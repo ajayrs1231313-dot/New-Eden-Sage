@@ -10,6 +10,7 @@ import { IskLab } from "./IskLab";
 
 type View =
   | "overview"
+  | "augments"
   | "skills"
   | "market"
   | "regional"
@@ -20,6 +21,7 @@ type CloneState = "alpha" | "omega";
 
 const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "overview", label: "Command", mark: "◇" },
+  { id: "augments", label: "Augments", mark: "✦" },
   { id: "skills", label: "Skills", mark: "△" },
   { id: "market", label: "ISK Lab", mark: "◈" },
   { id: "regional", label: "Regional Market", mark: "▦" },
@@ -573,8 +575,10 @@ export default function App() {
             onConnect={connect}
             cloneState={active ? cloneStates[active.characterId] : undefined}
             confirmationRequired={cloneConfirmationRequired}
-            resolvedTypeNames={resolvedTypeNames}
           />
+        )}
+        {view === "augments" && (
+          <Augments snapshot={active} resolvedTypeNames={resolvedTypeNames} />
         )}
         {view === "settings" && (
           <Settings config={config} onSaved={setConfig} />
@@ -606,18 +610,68 @@ export default function App() {
   );
 }
 
+function Augments({
+  snapshot,
+  resolvedTypeNames,
+}: {
+  snapshot?: CharacterSnapshot;
+  resolvedTypeNames: Record<number, string>;
+}) {
+  if (!snapshot) {
+    return (
+      <section className="empty">
+        <p className="eyebrow">NO CAPSULEER SELECTED</p>
+        <h2>Connect a character to view augments</h2>
+      </section>
+    );
+  }
+  const implants = Array.isArray(snapshot.extended?.implants)
+    ? snapshot.extended.implants
+    : [];
+  return (
+    <section className="augments-page">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">ACTIVE CLONE</p>
+          <h2>{snapshot.character.name}'s augments</h2>
+          <p>Implants currently installed in this character's active clone.</p>
+        </div>
+        <strong>{implants.length} installed</strong>
+      </div>
+      {implants.length ? (
+        <div className="augment-grid">
+          {implants.map((implant, index) => {
+            const typeId = typeof implant === "number" ? implant : implant.typeId;
+            const name =
+              typeof implant === "number"
+                ? resolvedTypeNames[typeId]
+                : implant.name || resolvedTypeNames[typeId];
+            return (
+              <article className="augment-card" key={typeId}>
+                <span>SLOT {index + 1}</span>
+                <strong>{name ?? "Resolving implant name…"}</strong>
+                <small>Installed and active</small>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-panel">No implants are installed in this active clone.</div>
+      )}
+    </section>
+  );
+}
+
 function Overview({
   snapshot,
   onConnect,
   cloneState,
   confirmationRequired,
-  resolvedTypeNames,
 }: {
   snapshot?: CharacterSnapshot;
   onConnect(): void;
   cloneState?: CloneState;
   confirmationRequired: boolean;
-  resolvedTypeNames: Record<number, string>;
 }) {
   if (!snapshot)
     return (
@@ -668,26 +722,6 @@ function Overview({
             {snapshot.character.corporation_name ??
               "Sync to resolve corporation"}
           </p>
-        </div>
-        <div className="augment-panel">
-          <span>AUGMENTS</span>
-          <div>
-            {Array.isArray(snapshot.extended?.implants) &&
-            snapshot.extended.implants.length ? (
-              snapshot.extended.implants.slice(0, 7).map((implant: any) => (
-                <small key={implant.typeId ?? implant}>
-                  {implant.name ??
-                    resolvedTypeNames[implant.typeId ?? implant] ??
-                    "Resolving implant name…"}
-                </small>
-              ))
-            ) : (
-              <small>No active implants</small>
-            )}
-          </div>
-          {confirmationRequired && (
-            <em>Select A or Ω beside this character for accurate training times.</em>
-          )}
         </div>
         <div className="wallet-focus">
           <span>LIQUID ISK</span>
