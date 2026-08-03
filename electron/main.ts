@@ -105,6 +105,26 @@ app.whenReady().then(() => {
     }
     return resolved;
   });
+  ipcMain.handle("universe:resolve-type-ids", async (_event, ids: number[]) => {
+    const unique = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+    if (!unique.length) return [];
+    const resolved = [];
+    for (let index = 0; index < unique.length; index += 1000) {
+      const response = await fetch("https://esi.evetech.net/universe/names/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Compatibility-Date": "2026-08-02",
+          "X-User-Agent": "NewEdenSage/0.1.1",
+        },
+        body: JSON.stringify(unique.slice(index, index + 1000)),
+      });
+      if (!response.ok)
+        throw new Error(`EVE implant name lookup failed (${response.status}).`);
+      resolved.push(...((await response.json()) as Array<{ id: number; name: string }>));
+    }
+    return resolved;
+  });
   ipcMain.handle("universe:ships", () => listPublishedShips());
   ipcMain.handle(
     "fitting:analyze",

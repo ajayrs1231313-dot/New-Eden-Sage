@@ -340,6 +340,7 @@ export default function App() {
   );
   const [cloneConfirmationRequired, setCloneConfirmationRequired] =
     useState(true);
+  const [resolvedTypeNames, setResolvedTypeNames] = useState<Record<number, string>>({});
 
   useEffect(() => {
     Promise.all([window.sage.getConfig(), window.sage.listSnapshots()]).then(
@@ -352,6 +353,23 @@ export default function App() {
       },
     );
   }, []);
+
+  useEffect(() => {
+    const ids = snapshots.flatMap((snapshot) =>
+      Array.isArray(snapshot.extended?.implants)
+        ? snapshot.extended.implants
+            .map((implant) => typeof implant === "number" ? implant : implant.typeId)
+            .filter((id) => !resolvedTypeNames[id])
+        : [],
+    );
+    if (!ids.length) return;
+    window.sage.resolveTypeIds(ids).then((resolved) => {
+      setResolvedTypeNames((current) => ({
+        ...current,
+        ...Object.fromEntries(resolved.map((item) => [item.id, item.name])),
+      }));
+    }).catch(() => undefined);
+  }, [snapshots]);
 
   async function connect() {
     setBusy(true);
@@ -408,13 +426,15 @@ export default function App() {
     setMessage("Confirm Alpha or Omega clone state for accurate training times");
   }
 
-  function confirmCloneState(state: CloneState) {
-    if (!active) return;
-    const next = { ...cloneStates, [active.characterId]: state };
+  function confirmCloneState(characterId: string, state: CloneState) {
+    const character = snapshots.find((snapshot) => snapshot.characterId === characterId);
+    if (!character) return;
+    setActiveId(characterId);
+    const next = { ...cloneStates, [characterId]: state };
     setCloneStates(next);
     localStorage.setItem("new-eden-sage-clone-states", JSON.stringify(next));
     setCloneConfirmationRequired(false);
-    setMessage(`${active.character.name}: ${state === "omega" ? "Omega" : "Alpha"} training speed selected`);
+    setMessage(`${character.character.name}: ${state === "omega" ? "Omega" : "Alpha"} training speed selected`);
   }
 
   if (!config) return <div className="boot">Waking New Eden Sage…</div>;
@@ -464,6 +484,49 @@ export default function App() {
                     </small>
                   </div>
                 </button>
+                <div
+                  className={`character-clone-state ${
+                    active?.characterId === snapshot.characterId &&
+                    cloneConfirmationRequired
+                      ? "needs-confirmation"
+                      : ""
+                  }`}
+                >
+                  <button
+                    className={
+                      cloneStates[snapshot.characterId] === "alpha" &&
+                      !(
+                        active?.characterId === snapshot.characterId &&
+                        cloneConfirmationRequired
+                      )
+                        ? "active"
+                        : ""
+                    }
+                    title={`Alpha clone: ${snapshot.character.name}`}
+                    onClick={() =>
+                      confirmCloneState(snapshot.characterId, "alpha")
+                    }
+                  >
+                    A
+                  </button>
+                  <button
+                    className={
+                      cloneStates[snapshot.characterId] === "omega" &&
+                      !(
+                        active?.characterId === snapshot.characterId &&
+                        cloneConfirmationRequired
+                      )
+                        ? "active"
+                        : ""
+                    }
+                    title={`Omega clone: ${snapshot.character.name}`}
+                    onClick={() =>
+                      confirmCloneState(snapshot.characterId, "omega")
+                    }
+                  >
+                    Ω
+                  </button>
+                </div>
                 <button
                   className="remove-character"
                   title={`Remove ${snapshot.character.name}`}
@@ -510,7 +573,7 @@ export default function App() {
             onConnect={connect}
             cloneState={active ? cloneStates[active.characterId] : undefined}
             confirmationRequired={cloneConfirmationRequired}
-            onConfirmCloneState={confirmCloneState}
+            resolvedTypeNames={resolvedTypeNames}
           />
         )}
         {view === "settings" && (
@@ -548,13 +611,13 @@ function Overview({
   onConnect,
   cloneState,
   confirmationRequired,
-  onConfirmCloneState,
+  resolvedTypeNames,
 }: {
   snapshot?: CharacterSnapshot;
   onConnect(): void;
   cloneState?: CloneState;
   confirmationRequired: boolean;
-  onConfirmCloneState(state: CloneState): void;
+  resolvedTypeNames: Record<number, string>;
 }) {
   if (!snapshot)
     return (
@@ -613,30 +676,17 @@ function Overview({
             snapshot.extended.implants.length ? (
               snapshot.extended.implants.slice(0, 7).map((implant: any) => (
                 <small key={implant.typeId ?? implant}>
-                  {implant.name ?? `Implant ${implant}`}
+                  {implant.name ??
+                    resolvedTypeNames[implant.typeId ?? implant] ??
+                    "Resolving implant name…"}
                 </small>
               ))
             ) : (
               <small>No active implants</small>
             )}
           </div>
-          <div className={`clone-state ${confirmationRequired ? "needs-confirmation" : ""}`}>
-            <strong>TRAINING SPEED — SELECT CLONE STATE</strong>
-            <button
-              className={cloneState === "alpha" && !confirmationRequired ? "active" : ""}
-              onClick={() => onConfirmCloneState("alpha")}
-            >
-              Alpha · 0.5×
-            </button>
-            <button
-              className={cloneState === "omega" && !confirmationRequired ? "active" : ""}
-              onClick={() => onConfirmCloneState("omega")}
-            >
-              Omega · 1×
-            </button>
-          </div>
           {confirmationRequired && (
-            <em>Confirm this after every character switch. ESI does not reliably expose current subscription state.</em>
+            <em>Select A or Ω beside this character for accurate training times.</em>
           )}
         </div>
         <div className="wallet-focus">

@@ -117,6 +117,7 @@ declare global {
       resolveTypeNames(
         names: string[],
       ): Promise<Array<{ id: number; name: string }>>;
+      resolveTypeIds(ids: number[]): Promise<Array<{ id: number; name: string }>>;
       listShips(): Promise<Array<{ typeId: number; name: string }>>;
       analyzeFitting(input: {
         characterId: string;

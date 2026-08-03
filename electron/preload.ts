@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld("sage", {
   copyText: (value: string) => ipcRenderer.invoke("clipboard:write", value),
   resolveTypeNames: (names: string[]) =>
     ipcRenderer.invoke("universe:resolve-types", names),
+  resolveTypeIds: (ids: number[]) =>
+    ipcRenderer.invoke("universe:resolve-type-ids", ids),
   listShips: () => ipcRenderer.invoke("universe:ships"),
   analyzeFitting: (input: unknown) =>
     ipcRenderer.invoke("fitting:analyze", input),
