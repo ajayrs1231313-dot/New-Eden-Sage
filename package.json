@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "license": "MIT",
   "author": "New Eden Sage contributors",
@@ -15,7 +15,7 @@
     "build": "tsc --noEmit && tsc -p tsconfig.electron.json && vite build",
     "preview": "vite preview",
     "icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run icon && npm run build && electron-builder --win nsis"
+    "dist:win": "npm run icon && npm run build && electron-builder --win nsis --publish never"
   },
   "dependencies": {
     "adm-zip": "^0.6.0",
