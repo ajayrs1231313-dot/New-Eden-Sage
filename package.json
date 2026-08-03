@@ -1,0 +1,73 @@
+{
+  "name": "new-eden-sage",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "author": "New Eden Sage contributors",
+  "description": "A private, local-first EVE Online assistant.",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --port 42814 --strictPort\" \"npm:dev:electron\" \"npm:dev:app\"",
+    "dev:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:app": "wait-on http://localhost:42814 dist-electron/main.js && electron . --dev",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "build": "tsc --noEmit && tsc -p tsconfig.electron.json && vite build",
+    "preview": "vite preview",
+    "icon": "node scripts/generate-icon.cjs",
+    "dist:win": "npm run icon && npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "exceljs": "^4.4.0",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "electron": "latest",
+    "electron-builder": "^26.15.3",
+    "sharp": "^0.35.3",
+    "typescript": "latest",
+    "vite": "latest",
+    "wait-on": "latest"
+  },
+  "build": {
+    "appId": "com.newedensage.desktop",
+    "productName": "New Eden Sage",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "README.md",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "New-Eden-Sage-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "New Eden Sage"
+    }
+  }
+}

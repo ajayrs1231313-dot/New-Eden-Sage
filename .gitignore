@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-electron/
+.vite/
+*.log
+.env
+.env.*
+!.env.example
+release/
+EVE data for gpt/
+vendor/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+settings.json
