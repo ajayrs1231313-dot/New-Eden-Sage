@@ -10,11 +10,11 @@ New Eden Sage is a local-first Windows desktop companion for EVE Online. It keep
 4. Windows SmartScreen may show an **Unknown publisher** warning because community builds are not code-signed. Choose **More info**, confirm the filename came from this repository, then choose **Run anyway**.
 5. Start **New Eden Sage**.
 
-The installer never contains the developer's characters, market database or EVE credentials. Fresh installations store data under `%LOCALAPPDATA%\New Eden Sage Data`. Existing development installations that already use `F:\New Eden Sage Data` continue using that folder.
+App data is stored under `%LOCALAPPDATA%\New Eden Sage Data`. Existing installations that already use `F:\New Eden Sage Data` continue using that folder.
 
 ## Create your EVE application
 
-Every user should create their own EVE developer application and keep control of it.
+Create an EVE developer application for New Eden Sage:
 
 1. Sign in at [EVE Online Developers](https://developers.eveonline.com/applications).
 2. Create a new application.
