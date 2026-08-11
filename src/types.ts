@@ -491,9 +491,37 @@ export interface RawMarketSearchResult {
   orders: RawMarketSearchOrder[];
 }
 
+export type FitRemedyCandidate = {
+  kind: "skill" | "implant" | "rig";
+  typeId: number;
+  name: string;
+  solves: string[];
+  affectedAttributeId: number;
+  effectValue: number;
+  operation: number;
+  skillTypeId?: number;
+  skillName?: string;
+  currentLevel?: number;
+  targetLevel?: number;
+  reason: string;
+};
+
+export type FitResolutionIntent = {
+  source: "dream-fit" | "fit-issues";
+  fitName: string;
+  hullTypeId: number;
+  hullName: string;
+  characterId?: string;
+  issues: Array<{ level: string; code: string; message: string; item?: string }>;
+  missingRequirements: Array<{ item: string; skillId: number; skill: string; requiredLevel: number; trainedLevel: number }>;
+  remedies: FitRemedyCandidate[];
+  resources?: { used: { cpu:number; powergrid:number; calibration:number }; capacity: { cpu:number; powergrid:number; calibration:number } };
+};
+
 declare global {
   interface Window {
     sage: {
+      bridgeInfo: { version: number; localFittingCatalogue: boolean; localTypeImages: boolean };
       getUpdateState(): Promise<{ version: string; packaged: boolean }>;
       checkForUpdates(): Promise<unknown>;
       downloadUpdate(): Promise<unknown>;
@@ -515,6 +543,18 @@ declare global {
       resolveFittingTypeNamesLocal(
         names: string[],
       ): Promise<Array<{ id: number; name: string }>>;
+      searchFittingTypesLocal(query: string, limit?: number): Promise<Array<{ id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: "low" | "mid" | "high" | "rig" | "subsystem" }>>;
+      prepareFittingDataLocal(): Promise<{ catalogue:{ groups:Array<{id:number;name:string;parentId?:number;iconId?:number}>; items:Array<any> }; preparedAt:string; itemCount:number; groupCount:number; durationMs:number }>;
+      onFittingPreparationProgress(callback:(value:{percent:number;stage:string;message:string})=>void): () => void;
+      filterFittingItemsForHullLocal(input:{hullTypeId:number;candidates:Array<{typeId:number;placement?:string}>;fitted?:Array<{typeId:number;rack?:string}>}): Promise<{compatibleTypeIds:number[];checked:number}>;
+      getFittingChargesForModulesLocal(moduleTypeIds:number[]): Promise<{compatibleTypeIds:number[];checked:number}>;
+      getFittingCatalogueLocal(): Promise<{ groups: Array<{ id:number; name:string; parentId?:number; iconId?:number }>; items: Array<{ id:number; name:string; groupId:number; categoryId:number; categoryName:string; rack?: "low" | "mid" | "high" | "rig" | "subsystem"; marketGroupId:number; rootName:string; metaLevel:number; placement:"ship"|"high"|"mid"|"low"|"rig"|"subsystem"|"drone"|"fighter"|"implant"|"booster"|"charge"|"cargo" }> }>;
+      getFittingTypeInfoLocal(typeId:number): Promise<{ typeId:number; name:string; description:string; group:{id:number;name:string}; category:{id:number;name:string}; marketGroup:null|{id:number;name:string;path:string[]}; placement:"ship"|"high"|"mid"|"low"|"rig"|"subsystem"|"drone"|"fighter"|"implant"|"booster"|"charge"|"cargo"; rack?:string; metaLevel?:number; techLevel?:number; published:boolean; iconId?:number; physical:{volumeM3?:number;massKg?:number;capacityM3?:number;radiusM?:number;portionSize?:number;basePrice?:number}; fitting:Array<{attributeId:number;label:string;unit:string;value:number}>; requirements:Array<{skillId:number;name:string;level:number}>; attributes:Array<{attributeId:number;name:string;internalName?:string;description?:string;value:number;unitId?:number;unit?:string;categoryId?:number;category:string;highIsGood?:boolean;published:boolean}>; effects:Array<{effectId:number;name:string;category:number;description?:string}> }>;
+      getHullFittingProfileLocal(typeId:number): Promise<{ slots:{ high:number; mid:number; low:number; rig:number; subsystem:number }; hardpoints:{ turret:number; launcher:number }; storage:{ cargoM3:number; droneBayM3:number; droneBandwidth:number; fighterHangarM3:number; fighterTubes:number } }>;
+      getMutationOptionsLocal(typeId: number): Promise<Array<{ mutaplasmidTypeId: number; mutaplasmidName: string; resultingTypeId: number; resultingTypeName: string; attributes: Array<{ attributeId: number; name: string; baseValue: number; minValue: number; maxValue: number; minMultiplier: number; maxMultiplier: number; highIsGood: boolean; unitId?: number }> }>>;
+      checkFittingChargeCompatibilityLocal(moduleTypeId:number, chargeTypeId:number): Promise<{ compatible:boolean; reason:string }>;
+      checkFittingItemCompatibilityLocal(input:{ hullTypeId:number; itemTypeId:number; placement?:string; fitted?:Array<{typeId:number;rack?:string}> }): Promise<{ compatible:boolean; code:string; reason:string }>;
+      getFittingRemediesLocal(input: { characterId?:string; hullTypeId:number; issueCodes:string[]; itemTypeIds:number[] }): Promise<FitRemedyCandidate[]>;
       resolveTypeIds(ids: number[]): Promise<Array<{ id: number; name: string }>>;
       listShips(): Promise<Array<{ typeId: number; name: string }>>;
       getShipReadiness(input: {
@@ -539,6 +579,7 @@ declare global {
         items?: Array<{ typeId: number; quantity?: number; rack?: string; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated" }>;
         targetProfile?: { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number };
         damageProfile?: { em: number; thermal: number; kinetic: number; explosive: number };
+        implantTypeIds?: number[];
         boosterTypeIds?: number[];
         boosterSideEffectIds?: number[];
         projectedItems?: Array<{ typeId: number; chargeTypeId?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated"; effectiveness?: number }>;

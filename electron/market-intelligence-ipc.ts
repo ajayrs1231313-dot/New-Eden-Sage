@@ -2,7 +2,8 @@ import { dialog, ipcMain } from "electron";
 import { promises as fs } from "node:fs";
 import ExcelJS from "exceljs";
 import { loadRecentMarketDatasetsByMode } from "./market-storage";
-import { getMarketTypeIndex } from "./market-static-index";
+import { getMarketSystemIndex, getMarketTypeIndex } from "./market-static-index";
+import { universeRoute } from "./universe-route-graph";
 
 export type MarketItemHistoryPoint = {
   createdAt: string;
@@ -124,4 +125,34 @@ ipcMain.handle("market:regional-export", async (_event, format: "csv" | "json" |
   }
   await workbook.xlsx.writeFile(result.filePath);
   return result.filePath;
+});
+
+
+ipcMain.handle("industrial:opportunity-route-scope", async (_event, input: { systemQuery?: string; targetSystemIds?: number[]; maxJumps?: number }) => {
+  const systems = await getMarketSystemIndex();
+  const query = String(input?.systemQuery ?? "").trim().toLowerCase();
+  if (!query) throw new Error("Type a system to search around.");
+  const candidates = [...systems.values()].filter((system) => system.name.toLowerCase().includes(query)).sort((a, b) => {
+    const aa = a.name.toLowerCase();
+    const bb = b.name.toLowerCase();
+    const ar = aa === query ? 0 : aa.startsWith(query) ? 1 : 2;
+    const br = bb === query ? 0 : bb.startsWith(query) ? 1 : 2;
+    return ar - br || a.name.length - b.name.length || a.name.localeCompare(b.name);
+  });
+  const origin = candidates[0];
+  if (!origin) throw new Error(`No EVE solar system matches "${String(input?.systemQuery ?? "").trim()}".`);
+  const maxJumps = Math.max(0, Math.min(50, Math.floor(Number(input?.maxJumps ?? 10))));
+  const ids = [...new Set((input?.targetSystemIds ?? []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
+  const routes = await Promise.all(ids.map(async (systemId) => {
+    const target = systems.get(systemId);
+    if (!target) return { systemId, systemName: `System ${systemId}`, securityBand: "unknown", jumps: 999, withinRange: false };
+    const route = await universeRoute(origin.systemId, systemId);
+    return { systemId, systemName: target.name, securityBand: target.securityBand, securityStatus: target.securityStatus, jumps: route.jumps, minimumSecurityStatus: route.minimumSecurityStatus, withinRange: route.jumps <= maxJumps };
+  }));
+  return {
+    origin: { systemId: origin.systemId, systemName: origin.name, securityBand: origin.securityBand, securityStatus: origin.securityStatus },
+    maxJumps,
+    suggestions: candidates.slice(0, 8).map((system) => ({ systemId: system.systemId, systemName: system.name, securityBand: system.securityBand })),
+    routes,
+  };
 });

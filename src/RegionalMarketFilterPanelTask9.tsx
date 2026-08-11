@@ -7,6 +7,7 @@ import type {
   RegionalMarketSignal,
   RegionalMarketSort,
 } from "./types";
+import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
 
 const number = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 2 });
 const whole = new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 });
@@ -21,7 +22,7 @@ function ratioLabel(value: number) {
   return value >= 100 ? whole.format(value) : value.toFixed(value >= 10 ? 1 : 2);
 }
 
-export function RegionalMarketFilterPanel() {
+export function RegionalMarketFilterPanel({ dataRevision = 0 }: { dataRevision?: number }) {
   const [query, setQuery] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [groupId, setGroupId] = useState("");
@@ -52,6 +53,7 @@ export function RegionalMarketFilterPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const requestSequence = useRef(0);
+  const lastPreparedRevision = useRef<number | null>(null);
 
   useEffect(
     () =>
@@ -115,8 +117,8 @@ export function RegionalMarketFilterPanel() {
       const next = await window.sage.filterRegionalMarket(currentInput(offset, overrides));
       if (requestId === requestSequence.current) setResult(next);
     } catch (caught) {
-      if (requestId === requestSequence.current) {
-        setError(caught instanceof Error ? caught.message : "Regional market filtering failed.");
+      if (requestId === requestSequence.current && !isExpectedAnalysisCancellation(caught)) {
+        setError(friendlyAnalysisError(caught, "Regional market filtering failed."));
       }
     } finally {
       if (requestId === requestSequence.current) {
@@ -127,10 +129,12 @@ export function RegionalMarketFilterPanel() {
   }
 
   useEffect(() => {
+    if (lastPreparedRevision.current === dataRevision) return;
+    lastPreparedRevision.current = dataRevision;
     void runFilter(0);
-    // Initial taxonomy + aggregate load only.
+    // Prepare once for each actual market-data revision, never because of navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [dataRevision]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -349,7 +353,7 @@ export function RegionalMarketFilterPanel() {
           <div className="analysis-progress-track"><i style={{ width: `${Math.max(2, Math.min(100, progress.percent ?? 8))}%` }} /></div>
         </div>
       )}
-      {error && <div className="global-market-message error">{error}</div>}
+      {error && <div className="global-market-message error"><span>{error}</span><button onClick={() => void runFilter(result?.offset ?? 0)} disabled={busy}>Retry</button></div>}
       {result?.message && <div className="global-market-message">{result.message}</div>}
 
       {result && (

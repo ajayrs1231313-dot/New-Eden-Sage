@@ -3,6 +3,7 @@ import type { AnalysisProgress, CharacterSnapshot, OpportunityAnalysis, PveLocat
 import { MarketOpportunityScanner } from "./MarketOpportunityScanner";
 import { OpportunityExplorer } from "./OpportunityExplorer";
 import { PveLocationIntel } from "./PveLocationIntel";
+import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
 
 const money = (value: number) =>
   new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
@@ -74,7 +75,8 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       return next;
     } catch (error) {
       if (requestId !== marketRequestSequence.current) return null;
-      const message = error instanceof Error ? error.message : "Could not analyze the current market snapshot.";
+      if (isExpectedAnalysisCancellation(error)) return null;
+      const message = friendlyAnalysisError(error, "Could not analyze the current market snapshot.");
       setMarketStatus(analysis ? `${message} Previous completed results are still shown.` : message);
       return null;
     } finally {
@@ -110,7 +112,8 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       return next;
     } catch (error) {
       if (requestId !== pveRequestSequence.current) return null;
-      const message = error instanceof Error ? error.message : "Could not analyze PvE locations.";
+      if (isExpectedAnalysisCancellation(error)) return null;
+      const message = friendlyAnalysisError(error, "Could not analyze PvE locations.");
       setPveStatus(pveAnalysis ? `${message} Previous completed location results are still shown.` : message);
       return null;
     } finally {
@@ -127,9 +130,9 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
 
   useEffect(() => {
     void scanMarket();
-    // Character switches and completed market refreshes rerun against the newest saved dataset.
+    // Character source revisions and completed market refreshes rerun against the newest saved dataset.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot?.characterId, marketDataRevision]);
+  }, [snapshot?.characterId, snapshot?.updatedAt, marketDataRevision]);
 
   function openPveTab() {
     setTab("pve");

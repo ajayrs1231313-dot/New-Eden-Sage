@@ -92,7 +92,6 @@ export type RawMarketSearchResult = {
 type CachedTypeOrders = {
   snapshotId: string;
   typeId: number;
-  expiresAt: number;
   orders: RawMarketSearchOrder[];
 };
 
@@ -167,7 +166,7 @@ function orderFromRaw(
 async function loadTypeOrders(snapshot: RawMarketSnapshot, typeId: number, typeName: string) {
   const key = `${snapshot.id}:${typeId}`;
   const cached = typeOrderCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.orders;
+  if (cached) return cached.orders;
 
   const systems = await getMarketSystemIndex();
   const locations = await locationNames();
@@ -189,10 +188,9 @@ async function loadTypeOrders(snapshot: RawMarketSnapshot, typeId: number, typeN
     snapshotId: snapshot.id,
     typeId,
     orders,
-    expiresAt: Date.now() + 5 * 60 * 1000,
   });
   for (const [cacheKey, value] of typeOrderCache) {
-    if (value.expiresAt <= Date.now() || value.snapshotId !== snapshot.id) typeOrderCache.delete(cacheKey);
+    if (value.snapshotId !== snapshot.id) typeOrderCache.delete(cacheKey);
   }
   return orders;
 }

@@ -3,6 +3,7 @@ import type {
   CharacterSnapshot,
   ShipReadinessResult,
   SkillDetail,
+  FitResolutionIntent,
 } from "./types";
 import { describeSkill, getSkillTrainingState } from "./skill-intelligence";
 import { ActivityPlanner } from "./ActivityPlanner";
@@ -17,6 +18,7 @@ type Props = {
   cloneState?: CloneState;
   confirmationRequired?: boolean;
   initialHullTypeId?: number;
+  initialFitIntent?: FitResolutionIntent;
 };
 
 const money = (value: number) =>
@@ -31,7 +33,7 @@ function duration(seconds: number | null) {
   return `${Math.floor(seconds / 86400)}d ${Math.ceil((seconds % 86400) / 3600)}h`;
 }
 
-export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, initialHullTypeId }: Props) {
+export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, initialHullTypeId, initialFitIntent }: Props) {
   const [tab, setTab] = useState<SkillsTab>(initialHullTypeId ? "planner" : "activity-planner");
   useEffect(() => { if (initialHullTypeId) setTab("planner"); }, [initialHullTypeId]);
 
@@ -81,15 +83,15 @@ export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, in
           My Skills
         </button>
       </div>
-      {tab === "my-skills" && (
+      <div className="cached-view" hidden={tab !== "my-skills"}>
         <MySkills snapshot={snapshot} cloneState={cloneState} />
-      )}
-      {tab === "planner" && (
-        <ShipPlanner snapshot={snapshot} cloneState={cloneState} initialHullTypeId={initialHullTypeId} />
-      )}
-      {tab === "activity-planner" && (
+      </div>
+      <div className="cached-view" hidden={tab !== "planner"}>
+        <ShipPlanner snapshot={snapshot} cloneState={cloneState} initialHullTypeId={initialHullTypeId} initialFitIntent={initialFitIntent} />
+      </div>
+      <div className="cached-view" hidden={tab !== "activity-planner"}>
         <ActivityPlanner snapshot={snapshot} cloneState={cloneState} />
-      )}
+      </div>
     </section>
   );
 }
@@ -326,14 +328,47 @@ function DetailGroup({ title, items }: { title: string; items: string[] }) {
   );
 }
 
+function FitResolutionPlan({ intent }: { intent: FitResolutionIntent }) {
+  const missing = [...new Map(intent.missingRequirements.map((item) => [`${item.skillId}:${item.requiredLevel}`, item])).values()];
+  const supportSkills = intent.remedies.filter((item) => item.kind === "skill");
+  const implants = intent.remedies.filter((item) => item.kind === "implant");
+  const rigs = intent.remedies.filter((item) => item.kind === "rig");
+  const hardIssues = intent.issues.filter((issue) => issue.code !== "cpu-exceeded" && issue.code !== "powergrid-exceeded");
+  const shortage = (code:string) => {
+    const resources = intent.resources;
+    if (!resources) return 0;
+    const key = code === "cpu-exceeded" ? "cpu" : "powergrid";
+    const used = resources.used[key]; const cap = resources.capacity[key];
+    return cap > 0 ? Math.max(0, (used / cap - 1) * 100) : 0;
+  };
+  const remedyNote = (item:any) => {
+    const issue = item.solves?.[0];
+    const need = shortage(issue);
+    const directOutput = (item.affectedAttributeId === 48 || item.affectedAttributeId === 11) && item.operation === 6;
+    if (directOutput && need > 0 && item.effectValue >= need) return `Covers the current ${issue === "cpu-exceeded" ? "CPU" : "powergrid"} shortfall alone (${need.toFixed(1)}% needed).`;
+    return item.reason;
+  };
+  return <section className="fit-resolution-plan">
+    <div className="fit-resolution-title"><div><p className="eyebrow">{intent.source === "dream-fit" ? "DREAM FIT RESOLUTION" : "FIT ISSUE RESOLUTION"}</p><h3>{intent.fitName}</h3><small>{intent.hullName} · exact fitting blockers carried from Fittings</small></div><strong>{intent.issues.length + missing.length} blockers</strong></div>
+    {intent.issues.length === 0 && missing.length === 0 ? <div className="fit-resolution-ready">This fit is already viable for the selected pilot.</div> : <div className="fit-resolution-grid">
+      <article><h4>Train these skills</h4>{missing.length === 0 && supportSkills.length === 0 ? <small>No training fix identified.</small> : <>{missing.map((item) => <div key={`required-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><span>L{item.trainedLevel} → L{item.requiredLevel}</span><small>Required by {item.item}</small></div>)}{supportSkills.map((item) => <div key={`support-${item.typeId}-${item.solves.join("-")}`}><strong>{item.name}</strong><span>L{item.currentLevel ?? 0} → L{item.targetLevel ?? 1}</span><small>{item.reason}</small></div>)}</>}</article>
+      <article><h4>Augments that can help</h4>{implants.length ? implants.map((item) => <div key={`implant-${item.typeId}`}><strong>{item.name}</strong><span>{item.solves.map(code => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ")}</span><small>{remedyNote(item)}</small></div>) : <small>No relevant fitting implant was found in the current local CCP SDE.</small>}</article>
+      <article><h4>Rigs that can help</h4>{rigs.length ? rigs.map((item) => <div key={`rig-${item.typeId}`}><strong>{item.name}</strong><span>{item.solves.map(code => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ")}</span><small>{remedyNote(item)}</small></div>) : <small>No compatible fitting rig was identified for this hull and current issue set.</small>}</article>
+      <article><h4>Fit changes required</h4>{hardIssues.length ? hardIssues.map((issue,index) => <div key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small></div>) : <small>No hard slot, calibration, hardpoint or compatibility blocker remains beyond the resource/skill issues above.</small>}</article>
+    </div>}
+    <p className="fit-resolution-note">Sage only lists augments and rigs whose current CCP DOGMA modifiers target the failing fitting resource. Apply a suggested change in Fittings and the live analysis will verify whether the complete fit is resolved.</p>
+  </section>;
+}
 function ShipPlanner({
   snapshot,
   cloneState,
   initialHullTypeId,
+  initialFitIntent,
 }: {
   snapshot: CharacterSnapshot;
   cloneState?: CloneState;
   initialHullTypeId?: number;
+  initialFitIntent?: FitResolutionIntent;
 }) {
   const ownedShips =
     snapshot.extended?.assetSummary?.ownedShips?.map((item) => item.item) ?? [];
@@ -413,6 +448,7 @@ function ShipPlanner({
   }, [ships, search]);
 
   const selectedShip = ships.find((item) => item.typeId === selectedTypeId);
+  const fitIntent = initialFitIntent?.hullTypeId === selectedTypeId ? initialFitIntent : undefined;
 
   async function copyRecommendedQueue() {
     if (!analysis?.recommendedQueue.length) return;
@@ -435,6 +471,8 @@ function ShipPlanner({
           official ship mastery certificates across every published hull.
         </p>
       </div>
+
+      {fitIntent && <FitResolutionPlan intent={fitIntent} />}
 
       <div className="planner-selector-card task3-selector">
         <label>
