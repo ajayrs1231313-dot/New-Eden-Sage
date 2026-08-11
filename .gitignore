@@ -7,9 +7,19 @@ dist-electron/
 .env.*
 !.env.example
 release/
+release-*/
 EVE data for gpt/
 vendor/
+task10-*/
+task12-*/
+dogma-*/
+scan-*/
+run-task10-*/
+work/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
 settings.json
+*.token
+*.pem
+*.pfx

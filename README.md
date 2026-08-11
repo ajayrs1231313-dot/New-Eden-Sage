@@ -12,36 +12,14 @@ New Eden Sage is a local-first Windows desktop companion for EVE Online. It keep
 
 App data is stored under `%LOCALAPPDATA%\New Eden Sage Data`. Existing installations that already use `F:\New Eden Sage Data` continue using that folder.
 
-## Create your EVE application
-
-Create an EVE developer application for New Eden Sage:
-
-1. Sign in at [EVE Online Developers](https://developers.eveonline.com/applications).
-2. Create a new application.
-3. Use a name such as `My New Eden Sage`.
-4. Use a description such as `Private local EVE Online character, skills, fittings and market helper`.
-5. Select the desktop/native **Authorization Code with PKCE** connection type when offered.
-6. Set the callback URL exactly to:
-
-   ```text
-   http://localhost:42813/auth/eve/callback
-   ```
-
-7. Enable the ESI scopes you want New Eden Sage to collect. For the complete character export, enable all available character and corporation read scopes used by your characters.
-8. Finish creating the application and copy its **Client ID**.
-
-New Eden Sage uses PKCE, the recommended flow for desktop applications. It does **not** need or accept your Client Secret.
-
-Official reference: [EVE SSO Authorization Code with PKCE](https://developers.eveonline.com/docs/services/sso/).
-
 ## Connect a character
 
-1. Open **Settings** in New Eden Sage.
-2. Paste the EVE application **Client ID** and save it.
-3. Select **Connect character**.
-4. Sign in through the official EVE Online page, select a character and approve the scopes.
-5. Return to New Eden Sage after the browser confirms the connection.
-6. Repeat **Connect character** for additional characters.
+1. Select **Add character**.
+2. Sign in through the official EVE Online page, select a character and approve the requested ESI permissions.
+3. Return to New Eden Sage after the browser confirms the connection.
+4. Repeat **Add character** for additional characters.
+
+New Eden Sage uses Authorization Code with PKCE and never asks for your EVE password or client secret.
 
 Refresh tokens are encrypted with Windows secure storage. They are not included in backups, exports, Git commits or market datasets.
 

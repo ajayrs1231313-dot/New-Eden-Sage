@@ -1,0 +1,92 @@
+.fit-library-tools { display:grid; gap:6px; margin-bottom:9px; }
+.fit-library-tools input,.fit-library-tools select { width:100%; min-width:0; border:1px solid #294951; background:#051016; color:#d8e8ea; padding:8px 9px; font-size:10px; }
+.fit-readiness { display:inline-block; margin-top:4px; padding:2px 5px; border:1px solid #294951; border-radius:10px; font-style:normal; font-size:8px; text-transform:uppercase; letter-spacing:.08em; }
+.fit-readiness.ready { color:#65e1d2; border-color:#2d716b; }
+.fit-readiness.missing { color:#e58a7d; border-color:#734640; }
+.fit-readiness.unknown { color:#7b9299; }
+.fit-library-summary { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+.fit-library-summary span { border:1px solid #1d414a; background:#061219; color:#78939d; padding:5px 7px; font-size:9px; text-transform:uppercase; letter-spacing:.06em; }
+
+.fit-item { position: relative; }
+.fit-module-state { width:100%; min-width:0; margin-top:5px; border:1px solid #294951; background:#051016; color:#b8ccd1; padding:4px 5px; font-size:8px; text-transform:uppercase; }
+.fit-item.state-offline img { opacity:.35; filter:grayscale(1); }
+.fit-item.state-online { box-shadow: inset 0 0 0 1px rgba(125,155,165,.22); }
+.fit-item.state-active { box-shadow: inset 0 0 0 1px rgba(101,225,210,.34); }
+.fit-item.state-overheated { box-shadow: inset 0 0 0 1px rgba(229,138,125,.58); }
+
+.target-profile-controls { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin:8px 0 14px; }
+.target-profile-controls label { display:grid; gap:4px; color:#78939d; font-size:9px; text-transform:uppercase; letter-spacing:.06em; }
+.target-profile-controls input { min-width:0; border:1px solid #294951; background:#051016; color:#d8e8ea; padding:7px 8px; }
+
+.damage-profile-controls { display:flex; margin:8px 0 14px; }
+.damage-profile-controls label { display:grid; gap:4px; color:#78939d; font-size:9px; text-transform:uppercase; letter-spacing:.06em; }
+.damage-profile-controls select { border:1px solid #294951; background:#051016; color:#d8e8ea; padding:7px 8px; }
+
+/* The global footer sits after the fitting workspace in App.tsx. On this dense
+   screen its top rule can visually cut through the fitting cards, so Fittings
+   owns the full content viewport and suppresses that global footer row. */
+.fit-workspace + footer { display: none; }
+
+
+/* Task 10 advanced fitting context */
+.external-effects-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(135, 171, 194, 0.2);
+  border-radius: 10px;
+  background: rgba(5, 16, 24, 0.45);
+}
+.external-effect-add {
+  display: grid;
+  grid-template-columns: minmax(130px, .7fr) minmax(220px, 1.6fr) minmax(190px, 1.2fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.external-effect-add label,
+.external-effect-row label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted, #91a3ad);
+}
+.external-effect-add input,
+.external-effect-add select,
+.external-effect-row input,
+.external-effect-row select {
+  width: 100%;
+  min-width: 0;
+}
+.external-effect-status {
+  display: block;
+  color: var(--muted, #91a3ad);
+}
+.external-effect-list {
+  display: grid;
+  gap: 8px;
+}
+.external-effect-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(105px, .35fr) minmax(85px, .25fr) auto;
+  gap: 10px;
+  align-items: end;
+  padding: 9px 10px;
+  border: 1px solid rgba(135, 171, 194, 0.14);
+  border-radius: 8px;
+  background: rgba(7, 20, 29, 0.52);
+}
+.external-effect-row > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.external-effect-row strong,
+.external-effect-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 1050px) {
+  .external-effect-add, .external-effect-row { grid-template-columns: 1fr 1fr; }
+}

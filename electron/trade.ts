@@ -4,6 +4,7 @@ import {
   loadRecentMarketDatasetsByMode,
 } from "./market-storage";
 import { highSecJumps } from "./route-graph";
+import { findFullMarketTrades } from "./full-market-trade";
 
 type Order = {
   orderId: number;
@@ -21,6 +22,8 @@ type Order = {
 type Item = {
   typeId: number;
   typeName: string;
+  categoryId?: number;
+  categoryName?: string;
   itemVolumeM3?: number;
   topBuyOrders?: Order[];
   topSellOrders?: Order[];
@@ -34,6 +37,8 @@ function marketItems(data: { summaries: unknown[] }) {
     number,
     {
       typeName: string;
+      categoryId: number;
+      categoryName: string;
       itemVolumeM3: number;
       buys: Map<number, Order>;
       sells: Map<number, Order>;
@@ -46,6 +51,8 @@ function marketItems(data: { summaries: unknown[] }) {
     for (const item of region.items ?? []) {
       const current = items.get(item.typeId) ?? {
         typeName: item.typeName,
+        categoryId: item.categoryId ?? 0,
+        categoryName: item.categoryName ?? "Other",
         itemVolumeM3: item.itemVolumeM3 ?? 0,
         buys: new Map<number, Order>(),
         sells: new Map<number, Order>(),
@@ -76,7 +83,7 @@ export async function buildFitShoppingRoute(input: {
       "Sync the selected character before building a shopping route.",
     );
   const full = await loadLatestMarketDatasetByMode("all");
-  if (!full) throw new Error("Run a full high-sec market pull first.");
+  if (!full) throw new Error("Run a full public market pull first.");
   const market = marketItems(full);
   const owned = new Map<number, number>();
   if (!input.buyEntireFit && Array.isArray(snapshot.extended?.assets))
@@ -118,7 +125,7 @@ export async function buildFitShoppingRoute(input: {
       unavailable.push({
         item: need.name,
         quantity: remaining,
-        reason: "No retained high-sec sellers",
+        reason: "No retained qualifying sellers",
       });
       continue;
     }
@@ -240,185 +247,16 @@ export type TradeAnalysisMode =
   | "viator"
   | "iskm3";
 
-export async function findRadiusTrades(mode: TradeAnalysisMode = "top") {
-  const recent = await loadRecentMarketDatasetsByMode("all", 2);
-  const full = recent[0] ?? null;
-  if (!full) throw new Error("Run a full high-sec market pull first.");
-  const haulers = haulerProfiles();
-  const maxHauler = [...haulers].sort((a, b) => b.capacityM3 - a.capacityM3)[0];
-  const analysisHauler = maxHauler ?? {
-    characterId: "generic-industrial",
-    character: "Generic industrial",
-    capacityM3: 38_000,
-    basis:
-      "38,000 m3 assumption; sync an industrial pilot for a tailored limit",
-  };
-  const market = marketItems(full);
-  const previousMarket = recent[1] ? marketItems(recent[1]) : null;
-  const prelim = [];
-  let pairCount = 0;
-  for (const [typeId, item] of market) {
-    const sells = [...item.sells.values()]
-      .sort((a, b) => a.price - b.price)
-      .slice(0, 10);
-    const buys = [...item.buys.values()]
-      .sort((a, b) => b.price - a.price)
-      .slice(0, 10);
-    const pairs = new Map<string, { sell: Order; buy: Order }>();
-    // Retained market data contains the best ten orders in every region. Test
-    // several executable station pairs instead of discarding an item when its
-    // single global best pair happens to be unusable.
-    for (const sell of sells) {
-      const buy = buys.find(
-        (candidate) =>
-          candidate.price > sell.price &&
-          candidate.locationId !== sell.locationId,
-      );
-      if (buy) pairs.set(`${sell.orderId}:${buy.orderId}`, { sell, buy });
-    }
-    for (const buy of buys) {
-      const sell = sells.find(
-        (candidate) =>
-          buy.price > candidate.price &&
-          candidate.locationId !== buy.locationId,
-      );
-      if (sell) pairs.set(`${sell.orderId}:${buy.orderId}`, { sell, buy });
-    }
-    for (const { sell, buy } of pairs.values()) {
-      pairCount += 1;
-      const availableUnits = Math.min(sell.volumeRemain, buy.volumeRemain);
-      const cargoCapacity =
-        mode === "viator" ? 10_000 : analysisHauler.capacityM3;
-      const cargoUnits =
-        item.itemVolumeM3 > 0
-          ? Math.floor(cargoCapacity / item.itemVolumeM3)
-          : availableUnits;
-      const capitalLimit = mode === "wallet100m" ? 100_000_000 : Infinity;
-      const capitalUnits = Math.floor(capitalLimit / sell.price);
-      const units = Math.min(availableUnits, cargoUnits, capitalUnits);
-      const profit = (buy.price - sell.price) * units;
-      if (units > 0 && profit > 0)
-        prelim.push({
-          typeId,
-          item: item.typeName,
-          itemVolumeM3: item.itemVolumeM3,
-          sell,
-          buy,
-          units,
-          profit,
-          previousMargin: previousMarket
-            ? marketMargin(previousMarket.get(typeId))
-            : null,
-        });
-    }
-  }
-  const checked = await mapLimited(
-    prelim
-      .sort((a, b) => b.profit - a.profit)
-      .slice(0, mode === "top1000" ? 6000 : 2500),
-    24,
-    async (trade) => {
-      const volumeM3 = trade.itemVolumeM3;
-      const jumps = await jumpsBetween(trade.sell.systemId, trade.buy.systemId);
-      const cargoCapacity =
-        mode === "viator" ? 10_000 : analysisHauler.capacityM3;
-      const cargoUnits =
-        volumeM3 > 0 ? Math.floor(cargoCapacity / volumeM3) : trade.units;
-      const capitalLimit = mode === "wallet100m" ? 100_000_000 : Infinity;
-      const capitalUnits = Math.floor(capitalLimit / trade.sell.price);
-      const units = Math.min(trade.units, cargoUnits, capitalUnits);
-      const profit = (trade.buy.price - trade.sell.price) * units;
-      const investment = trade.sell.price * units;
-      const margin = trade.buy.price - trade.sell.price;
-      const marginPercent =
-        trade.sell.price > 0 ? (margin / trade.sell.price) * 100 : 0;
-      const iskPerM3 =
-        volumeM3 > 0 ? margin / volumeM3 : profit > 0 ? Infinity : 0;
-      const currentMargin = trade.buy.price - trade.sell.price;
-      const marginWidenedBy =
-        trade.previousMargin == null
-          ? null
-          : currentMargin - trade.previousMargin;
-      const issuedAt = Date.parse(trade.buy.issued ?? "");
-      const ageDays = Number.isFinite(issuedAt)
-        ? Math.max(0, (Date.now() - issuedAt) / 86_400_000)
-        : 30;
-      const minimumVolumeAdjustment =
-        (trade.buy.minVolume ?? 1) <= units ? 10 : -20;
-      const fillScore = Math.round(
-        Math.max(
-          0,
-          Math.min(
-            100,
-            45 +
-              Math.min(25, Math.log10(Math.max(1, trade.units)) * 6) +
-              Math.max(0, 20 - ageDays) +
-              minimumVolumeAdjustment,
-          ),
-        ),
-      );
-      const iskPerJump = profit / Math.max(1, jumps);
-      const risk =
-        fillScore < 55 || marginPercent > 100 || units < 2
-          ? "High"
-          : fillScore < 75 || jumps > 10 || marginPercent > 40
-            ? "Medium"
-            : "Low";
-      return {
-        ...trade,
-        units,
-        profit,
-        investment,
-        marginPercent,
-        iskPerM3,
-        fillScore,
-        iskPerJump,
-        risk,
-        marginWidenedBy,
-        volumeM3,
-        cargoM3: units * volumeM3,
-        jumps,
-        hauler:
-          mode === "viator"
-            ? {
-                characterId: "viator-assumption",
-                character: "Viator",
-                capacityM3: 10_000,
-                basis: "10,000 m3 fitted-cargo assumption",
-              }
-            : analysisHauler,
-      };
-    },
-  );
-  return {
-    haulers,
-    mode,
-    opportunities: rankTrades(
-      checked.filter((trade) => {
-        if (trade.jumps >= 999 || trade.units <= 0 || trade.profit <= 0)
-          return false;
-        if (mode === "under10" && trade.jumps > 10) return false;
-        if (mode === "widened" && (trade.marginWidenedBy ?? 0) <= 0)
-          return false;
-        return true;
-      }),
-      mode,
-    ).slice(0, mode === "top1000" ? 1000 : 20),
-    diagnostics: {
-      sourceItems: market.size,
-      viablePairs: pairCount,
-      routeChecks: checked.length,
-      reachableRoutes: checked.filter((trade) => trade.jumps < 999).length,
-      profitableRoutes: checked.filter(
-        (trade) => trade.jumps < 999 && trade.units > 0 && trade.profit > 0,
-      ).length,
-      datasetCreatedAt: full.createdAt,
-    },
-    message:
-      mode === "widened" && !previousMarket
-        ? "Margins need two full high-sec snapshots. Run another pull later, then scan again."
-        : undefined,
-  };
+export async function findRadiusTrades(
+  mode: TradeAnalysisMode = "top",
+  constraints: {
+    maxCapital?: number | null;
+    cargoCapacityM3?: number | null;
+    maxJumps?: number | null;
+    maxMinutes?: number | null;
+  } = {},
+) {
+  return findFullMarketTrades(mode, constraints, { snapshots: listSnapshots() as any[] });
 }
 
 function marketMargin(item?: {

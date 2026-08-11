@@ -9,7 +9,9 @@ export interface AppConfig {
 }
 
 const defaults: AppConfig = {
-  eveClientId: "",
+  // Public application identifier for New Eden Sage's PKCE desktop SSO flow.
+  // This is application metadata, not an EVE client secret.
+  eveClientId: "0fd88c89991b420f89d6f8d85fccbae6",
   callbackUrl: "http://localhost:42813/auth/eve/callback",
   encryptedRefreshTokens: {},
 };
@@ -24,7 +26,7 @@ export async function readConfig(): Promise<AppConfig> {
       await fs.readFile(configPath(), "utf8"),
     ) as Partial<AppConfig> & Record<string, unknown>;
     const clean = {
-      eveClientId: parsed.eveClientId ?? defaults.eveClientId,
+      eveClientId: parsed.eveClientId?.trim() || defaults.eveClientId,
       callbackUrl: parsed.callbackUrl ?? defaults.callbackUrl,
       encryptedRefreshTokens: parsed.encryptedRefreshTokens ?? {},
     };

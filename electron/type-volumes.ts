@@ -1,6 +1,7 @@
 import AdmZip from "adm-zip";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import { logEvent } from "./logger";
 import { STATIC_DATA_ROOT } from "./data-paths";
 
@@ -48,32 +49,19 @@ export function itemCategoryName(categoryId: number) {
 
 export async function listPublishedShips() {
   if (!shipsPromise)
-    shipsPromise = (async () => {
-      const zip = new AdmZip(SDE_ARCHIVE);
-      const typesEntry = zip.getEntry("types.jsonl");
-      const groupsEntry = zip.getEntry("groups.jsonl");
-      if (!typesEntry || !groupsEntry)
-        throw new Error("Official EVE static data is missing ship types.");
-      const shipGroups = new Set<number>();
-      for (const line of groupsEntry.getData().toString("utf8").split(/\r?\n/)) {
-        if (!line) continue;
-        const group = JSON.parse(line) as { _key: number; categoryID: number };
-        if (group.categoryID === 6) shipGroups.add(group._key);
-      }
-      const ships: Array<{ typeId: number; name: string }> = [];
-      for (const line of typesEntry.getData().toString("utf8").split(/\r?\n/)) {
-        if (!line) continue;
-        const type = JSON.parse(line) as {
-          _key: number;
-          groupID: number;
-          published?: boolean;
-          name?: { en?: string };
-        };
-        if (type.published && shipGroups.has(type.groupID) && type.name?.en)
-          ships.push({ typeId: type._key, name: type.name.en });
-      }
-      return ships.sort((a, b) => a.name.localeCompare(b.name));
-    })();
+    shipsPromise = ensureStaticDataArchive().then(() => new Promise<Array<{ typeId: number; name: string }>>((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, "ship-index-worker.js"), {
+        workerData: { archive: SDE_ARCHIVE },
+      });
+      worker.once("message", (message: { ships?: Array<{ typeId: number; name: string }>; error?: string }) => {
+        if (message.error) reject(new Error(message.error));
+        else resolve(message.ships ?? []);
+      });
+      worker.once("error", reject);
+      worker.once("exit", (code) => {
+        if (code !== 0) reject(new Error(`Ship catalogue worker stopped (${code}).`));
+      });
+    }));
   return shipsPromise;
 }
 
@@ -182,6 +170,16 @@ async function addCategoryIds(cache: CacheFile) {
   cache.categoryIds = categoryIds;
   await saveCache(cache);
   return cache;
+}
+
+export async function ensureStaticDataArchive() {
+  try {
+    await fs.access(SDE_ARCHIVE);
+  } catch {
+    await fs.mkdir(STATIC_ROOT, { recursive: true });
+    await downloadSde();
+  }
+  return SDE_ARCHIVE;
 }
 
 async function downloadSde() {

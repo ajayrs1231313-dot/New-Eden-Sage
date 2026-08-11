@@ -1,0 +1,300 @@
+:root {
+  --sage-control-height: 38px;
+  --sage-control-radius: 4px;
+  --sage-control-padding-x: 11px;
+  --sage-control-bg: #061219;
+  --sage-control-border: #23444d;
+  --sage-control-border-focus: #58bdb3;
+  --sage-control-text: #d8e8eb;
+  --sage-control-muted: #78959d;
+}
+
+/* Heavy data screens stay mounted so navigation does not reload their indexes/results. */
+.cached-view[hidden] {
+  display: none !important;
+}
+
+select,
+textarea {
+  font: inherit;
+}
+
+/* Shared field geometry: feature styles can change colour/width, not basic sizing. */
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: var(--sage-control-height);
+  height: var(--sage-control-height);
+  padding: 0 var(--sage-control-padding-x);
+  border-radius: var(--sage-control-radius);
+  line-height: 1.2;
+}
+
+textarea {
+  border-radius: var(--sage-control-radius);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+}
+
+/* Standard full-size actions used beside form fields. Compact chips/tabs are intentionally excluded. */
+.connect,
+.primary,
+.sync,
+.isk-rescan,
+.market-controls > button,
+.item-tools > button,
+.route-head button,
+.route-controls > button,
+.depth-title button,
+.fit-import > button,
+.fit-title-actions > button {
+  min-height: var(--sage-control-height);
+  border-radius: var(--sage-control-radius);
+  padding-top: 0;
+  padding-bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Form labels use the same rhythm throughout the application. */
+.isk-constraint-grid label,
+.market-filter-grid label,
+.training-selectors label,
+.settings label {
+  gap: 6px;
+}
+
+/* ISK Lab: a real equal-cell filter grid rather than arbitrary box widths. */
+.market-filter-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: end;
+}
+
+.market-filter-grid .wide {
+  grid-column: span 1;
+}
+
+.market-filter-grid input,
+.market-filter-grid select,
+.isk-constraint-grid input,
+.opportunity-tools input {
+  width: 100%;
+}
+
+.market-check {
+  min-height: var(--sage-control-height);
+  height: var(--sage-control-height);
+  padding: 0 var(--sage-control-padding-x);
+  border-radius: var(--sage-control-radius);
+}
+
+/* Align the common toolbars to the same control height. */
+.market-controls select,
+.market-controls button,
+.item-tools input,
+.item-tools select,
+.item-tools button,
+.fit-title-actions select,
+.route-controls select,
+.skills-head input,
+.settings input,
+.training-selectors input,
+.training-selectors select {
+  min-height: var(--sage-control-height);
+  height: var(--sage-control-height);
+}
+
+/* Consistent field borders without flattening feature-specific panels/cards. */
+.market-filter-grid input,
+.market-filter-grid select,
+.isk-constraint-grid input,
+.opportunity-tools input,
+.training-selectors input,
+.training-selectors select,
+.settings input,
+.skills-head input,
+.item-tools input,
+.item-tools select,
+.fit-title-actions select,
+.route-controls select {
+  border-radius: var(--sage-control-radius);
+}
+
+@media (max-width: 1180px) {
+  .market-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .market-filter-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Regional Market follows the same compact, equal-cell form geometry as ISK Lab. */
+.regional-filter-primary {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.regional-filter-search {
+  grid-column: span 1;
+}
+
+.regional-filter-primary > button {
+  min-height: var(--sage-control-height);
+  height: var(--sage-control-height);
+  border-radius: var(--sage-control-radius);
+  padding: 0 var(--sage-control-padding-x);
+}
+
+/* Regional Market uses the same dark teal visual language as ISK Lab. */
+.regional-filter-panel input,
+.regional-filter-panel select {
+  border: 1px solid #23444d;
+  background: #061219;
+  color: #d8e8eb;
+}
+
+.regional-filter-panel input:focus,
+.regional-filter-panel select:focus {
+  border-color: #4caea6;
+}
+
+.pve-filter-grid input,
+.pve-filter-grid select {
+  min-height: var(--sage-control-height);
+  height: var(--sage-control-height);
+  width: 100%;
+  border: 1px solid #23444d;
+  border-radius: var(--sage-control-radius);
+  background: #061219;
+  color: #d8e8eb;
+  padding: 0 var(--sage-control-padding-x);
+}
+
+.pve-filter-grid input:focus,
+.pve-filter-grid select:focus {
+  border-color: #4caea6;
+}
+
+.pve-ship-context {
+  display: grid;
+  gap: 3px;
+  width: fit-content;
+  min-width: 260px;
+  padding: 9px 11px;
+  border: 1px solid #24464f;
+  background: #081920;
+}
+
+.pve-ship-context span,
+.pve-ship-context small {
+  color: #67848c;
+  font-size: 8px;
+}
+
+.pve-ship-context span {
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.pve-ship-context strong {
+  color: #80eadf;
+  font-size: 11px;
+}
+
+.pve-location-row {
+  grid-template-columns: 1.35fr 1fr 1.2fr 1.15fr 1fr .72fr 58px;
+}
+
+.regional-filter-presets button,
+.regional-filter-primary > button {
+  border: 1px solid #2c6665;
+  background: #0d292b;
+  color: #78e4d8;
+  border-radius: var(--sage-control-radius);
+}
+
+.regional-filter-presets button:hover,
+.regional-filter-primary > button:hover {
+  border-color: #4caea6;
+  background: #123638;
+  color: #a2fff4;
+}
+
+.regional-filter-presets .secondary {
+  border-color: #29434a;
+  background: #0a1a21;
+  color: #78959d;
+  opacity: 1;
+}
+
+/* Keep the entire ISK Lab limits row geometrically predictable. */
+.isk-constraints {
+  grid-template-columns: minmax(260px, 1fr) minmax(0, 4fr) auto;
+}
+
+.isk-constraint-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: start;
+}
+
+.isk-constraint-grid label,
+.isk-constraint-grid input {
+  width: 100%;
+  min-width: 0;
+}
+
+.isk-analysis-actions {
+  width: auto;
+  justify-content: flex-end;
+}
+
+.isk-analysis-actions .isk-rescan {
+  min-width: 210px;
+}
+
+.isk-analysis-actions .isk-cancel-analysis,
+.isk-analysis-actions .isk-refresh-intel {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1450px) {
+  .regional-filter-primary {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1100px) {
+  .regional-filter-primary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .isk-constraints {
+    grid-template-columns: 1fr;
+  }
+
+  .isk-constraint-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .isk-analysis-actions {
+    width: min(420px, 100%);
+  }
+}
+
+@media (max-width: 760px) {
+  .regional-filter-primary {
+    grid-template-columns: 1fr;
+  }
+
+  .isk-constraint-grid {
+    grid-template-columns: 1fr;
+  }
+}

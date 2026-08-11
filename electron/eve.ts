@@ -3,6 +3,7 @@ import http from "node:http";
 import { shell } from "electron";
 
 import { itemCategoryIds, itemVolumes } from "./type-volumes";
+import { trainingTimesToLevels } from "./skill-training";
 
 export const EVE_SCOPES = [
   "esi-assets.read_assets.v1",
@@ -16,6 +17,7 @@ export const EVE_SCOPES = [
   "esi-clones.read_implants.v1",
   "esi-contracts.read_character_contracts.v1",
   "esi-fittings.read_fittings.v1",
+  "esi-fittings.write_fittings.v1",
   "esi-industry.read_character_jobs.v1",
   "esi-killmails.read_killmails.v1",
   "esi-location.read_location.v1",
@@ -43,6 +45,7 @@ export const EVE_SCOPES = [
 ];
 
 const SSO = "https://login.eveonline.com";
+let activeLoginServer: http.Server | null = null;
 
 function base64url(value: Buffer) {
   return value.toString("base64url");
@@ -71,6 +74,14 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
     crypto.createHash("sha256").update(verifier).digest(),
   );
   const state = base64url(crypto.randomBytes(24));
+
+  if (activeLoginServer) {
+    const previous = activeLoginServer;
+    await new Promise<void>((resolve) => previous.close(() => {
+      if (activeLoginServer === previous) activeLoginServer = null;
+      resolve();
+    }));
+  }
 
   const result = new Promise<{
     accessToken: string;
@@ -121,23 +132,41 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
         response.end(
           "<h2>New Eden Sage is connected.</h2><p>You can close this tab and return to the app.</p>",
         );
-        resolve({
+        const login = {
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           characterId,
           characterName: claims.name,
+        };
+        server.close(() => {
+          if (activeLoginServer === server) activeLoginServer = null;
+          resolve(login);
         });
       } catch (error) {
         response.writeHead(400, {
           "Content-Type": "text/plain; charset=utf-8",
         });
         response.end(error instanceof Error ? error.message : "Login failed.");
-        reject(error);
-      } finally {
-        server.close();
+        server.close(() => {
+          if (activeLoginServer === server) activeLoginServer = null;
+          reject(error);
+        });
       }
     });
-    server.on("error", reject);
+    activeLoginServer = server;
+    const timeout = setTimeout(() => {
+      server.close(() => {
+        if (activeLoginServer === server) activeLoginServer = null;
+        reject(new Error("EVE login timed out. Start Add character again to retry."));
+      });
+    }, 180_000);
+    timeout.unref();
+    server.on("close", () => clearTimeout(timeout));
+    server.on("error", (error) => {
+      if (activeLoginServer === server) activeLoginServer = null;
+      clearTimeout(timeout);
+      reject(error);
+    });
     server.listen(Number(callback.port), "127.0.0.1");
   });
 
@@ -341,7 +370,7 @@ export async function fetchCharacterSnapshot(
   const detailedSkills = skillDetails
     .map((skill) => ({
       ...skill,
-      timeToLevels: calculateTrainingTimes(
+      timeToLevels: trainingTimesToLevels(
         skill,
         attributes,
         queue.filter((item) => item.skill_id === skill.skill_id),
@@ -903,58 +932,6 @@ async function mapLimited<T, R>(
   return results;
 }
 
-const ATTRIBUTE_NAMES: Record<
-  number,
-  "charisma" | "intelligence" | "memory" | "perception" | "willpower"
-> = {
-  164: "charisma",
-  165: "intelligence",
-  166: "memory",
-  167: "perception",
-  168: "willpower",
-};
-const BASE_SKILL_POINTS = [0, 250, 1415, 8000, 45255, 256000];
 
-function calculateTrainingTimes(
-  skill: {
-    trained_skill_level: number;
-    skillpoints_in_skill: number;
-    rank: number;
-    primaryAttributeId?: number;
-    secondaryAttributeId?: number;
-  },
-  attributes: {
-    charisma: number;
-    intelligence: number;
-    memory: number;
-    perception: number;
-    willpower: number;
-  },
-  queue: Array<{ finished_level: number; finish_date?: string }>,
-) {
-  const primary = skill.primaryAttributeId
-    ? attributes[ATTRIBUTE_NAMES[skill.primaryAttributeId]]
-    : undefined;
-  const secondary = skill.secondaryAttributeId
-    ? attributes[ATTRIBUTE_NAMES[skill.secondaryAttributeId]]
-    : undefined;
-  const spPerMinute = primary && secondary ? primary + secondary / 2 : 0;
-  return [1, 2, 3, 4, 5]
-    .filter((level) => level > skill.trained_skill_level)
-    .map((level) => {
-      const queued = queue.find(
-        (item) => item.finished_level === level,
-      )?.finish_date;
-      const remainingSp = Math.max(
-        0,
-        BASE_SKILL_POINTS[level] * skill.rank - skill.skillpoints_in_skill,
-      );
-      return {
-        level,
-        seconds: spPerMinute
-          ? Math.ceil((remainingSp / spPerMinute) * 60)
-          : null,
-        queuedFinishDate: queued,
-      };
-    });
-}
+
+

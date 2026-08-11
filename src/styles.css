@@ -239,7 +239,8 @@ main {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 header {
   display: flex;
@@ -852,6 +853,8 @@ footer {
 }
 .market-page {
   padding-top: 34px;
+  min-width: 0;
+  max-width: 100%;
 }
 .market-head {
   display: flex;
@@ -1887,4 +1890,186 @@ footer {
     grid-template-columns: 1fr;
     gap: 20px;
   }
+}
+
+/* TASK 1 - COMMAND INTELLIGENCE */
+.command-intelligence-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, .88fr);
+  gap: 18px;
+  margin: 18px 0;
+}
+.command-priority-panel,
+.eve-news-panel {
+  min-width: 0;
+  border: 1px solid rgba(130, 164, 191, .18);
+  background: linear-gradient(180deg, rgba(11, 24, 35, .96), rgba(7, 17, 25, .94));
+  border-radius: 14px;
+  padding: 18px;
+}
+.command-priority-panel { border-color: rgba(209, 84, 84, .26); }
+.eve-news-panel { border-color: rgba(68, 181, 135, .24); }
+.command-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 13px;
+}
+.command-panel-heading h3 { margin: 2px 0 0; }
+.command-panel-heading > span { color: #869aaa; font-size: .78rem; }
+.priority-list, .news-list { display: grid; gap: 8px; }
+.priority-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 10px 11px;
+  border-radius: 9px;
+  background: rgba(255,255,255,.025);
+  border: 1px solid rgba(255,255,255,.045);
+}
+.priority-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 10px currentColor; }
+.priority-red .priority-dot { color: #ff5c68; background: #ff5c68; }
+.priority-orange .priority-dot { color: #ff9c52; background: #ff9c52; }
+.priority-yellow .priority-dot { color: #e3c75b; background: #e3c75b; }
+.priority-green .priority-dot { color: #55d596; background: #55d596; }
+.priority-copy { display: grid; gap: 3px; min-width: 0; }
+.priority-copy strong { color: #edf6fa; font-size: .92rem; }
+.priority-copy small { color: #8398a8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.priority-item button, .priority-view-all, .news-refresh, .news-filters button {
+  border: 1px solid rgba(107, 153, 184, .22);
+  background: rgba(31, 61, 79, .28);
+  color: #bcd1dd;
+  border-radius: 7px;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+.priority-item button:disabled { opacity: .35; cursor: default; }
+.priority-view-all { width: 100%; margin-top: 10px; }
+.news-filters { display: flex; gap: 7px; margin-bottom: 12px; flex-wrap: wrap; }
+.news-filters button { padding: 6px 10px; text-transform: uppercase; letter-spacing: .08em; font-size: .7rem; }
+.news-filters button.active { border-color: rgba(91, 218, 161, .52); color: #7ce8b7; background: rgba(54, 151, 108, .16); }
+.news-refresh { font-size: 1rem; line-height: 1; }
+.news-list a {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 9px;
+  background: rgba(255,255,255,.025);
+  border: 1px solid rgba(255,255,255,.04);
+}
+.news-list a:hover { border-color: rgba(88, 196, 150, .3); background: rgba(70, 151, 119, .06); }
+.news-list strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .88rem; }
+.news-list small { color: #78909f; font-size: .72rem; }
+.news-category { font-size: .62rem; letter-spacing: .08em; padding: 3px 5px; border-radius: 5px; background: rgba(101, 145, 169, .14); color: #92b2c4; }
+.news-market { color: #e0c56c; background: rgba(191, 155, 63, .12); }
+.news-war { color: #ff7878; background: rgba(190, 70, 70, .12); }
+.news-events { color: #c690f4; background: rgba(139, 87, 183, .13); }
+.news-ccp { color: #69d9a7; background: rgba(62, 153, 113, .13); }
+.news-state { padding: 24px 10px; text-align: center; color: #8397a5; }
+@media (max-width: 1180px) {
+  .command-intelligence-grid { grid-template-columns: 1fr; }
+}
+
+/* Character selector refinement */
+.character-entry {
+  display: grid !important;
+  grid-template-columns: 1fr !important;
+  gap: 0 !important;
+  padding: 0 0 8px !important;
+  margin-bottom: 8px;
+  border-bottom: 1px solid rgba(91, 142, 151, 0.12);
+}
+.character-entry > button:first-child {
+  width: 100%;
+}
+.character-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 4px 0 36px;
+}
+.clone-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  flex: 1;
+  padding: 2px;
+  border: 1px solid #24454e;
+  border-radius: 7px;
+  background: #06131a;
+}
+.clone-switch button {
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 7px;
+  background: transparent;
+  color: #63818a;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.clone-switch button:hover {
+  color: #b8d0d5;
+  background: #0b2027;
+}
+.clone-switch button.active {
+  background: #12363b;
+  color: #66e6d6;
+  box-shadow: inset 0 0 0 1px #2e766f;
+}
+.clone-switch.needs-confirmation {
+  border-color: #b98724;
+  box-shadow: 0 0 0 1px rgba(185, 135, 36, .14);
+}
+.clone-switch.needs-confirmation button {
+  color: #c5a45d;
+}
+.character-controls .remove-character {
+  position: static !important;
+  width: 25px !important;
+  height: 25px !important;
+  min-width: 25px;
+  padding: 0 !important;
+  border: 1px solid transparent !important;
+  border-radius: 6px;
+  background: transparent !important;
+  color: #597780 !important;
+  font-size: 14px;
+}
+.character-controls .remove-character:hover {
+  border-color: #573940 !important;
+  background: #24141a !important;
+  color: #e18b95 !important;
+}
+.construction-page{position:relative;min-height:520px;overflow:hidden;border:1px solid #1f4149;background:linear-gradient(145deg,#081920,#061118);padding:70px 54px}.construction-page h2{margin:8px 0;color:#dcebed;font-size:32px}.construction-page>p:last-child{color:#718e96;max-width:560px}.construction-banner{position:absolute;right:-72px;top:48px;transform:rotate(36deg);width:340px;padding:12px;text-align:center;background:#c89e43;color:#10161a;font-weight:800;letter-spacing:.16em;box-shadow:0 4px 18px #0008}.market-workspace{display:grid;gap:12px}
+.cached-view,.market-workspace{min-width:0;max-width:100%}
+.regional-filter-panel{width:100%;min-width:0;max-width:100%;overflow:hidden}
+.regional-filter-table{width:100%;min-width:0;max-width:100%;overflow-x:auto;overflow-y:hidden}
+.fittings-workspace .base-stat-grid article,.fittings-workspace .performance-note,.fittings-workspace .requirement-list article{border-color:#1f4149;background:#081920;border-radius:0;min-height:68px;padding:11px 12px}.fittings-workspace .base-stat-grid{gap:8px}.fittings-workspace input,.fittings-workspace select,.fittings-workspace button{min-height:36px}
+.settings-connection-card{border:1px solid #244952;background:#081920;padding:18px;max-width:680px}.settings-connection-card strong{display:block;color:#d8e8ea;margin-bottom:7px}.settings-connection-card p{color:#78949b;line-height:1.55}.settings-connection-card small{color:#58767e}
+.support-developer{border:1px solid #b5964f;background:#241e11;color:#f0ce78;padding:9px 13px;white-space:nowrap}.support-developer:hover{border-color:#e0bb5f;background:#332918;color:#ffe19a}
+.mcp-settings-card{display:grid;gap:10px}.mcp-setup-actions{display:flex;gap:8px;flex-wrap:wrap}.mcp-setup-actions button{border:1px solid #39736f;background:#0d292b;color:#81ded5;padding:9px 12px}.mcp-settings-card code{display:block;overflow-wrap:anywhere;border:1px solid #1f4148;background:#06141a;color:#9db8bd;padding:10px}.mcp-copy-status{color:#7ee1d6!important}
+.mcp-instructions{border:1px solid #24464f;background:#07161c;padding:12px}.mcp-instructions>strong{color:#dcebed}.mcp-instructions ol{margin:9px 0;padding-left:20px;color:#91aeb4;font-size:11px;line-height:1.65}.mcp-instructions li b{color:#80ddd4}.mcp-instructions li code{display:inline;border:0;background:transparent;padding:0;color:#d5bd7a}.mcp-instructions small{display:block;color:#69868e;line-height:1.5}
+.mcp-tunnel-panel {
+  display: grid;
+  gap: 0.7rem;
+  padding: 1rem;
+  border: 1px solid rgba(79, 214, 200, 0.25);
+  background: rgba(5, 24, 31, 0.65);
+}
+
+.mcp-tunnel-panel input {
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid rgba(105, 188, 195, 0.35);
+  background: #07151c;
+  color: #e8fbfb;
 }

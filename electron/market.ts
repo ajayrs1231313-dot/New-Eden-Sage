@@ -57,7 +57,24 @@ async function esiFetch(
   attempts = 3,
   allowNotFound = false,
 ): Promise<Response> {
-  const response = await fetch(url, { headers: HEADERS });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: HEADERS,
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    if (attempts > 0) {
+      void logEvent("warn", "esi.network_retry", {
+        url,
+        attemptsRemaining: attempts,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await new Promise((resolve) => setTimeout(resolve, (4 - attempts) * 1000));
+      return esiFetch(url, attempts - 1, allowNotFound);
+    }
+    throw new Error("EVE market data timed out after several retries. Please try again shortly.");
+  }
   if (response.status === 429 && attempts > 0) {
     const waitSeconds = Math.max(
       1,
@@ -72,6 +89,15 @@ async function esiFetch(
     return esiFetch(url, attempts - 1, allowNotFound);
   }
   if (response.status === 404 && allowNotFound) return response;
+  if (response.status >= 500 && attempts > 0) {
+    void logEvent("warn", "esi.server_retry", {
+      url,
+      status: response.status,
+      attemptsRemaining: attempts,
+    });
+    await new Promise((resolve) => setTimeout(resolve, (4 - attempts) * 1000));
+    return esiFetch(url, attempts - 1, allowNotFound);
+  }
   if (!response.ok) {
     void logEvent("error", "esi.request_failed", {
       url,
@@ -82,14 +108,40 @@ async function esiFetch(
   return response;
 }
 
+async function esiJson<T>(
+  url: string,
+  attempts = 3,
+  allowNotFound = false,
+): Promise<{ response: Response; data: T | null }> {
+  const response = await esiFetch(url, attempts, allowNotFound);
+  if (response.status === 404 && allowNotFound) return { response, data: null };
+  const body = await response.text();
+  try {
+    if (!body.trim()) throw new SyntaxError("Empty JSON response");
+    return { response, data: JSON.parse(body) as T };
+  } catch (error) {
+    if (attempts > 0) {
+      void logEvent("warn", "esi.invalid_json_retry", {
+        url,
+        bodyBytes: body.length,
+        attemptsRemaining: attempts,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await new Promise((resolve) => setTimeout(resolve, (4 - attempts) * 500));
+      return esiJson<T>(url, attempts - 1, allowNotFound);
+    }
+    throw new Error("EVE market data was incomplete after several retries. Please try again shortly.");
+  }
+}
+
 export async function listRegions(): Promise<RegionInfo[]> {
-  const response = await esiFetch("https://esi.evetech.net/universe/regions/");
-  const ids = (await response.json()) as number[];
+  const { data: regionIds } = await esiJson<number[]>("https://esi.evetech.net/universe/regions/");
+  const ids = regionIds ?? [];
   const regions = await mapLimited(ids, 8, async (regionId) => {
-    const detail = await esiFetch(
+    const { data } = await esiJson<{ name: string }>(
       `https://esi.evetech.net/universe/regions/${regionId}/`,
     );
-    const data = (await detail.json()) as { name: string };
+    if (!data) throw new Error(`EVE region ${regionId} was not found.`);
     return { regionId, name: data.name };
   });
   return regions.sort((a, b) => a.name.localeCompare(b.name));
@@ -99,10 +151,11 @@ export async function pullRegionMarket(
   region: RegionInfo,
   progress?: (pagesDone: number, pagesTotal: number) => void,
   allowedSystemIds?: Set<number>,
+  rawOrderSink?: (orders: MarketOrder[]) => Promise<void>,
 ) {
   const base = `https://esi.evetech.net/markets/${region.regionId}/orders/?order_type=all`;
-  const firstResponse = await esiFetch(`${base}&page=1`);
-  const first = (await firstResponse.json()) as MarketOrder[];
+  const { response: firstResponse, data: first } = await esiJson<MarketOrder[]>(`${base}&page=1`);
+  if (!first) throw new Error(`EVE returned no market data for ${region.name}.`);
   const totalPages = Number(firstResponse.headers.get("x-pages") ?? 1);
   progress?.(1, totalPages);
   let completed = 1;
@@ -111,14 +164,14 @@ export async function pullRegionMarket(
     (_, index) => index + 2,
   );
   const chunks = await mapLimited(remainingPages, 4, async (page) => {
-    const response = await esiFetch(`${base}&page=${page}`, 3, true);
-    if (response.status === 404) return [];
-    const orders = (await response.json()) as MarketOrder[];
+    const { data } = await esiJson<MarketOrder[]>(`${base}&page=${page}`, 3, true);
+    const orders = data ?? [];
     completed += 1;
     progress?.(completed, totalPages);
     return orders;
   });
   const downloadedOrders = first.concat(...chunks);
+  await rawOrderSink?.(downloadedOrders);
   const orders = allowedSystemIds
     ? downloadedOrders.filter((order) => allowedSystemIds.has(order.system_id))
     : downloadedOrders;

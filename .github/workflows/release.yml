@@ -23,5 +23,7 @@ jobs:
         with:
           files: |
             release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
             README.md
           generate_release_notes: true

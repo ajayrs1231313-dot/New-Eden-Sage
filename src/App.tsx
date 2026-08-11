@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import type {
   CharacterSnapshot,
   MarketItem,
@@ -7,325 +7,51 @@ import type {
 } from "./types";
 import { FittingsWorkspace } from "./Fittings";
 import { IskLab } from "./IskLab";
+import { CommandIntelligence } from "./CommandIntelligence";
+import { SkillsWorkspace } from "./SkillsWorkspace";
+import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
+import { GlobalMarketSearch } from "./GlobalMarketSearch";
+import { RegionalMarketFilterPanel } from "./RegionalMarketFilterPanel";
+import { IndustrialCommand } from "./IndustrialCommand";
 
 type View =
   | "overview"
   | "augments"
   | "skills"
+  | "isk"
   | "market"
   | "regional"
+  | "industrial"
+  | "corporation"
+  | "alliance"
   | "fittings"
   | "data"
   | "settings";
 type CloneState = "alpha" | "omega";
 
 const nav: Array<{ id: View; label: string; mark: string }> = [
-  { id: "overview", label: "Command", mark: "◇" },
-  { id: "augments", label: "Augments", mark: "✦" },
-  { id: "skills", label: "Skills", mark: "△" },
-  { id: "market", label: "ISK Lab", mark: "◈" },
-  { id: "regional", label: "Regional Market", mark: "▦" },
-  { id: "fittings", label: "Fittings", mark: "⌁" },
-  { id: "data", label: "Data Vault", mark: "▣" },
-  { id: "settings", label: "Settings", mark: "⚙" },
+  { id: "overview", label: "Command", mark: "\u2726" },
+  { id: "augments", label: "Augments", mark: "\u25C8" },
+  { id: "skills", label: "Progression", mark: "\u25B3" },
+  { id: "isk", label: "ISK Lab", mark: "\u25C8" },
+  { id: "market", label: "Market", mark: "\u25C6" },
+  { id: "fittings", label: "Fittings", mark: "\u2318" },
+  { id: "industrial", label: "Industrial Command", mark: "\u2692" },
+  { id: "corporation", label: "Corporation Management", mark: "\u25C9" },
+  { id: "alliance", label: "Alliance Management", mark: "\u2727" },
+  { id: "data", label: "Data Vault", mark: "\u25A3" },
+  { id: "settings", label: "Settings", mark: "\u2699" },
 ];
 
 const money = (value: number) =>
   new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
 
-type TrainingTarget = { skill: string; level: number };
-type ActivityProfile = {
-  id: string;
-  label: string;
-  detail: string;
-  skills: TrainingTarget[];
-};
-
-const activityProfiles: ActivityProfile[] = [
-  {
-    id: "abyssal",
-    label: "Abyssal Deadspace",
-    detail: "Solo cruiser or small-ship PvE with strong tank, capacitor and damage support.",
-    skills: [
-      { skill: "Capacitor Management", level: 4 },
-      { skill: "Capacitor Systems Operation", level: 4 },
-      { skill: "Navigation", level: 4 },
-      { skill: "Afterburner", level: 4 },
-      { skill: "Shield Management", level: 4 },
-      { skill: "Drones", level: 5 },
-      { skill: "Weapon Upgrades", level: 4 },
-    ],
-  },
-  {
-    id: "missions",
-    label: "Security missions",
-    detail: "Reliable high-sec PvE progression through tank, application and sustained damage.",
-    skills: [
-      { skill: "Navigation", level: 4 },
-      { skill: "Target Management", level: 4 },
-      { skill: "Weapon Upgrades", level: 4 },
-      { skill: "Capacitor Management", level: 4 },
-      { skill: "Drones", level: 4 },
-      { skill: "Social", level: 4 },
-      { skill: "Security Connections", level: 4 },
-    ],
-  },
-  {
-    id: "exploration",
-    label: "Exploration and hacking",
-    detail: "Scanning, relic/data sites and safe movement through dangerous space.",
-    skills: [
-      { skill: "Astrometrics", level: 4 },
-      { skill: "Astrometric Rangefinding", level: 3 },
-      { skill: "Hacking", level: 4 },
-      { skill: "Archaeology", level: 4 },
-      { skill: "Cloaking", level: 4 },
-      { skill: "Evasive Maneuvering", level: 4 },
-    ],
-  },
-  {
-    id: "mining",
-    label: "Mining and resource harvesting",
-    detail: "Barges, yield, crystals and survivability for sustained resource gathering.",
-    skills: [
-      { skill: "Mining", level: 5 },
-      { skill: "Astrogeology", level: 5 },
-      { skill: "Mining Barge", level: 4 },
-      { skill: "Mining Upgrades", level: 4 },
-      { skill: "Drones", level: 4 },
-      { skill: "Shield Management", level: 4 },
-    ],
-  },
-  {
-    id: "hauling",
-    label: "Hauling and market trading",
-    detail: "Cargo movement, safer travel, order capacity and reduced trading costs.",
-    skills: [
-      { skill: "Navigation", level: 5 },
-      { skill: "Evasive Maneuvering", level: 4 },
-      { skill: "Warp Drive Operation", level: 4 },
-      { skill: "Spaceship Command", level: 5 },
-      { skill: "Trade", level: 4 },
-      { skill: "Retail", level: 4 },
-      { skill: "Accounting", level: 4 },
-      { skill: "Broker Relations", level: 4 },
-    ],
-  },
-  {
-    id: "industry",
-    label: "Manufacturing and industry",
-    detail: "Production throughput, more concurrent jobs and remote industrial control.",
-    skills: [
-      { skill: "Industry", level: 5 },
-      { skill: "Advanced Industry", level: 4 },
-      { skill: "Mass Production", level: 4 },
-      { skill: "Advanced Mass Production", level: 3 },
-      { skill: "Science", level: 4 },
-      { skill: "Supply Chain Management", level: 3 },
-    ],
-  },
-  {
-    id: "faction-warfare",
-    label: "Faction Warfare and small-gang PvP",
-    detail: "Core fitting, navigation, heat and weapon support for PvP frigates and cruisers.",
-    skills: [
-      { skill: "CPU Management", level: 5 },
-      { skill: "Power Grid Management", level: 5 },
-      { skill: "Mechanics", level: 5 },
-      { skill: "Hull Upgrades", level: 4 },
-      { skill: "Navigation", level: 5 },
-      { skill: "Weapon Upgrades", level: 5 },
-      { skill: "Thermodynamics", level: 4 },
-    ],
-  },
-  {
-    id: "incursions",
-    label: "Incursions and fleet PvE",
-    detail: "Fleet-ready tank, capacitor, targeting and damage or logistics support.",
-    skills: [
-      { skill: "CPU Management", level: 5 },
-      { skill: "Power Grid Management", level: 5 },
-      { skill: "Capacitor Management", level: 5 },
-      { skill: "Shield Management", level: 5 },
-      { skill: "Long Range Targeting", level: 4 },
-      { skill: "Signature Analysis", level: 4 },
-      { skill: "Advanced Weapon Upgrades", level: 4 },
-    ],
-  },
-  {
-    id: "homefront",
-    label: "Homefront Operations",
-    detail: "Accessible cooperative high-sec sites using combat, logistics or hacking roles.",
-    skills: [
-      { skill: "Navigation", level: 4 },
-      { skill: "Capacitor Management", level: 4 },
-      { skill: "Target Management", level: 4 },
-      { skill: "Signature Analysis", level: 4 },
-      { skill: "Shield Management", level: 4 },
-      { skill: "Hacking", level: 3 },
-    ],
-  },
-  {
-    id: "nullsec-ratting",
-    label: "Null-sec anomaly ratting",
-    detail: "Sustained PvE damage, drone control, tank and mobility for anomalies.",
-    skills: [
-      { skill: "Drones", level: 5 },
-      { skill: "Drone Interfacing", level: 4 },
-      { skill: "Heavy Drone Operation", level: 4 },
-      { skill: "Navigation", level: 4 },
-      { skill: "Capacitor Management", level: 4 },
-      { skill: "Weapon Upgrades", level: 4 },
-    ],
-  },
-];
-
-const activityMastery: Record<string, TrainingTarget[]> = {
-  abyssal: [
-    { skill: "CPU Management", level: 5 },
-    { skill: "Power Grid Management", level: 5 },
-    { skill: "Capacitor Management", level: 5 },
-    { skill: "Capacitor Systems Operation", level: 5 },
-    { skill: "Acceleration Control", level: 4 },
-    { skill: "Fuel Conservation", level: 4 },
-    { skill: "Thermodynamics", level: 4 },
-    { skill: "Advanced Weapon Upgrades", level: 4 },
-    { skill: "Drone Interfacing", level: 5 },
-    { skill: "Drone Navigation", level: 5 },
-    { skill: "Drone Sharpshooting", level: 5 },
-    { skill: "Tactical Shield Manipulation", level: 4 },
-  ],
-  missions: [
-    { skill: "CPU Management", level: 5 },
-    { skill: "Power Grid Management", level: 5 },
-    { skill: "Capacitor Systems Operation", level: 5 },
-    { skill: "Signature Analysis", level: 4 },
-    { skill: "Long Range Targeting", level: 4 },
-    { skill: "Advanced Weapon Upgrades", level: 4 },
-    { skill: "Drone Interfacing", level: 4 },
-  ],
-  exploration: [
-    { skill: "Astrometric Acquisition", level: 4 },
-    { skill: "Astrometric Pinpointing", level: 4 },
-    { skill: "Astrometric Rangefinding", level: 4 },
-    { skill: "Covert Ops", level: 4 },
-    { skill: "Warp Drive Operation", level: 5 },
-    { skill: "Navigation", level: 5 },
-    { skill: "Interceptors", level: 4 },
-  ],
-  mining: [
-    { skill: "Exhumers", level: 4 },
-    { skill: "Reprocessing", level: 5 },
-    { skill: "Mining Drone Operation", level: 5 },
-    { skill: "Mining Drone Specialization", level: 4 },
-    { skill: "Drone Interfacing", level: 4 },
-    { skill: "Tactical Shield Manipulation", level: 4 },
-  ],
-  hauling: [
-    { skill: "Transport Ships", level: 4 },
-    { skill: "Cloaking", level: 4 },
-    { skill: "Acceleration Control", level: 4 },
-    { skill: "Cybernetics", level: 4 },
-    { skill: "Marketing", level: 4 },
-    { skill: "Daytrading", level: 4 },
-    { skill: "Wholesale", level: 4 },
-  ],
-  industry: [
-    { skill: "Advanced Mass Production", level: 4 },
-    { skill: "Laboratory Operation", level: 5 },
-    { skill: "Advanced Laboratory Operation", level: 4 },
-    { skill: "Scientific Networking", level: 4 },
-    { skill: "Metallurgy", level: 4 },
-    { skill: "Research", level: 4 },
-    { skill: "Invention", level: 4 },
-  ],
-  "faction-warfare": [
-    { skill: "Acceleration Control", level: 4 },
-    { skill: "High Speed Maneuvering", level: 4 },
-    { skill: "Evasive Maneuvering", level: 5 },
-    { skill: "Advanced Weapon Upgrades", level: 4 },
-    { skill: "Signature Analysis", level: 5 },
-    { skill: "Long Range Targeting", level: 4 },
-  ],
-  incursions: [
-    { skill: "Logistics Cruisers", level: 4 },
-    { skill: "Thermodynamics", level: 4 },
-    { skill: "Shield Compensation", level: 4 },
-    { skill: "Advanced Weapon Upgrades", level: 5 },
-    { skill: "Signature Analysis", level: 5 },
-  ],
-  homefront: [
-    { skill: "Remote Armor Repair Systems", level: 4 },
-    { skill: "Shield Emission Systems", level: 4 },
-    { skill: "Logistics Cruisers", level: 3 },
-    { skill: "Hacking", level: 4 },
-    { skill: "Thermodynamics", level: 4 },
-  ],
-  "nullsec-ratting": [
-    { skill: "CPU Management", level: 5 },
-    { skill: "Power Grid Management", level: 5 },
-    { skill: "Heavy Drone Operation", level: 5 },
-    { skill: "Sentry Drone Interfacing", level: 5 },
-    { skill: "Drone Navigation", level: 5 },
-    { skill: "Drone Sharpshooting", level: 5 },
-    { skill: "Advanced Weapon Upgrades", level: 4 },
-    { skill: "Thermodynamics", level: 4 },
-  ],
-};
-
-const shipTraining: Record<string, TrainingTarget[]> = {
-  Orca: [
-    { skill: "Industrial Command Ships", level: 4 },
-    { skill: "Mining Director", level: 5 },
-    { skill: "Mining Foreman", level: 5 },
-    { skill: "Leadership", level: 5 },
-    { skill: "Drone Interfacing", level: 4 },
-    { skill: "Shield Management", level: 4 },
-  ],
-  Gila: [
-    { skill: "Caldari Cruiser", level: 4 },
-    { skill: "Gallente Cruiser", level: 4 },
-    { skill: "Drones", level: 5 },
-    { skill: "Medium Drone Operation", level: 5 },
-    { skill: "Shield Management", level: 4 },
-  ],
-  Ishtar: [
-    { skill: "Gallente Cruiser", level: 5 },
-    { skill: "Heavy Assault Cruisers", level: 4 },
-    { skill: "Drones", level: 5 },
-    { skill: "Heavy Drone Operation", level: 5 },
-    { skill: "Drone Interfacing", level: 5 },
-  ],
-  Viator: [
-    { skill: "Gallente Industrial", level: 5 },
-    { skill: "Transport Ships", level: 4 },
-    { skill: "Cloaking", level: 4 },
-    { skill: "Evasive Maneuvering", level: 5 },
-  ],
-  Hulk: [
-    { skill: "Mining Barge", level: 5 },
-    { skill: "Exhumers", level: 4 },
-    { skill: "Mining", level: 5 },
-    { skill: "Astrogeology", level: 5 },
-  ],
-};
-
-const popularPlannerShips = [
-  "Gila",
-  "Ishtar",
-  "Orca",
-  "Hulk",
-  "Retriever",
-  "Venture",
-  "Heron",
-  "Astero",
-  "Drake",
-  "Raven",
-  "Viator",
-];
-
 export default function App() {
   const [view, setView] = useState<View>("overview");
+  const [marketDataRevision, setMarketDataRevision] = useState(0);
+  const [plannerHullTypeId, setPlannerHullTypeId] = useState<number>();
+  const mountedViews = useRef(new Set<View>(["overview"]));
+  mountedViews.current.add(view);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [snapshots, setSnapshots] = useState<CharacterSnapshot[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -340,8 +66,6 @@ export default function App() {
       }
     },
   );
-  const [cloneConfirmationRequired, setCloneConfirmationRequired] =
-    useState(true);
   const [resolvedTypeNames, setResolvedTypeNames] = useState<Record<number, string>>({});
 
   useEffect(() => {
@@ -350,8 +74,6 @@ export default function App() {
         setConfig(nextConfig);
         setSnapshots(nextSnapshots);
         setActiveId(nextSnapshots[0]?.characterId ?? "");
-        setCloneConfirmationRequired(Boolean(nextSnapshots[0]));
-        if (!nextConfig.eveClientId) setView("settings");
       },
     );
   }, []);
@@ -383,7 +105,6 @@ export default function App() {
         result.snapshot,
       ]);
       setActiveId(result.characterId);
-      setCloneConfirmationRequired(true);
       setConfig(await window.sage.getConfig());
       setView("overview");
       setMessage(`${result.characterName} connected`);
@@ -424,8 +145,13 @@ export default function App() {
 
   function selectCharacter(characterId: string) {
     setActiveId(characterId);
-    setCloneConfirmationRequired(true);
-    setMessage("Confirm Alpha or Omega clone state for accurate training times");
+    const character = snapshots.find((snapshot) => snapshot.characterId === characterId);
+    const savedState = cloneStates[characterId];
+    setMessage(
+      savedState
+        ? (character?.character.name ?? "Character") + ": " + (savedState === "omega" ? "Omega" : "Alpha") + " training speed active"
+        : "Confirm Alpha or Omega clone state for accurate training times",
+    );
   }
 
   function confirmCloneState(characterId: string, state: CloneState) {
@@ -435,19 +161,21 @@ export default function App() {
     const next = { ...cloneStates, [characterId]: state };
     setCloneStates(next);
     localStorage.setItem("new-eden-sage-clone-states", JSON.stringify(next));
-    setCloneConfirmationRequired(false);
     setMessage(`${character.character.name}: ${state === "omega" ? "Omega" : "Alpha"} training speed selected`);
   }
 
   if (!config) return <div className="boot">Waking New Eden Sage…</div>;
   const active =
     snapshots.find((item) => item.characterId === activeId) ?? snapshots[0];
+  const cloneConfirmationRequired = Boolean(
+    active && !cloneStates[active.characterId],
+  );
 
   return (
     <div className="app-shell">
       <aside>
         <div className="brand">
-          <span className="brand-glyph">✦</span>
+          <span className="brand-glyph">{"\u2726"}</span>
           <div>
             <strong>NEW EDEN</strong>
             <small>SAGE</small>
@@ -486,56 +214,51 @@ export default function App() {
                     </small>
                   </div>
                 </button>
-                <div
-                  className={`character-clone-state ${
-                    active?.characterId === snapshot.characterId &&
-                    cloneConfirmationRequired
-                      ? "needs-confirmation"
-                      : ""
-                  }`}
-                >
-                  <button
-                    className={
-                      cloneStates[snapshot.characterId] === "alpha" &&
-                      !(
-                        active?.characterId === snapshot.characterId &&
-                        cloneConfirmationRequired
-                      )
-                        ? "active"
+                <div className="character-controls">
+                  <div
+                    className={`clone-switch ${
+                      active?.characterId === snapshot.characterId &&
+                      cloneConfirmationRequired
+                        ? "needs-confirmation"
                         : ""
-                    }
-                    title={`Alpha clone: ${snapshot.character.name}`}
-                    onClick={() =>
-                      confirmCloneState(snapshot.characterId, "alpha")
-                    }
+                    }`}
+                    aria-label={`Clone state for ${snapshot.character.name}`}
                   >
-                    A
-                  </button>
+                    <button
+                      className={
+                        cloneStates[snapshot.characterId] === "alpha"
+                          ? "active"
+                          : ""
+                      }
+                      title={`Use Alpha training speed for ${snapshot.character.name}`}
+                      onClick={() =>
+                        confirmCloneState(snapshot.characterId, "alpha")
+                      }
+                    >
+                      Alpha
+                    </button>
+                    <button
+                      className={
+                        cloneStates[snapshot.characterId] === "omega"
+                          ? "active"
+                          : ""
+                      }
+                      title={`Use Omega training speed for ${snapshot.character.name}`}
+                      onClick={() =>
+                        confirmCloneState(snapshot.characterId, "omega")
+                      }
+                    >
+                      Omega
+                    </button>
+                  </div>
                   <button
-                    className={
-                      cloneStates[snapshot.characterId] === "omega" &&
-                      !(
-                        active?.characterId === snapshot.characterId &&
-                        cloneConfirmationRequired
-                      )
-                        ? "active"
-                        : ""
-                    }
-                    title={`Omega clone: ${snapshot.character.name}`}
-                    onClick={() =>
-                      confirmCloneState(snapshot.characterId, "omega")
-                    }
+                    className="remove-character"
+                    title={`Remove ${snapshot.character.name}`}
+                    onClick={() => removeCharacter(snapshot.characterId)}
                   >
-                    Ω
+                    ×
                   </button>
                 </div>
-                <button
-                  className="remove-character"
-                  title={`Remove ${snapshot.character.name}`}
-                  onClick={() => removeCharacter(snapshot.characterId)}
-                >
-                  ×
-                </button>
               </div>
             ))}
           </div>
@@ -555,6 +278,14 @@ export default function App() {
             <h1>{nav.find((item) => item.id === view)?.label}</h1>
           </div>
           <div className="header-actions">
+            <UpdateControl />
+            <button
+              className="support-developer"
+              onClick={() => void window.sage.openSupportPage()}
+              title="Support New Eden Sage development via PayPal"
+            >
+              Support Developer
+            </button>
             {active && (
               <button className="sync" onClick={refreshActive} disabled={busy}>
                 ↻ Sync {active.character.name}
@@ -563,9 +294,9 @@ export default function App() {
             <button
               className="connect"
               onClick={connect}
-              disabled={busy || !config.eveClientId}
+              disabled={busy}
             >
-              {busy ? "Working…" : "+ Connect character"}
+              {busy ? "Connecting…" : "+ Add character"}
             </button>
           </div>
         </header>
@@ -574,7 +305,7 @@ export default function App() {
             snapshot={active}
             onConnect={connect}
             cloneState={active ? cloneStates[active.characterId] : undefined}
-            confirmationRequired={cloneConfirmationRequired}
+            onNavigate={setView}
           />
         )}
         {view === "augments" && (
@@ -592,14 +323,50 @@ export default function App() {
           />
         )}
         {view === "skills" && (
-          <Skills
+          <SkillsWorkspace
             snapshot={active}
             cloneState={active ? cloneStates[active.characterId] : undefined}
+            confirmationRequired={cloneConfirmationRequired}
+            initialHullTypeId={plannerHullTypeId}
           />
         )}
-        {view === "market" && <IskLab />}
-        {view === "regional" && <RegionalMarket snapshot={active} />}
-        {view === "fittings" && <FittingsWorkspace />}
+        {mountedViews.current.has("isk") && (
+          <div className="cached-view" hidden={view !== "isk"}>
+            <IskLab
+              snapshot={active}
+              cloneState={active ? cloneStates[active.characterId] : undefined}
+              marketDataRevision={marketDataRevision}
+            />
+          </div>
+        )}
+        {mountedViews.current.has("market") && (
+          <div className="cached-view" hidden={view !== "market"}>
+            <MarketWorkspace
+              snapshot={active}
+              cloneState={active ? cloneStates[active.characterId] : undefined}
+              onMarketDataUpdated={() => setMarketDataRevision((value) => value + 1)}
+            />
+          </div>
+        )}
+        {mountedViews.current.has("regional") && (
+          <div className="cached-view" hidden={view !== "regional"}>
+            <RegionalMarket
+              snapshot={active}
+              onMarketDataUpdated={() => setMarketDataRevision((value) => value + 1)}
+            />
+          </div>
+        )}
+        {view === "fittings" && <FittingsWorkspace onExportToPlanner={(hullTypeId, characterId) => { if (characterId) setActiveId(characterId); setPlannerHullTypeId(hullTypeId); setView("skills"); }} />}
+        {view === "industrial" && (
+          <IndustrialCommand
+            snapshots={snapshots}
+            activeCharacterId={active?.characterId}
+            onSelectCharacter={selectCharacter}
+          />
+        )}
+        {(view === "corporation" || view === "alliance") && (
+          <UnderConstruction title={nav.find((item) => item.id === view)?.label ?? "New module"} />
+        )}
         <footer>
           <span className="pulse" />
           {message}
@@ -608,6 +375,55 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function UpdateControl() {
+  const [state, setState] = useState<{ status: string; detail?: any }>({ status: "idle" });
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    window.sage.getUpdateState().then((value) => setVersion(value.version));
+    return window.sage.onUpdateStatus(setState);
+  }, []);
+  const progress = state.status === "downloading" ? Math.round(state.detail?.percent ?? 0) : 0;
+  async function act() {
+    if (state.status === "available") await window.sage.downloadUpdate();
+    else if (state.status === "downloaded") await window.sage.installUpdate();
+    else {
+      setState({ status: "checking" });
+      try {
+        const result = await Promise.race([
+          window.sage.checkForUpdates(),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Update check timed out.")), 20000)),
+        ]) as { status?: string; detail?: any };
+        if (result?.status === "available" || result?.status === "current")
+          setState({ status: result.status, detail: result.detail });
+      } catch (error) {
+        setState({ status: "error", detail: error instanceof Error ? error.message : "Update check failed." });
+      }
+    }
+  }
+  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Install & restart" : state.status === "checking" ? "Checking…" : state.status === "current" ? `Up to date · v${version}` : state.status === "error" ? "Update failed · retry" : `Check updates · v${version}`;
+  return <button className="update-control" onClick={act} disabled={state.status === "checking" || state.status === "downloading"} title={state.status === "error" ? String(state.detail) : "Install the latest full Sage release from GitHub"}>{label}</button>;
+}
+
+function MarketWorkspace({ snapshot, cloneState, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; onMarketDataUpdated: () => void }) {
+  const [tab, setTab] = useState<"market" | "regional">("regional");
+  return <section className="market-workspace">
+    <div className="skills-tabs" role="tablist" aria-label="Market sections">
+      <button className={tab === "regional" ? "active" : ""} onClick={() => setTab("regional")}>Regional Explorer</button>
+      <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>Market</button>
+    </div>
+    {tab === "market" ? <GlobalMarketSearch /> : <RegionalMarket snapshot={snapshot} onMarketDataUpdated={onMarketDataUpdated} />}
+  </section>;
+}
+
+function UnderConstruction({ title }: { title: string }) {
+  return <section className="construction-page">
+    <div className="construction-banner">UNDER CONSTRUCTION</div>
+    <p className="eyebrow">NEW EDEN SAGE MODULE</p>
+    <h2>{title}</h2>
+    <p>This command workspace is reserved and will be activated in a future release.</p>
+  </section>;
 }
 
 function Augments({
@@ -666,12 +482,12 @@ function Overview({
   snapshot,
   onConnect,
   cloneState,
-  confirmationRequired,
+  onNavigate,
 }: {
   snapshot?: CharacterSnapshot;
   onConnect(): void;
   cloneState?: CloneState;
-  confirmationRequired: boolean;
+  onNavigate(target: "skills" | "market" | "regional" | "fittings"): void;
 }) {
   if (!snapshot)
     return (
@@ -690,28 +506,6 @@ function Overview({
   const queueFinish = snapshot.queue.find(
     (item) => item.finish_date,
   )?.finish_date;
-  const overviewSkillLevels = new Map(
-    snapshot.skills.skills.map((skill) => [
-      skill.name,
-      skill.trained_skill_level,
-    ]),
-  );
-  const rankedCurrentActivities = activityProfiles
-    .map((profile) => ({
-      profile,
-      score:
-        profile.skills.reduce(
-          (sum, target) =>
-            sum +
-            Math.min(
-              1,
-              (overviewSkillLevels.get(target.skill) ?? 0) / target.level,
-            ),
-          0,
-        ) / profile.skills.length,
-    }))
-    .sort((a, b) => b.score - a.score);
-  const bestCurrentActivity = rankedCurrentActivities[0];
   return (
     <section className="dashboard">
       <div className="hero-panel">
@@ -776,209 +570,13 @@ function Overview({
           detail="Current corporation"
         />
       </div>
-      <div className="split">
-        <TrainingVector
-          snapshot={snapshot}
-          queueFinish={queueFinish}
-          cloneState={cloneState}
-          confirmationRequired={confirmationRequired}
-        />
-        <article className="capability-radar">
-          <p className="eyebrow">CAPABILITY RADAR</p>
-          <h3>Top 5 current activity matches</h3>
-          <ol>
-            {rankedCurrentActivities.slice(0, 5).map((item) => (
-              <li key={item.profile.id}>
-                <span>{item.profile.label}</span>
-                <div><i style={{ width: `${Math.round(item.score * 100)}%` }} /></div>
-                <strong>{Math.round(item.score * 100)}%</strong>
-              </li>
-            ))}
-          </ol>
-          <p>
-            Rankings compare the currently synced skill levels against each
-            activity’s core skill profile.
-          </p>
-        </article>
-      </div>
+      <CommandIntelligence snapshot={snapshot} onNavigate={onNavigate} />
+      <CapabilityCommandCenter
+        snapshot={snapshot}
+        cloneState={cloneState}
+        onOpenProgression={() => onNavigate("skills")}
+      />
     </section>
-  );
-}
-
-function TrainingVector({
-  snapshot,
-  queueFinish,
-  cloneState,
-  confirmationRequired,
-}: {
-  snapshot: CharacterSnapshot;
-  queueFinish?: string;
-  cloneState?: CloneState;
-  confirmationRequired: boolean;
-}) {
-  const skillByName = new Map(
-    snapshot.skills.skills.map((skill) => [skill.name, skill]),
-  );
-  const activityScores = activityProfiles.map((profile) => ({
-    profile,
-    score:
-      profile.skills.reduce((sum, target) => {
-        const level = skillByName.get(target.skill)?.trained_skill_level ?? 0;
-        return sum + Math.min(1, level / target.level);
-      }, 0) / profile.skills.length,
-  }));
-  const best = [...activityScores].sort((a, b) => b.score - a.score)[0];
-  const ownedShips =
-    snapshot.extended?.assetSummary?.ownedShips?.map((ship) => ship.item) ?? [];
-  const initialShips = [
-    ...new Set(
-      [snapshot.ship.ship_type_name, ...ownedShips, ...popularPlannerShips].filter(
-        Boolean,
-      ),
-    ),
-  ] as string[];
-  const [shipOptions, setShipOptions] = useState<
-    Array<{ typeId?: number; name: string }>
-  >(initialShips.map((name) => ({ name })));
-  const [activityId, setActivityId] = useState(best.profile.id);
-  const [ship, setShip] = useState(
-    snapshot.ship.ship_type_name || initialShips[0],
-  );
-  const [hullTargets, setHullTargets] = useState<TrainingTarget[]>([]);
-  useEffect(() => {
-    window.sage.listShips().then((allShips) => {
-      const byName = new Map(allShips.map((item) => [item.name, item]));
-      for (const name of initialShips)
-        if (!byName.has(name)) byName.set(name, { name, typeId: undefined as any });
-      setShipOptions([...byName.values()].sort((a, b) => a.name.localeCompare(b.name)));
-    });
-  }, []);
-  useEffect(() => {
-    setActivityId(best.profile.id);
-    setShip(snapshot.ship.ship_type_name || initialShips[0]);
-  }, [snapshot.characterId, snapshot.updatedAt]);
-  useEffect(() => {
-    const selectedHull = shipOptions.find((item) => item.name === ship);
-    if (!selectedHull?.typeId) {
-      setHullTargets([]);
-      return;
-    }
-    let cancelled = false;
-    window.sage
-      .analyzeFitting({
-        characterId: snapshot.characterId,
-        hullTypeId: selectedHull.typeId,
-        itemTypeIds: [],
-      })
-      .then((analysis) => {
-        if (cancelled) return;
-        setHullTargets(
-          (analysis.requirements ?? []).flatMap((requirement: any) =>
-            (requirement.skills ?? []).map((skill: any) => ({
-              skill: skill.skill,
-              level: skill.requiredLevel,
-            })),
-          ),
-        );
-      })
-      .catch(() => !cancelled && setHullTargets([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [ship, shipOptions, snapshot.characterId]);
-  const selectedActivity =
-    activityProfiles.find((profile) => profile.id === activityId) ?? best.profile;
-  const combinedTargets = new Map<string, number>();
-  for (const target of [
-    ...selectedActivity.skills,
-    ...(activityMastery[activityId] ?? []),
-    ...(shipTraining[ship] ?? []),
-    ...hullTargets,
-  ])
-    combinedTargets.set(
-      target.skill,
-      Math.max(combinedTargets.get(target.skill) ?? 0, target.level),
-    );
-  const path = [...combinedTargets]
-    .map(([skill, level]) => {
-      const trained = skillByName.get(skill);
-      const current = trained?.trained_skill_level ?? 0;
-      const estimate = trained?.timeToLevels?.find(
-        (item) => item.level === level,
-      );
-      return { skill, level, current, seconds: estimate?.seconds ?? null };
-    })
-    .filter((target) => target.current < target.level)
-    .sort((a, b) => a.level - b.level || a.current - b.current);
-  const readiness = Math.round(
-    (activityScores.find((item) => item.profile.id === activityId)?.score ?? 0) *
-      100,
-  );
-  return (
-    <article className="training-vector">
-      <p className="eyebrow">SKILL PATH PLANNER</p>
-      <div className="training-selectors">
-        <label>
-          Ship
-          <input
-            list="eve-ship-types"
-            value={ship}
-            onChange={(event) => setShip(event.target.value)}
-            placeholder="Search every EVE ship…"
-          />
-          <datalist id="eve-ship-types">
-            {shipOptions.map((item) => (
-              <option key={`${item.typeId ?? "local"}-${item.name}`} value={item.name} />
-            ))}
-          </datalist>
-        </label>
-        <label>
-          Activity
-          <select
-            value={activityId}
-            onChange={(event) => setActivityId(event.target.value)}
-          >
-            {activityProfiles.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="training-summary">
-        <h3>{readiness}% ready for {selectedActivity.label}</h3>
-        <span>
-          Best current match: {best.profile.label} ({Math.round(best.score * 100)}%)
-        </span>
-        <p>{selectedActivity.detail}</p>
-      </div>
-      <div className="recommended-queue">
-        <strong>Recommended path for {ship}</strong>
-        {path.length ? (
-          <ol>
-            {path.slice(0, 14).map((target) => (
-              <li key={target.skill}>
-                <span>{target.skill}</span>
-                <small>
-                  Level {target.current} → {target.level}
-                  {target.seconds !== null && cloneState && !confirmationRequired
-                    ? ` · about ${duration(target.seconds / (cloneState === "alpha" ? 0.5 : 1))}`
-                    : " · confirm clone state for time"}
-                </small>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p>All selected activity and ship targets are already trained.</p>
-        )}
-      </div>
-      <small className="queue-state">
-        {queueFinish
-          ? `Live EVE queue: next completion ${new Date(queueFinish).toLocaleString()}`
-          : "Live EVE queue has no active completion date."}
-      </small>
-    </article>
   );
 }
 
@@ -1093,53 +691,86 @@ function Metric({
 
 function Settings({
   config,
-  onSaved,
 }: {
   config: PublicConfig;
   onSaved(config: PublicConfig): void;
 }) {
-  const [clientId, setClientId] = useState(config.eveClientId);
-  const [saved, setSaved] = useState(false);
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    onSaved(
-      await window.sage.saveConfig({
-        eveClientId: clientId,
-      }),
-    );
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1800);
+  const [mcpSetup, setMcpSetup] = useState<{ command: string; args: string[]; json: string; codex: string; access: string } | null>(null);
+  const [mcpMessage, setMcpMessage] = useState("");
+  const [tunnelId, setTunnelId] = useState("");
+  const [runtimeKey, setRuntimeKey] = useState("");
+  const [tunnelReady, setTunnelReady] = useState(false);
+  useEffect(() => {
+    void window.sage.getMcpSetup().then(setMcpSetup);
+    void window.sage.getMcpTunnelStatus().then((value) => { setTunnelId(value.tunnelId); setTunnelReady(value.ready); });
+  }, []);
+  async function copyMcp(value: string, label: string) {
+    await window.sage.copyText(value);
+    setMcpMessage(`${label} copied.`);
+  }
+  async function connectChatGpt() {
+    setMcpMessage("Starting secure ChatGPT tunnel...");
+    try {
+      const result = await window.sage.configureMcpTunnel({ tunnelId, runtimeKey });
+      setRuntimeKey("");
+      setTunnelReady(result.ready);
+      setMcpMessage(result.ready ? "Secure ChatGPT tunnel is ready." : "Tunnel started. Allow a moment, then add it in ChatGPT Plugins.");
+    } catch (error) {
+      setMcpMessage(error instanceof Error ? error.message : "Could not start the ChatGPT tunnel.");
+    }
   }
   return (
     <section className="settings">
       <div className="settings-copy">
-        <p className="eyebrow">PRIVATE CONFIGURATION</p>
-        <h2>Connect EVE Online</h2>
+        <p className="eyebrow">EVE ONLINE CONNECTION</p>
+        <h2>Official EVE SSO</h2>
         <p>
-          EVE refresh tokens are encrypted using Windows secure storage. The EVE
-          Client ID is public application metadata.
+          Use Add Character in the app header to sign in on EVE Online's official
+          authorization page. Sage never asks for your EVE password.
         </p>
       </div>
-      <form onSubmit={submit}>
-        <label>
-          EVE Client ID
-          <input
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            placeholder="Paste the Client ID from CCP"
-          />
-        </label>
-        <label>
-          Callback URL
-          <input value={config.callbackUrl} readOnly />
-        </label>
-        <div className="form-note">
-          Do not enter your EVE Client Secret. New Eden Sage uses PKCE.
+      <div className="settings-connection-card">
+        <strong>Secure desktop authorization</strong>
+        <p>Character and ESI permissions are selected and approved on EVE Online. Refresh tokens are encrypted with Windows secure storage and remain on this PC.</p>
+        <small>Callback: {config.callbackUrl}</small>
+      </div>
+      <div className="settings-connection-card mcp-settings-card">
+        <strong>AI / MCP access</strong>
+        <p>Connect ChatGPT or Codex to Sage's complete local read-only dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are always removed.</p>
+        <div className="mcp-tunnel-panel">
+          <strong>ChatGPT Secure MCP Tunnel</strong>
+          <small>Status: {tunnelReady ? "Ready" : "Not connected"}</small>
+          <input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" />
+          <input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" />
+          <div className="mcp-setup-actions">
+            <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
+            <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
+            <button onClick={() => void connectChatGpt()}>Save and start tunnel</button>
+            <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
+          </div>
+          <small>The runtime key is encrypted with Windows secure storage and remains only on this PC. Keep the tunnel running while ChatGPT uses Sage.</small>
         </div>
-        <button className="primary" type="submit">
-          {saved ? "Saved" : "Save securely"}
-        </button>
-      </form>
+        {mcpSetup && <>
+          <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
+          <div className="mcp-setup-actions">
+            <button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button>
+            <button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button>
+          </div>
+          <div className="mcp-instructions">
+            <strong>How to connect</strong>
+            <ol>
+              <li>Sync your characters and refresh any market data you want the AI to inspect.</li>
+              <li>For ChatGPT, create an OpenAI tunnel and runtime key with the buttons above, then save and start the tunnel.</li>
+              <li>Choose <b>Add in ChatGPT</b>, create a developer-mode app using <b>Tunnel</b>, and select the New Eden Sage tunnel.</li>
+              <li>For Codex local access, choose <b>Copy Codex config</b> and add it to your Codex <code>config.toml</code>.</li>
+              <li>Ask the AI to list Sage characters or available Sage data points before requesting detailed analysis.</li>
+            </ol>
+            <small>Sage does not need to remain open while the AI reads already-saved data. Open Fittings once after changing saved fits so the MCP copy is refreshed. New character or market data becomes available after the relevant Sage sync completes.</small>
+          </div>
+          <code>{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
+        </>}
+        {mcpMessage && <small className="mcp-copy-status">{mcpMessage}</small>}
+      </div>
     </section>
   );
 }
@@ -1408,7 +1039,7 @@ function DataVault({
   );
 }
 
-function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
+function RegionalMarket({ snapshot, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; onMarketDataUpdated: () => void }) {
   const [regions, setRegions] = useState<
     Array<{ regionId: number; name: string }>
   >([]);
@@ -1416,6 +1047,7 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
   const [summaries, setSummaries] = useState<MarketSummary[]>([]);
   const [activeRegion, setActiveRegion] = useState<number>(10000002);
   const [busy, setBusy] = useState(false);
+  const marketProgressLocked = useRef(false);
   const [progress, setProgress] = useState(
     "Ready to pull public ESI market data",
   );
@@ -1436,6 +1068,14 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
   const [storage, setStorage] = useState<{
     path: string;
     retainedDatasets: number;
+    raw?: {
+      root: string;
+      snapshotId: string;
+      createdAt: string;
+      orderCount: number;
+      regionCount: number;
+      complete: boolean;
+    } | null;
   } | null>(null);
   useEffect(() => {
     Promise.all([
@@ -1456,11 +1096,11 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
       .listMarketRegions()
       .then(setRegions)
       .catch(() => undefined);
-    return window.sage.onMarketProgress((item) =>
-      setProgress(
+    return window.sage.onMarketProgress((item) => {
+      if (!marketProgressLocked.current) setProgress(
         `${item.regionName}: page ${item.pagesDone}/${item.pagesTotal} · regions ${item.regionsDone}/${item.regionsTotal}`,
-      ),
-    );
+      );
+    });
   }, []);
   async function showRegion(regionId: number) {
     setActiveRegion(regionId);
@@ -1478,6 +1118,7 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
       setProgress("Connect and sync a character before using a radius pull.");
       return;
     }
+    marketProgressLocked.current = false;
     setBusy(true);
     setProgress(
       mode === "all"
@@ -1496,10 +1137,12 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
         includeLowSec,
       });
       setSummaries(result.summaries);
+      onMarketDataUpdated();
       await showRegion(selected);
       setProgress(
         `Dataset saved to ${result.storage.path}. ${result.storage.retained} total snapshots retained.`,
       );
+      marketProgressLocked.current = true;
     } catch (error) {
       setProgress(
         error instanceof Error ? error.message : "Market pull failed",
@@ -1513,29 +1156,27 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
       setProgress("Connect and sync a character before refreshing everything.");
       return;
     }
+    marketProgressLocked.current = false;
     setBusy(true);
     setSelectedItem(null);
     try {
-      setProgress("Step 1 of 4: syncing character location and information...");
+      setProgress("Step 1 of 3: syncing character location and information...");
       await window.sage.refreshCharacter(snapshot.characterId);
-      setProgress("Step 2 of 4: pulling the 20-jump character market...");
+      setProgress("Step 2 of 3: pulling the 20-jump character market...");
       await window.sage.pullMarket({
         mode: "radius",
         characterId: snapshot.characterId,
         includeLowSec,
       });
-      setProgress("Step 3 of 4: pulling every high-sec station market...");
+      setProgress("Step 3 of 3: pulling every public regional market order...");
       const stations = await window.sage.pullMarket({ mode: "all" });
       setSummaries(stations.summaries);
-      setProgress("Step 4 of 4: pulling every high-sec public contract...");
-      const contracts = await window.sage.pullMarket({ mode: "contracts" });
-      setSummaries(contracts.summaries);
+      onMarketDataUpdated();
       const storageInfo = await window.sage.getMarketStorage();
       setStorage(storageInfo);
       await showRegion(selected);
-      setProgress(
-        `Everything refreshed: 20-jump market, full high-sec station orders and full high-sec contracts. ${storageInfo.retainedDatasets} historical datasets stored.`,
-      );
+      marketProgressLocked.current = true;
+      setProgress("Market refresh successful.");
     } catch (error) {
       setProgress(
         error instanceof Error
@@ -1629,6 +1270,9 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
           <button onClick={() => pull("single")} disabled={busy}>
             Pull region
           </button>
+          <button onClick={() => pull("contracts")} disabled={busy} title="Contracts are a slower, separate dataset">
+            Refresh contracts
+          </button>
           <label className="lowsec-check">
             <input
               type="checkbox"
@@ -1652,12 +1296,13 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
           {progress}
           {storage && (
             <small>
-              Storage: {storage.path} · {storage.retainedDatasets} datasets
-              currently retained
+              Storage: {storage.path} · {storage.retainedDatasets} derived datasets retained
+              {storage.raw ? ` · raw order book: ${money(storage.raw.orderCount)} orders across ${storage.raw.regionCount} regions` : ""}
             </small>
           )}
         </div>
       </div>
+      <RegionalMarketFilterPanel />
       {summaries.length > 0 && (
         <div className="region-tabs">
           {summaries.map((item) => (
@@ -1699,7 +1344,7 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
             <input
               value={itemSearch}
               onChange={(event) => setItemSearch(event.target.value)}
-              placeholder="Search all items in this region…"
+              placeholder="Search items in the selected region…"
             />
             <select
               value={categoryFilter}
@@ -1799,14 +1444,14 @@ function RegionalMarket({ snapshot }: { snapshot?: CharacterSnapshot }) {
             <div className="order-depth">
               <div className="depth-title">
                 <div>
-                  <p className="eyebrow">RETAINED MARKET DEPTH</p>
+                  <p className="eyebrow">SELECTED REGION QUICK DEPTH</p>
                   <h3>{selectedItem.typeName}</h3>
                 </div>
                 <button onClick={() => setSelectedItem(null)}>Close</button>
               </div>
               {!selectedItem.topBuyOrders && !selectedItem.topSellOrders ? (
                 <div className="reindex-note">
-                  Pull this market again to store its top 10 buyers and sellers.
+                  Pull this region again to rebuild its quick-depth index. Use Global Market Search above for the complete raw order book.
                 </div>
               ) : (
                 <div className="depth-columns">
@@ -1874,9 +1519,15 @@ function OrderDepth({
       )}
       {omitted > 0 && (
         <small className="omitted">
-          {money(omitted)} lower-priority orders omitted from storage
+          {money(omitted)} additional orders exist in the raw order book · use Global Market Search for complete depth
         </small>
       )}
     </div>
   );
 }
+
+
+
+
+
+
