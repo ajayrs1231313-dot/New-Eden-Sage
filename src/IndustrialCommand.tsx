@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { CharacterSnapshot } from "./types";
 import "./industrial-command.css";
 
-type IndustrialTab = "overview" | "blueprints" | "jobs" | "materials" | "research" | "production";
+type IndustrialTab = "overview" | "opportunities" | "blueprints" | "jobs" | "materials" | "research" | "production";
 
 type BlueprintRecord = {
   item_id?: number;
@@ -46,6 +46,7 @@ type EnrichedAsset = {
 
 const tabs: Array<{ id: IndustrialTab; label: string }> = [
   { id: "overview", label: "Command Overview" },
+  { id: "opportunities", label: "Industrial Opportunities" },
   { id: "blueprints", label: "Blueprint Library" },
   { id: "jobs", label: "Industry Jobs" },
   { id: "materials", label: "Materials" },
@@ -80,6 +81,21 @@ function sourceUnavailable(value: unknown) {
   return Boolean(value && typeof value === "object" && "unavailable" in value);
 }
 
+type AssetSharingPreferences = { enabled: boolean; characterIds: string[] };
+const ASSET_SHARING_STORAGE_KEY = "new-eden-sage-industrial-asset-sharing-v1";
+
+function loadAssetSharingPreferences(): AssetSharingPreferences {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ASSET_SHARING_STORAGE_KEY) ?? "null") as Partial<AssetSharingPreferences> | null;
+    return {
+      enabled: Boolean(parsed?.enabled),
+      characterIds: Array.isArray(parsed?.characterIds) ? parsed!.characterIds!.map(String) : [],
+    };
+  } catch {
+    return { enabled: false, characterIds: [] };
+  }
+}
+
 export function IndustrialCommand({
   snapshots,
   activeCharacterId,
@@ -91,6 +107,9 @@ export function IndustrialCommand({
 }) {
   const [tab, setTab] = useState<IndustrialTab>("overview");
   const [blueprintFilter, setBlueprintFilter] = useState("");
+  const [blueprintLibraryScope, setBlueprintLibraryScope] = useState<"personal" | "corporation">("personal");
+  const [materialFilter, setMaterialFilter] = useState("");
+  const [assetSharing, setAssetSharing] = useState<AssetSharingPreferences>(loadAssetSharingPreferences);
   const [typeNames, setTypeNames] = useState<Record<number, string>>({});
   const [selectedBlueprintIndex, setSelectedBlueprintIndex] = useState(0);
   const [targetQuantity, setTargetQuantity] = useState(1);
@@ -99,9 +118,27 @@ export function IndustrialCommand({
   const [blueprintActivities, setBlueprintActivities] = useState<any>(null);
   const [activityStatus, setActivityStatus] = useState("Choose an owned blueprint to inspect CCP activity data.");
   const [systemCostIndex, setSystemCostIndex] = useState<any>(null);
-  const [includeConnectedStock, setIncludeConnectedStock] = useState(false);
   const [systemCostStatus, setSystemCostStatus] = useState("Current-system cost index not loaded.");
+  const [opportunities, setOpportunities] = useState<any[]>([]);
+  const [opportunityBusy, setOpportunityBusy] = useState(false);
+  const [opportunityStatus, setOpportunityStatus] = useState("Scanning owned blueprints against retained regional demand…");
+  const [opportunityPreparedFor, setOpportunityPreparedFor] = useState("");
+  const [opportunitySystem, setOpportunitySystem] = useState("");
+  const [opportunityJumpRadius, setOpportunityJumpRadius] = useState<5 | 10 | 20 | null>(null);
+  const [opportunitySecurity, setOpportunitySecurity] = useState({ high: true, low: true, null: true });
   const active = snapshots.find((item) => item.characterId === activeCharacterId) ?? snapshots[0];
+
+  useEffect(() => {
+    const validIds = new Set(snapshots.map((snapshot) => String(snapshot.characterId)));
+    setAssetSharing((current) => {
+      const characterIds = current.characterIds.filter((id) => validIds.has(id));
+      return characterIds.length === current.characterIds.length ? current : { ...current, characterIds };
+    });
+  }, [snapshots]);
+  useEffect(() => {
+    localStorage.setItem(ASSET_SHARING_STORAGE_KEY, JSON.stringify(assetSharing));
+    setManufacturingPlan(null);
+  }, [assetSharing]);
 
   const industrial = useMemo(() => {
     const characters = snapshots.map((snapshot) => {
@@ -155,6 +192,9 @@ export function IndustrialCommand({
     setManufacturingStatus("Choose a blueprint and output quantity.");
     setBlueprintActivities(null);
     setActivityStatus("Choose an owned blueprint to inspect CCP activity data.");
+    setOpportunitySystem("");
+    setOpportunityJumpRadius(null);
+    setOpportunityPreparedFor("");
   }, [active?.characterId]);
 
   if (!active) {
@@ -180,7 +220,36 @@ export function IndustrialCommand({
     0,
   );
 
-  const selectedBlueprint = activeData.blueprints[selectedBlueprintIndex] ?? activeData.blueprints[0];
+  const sharedCharacterIdSet = new Set(assetSharing.characterIds);
+  const materialOwners = assetSharing.enabled
+    ? industrial.filter((owner) => owner.snapshot.characterId === active.characterId || sharedCharacterIdSet.has(String(owner.snapshot.characterId)))
+    : [activeData];
+  const materialInventory = [...materialOwners.flatMap((owner) => owner.assets.map((asset, assetIndex) => ({
+    asset,
+    characterId: String(owner.snapshot.characterId),
+    characterName: owner.snapshot.character.name,
+    sourceAssetId: `${owner.snapshot.characterId}:${asset.item_id ?? `stack-${assetIndex}`}`,
+  }))).reduce((map, entry) => {
+    const typeId = Number(entry.asset.type_id ?? 0);
+    const key = typeId > 0 ? `type-${typeId}` : `name-${entry.asset.item ?? "unknown"}`;
+    const current = map.get(key) ?? { typeId, name: entry.asset.item ?? (typeId > 0 ? `Type ${typeId}` : "Unknown item"), quantity: 0, estimatedValue: 0, owners: new Map<string, { characterName: string; quantity: number }>(), locations: new Set<string>(), sourceAssetIds: new Set<string>() };
+    const quantity = Math.max(0, Number(entry.asset.quantity ?? 0));
+    current.quantity += quantity;
+    current.estimatedValue += Math.max(0, Number(entry.asset.estimatedValue ?? 0));
+    const owner = current.owners.get(entry.characterId) ?? { characterName: entry.characterName, quantity: 0 };
+    owner.quantity += quantity;
+    current.owners.set(entry.characterId, owner);
+    current.sourceAssetIds.add(entry.sourceAssetId);
+    const location = entry.asset.station ?? entry.asset.system ?? entry.asset.location_flag;
+    if (location) current.locations.add(String(location));
+    map.set(key, current);
+    return map;
+  }, new Map<string, { typeId: number; name: string; quantity: number; estimatedValue: number; owners: Map<string, { characterName: string; quantity: number }>; locations: Set<string>; sourceAssetIds: Set<string> }>()).values()]
+    .filter((item) => item.quantity > 0 && item.name.toLowerCase().includes(materialFilter.trim().toLowerCase()))
+    .sort((a, b) => b.estimatedValue - a.estimatedValue || b.quantity - a.quantity || a.name.localeCompare(b.name));
+
+  const planningBlueprints = blueprintLibraryScope === "corporation" ? activeData.corpBlueprints : activeData.blueprints;
+  const selectedBlueprint = planningBlueprints[selectedBlueprintIndex] ?? planningBlueprints[0];
   async function buildManufacturingPlan() {
     if (!selectedBlueprint?.type_id) {
       setManufacturingStatus("Choose a manufacturing blueprint first.");
@@ -195,7 +264,8 @@ export function IndustrialCommand({
         timeEfficiency: selectedBlueprint.time_efficiency ?? 0,
         targetQuantity: Math.max(1, Math.floor(targetQuantity)),
         availableRuns: (selectedBlueprint.runs ?? -1) >= 0 ? selectedBlueprint.runs : undefined,
-        includeConnectedStock,
+        includeConnectedStock: assetSharing.enabled,
+        sharedCharacterIds: assetSharing.enabled ? assetSharing.characterIds : [],
       });
       setManufacturingPlan(result);
       setManufacturingStatus(result.totalMissingStacks ? `${result.totalMissingStacks} material type(s) still need sourcing.` : "Owned stock covers the complete blueprint bill of materials.");
@@ -228,7 +298,127 @@ export function IndustrialCommand({
       setActivityStatus(error instanceof Error ? error.message : "Blueprint activity analysis failed.");
     }
   }
-  const filteredBlueprints = activeData.blueprints.filter((blueprint) => {
+  async function analyseIndustrialOpportunities(force = false) {
+    const selectedSecurity = (Object.entries(opportunitySecurity) as Array<["high" | "low" | "null", boolean]>)
+      .filter(([, enabled]) => enabled)
+      .map(([band]) => band);
+    const proximityEnabled = Boolean(opportunitySystem.trim() && opportunityJumpRadius);
+    if ((opportunitySystem.trim() && !opportunityJumpRadius) || (!opportunitySystem.trim() && opportunityJumpRadius)) {
+      setOpportunities([]);
+      setOpportunityStatus("To use proximity filtering, choose both a system and a 5 / 10 / 20 jump radius. Clear both to search all selected security space.");
+      return;
+    }
+    if (!selectedSecurity.length) {
+      setOpportunities([]);
+      setOpportunityStatus("Select at least one security band.");
+      return;
+    }
+    const revisionKey = [
+      active.characterId, active.updatedAt, activeData.blueprints.length, activeData.corpBlueprints.length,
+      proximityEnabled ? opportunitySystem.trim().toLowerCase() : "all-systems", proximityEnabled ? opportunityJumpRadius : "all-jumps", selectedSecurity.join(","),
+      assetSharing.enabled, assetSharing.characterIds.join(","),
+    ].join(":");
+    if (!force && opportunityPreparedFor === revisionKey) return;
+    const ownedBlueprints = [...activeData.blueprints, ...activeData.corpBlueprints]
+      .filter((blueprint, index, all) => blueprint.type_id && all.findIndex((item) => item.type_id === blueprint.type_id) === index)
+      .slice(0, 40);
+    if (!ownedBlueprints.length) {
+      setOpportunities([]);
+      setOpportunityStatus("No owned blueprints are available to analyse.");
+      setOpportunityPreparedFor(revisionKey);
+      return;
+    }
+    setOpportunityBusy(true);
+    setOpportunityStatus("Resolving owned blueprints into manufactured products…");
+    try {
+      const output: any[] = [];
+      for (const blueprint of ownedBlueprints) {
+        if (!blueprint.type_id) continue;
+        try {
+          const activities = await (window.sage as any).getBlueprintActivities({ characterId: active.characterId, blueprintTypeId: blueprint.type_id });
+          const manufacturing = activities?.activities?.find((activity: any) => activity.id === "manufacturing");
+          const product = manufacturing?.products?.[0];
+          if (!product?.name || !product?.typeId) continue;
+          setOpportunityStatus(proximityEnabled ? ("Checking " + product.name + " within " + opportunityJumpRadius + " jumps of " + opportunitySystem + "…") : ("Checking " + product.name + " across selected security space…"));
+          const plan = await (window.sage as any).getManufacturingPlan({
+            characterId: active.characterId,
+            blueprintTypeId: blueprint.type_id,
+            materialEfficiency: blueprint.material_efficiency ?? 0,
+            timeEfficiency: blueprint.time_efficiency ?? 0,
+            targetQuantity: Math.max(1, Number(product.quantity ?? 1)),
+            availableRuns: (blueprint.runs ?? -1) >= 0 ? blueprint.runs : undefined,
+            includeConnectedStock: assetSharing.enabled,
+            sharedCharacterIds: assetSharing.enabled ? assetSharing.characterIds : [],
+          });
+          const marketRows: any[] = [];
+          for (const security of selectedSecurity) {
+            const market = await (window.sage as any).filterRegionalMarket({
+              query: product.name, categoryIds: [], groupIds: [], marketGroupIds: [], regionIds: [], security,
+              presence: "any", signal: "all", sort: "signal", offset: 0, limit: 80,
+            });
+            marketRows.push(...(market?.rows ?? []).filter((row: any) => row.item === product.name));
+          }
+          const candidateSystemIds = marketRows
+            .map((row: any) => Number(row.bestBuySystemId ?? row.bestSellSystemId ?? 0))
+            .filter((value: number) => value > 0);
+          const routeScope = proximityEnabled ? await (window.sage as any).getIndustrialOpportunityRouteScope({
+            systemQuery: opportunitySystem,
+            maxJumps: opportunityJumpRadius,
+            targetSystemIds: candidateSystemIds,
+          }) : null;
+          const routeBySystem = new Map<number, any>((routeScope?.routes ?? []).map((route: any) => [Number(route.systemId), route]));
+          const buildUnitCost = Number(plan?.market?.fullBomMarketCost ?? plan?.market?.shortageMarketCost ?? 0) / Math.max(1, Number(plan?.outputQuantity ?? product.quantity ?? 1));
+          for (const row of marketRows.slice(0, 60)) {
+            const demandSystemId = Number(row.bestBuySystemId ?? row.bestSellSystemId ?? 0);
+            const route = proximityEnabled ? routeBySystem.get(demandSystemId) : null;
+            if (proximityEnabled && !route?.withinRange) continue;
+            const immediateUnitRevenue = Number(row.bestBuy ?? 0);
+            const listUnitRevenue = Number(row.bestSell ?? row.bestBuy ?? 0);
+            const demandUnits = Math.max(0, Number(row.buyVolume ?? 0));
+            const supplyUnits = Math.max(0, Number(row.sellVolume ?? 0));
+            const demandGap = Math.max(0, demandUnits - supplyUnits);
+            const batch = Math.max(1, Math.min(100, Math.ceil(Math.max(demandGap * 0.25, Number(row.buyOrders ?? 0) * 2, 1))));
+            const unitRevenue = immediateUnitRevenue > 0 ? immediateUnitRevenue : listUnitRevenue;
+            const unitProfit = buildUnitCost > 0 && unitRevenue > 0 ? unitRevenue - buildUnitCost : null;
+            const batchProfit = unitProfit == null ? null : unitProfit * batch;
+            if (batchProfit == null || batchProfit <= 0) continue;
+            const confidence = row.supplyGap || (row.buyPressure && Number(row.demandSupplyRatio ?? 0) >= 2) ? "HIGH" : row.thinSupply || Number(row.signalScore ?? 0) >= 60 ? "MEDIUM" : "WATCH";
+            const score = Number(row.signalScore ?? 0) + (row.supplyGap ? 45 : 0) + (row.buyPressure ? 25 : 0) + (row.thinSupply ? 15 : 0) + Math.min(35, Math.max(0, Number(row.demandSupplyRatio ?? 0) * 5)) + Math.min(40, Math.log10(batchProfit + 1) * 5) + (proximityEnabled ? Math.max(0, 20 - Number(route?.jumps ?? 20)) : 0);
+            output.push({
+              blueprintTypeId: blueprint.type_id,
+              blueprintName: typeNames[blueprint.type_id] ?? activities?.blueprintName ?? "Owned blueprint",
+              productTypeId: product.typeId, productName: product.name, region: row.region, security: row.security,
+              system: route?.systemName ?? row.bestBuySystemName ?? row.bestSellSystemName ?? row.region, systemId: demandSystemId, jumps: proximityEnabled ? route?.jumps : null, originSystem: proximityEnabled ? (routeScope?.origin?.systemName ?? opportunitySystem) : null,
+              bestBuy: row.bestBuy, bestSell: row.bestSell, buyOrders: row.buyOrders, sellOrders: row.sellOrders,
+              buyVolume: demandUnits, sellVolume: supplyUnits, demandSupplyRatio: row.demandSupplyRatio, regionalPremiumPercent: row.regionalPremiumPercent,
+              supplyGap: row.supplyGap, thinSupply: row.thinSupply, buyPressure: row.buyPressure, signalScore: row.signalScore,
+              buildUnitCost, unitProfit, batch, batchProfit, confidence, score,
+              materialEfficiency: blueprint.material_efficiency ?? 0, timeEfficiency: blueprint.time_efficiency ?? 0,
+            });
+          }
+        } catch { /* Keep scanning the rest of the owned blueprint library. */ }
+      }
+      const deduped = [...new Map(output.sort((a,b) => b.score - a.score).map((item) => [item.productTypeId + ":" + item.region + ":" + item.system, item])).values()].slice(0, 40);
+      setOpportunities(deduped);
+      setOpportunityPreparedFor(revisionKey);
+      setOpportunityStatus(deduped.length
+        ? (proximityEnabled ? ("Ranked " + deduped.length + " profitable opportunities within " + opportunityJumpRadius + " jumps of " + (deduped[0]?.originSystem ?? opportunitySystem) + ".") : ("Ranked " + deduped.length + " profitable opportunities across the selected security space."))
+        : (proximityEnabled ? "No profitable retained-market opportunities matched those security and jump filters." : "No profitable retained-market opportunities matched the selected security filters."));
+    } finally {
+      setOpportunityBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!activeData.blueprints.length && !activeData.corpBlueprints.length) return;
+    const timer = setTimeout(() => void analyseIndustrialOpportunities(false), 1800);
+    return () => clearTimeout(timer);
+    // Background preparation is revision-driven; opening the tab is display-only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active.characterId, active.updatedAt, activeData.blueprints.length, activeData.corpBlueprints.length, opportunitySystem, opportunityJumpRadius, opportunitySecurity.high, opportunitySecurity.low, opportunitySecurity.null, assetSharing.enabled, assetSharing.characterIds.join(",")]);
+
+  const libraryBlueprints = planningBlueprints;
+  const filteredBlueprints = libraryBlueprints.filter((blueprint) => {
     const typeName = blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint";
     return typeName.toLowerCase().includes(blueprintFilter.toLowerCase());
   });
@@ -264,6 +454,20 @@ export function IndustrialCommand({
           </button>
         ))}
       </div>
+
+      <AssetSharingControl
+        snapshots={snapshots}
+        activeCharacterId={String(active.characterId)}
+        enabled={assetSharing.enabled}
+        selectedIds={assetSharing.characterIds}
+        onToggle={(enabled) => setAssetSharing((current) => ({ ...current, enabled }))}
+        onSelect={(characterId, selected) => setAssetSharing((current) => ({
+          ...current,
+          characterIds: selected
+            ? [...new Set([...current.characterIds, characterId])]
+            : current.characterIds.filter((id) => id !== characterId),
+        }))}
+      />
 
       <div className="skills-tabs industrial-tabs" role="tablist" aria-label="Industrial Command sections">
         {tabs.map((item) => (
@@ -322,15 +526,51 @@ export function IndustrialCommand({
         </>
       )}
 
+      {tab === "opportunities" && (
+        <div className="industrial-opportunity-workspace">
+          <article className="industrial-panel industrial-opportunity-intro">
+            <div className="industrial-panel-head industrial-opportunity-head">
+              <div><p className="eyebrow">OWNED BLUEPRINT × MARKET DEMAND</p><h3>What should I build, and where should I sell it?</h3><p>Sage matches products you can actually manufacture against retained demand, constrained to the security space and jump radius you choose.</p></div>
+              <button type="button" className="industrial-opportunity-refresh" onClick={() => void analyseIndustrialOpportunities(true)} disabled={opportunityBusy}>{opportunityBusy ? 'Analysing…' : 'Refresh opportunities'}</button>
+            </div>
+            <div className="industrial-opportunity-controls">
+              <label className="industrial-opportunity-system"><span>Optional proximity search</span><input value={opportunitySystem} onChange={(event) => { setOpportunitySystem(event.target.value); setOpportunityPreparedFor(''); }} placeholder="System (optional) — e.g. Rens" /></label>
+              <div className="industrial-opportunity-filter-group"><span>Security</span><div className="industrial-opportunity-toggle-row">
+                {(['high','low','null'] as const).map((band) => <button type="button" key={band} className={opportunitySecurity[band] ? 'active' : ''} onClick={() => { setOpportunitySecurity((current) => ({ ...current, [band]: !current[band] })); setOpportunityPreparedFor(''); }}>{band === 'high' ? 'High sec' : band === 'low' ? 'Low sec' : 'Null sec'}</button>)}
+              </div></div>
+              <div className="industrial-opportunity-filter-group"><span>Jump radius</span><div className="industrial-opportunity-toggle-row">
+                <button type="button" className={opportunityJumpRadius === null ? 'active' : ''} onClick={() => { setOpportunityJumpRadius(null); setOpportunitySystem(''); setOpportunityPreparedFor(''); }}>Anywhere</button>
+                {([5,10,20] as const).map((radius) => <button type="button" key={radius} className={opportunityJumpRadius === radius ? 'active' : ''} onClick={() => { setOpportunityJumpRadius(radius); setOpportunityPreparedFor(''); }}>{radius} jumps</button>)}
+              </div></div>
+            </div>
+            <div className="industrial-notice">{opportunityStatus}</div>
+          </article>
+          {opportunities.length ? <div className="industrial-opportunity-grid">{opportunities.map((item) => <article className="industrial-opportunity-card" key={item.productTypeId + ':' + item.region + ':' + item.system}>
+            <div className="industrial-opportunity-card-head"><span className={'industrial-opportunity-confidence ' + item.confidence.toLowerCase()}>{item.confidence}</span><span>{item.region}</span></div>
+            <h3>{item.productName}</h3><p>{item.system}{item.jumps != null ? <> · <strong>{item.jumps} jump{item.jumps === 1 ? '' : 's'}</strong> from {item.originSystem}</> : null} · {item.security === 'high' ? 'High sec' : item.security === 'low' ? 'Low sec' : 'Null sec'}</p>
+            <div className="industrial-opportunity-numbers"><span><small>Recommended batch</small><strong>{number(item.batch)}</strong></span><span><small>Build / unit</small><strong>{item.buildUnitCost > 0 ? isk(item.buildUnitCost) : '—'}</strong></span><span><small>Immediate buyer</small><strong>{item.bestBuy == null ? '—' : isk(item.bestBuy)}</strong></span><span><small>Est. batch profit</small><strong className={item.batchProfit != null && item.batchProfit > 0 ? 'positive' : ''}>{item.batchProfit == null ? '—' : isk(item.batchProfit)}</strong></span></div>
+            <div className="industrial-opportunity-signals"><span>{number(item.buyOrders ?? 0)} buy orders · {number(item.buyVolume ?? 0)} wanted</span><span>{number(item.sellOrders ?? 0)} sell orders · {number(item.sellVolume ?? 0)} supplied</span>{item.supplyGap && <b>Supply gap</b>}{item.thinSupply && <b>Thin supply</b>}{item.buyPressure && <b>Buy pressure</b>}</div>
+            <div className="industrial-opportunity-blueprint"><span>{item.blueprintName}</span><small>ME {item.materialEfficiency}% · TE {item.timeEfficiency}%</small></div>
+          </article>)}</div> : <article className="industrial-panel industrial-planned"><p className="eyebrow">INDUSTRIAL OPPORTUNITY ENGINE</p><h3>{opportunityBusy ? 'Building actionable demand intelligence…' : 'No ranked opportunities yet'}</h3><p>{opportunityBusy ? 'Sage is resolving owned blueprints, checking their products against retained regional market intelligence and calculating manufacture-vs-demand economics in the background.' : 'Refresh the opportunity scan after market data or blueprint ownership changes.'}</p></article>}
+        </div>
+      )}
+
       {tab === "blueprints" && (
         <div className="industrial-panel industrial-full-panel">
           <div className="industrial-panel-head blueprint-head">
             <div>
-              <p className="eyebrow">PERSONAL BLUEPRINT LIBRARY</p>
+              <p className="eyebrow">{blueprintLibraryScope === "corporation" ? "CORPORATION BLUEPRINT LIBRARY" : "PERSONAL BLUEPRINT LIBRARY"}</p>
               <h3>{active.character.name}</h3>
               <p>BPO/BPC identity, ME/TE and remaining runs from ESI.</p>
             </div>
-            <input value={blueprintFilter} onChange={(event) => setBlueprintFilter(event.target.value)} placeholder="Filter blueprints…" />
+            <input value={blueprintFilter} onChange={(event) => setBlueprintFilter(event.target.value)} placeholder="Filter blueprints..." />
+          </div>
+          <div className="industrial-material-toolbar">
+            <div className="industrial-scope-toggle">
+              <button type="button" className={blueprintLibraryScope === "personal" ? "active" : ""} onClick={() => setBlueprintLibraryScope("personal")}>Personal</button>
+              <button type="button" disabled={!activeData.corpBlueprints.length} className={blueprintLibraryScope === "corporation" ? "active" : ""} onClick={() => setBlueprintLibraryScope("corporation")}>Corporation</button>
+            </div>
+            <span>{number(filteredBlueprints.length)} visible · {number(libraryBlueprints.length)} total</span>
           </div>
           {activeData.blueprintUnavailable ? (
             <div className="industrial-notice">Blueprint scope is unavailable for this stored login. Reconnect the character to grant the current Sage ESI scopes.</div>
@@ -351,7 +591,7 @@ export function IndustrialCommand({
               ))}
             </div>
           ) : (
-            <div className="industrial-notice">No personal blueprints are present in the latest synced snapshot.</div>
+            <div className="industrial-notice">No blueprints are present in the selected library scope.</div>
           )}
           {activeData.corpBlueprints.length > 0 && (
             <div className="industrial-corp-note">Corporation access detected: {number(activeData.corpBlueprints.length)} corporation blueprints are available for the corporation-management/industrial crossover pass.</div>
@@ -378,38 +618,31 @@ export function IndustrialCommand({
       )}
 
       {tab === "materials" && (
-        <div className="industrial-grid">
-          <article className="industrial-panel">
-            <div className="industrial-panel-head">
-              <div><p className="eyebrow">OWNED MATERIALS</p><h3>{active.character.name}</h3></div>
-              <span className="industrial-status live">ASSETS LIVE</span>
+        <div className="industrial-production-workspace">
+          <article className="industrial-panel industrial-full-panel">
+            <div className="industrial-panel-head blueprint-head">
+              <div><p className="eyebrow">MATERIAL INVENTORY</p><h3>{assetSharing.enabled ? "Selected shared stock pool" : active.character.name}</h3><p>Asset stacks are pooled only for analysis; every source remains keyed to its owning character and ESI item ID.</p></div>
+              <input value={materialFilter} onChange={(event) => setMaterialFilter(event.target.value)} placeholder="Filter materials..." />
             </div>
-            <div className="industrial-material-list">
-              {activeData.assets.slice(0, 12).map((asset, index) => (
-                <div key={asset.item_id ?? index}>
-                  <span><strong>{asset.item ?? `Type ${asset.type_id}`}</strong><small>{asset.station ?? asset.system ?? asset.location_flag ?? "Unresolved location"}</small></span>
-                  <span>{number(Math.max(1, asset.quantity ?? 1))}</span>
-                </div>
-              ))}
-              {!activeData.assets.length && <div className="industrial-notice">No enriched asset data is available in this snapshot.</div>}
+            <div className="industrial-material-toolbar">
+              <div className="industrial-stock-pool-label"><strong>{assetSharing.enabled ? "SHARED POOL ON" : "SHARING OFF"}</strong><small>{number(materialOwners.length)} contributing character{materialOwners.length === 1 ? "" : "s"} µ source identities preserved</small></div>
+              <span>{number(materialInventory.length)} material type(s) - {number(materialInventory.reduce((sum, item) => sum + item.quantity, 0))} units</span>
             </div>
+            {materialInventory.length ? <div className="industrial-table industrial-inventory-table"><div className="industrial-table-row heading"><span>Material</span><span>Quantity</span><span>Owners</span><span>Locations</span><span>Est. value</span></div>{materialInventory.map((item) => <div className="industrial-table-row" key={`${item.typeId}-${item.name}`}><strong>{item.name}</strong><span>{number(item.quantity)}</span><span className="industrial-owner-breakdown" title={[...item.sourceAssetIds].join(" · ")}>{[...item.owners.values()].map((owner) => `${owner.characterName}: ${number(owner.quantity)}`).join(" - ")}</span><span>{[...item.locations].slice(0, 3).join(" - ") || "--"}{item.locations.size > 3 ? ` +${item.locations.size - 3}` : ""}</span><span>{item.estimatedValue > 0 ? isk(item.estimatedValue) : "--"}</span></div>)}</div> : <div className="industrial-notice">No material stacks match this filter in the selected stock pool.</div>}
           </article>
-          <article className="industrial-panel industrial-planned">
-            <p className="eyebrow">MATERIAL REQUIREMENTS ENGINE</p>
-            <h3>Production bill of materials</h3>
-            <p>This panel is reserved for blueprint material expansion, owned-stock subtraction, sourcing, hauling volume and market cost.</p>
-            <div className="industrial-inline-banner">UNDER CONSTRUCTION</div>
-          </article>
+          <div className="industrial-grid">
+            <article className="industrial-panel"><p className="eyebrow">PRODUCTION LINK</p><h3>Owned stock feeds production automatically</h3><p>Production Planner subtracts these holdings before calculating shortages. Connected-stock mode preserves which character contributes each material stack.</p><div className="industrial-production-steps"><span>1 - Pick blueprint</span><span>2 - Pool chosen stock</span><span>3 - Consume owned inputs</span><span>4 - Build owned subcomponents</span><span>5 - Price market leaves</span><span>6 - Compare build vs buy</span></div></article>
+            <article className="industrial-panel"><p className="eyebrow">PROCUREMENT READINESS</p><h3>Shortages remain actionable</h3><p>Run a Production Planner target to calculate exact shortages, full-market sourcing cost and the recursive owned-build chain.</p><div className="industrial-stat-list"><IndustrialStat label="Characters in stock pool" value={number(materialOwners.length)} /><IndustrialStat label="Material types" value={number(materialInventory.length)} /><IndustrialStat label="Asset stacks" value={number(materialOwners.reduce((sum, owner) => sum + owner.assets.length, 0))} /><IndustrialStat label="Visible estimated value" value={isk(materialInventory.reduce((sum, item) => sum + item.estimatedValue, 0))} /></div></article>
+          </div>
         </div>
       )}
-
       {tab === "research" && (
         <div className="industrial-production-workspace">
           <article className="industrial-panel industrial-production-control">
             <div className="industrial-panel-head"><div><p className="eyebrow">RESEARCH & INVENTION</p><h3>Blueprint activity intelligence</h3><p>Inspect copying, ME/TE research, invention inputs, output options and skill requirements directly from CCP's local SDE.</p></div><span className="industrial-status live">OFFLINE SDE</span></div>
-            {activeData.blueprints.length ? <><div className="industrial-production-controls research-controls"><label><span>Owned blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, activeData.blueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setBlueprintActivities(null); }}>
-              {activeData.blueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}</option>)}
-            </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No personal blueprints are available for this character.</div>}
+            {planningBlueprints.length ? <><div className="industrial-production-controls research-controls"><label><span>Research blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setBlueprintActivities(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label><label><span>Owned blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setBlueprintActivities(null); }}>
+              {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}</option>)}
+            </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
           {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : <article className="industrial-panel industrial-planned"><p className="eyebrow">CCP ACTIVITY MAP</p><h3>Research and invention ready</h3><p>Choose an owned blueprint to reveal copying, research, invention and manufacturing definitions, including base activity time, required materials, possible outputs and trained skill readiness.</p></article>}
         </div>
@@ -418,27 +651,50 @@ export function IndustrialCommand({
         <div className="industrial-production-workspace">
           <article className="industrial-panel industrial-production-control">
             <div className="industrial-panel-head">
-              <div><p className="eyebrow">PRODUCTION CHAIN PLANNER</p><h3>Manufacturing target</h3><p>Uses the selected character's real blueprint ME/TE and personal asset stock.</p></div>
+              <div><p className="eyebrow">PRODUCTION CHAIN PLANNER</p><h3>Manufacturing target</h3><p>Uses the selected personal or corporation blueprint's real ME/TE and character-owned material stock.</p></div>
               <span className="industrial-status live">CCP SDE</span>
             </div>
-            {activeData.blueprints.length ? <>
+            {planningBlueprints.length ? <>
               <div className="industrial-production-controls">
-                <label><span>Blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, activeData.blueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setManufacturingPlan(null); }}>
-                  {activeData.blueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{(blueprint.runs ?? -1) >= 0 ? ` · ${blueprint.runs} runs` : " · BPO"}</option>)}
+                <label><span>Production blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setManufacturingPlan(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label>
+                  <label><span>Blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setManufacturingPlan(null); }}>
+                  {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{(blueprint.runs ?? -1) >= 0 ? ` · ${blueprint.runs} runs` : " · BPO"}</option>)}
                 </select></label>
                 <label><span>Target output</span><input type="number" min="1" step="1" value={targetQuantity} onChange={(event) => setTargetQuantity(Math.max(1, Number(event.target.value) || 1))} /></label>
-                <label className="industrial-stock-toggle"><input type="checkbox" checked={includeConnectedStock} onChange={(event) => { setIncludeConnectedStock(event.target.checked); setManufacturingPlan(null); }} /><span>Use connected characters' stock</span></label>
+                <label className="industrial-stock-toggle"><input type="checkbox" checked={assetSharing.enabled} onChange={(event) => setAssetSharing((current) => ({ ...current, enabled: event.target.checked }))} /><span>Use selected shared asset pool ({materialOwners.length} character{materialOwners.length === 1 ? "" : "s"})</span></label>
                 <button type="button" onClick={buildManufacturingPlan}>Build production plan</button>
               </div>
               <div className="industrial-system-index"><div><span>CURRENT SYSTEM</span><strong>{active.location?.solar_system_name ?? "Unknown system"}</strong><small>{systemCostIndex?.available ? `Manufacturing cost index ${(Number(systemCostIndex.indices?.manufacturing ?? 0) * 100).toFixed(3)}%` : systemCostStatus}</small></div><button type="button" onClick={loadSystemCostIndex}>Load current system index</button></div>
               <div className="industrial-notice">{manufacturingStatus}</div>
-            </> : <div className="industrial-notice">No personal blueprints are available for this character.</div>}
+            </> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
           {manufacturingPlan ? <ManufacturingPlanView plan={manufacturingPlan} /> : <article className="industrial-panel industrial-planned"><p className="eyebrow">MATERIAL REQUIREMENTS ENGINE</p><h3>Ready for a target</h3><p>Select an owned blueprint and Sage will expand its manufacturing bill of materials using CCP's local SDE, apply that exact blueprint's ME/TE, and subtract the selected owner's stock.</p><div className="industrial-production-steps"><span>1 · Choose owned blueprint</span><span>2 · Set output quantity</span><span>3 · Expand CCP materials</span><span>4 · Apply ME/TE</span><span>5 · Subtract stock</span><span>6 · Identify shortages</span></div></article>}
         </div>
       )}
     </section>
   );
+}
+
+function AssetSharingControl({ snapshots, activeCharacterId, enabled, selectedIds, onToggle, onSelect }: { snapshots: CharacterSnapshot[]; activeCharacterId: string; enabled: boolean; selectedIds: string[]; onToggle(enabled: boolean): void; onSelect(characterId: string, selected: boolean): void }) {
+  return <section className={`industrial-asset-sharing ${enabled ? "enabled" : "disabled"}`}>
+    <div className="industrial-asset-sharing-head">
+      <label><input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} /><span><strong>Cross-character asset sharing</strong><small>{enabled ? "Only checked characters can contribute stock to this industrial owner." : "Off — production uses the active character's assets only."}</small></span></label>
+      <span className={`industrial-status ${enabled ? "live" : ""}`}>{enabled ? "SELECTED POOL" : "ISOLATED"}</span>
+    </div>
+    <div className="industrial-asset-sharing-characters">
+      {snapshots.map((snapshot) => {
+        const characterId = String(snapshot.characterId);
+        const isActive = characterId === activeCharacterId;
+        const checked = isActive || selectedIds.includes(characterId);
+        const assets = Array.isArray((snapshot.extended as any)?.assets) ? (snapshot.extended as any).assets.length : 0;
+        return <label className={checked ? "selected" : ""} key={characterId}>
+          <input type="checkbox" checked={checked} disabled={isActive || !enabled} onChange={(event) => onSelect(characterId, event.target.checked)} />
+          <span><strong>{snapshot.character.name}</strong><small>{isActive ? "Active owner · always included" : `${assets} asset stacks · ${checked ? "sharing" : "not sharing"}`}</small></span>
+        </label>;
+      })}
+    </div>
+    <small className="industrial-asset-sharing-note">Sharing changes calculation scope only. Sage keeps source assets separate as characterId:item_id records, so disabling a character removes only that character's contribution and never rewrites or merges the stored assets.</small>
+  </section>;
 }
 
 function IndustrialMetric({ label, value, detail }: { label: string; value: string; detail: string }) {

@@ -206,3 +206,30 @@
   .categorized-training-queue li { grid-template-columns:36px minmax(0,1fr); }
   .training-skill-time { grid-column:2; justify-self:start; text-align:left; }
 }
+
+
+/* Dream Fit resolution handoff */
+.fit-resolution-plan {
+  display:grid;
+  gap:10px;
+  margin:12px 0;
+  padding:14px;
+  border:1px solid #3c706c;
+  background:linear-gradient(135deg,#0b2528,#08171d 65%);
+}
+.fit-resolution-title { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
+.fit-resolution-title h3 { margin:3px 0 4px; color:#e3f0f1; }
+.fit-resolution-title small { color:#78969b; }
+.fit-resolution-title > strong { color:#e3b56c; border:1px solid #675033; background:#211a10; padding:6px 9px; white-space:nowrap; }
+.fit-resolution-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.fit-resolution-grid > article { min-width:0; border:1px solid #1d414a; background:#06151b; padding:9px; }
+.fit-resolution-grid h4 { margin:0 0 7px; color:#8eb0b3; font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+.fit-resolution-grid article > div { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 8px; padding:6px 0; border-top:1px solid #112c33; }
+.fit-resolution-grid article > div:first-of-type { border-top:0; }
+.fit-resolution-grid strong { min-width:0; color:#d9e7e9; font-size:10px; }
+.fit-resolution-grid span { color:#65e1d2; font-size:9px; white-space:nowrap; }
+.fit-resolution-grid small { grid-column:1/-1; color:#68858c; font-size:8px; line-height:1.4; }
+.fit-resolution-ready { color:#65e1d2; padding:10px; border:1px solid #2d625d; background:#0b2524; }
+.fit-resolution-note { margin:0; color:#68858c; font-size:9px; line-height:1.45; }
+@media(max-width:1100px){.fit-resolution-grid{grid-template-columns:1fr}}
+

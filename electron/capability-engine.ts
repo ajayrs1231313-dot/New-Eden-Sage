@@ -330,7 +330,7 @@ const profiles: CapabilityProfile[] = [
   },
 ];
 
-const resultCache = new Map<string, { expiresAt: number; value: CapabilityAnalysis }>();
+const resultCache = new Map<string, CapabilityAnalysis>();
 let marketPriceCache: { expiresAt: number; values: Map<number, number> } | null = null;
 
 function asArray(value: unknown): any[] {
@@ -633,7 +633,7 @@ async function analyzeSkillCapability(snapshot: any, profile: CapabilitySkillPro
 export async function analyzeCapabilities(snapshot: any, cloneState: CloneState = "omega"): Promise<CapabilityAnalysis> {
   const key = `${snapshot.characterId}:${snapshot.updatedAt}:${cloneState}`;
   const cached = resultCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  if (cached) return cached;
   const capabilities: CapabilityResult[] = [];
   for (const profile of profiles) {
     capabilities.push(profile.kind === "activity"
@@ -661,6 +661,12 @@ export async function analyzeCapabilities(snapshot: any, cloneState: CloneState 
       activeQueue: asArray(snapshot.queue).length,
     },
   };
-  resultCache.set(key, { expiresAt: Date.now() + 5 * 60 * 1000, value });
+  const characterPrefix = `${snapshot.characterId}:`;
+  const cloneSuffix = `:${cloneState}`;
+  for (const cachedKey of resultCache.keys()) {
+    if (cachedKey !== key && cachedKey.startsWith(characterPrefix) && cachedKey.endsWith(cloneSuffix))
+      resultCache.delete(cachedKey);
+  }
+  resultCache.set(key, value);
   return value;
 }

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "concurrently -k \"vite --port 42814 --strictPort\" \"npm:dev:electron\" \"npm:dev:app\"",
     "dev:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
-    "dev:app": "wait-on http://localhost:42814 dist-electron/main.js && electron . --dev",
+    "dev:app": "node scripts/electron-dev-watch.cjs",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "build": "tsc --noEmit && tsc -p tsconfig.electron.json && vite build",

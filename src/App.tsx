@@ -4,14 +4,13 @@ import type {
   MarketItem,
   MarketSummary,
   PublicConfig,
+  FitResolutionIntent,
 } from "./types";
 import { FittingsWorkspace } from "./Fittings";
 import { IskLab } from "./IskLab";
 import { CommandIntelligence } from "./CommandIntelligence";
 import { SkillsWorkspace } from "./SkillsWorkspace";
 import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
-import { GlobalMarketSearch } from "./GlobalMarketSearch";
-import { RegionalMarketFilterPanel } from "./RegionalMarketFilterPanel";
 import { IndustrialCommand } from "./IndustrialCommand";
 
 type View =
@@ -50,7 +49,9 @@ export default function App() {
   const [view, setView] = useState<View>("overview");
   const [marketDataRevision, setMarketDataRevision] = useState(0);
   const [plannerHullTypeId, setPlannerHullTypeId] = useState<number>();
+  const [plannerFitIntent, setPlannerFitIntent] = useState<FitResolutionIntent>();
   const mountedViews = useRef(new Set<View>(["overview"]));
+  const [, setWarmRenderRevision] = useState(0);
   mountedViews.current.add(view);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [snapshots, setSnapshots] = useState<CharacterSnapshot[]>([]);
@@ -94,6 +95,20 @@ export default function App() {
       }));
     }).catch(() => undefined);
   }, [snapshots]);
+
+  useEffect(() => {
+    if (!config) return;
+    const warmOrder: View[] = ["market", "isk", "skills", "industrial", "fittings"];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    warmOrder.forEach((target, index) => {
+      timers.push(setTimeout(() => {
+        if (mountedViews.current.has(target)) return;
+        mountedViews.current.add(target);
+        setWarmRenderRevision((value) => value + 1);
+      }, 750 + index * 900));
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [config]);
 
   async function connect() {
     setBusy(true);
@@ -300,13 +315,15 @@ export default function App() {
             </button>
           </div>
         </header>
-        {view === "overview" && (
-          <Overview
-            snapshot={active}
-            onConnect={connect}
-            cloneState={active ? cloneStates[active.characterId] : undefined}
-            onNavigate={setView}
-          />
+        {mountedViews.current.has("overview") && (
+          <div className="cached-view" hidden={view !== "overview"}>
+            <Overview
+              snapshot={active}
+              onConnect={connect}
+              cloneState={active ? cloneStates[active.characterId] : undefined}
+              onNavigate={setView}
+            />
+          </div>
         )}
         {view === "augments" && (
           <Augments snapshot={active} resolvedTypeNames={resolvedTypeNames} />
@@ -322,13 +339,16 @@ export default function App() {
             }
           />
         )}
-        {view === "skills" && (
-          <SkillsWorkspace
-            snapshot={active}
-            cloneState={active ? cloneStates[active.characterId] : undefined}
-            confirmationRequired={cloneConfirmationRequired}
-            initialHullTypeId={plannerHullTypeId}
-          />
+        {mountedViews.current.has("skills") && (
+          <div className="cached-view" hidden={view !== "skills"}>
+            <SkillsWorkspace
+              snapshot={active}
+              cloneState={active ? cloneStates[active.characterId] : undefined}
+              confirmationRequired={cloneConfirmationRequired}
+              initialHullTypeId={plannerHullTypeId}
+              initialFitIntent={plannerFitIntent}
+            />
+          </div>
         )}
         {mountedViews.current.has("isk") && (
           <div className="cached-view" hidden={view !== "isk"}>
@@ -344,6 +364,7 @@ export default function App() {
             <MarketWorkspace
               snapshot={active}
               cloneState={active ? cloneStates[active.characterId] : undefined}
+              marketDataRevision={marketDataRevision}
               onMarketDataUpdated={() => setMarketDataRevision((value) => value + 1)}
             />
           </div>
@@ -356,13 +377,19 @@ export default function App() {
             />
           </div>
         )}
-        {view === "fittings" && <FittingsWorkspace onExportToPlanner={(hullTypeId, characterId) => { if (characterId) setActiveId(characterId); setPlannerHullTypeId(hullTypeId); setView("skills"); }} />}
-        {view === "industrial" && (
-          <IndustrialCommand
-            snapshots={snapshots}
-            activeCharacterId={active?.characterId}
-            onSelectCharacter={selectCharacter}
-          />
+        {mountedViews.current.has("fittings") && (
+          <div className="cached-view" hidden={view !== "fittings"}>
+            <FittingsWorkspace onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setView("skills"); }} />
+          </div>
+        )}
+        {mountedViews.current.has("industrial") && (
+          <div className="cached-view" hidden={view !== "industrial"}>
+            <IndustrialCommand
+              snapshots={snapshots}
+              activeCharacterId={active?.characterId}
+              onSelectCharacter={selectCharacter}
+            />
+          </div>
         )}
         {(view === "corporation" || view === "alliance") && (
           <UnderConstruction title={nav.find((item) => item.id === view)?.label ?? "New module"} />
@@ -406,14 +433,9 @@ function UpdateControl() {
   return <button className="update-control" onClick={act} disabled={state.status === "checking" || state.status === "downloading"} title={state.status === "error" ? String(state.detail) : "Install the latest full Sage release from GitHub"}>{label}</button>;
 }
 
-function MarketWorkspace({ snapshot, cloneState, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; onMarketDataUpdated: () => void }) {
-  const [tab, setTab] = useState<"market" | "regional">("regional");
+function MarketWorkspace({ snapshot, marketDataRevision, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; marketDataRevision: number; onMarketDataUpdated: () => void }) {
   return <section className="market-workspace">
-    <div className="skills-tabs" role="tablist" aria-label="Market sections">
-      <button className={tab === "regional" ? "active" : ""} onClick={() => setTab("regional")}>Regional Explorer</button>
-      <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>Market</button>
-    </div>
-    {tab === "market" ? <GlobalMarketSearch /> : <RegionalMarket snapshot={snapshot} onMarketDataUpdated={onMarketDataUpdated} />}
+    <RegionalMarket snapshot={snapshot} marketDataRevision={marketDataRevision} onMarketDataUpdated={onMarketDataUpdated} />
   </section>;
 }
 
@@ -1039,7 +1061,7 @@ function DataVault({
   );
 }
 
-function RegionalMarket({ snapshot, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; onMarketDataUpdated: () => void }) {
+function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; marketDataRevision?: number; onMarketDataUpdated: () => void }) {
   const [regions, setRegions] = useState<
     Array<{ regionId: number; name: string }>
   >([]);
@@ -1302,7 +1324,6 @@ function RegionalMarket({ snapshot, onMarketDataUpdated }: { snapshot?: Characte
           )}
         </div>
       </div>
-      <RegionalMarketFilterPanel />
       {summaries.length > 0 && (
         <div className="region-tabs">
           {summaries.map((item) => (
@@ -1451,7 +1472,7 @@ function RegionalMarket({ snapshot, onMarketDataUpdated }: { snapshot?: Characte
               </div>
               {!selectedItem.topBuyOrders && !selectedItem.topSellOrders ? (
                 <div className="reindex-note">
-                  Pull this region again to rebuild its quick-depth index. Use Global Market Search above for the complete raw order book.
+                  Pull this region again to rebuild its quick-depth index.
                 </div>
               ) : (
                 <div className="depth-columns">
@@ -1519,7 +1540,7 @@ function OrderDepth({
       )}
       {omitted > 0 && (
         <small className="omitted">
-          {money(omitted)} additional orders exist in the raw order book · use Global Market Search for complete depth
+          {money(omitted)} additional orders exist in the retained raw order book
         </small>
       )}
     </div>

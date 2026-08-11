@@ -1,4 +1,4 @@
-﻿import AdmZip from "adm-zip";
+import AdmZip from "adm-zip";
 import path from "node:path";
 import { STATIC_DATA_ROOT } from "./data-paths";
 import { ensureStaticDataArchive } from "./type-volumes";
@@ -19,6 +19,27 @@ const RACK_EFFECT: Record<string, number> = {
   rig: 2663,
   subsystem: 3772,
 };
+
+export type FittingPlacement = "ship" | "high" | "mid" | "low" | "rig" | "subsystem" | "drone" | "fighter" | "implant" | "booster" | "charge" | "cargo";
+function inferFittingPlacement(rootName:string, rack:string|undefined, categoryName:string, marketPath:string[] = []) : FittingPlacement {
+  if (rootName === "Deployable Structures" || rootName === "Filaments" || rootName === "Structure Equipment" || rootName === "Structure Modifications") return "cargo";
+  if (rack === "high" || rack === "mid" || rack === "low" || rack === "rig" || rack === "subsystem") return rack;
+  if (rootName === "Ships") return "ship";
+  if (rootName === "Drones") return "drone";
+  if (rootName === "Fighters") return "fighter";
+  if (rootName === "Ammunition & Charges") return "charge";
+  if (rootName === "Rigs") return "rig";
+  if (rootName === "Subsystems") return "subsystem";
+  if (rootName === "Implants & Boosters") {
+    const rootIndex = marketPath.findIndex((segment) => segment === "Implants & Boosters");
+    const path = marketPath.slice(rootIndex >= 0 ? rootIndex + 1 : 0).join(" / ").toLowerCase();
+    return path.includes("booster") || path.includes("cerebral accelerator") ? "booster" : "implant";
+  }
+  if (categoryName.toLowerCase() === "drone") return "drone";
+  if (categoryName.toLowerCase() === "fighter") return "fighter";
+  if (categoryName.toLowerCase() === "charge") return "charge";
+  return "cargo";
+}
 
 type Dogma = {
   attributes: Map<number, number>;
@@ -87,10 +108,22 @@ type FittingDogmaIndex = {
 
 let cache: Promise<FittingDogmaIndex> | undefined;
 const attributeDefaults = new Map<number, number>();
+type LocalPreparationProgress = { percent:number; message:string };
+function createLocalProgressChannel(){
+  const listeners=new Set<(progress:LocalPreparationProgress)=>void>();
+  let last:LocalPreparationProgress={percent:0,message:""};
+  return {
+    report(percent:number,message:string){last={percent,message};for(const listener of listeners)listener(last);},
+    subscribe(listener:(progress:LocalPreparationProgress)=>void){listeners.add(listener);if(last.percent>0)listener(last);return()=>listeners.delete(listener);},
+  };
+}
+const dogmaPreparationProgress=createLocalProgressChannel();
+const cataloguePreparationProgress=createLocalProgressChannel();
 
 function index() {
   return (cache ??= Promise.resolve().then(async () => {
     await ensureStaticDataArchive();
+    dogmaPreparationProgress.report(5,"Reading fitting rules…");
     const zip = new AdmZip(ARCHIVE);
     const dogma = new Map<number, Dogma>();
     const names = new Map<number, string>();
@@ -129,6 +162,7 @@ function index() {
         });
       }
     }
+    dogmaPreparationProgress.report(14,"Preparing fitting groups…");
     if (groupsEntry) {
       for (const line of groupsEntry.getData().toString("utf8").split(/\r?\n/)) {
         if (!line) continue;
@@ -143,6 +177,7 @@ function index() {
         if (row.name?.en) categoryNames.set(row._key, row.name.en);
       }
     }
+    dogmaPreparationProgress.report(24,"Preparing module effects…");
     if (effectsEntry) {
       for (const line of effectsEntry.getData().toString("utf8").split(/\r?\n/)) {
         if (!line) continue;
@@ -158,6 +193,7 @@ function index() {
         }
       }
     }
+    dogmaPreparationProgress.report(38,"Preparing fitting attributes…");
     if (attributesEntry) {
       for (const line of attributesEntry.getData().toString("utf8").split(/\r?\n/)) {
         if (!line) continue;
@@ -166,6 +202,7 @@ function index() {
         if (row.stackable === false) penalized.add(row._key);
       }
     }
+    dogmaPreparationProgress.report(46,"Parsing module data…");
     for (const line of dogmaEntry.getData().toString("utf8").split(/\r?\n/)) {
       if (!line) continue;
       const row = JSON.parse(line);
@@ -176,6 +213,7 @@ function index() {
         effects: new Set((row.dogmaEffects ?? []).map((item: any) => item.effectID)),
       });
     }
+    dogmaPreparationProgress.report(76,"Indexing ships and modules…");
     for (const line of typesEntry.getData().toString("utf8").split(/\r?\n/)) {
       if (!line) continue;
       const row = JSON.parse(line);
@@ -185,6 +223,7 @@ function index() {
       masses.set(row._key, row.mass ?? 0);
       capacities.set(row._key, row.capacity ?? 0);
     }
+    dogmaPreparationProgress.report(100,"Core fitting rules ready");
     return { dogma, names, groups, groupCategories, categoryNames, volumes, masses, capacities, modifiers, penalized, dbuffs };
   }));
 }
@@ -271,6 +310,381 @@ function evaluateTrainedSkillSource(
   return source;
 }
 
+let mutationCache: Promise<{ byType: Map<number, Array<{ mutaplasmidTypeId: number; resultingTypeId: number; attributes: Array<{ attributeId: number; min: number; max: number; highIsGood?: boolean }> }>>; attributes: Map<number, { name: string; displayName: string; highIsGood?: boolean; unitId?: number }> }> | undefined;
+
+async function mutationIndex() {
+  return (mutationCache ??= Promise.resolve().then(async () => {
+    await ensureStaticDataArchive();
+    const zip = new AdmZip(ARCHIVE);
+    const dynamicEntry = zip.getEntry("dynamicItemAttributes.jsonl");
+    const attributeEntry = zip.getEntry("dogmaAttributes.jsonl");
+    const byType = new Map<number, Array<{ mutaplasmidTypeId: number; resultingTypeId: number; attributes: Array<{ attributeId: number; min: number; max: number; highIsGood?: boolean }> }>>();
+    const attributes = new Map<number, { name: string; displayName: string; highIsGood?: boolean; unitId?: number }>();
+    if (attributeEntry) for (const line of attributeEntry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue;
+      const row = JSON.parse(line);
+      attributes.set(row._key, { name: row.name ?? ("Attribute " + row._key), displayName: row.displayName?.en ?? row.name ?? ("Attribute " + row._key), highIsGood: row.highIsGood, unitId: row.unitID });
+    }
+    if (dynamicEntry) for (const line of dynamicEntry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue;
+      const row = JSON.parse(line);
+      const attrs = (row.attributeIDs ?? []).map((item: any) => ({ attributeId: Number(item._key), min: Number(item.min), max: Number(item.max), highIsGood: item.highIsGood }));
+      for (const mapping of row.inputOutputMapping ?? []) for (const typeId of mapping.applicableTypes ?? []) {
+        const key = Number(typeId); const list = byType.get(key) ?? [];
+        list.push({ mutaplasmidTypeId: Number(row._key), resultingTypeId: Number(mapping.resultingType), attributes: attrs }); byType.set(key, list);
+      }
+    }
+    return { byType, attributes };
+  }));
+}
+
+export async function getMutationOptionsLocal(typeId: number) {
+  const [{ dogma, names }, mutations] = await Promise.all([index(), mutationIndex()]);
+  const base = dogma.get(typeId); if (!base) return [];
+  return (mutations.byType.get(typeId) ?? []).map((definition) => ({
+    mutaplasmidTypeId: definition.mutaplasmidTypeId,
+    mutaplasmidName: names.get(definition.mutaplasmidTypeId) ?? ("Mutaplasmid " + definition.mutaplasmidTypeId),
+    resultingTypeId: definition.resultingTypeId,
+    resultingTypeName: names.get(definition.resultingTypeId) ?? ("Abyssal type " + definition.resultingTypeId),
+    attributes: definition.attributes.map((rule) => {
+      const meta = mutations.attributes.get(rule.attributeId); const baseValue = attr(base, rule.attributeId);
+      const first = baseValue * rule.min; const second = baseValue * rule.max;
+      return { attributeId: rule.attributeId, name: meta?.displayName ?? meta?.name ?? ("Attribute " + rule.attributeId), baseValue, minValue: Math.min(first, second), maxValue: Math.max(first, second), minMultiplier: rule.min, maxMultiplier: rule.max, highIsGood: rule.highIsGood ?? meta?.highIsGood ?? true, unitId: meta?.unitId };
+    }),
+  })).sort((a,b) => a.mutaplasmidName.localeCompare(b.mutaplasmidName));
+}
+let fittingCatalogueCache: Promise<any> | undefined;
+
+export type FittingPreparationProgress = { percent:number; stage:string; message:string };
+
+export async function getFittingCatalogueLocal() {
+  return (fittingCatalogueCache ??= Promise.resolve().then(async () => {
+    await ensureStaticDataArchive();
+    const zip = new AdmZip(ARCHIVE);
+    const marketEntry = zip.getEntry("marketGroups.jsonl");
+    const typesEntry = zip.getEntry("types.jsonl");
+    const { dogma, groups, groupCategories, categoryNames } = await index();
+    if (!marketEntry || !typesEntry) throw new Error("Official EVE static data is missing fitting catalogue data.");
+    cataloguePreparationProgress.report(5,"Preparing module browser…");
+    const marketGroups = new Map<number, { id:number; name:string; parentId?:number; iconId?:number }>();
+    for (const line of marketEntry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue;
+      const row = JSON.parse(line);
+      marketGroups.set(Number(row._key), { id:Number(row._key), name:row.name?.en ?? `Group ${row._key}`, parentId:row.parentGroupID == null ? undefined : Number(row.parentGroupID), iconId:row.iconID == null ? undefined : Number(row.iconID) });
+    }
+    cataloguePreparationProgress.report(24,"Preparing fitting categories…");
+    const allowedRoots = new Set(["Ships", "Ship Equipment", "Ammunition & Charges", "Drones", "Fighters", "Implants & Boosters", "Rigs", "Subsystems", "Deployable Structures", "Filaments", "Structure Equipment", "Structure Modifications"]);
+    const rootFor = (marketGroupId:number) => {
+      let current = marketGroups.get(marketGroupId); let guard = 0;
+      while (current && guard++ < 32) {
+        if (allowedRoots.has(current.name)) return current;
+        if (!current.parentId) break;
+        current = marketGroups.get(current.parentId);
+      }
+      return current;
+    };
+    const rackFor = (typeId:number) => { const effects=dogma.get(typeId)?.effects; if(!effects)return undefined; return Object.entries(RACK_EFFECT).find(([,effectId])=>effects.has(effectId))?.[0]; };
+    const items:any[] = []; const usedMarketGroups = new Set<number>();
+    for (const line of typesEntry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue; const row=JSON.parse(line);
+      if (!row.published || !row.name?.en || !row.marketGroupID) continue;
+      const marketGroupId=Number(row.marketGroupID); const root=rootFor(marketGroupId);
+      if (!root || !allowedRoots.has(root.name)) continue;
+      const groupId=Number(row.groupID ?? 0); const categoryId=groupCategories.get(groupId) ?? 0;
+      const categoryName=categoryNames.get(categoryId) ?? "Unknown";
+      const marketPath:string[]=[]; let pathCursor:any=marketGroups.get(marketGroupId); let pathGuard=0;
+      while(pathCursor && pathGuard++<32){ marketPath.unshift(pathCursor.name); if(!pathCursor.parentId)break; pathCursor=marketGroups.get(pathCursor.parentId); }
+      const rack=rackFor(Number(row._key));
+      items.push({ id:Number(row._key), name:row.name.en, groupId, categoryId, categoryName, rack, marketGroupId, rootName:root.name, metaLevel:Number(row.metaLevel ?? 0), placement:inferFittingPlacement(root.name,rack,categoryName,marketPath) });
+      let cursor:any=marketGroups.get(marketGroupId); let guard=0; while(cursor && guard++<32){ usedMarketGroups.add(cursor.id); if(!cursor.parentId)break; cursor=marketGroups.get(cursor.parentId); }
+    }
+    cataloguePreparationProgress.report(84,"Indexing fitting items…");
+    const catalogueGroups=[...usedMarketGroups].map(id=>marketGroups.get(id)!).filter(Boolean).map(group=>({ id:group.id, name:group.name, parentId:allowedRoots.has(group.name) ? undefined : group.parentId, iconId:group.iconId })).sort((a,b)=>a.name.localeCompare(b.name));
+    items.sort((a,b)=>a.name.localeCompare(b.name));
+    cataloguePreparationProgress.report(100,"Module browser ready");
+    return { groups: catalogueGroups, items };
+  }));
+}
+
+export async function prepareFittingDataLocal(onProgress?: (progress:FittingPreparationProgress) => void) {
+  const startedAt=Date.now();
+  const report=(percent:number,stage:string,message:string)=>onProgress?.({percent,stage,message});
+  report(4,"metadata","Preparing fitting data…");
+  await ensureStaticDataArchive();
+  report(12,"dogma","Parsing module data…");
+  const stopDogmaProgress=dogmaPreparationProgress.subscribe(progress=>report(12+Math.round(progress.percent*0.44),"dogma",progress.message));
+  try { await index(); } finally { stopDogmaProgress(); }
+  report(56,"restrictions","Loading ship restrictions…");
+  const stopCatalogueProgress=cataloguePreparationProgress.subscribe(progress=>report(56+Math.round(progress.percent*0.34),"browser",progress.message));
+  let catalogue:any;
+  try { catalogue=await getFittingCatalogueLocal(); } finally { stopCatalogueProgress(); }
+  report(90,"browser","Preparing module browser…");
+  report(96,"finalising","Finalising fitting data…");
+  report(100,"ready","Fitting data ready");
+  return { catalogue, preparedAt:new Date().toISOString(), itemCount:catalogue.items.length, groupCount:catalogue.groups.length, durationMs:Date.now()-startedAt };
+}
+
+type FittingTypeInfoStatic = {
+  typeId:number; name:string; description:string; groupId:number; marketGroupId?:number; published:boolean;
+  basePrice?:number; volumeM3?:number; massKg?:number; capacityM3?:number; radiusM?:number; portionSize?:number; metaLevel?:number; techLevel?:number; iconId?:number;
+};
+type FittingAttributeMeta = { name:string; displayName:string; description?:string; unitId?:number; categoryId?:number; highIsGood?:boolean; published?:boolean };
+type FittingTypeInfoIndex = {
+  types:Map<number,FittingTypeInfoStatic>; groupNames:Map<number,string>; groupCategories:Map<number,number>; categoryNames:Map<number,string>;
+  marketGroups:Map<number,{name:string;parentId?:number}>; attributeMeta:Map<number,FittingAttributeMeta>; attributeCategoryNames:Map<number,string>; units:Map<number,string>; effects:Map<number,{name:string;category:number;description?:string}>;
+};
+let fittingTypeInfoCache:Promise<FittingTypeInfoIndex>|undefined;
+function plainSdeText(value:unknown){
+  return String(value ?? "").replace(/<br\s*\/?\s*>/gi,"\n").replace(/<\/p>/gi,"\n\n").replace(/<[^>]+>/g,"").replace(/&nbsp;/gi," " ).replace(/&amp;/gi,"&").replace(/&lt;/gi,"<").replace(/&gt;/gi,">").replace(/&quot;/gi,'"').replace(/&#39;/gi,"'").replace(/\n{3,}/g,"\n\n").trim();
+}
+async function fittingTypeInfoIndex(){
+  return (fittingTypeInfoCache ??= Promise.resolve().then(async()=>{
+    await ensureStaticDataArchive();
+    const zip=new AdmZip(ARCHIVE);
+    const lines=(name:string)=>zip.getEntry(name)?.getData().toString("utf8").split(/\r?\n/).filter(Boolean) ?? [];
+    const types=new Map<number,FittingTypeInfoStatic>(); const groupNames=new Map<number,string>(); const groupCategories=new Map<number,number>(); const categoryNames=new Map<number,string>();
+    const marketGroups=new Map<number,{name:string;parentId?:number}>(); const attributeMeta=new Map<number,FittingAttributeMeta>(); const attributeCategoryNames=new Map<number,string>(); const units=new Map<number,string>(); const effects=new Map<number,{name:string;category:number;description?:string}>();
+    for(const line of lines("categories.jsonl")){const row=JSON.parse(line);categoryNames.set(Number(row._key),row.name?.en ?? row.name ?? `Category ${row._key}`);}
+    for(const line of lines("groups.jsonl")){const row=JSON.parse(line);groupNames.set(Number(row._key),row.name?.en ?? row.name ?? `Group ${row._key}`);groupCategories.set(Number(row._key),Number(row.categoryID ?? 0));}
+    for(const line of lines("marketGroups.jsonl")){const row=JSON.parse(line);marketGroups.set(Number(row._key),{name:row.name?.en ?? row.name ?? `Market group ${row._key}`,parentId:row.parentGroupID==null?undefined:Number(row.parentGroupID)});}
+    for(const line of lines("dogmaAttributeCategories.jsonl")){const row=JSON.parse(line);attributeCategoryNames.set(Number(row._key),row.name?.en ?? row.name ?? `Category ${row._key}`);}
+    for(const line of lines("dogmaUnits.jsonl")){const row=JSON.parse(line);units.set(Number(row._key),row.displayName?.en ?? row.displayName ?? row.name?.en ?? row.name ?? "");}
+    for(const line of lines("dogmaAttributes.jsonl")){const row=JSON.parse(line);attributeMeta.set(Number(row._key),{name:row.name ?? `Attribute ${row._key}`,displayName:row.displayName?.en ?? row.displayName ?? row.name ?? `Attribute ${row._key}`,description:plainSdeText(row.description?.en ?? row.description),unitId:row.unitID==null?undefined:Number(row.unitID),categoryId:row.attributeCategoryID==null?undefined:Number(row.attributeCategoryID),highIsGood:row.highIsGood,published:row.published});}
+    for(const line of lines("dogmaEffects.jsonl")){const row=JSON.parse(line);effects.set(Number(row._key),{name:row.displayName?.en ?? row.name ?? row.guid ?? `Effect ${row._key}`,category:Number(row.effectCategoryID ?? 0),description:plainSdeText(row.description?.en ?? row.description)});}
+    for(const line of lines("types.jsonl")){const row=JSON.parse(line);if(!row.name?.en)continue;types.set(Number(row._key),{typeId:Number(row._key),name:row.name.en,description:plainSdeText(row.description?.en ?? row.description),groupId:Number(row.groupID ?? 0),marketGroupId:row.marketGroupID==null?undefined:Number(row.marketGroupID),published:Boolean(row.published),basePrice:row.basePrice==null?undefined:Number(row.basePrice),volumeM3:row.volume==null?undefined:Number(row.volume),massKg:row.mass==null?undefined:Number(row.mass),capacityM3:row.capacity==null?undefined:Number(row.capacity),radiusM:row.radius==null?undefined:Number(row.radius),portionSize:row.portionSize==null?undefined:Number(row.portionSize),metaLevel:row.metaLevel==null?undefined:Number(row.metaLevel),techLevel:row.techLevel==null?undefined:Number(row.techLevel),iconId:row.iconID==null?undefined:Number(row.iconID)});}
+    return {types,groupNames,groupCategories,categoryNames,marketGroups,attributeMeta,attributeCategoryNames,units,effects};
+  }));
+}
+export async function getFittingTypeInfoLocal(typeId:number){
+  const id=Number(typeId); if(!Number.isInteger(id)||id<=0) throw new Error("A valid EVE type ID is required.");
+  const [base,meta]=await Promise.all([index(),fittingTypeInfoIndex()]); const type=meta.types.get(id); if(!type) throw new Error(`Type ${id} is not present in the local CCP SDE.`);
+  const source=base.dogma.get(id); const groupName=meta.groupNames.get(type.groupId) ?? `Group ${type.groupId}`; const categoryId=meta.groupCategories.get(type.groupId) ?? 0; const categoryName=meta.categoryNames.get(categoryId) ?? "Unknown";
+  const marketPath:string[]=[]; let cursor=type.marketGroupId==null?undefined:meta.marketGroups.get(type.marketGroupId); let guard=0; while(cursor&&guard++<32){marketPath.unshift(cursor.name);cursor=cursor.parentId==null?undefined:meta.marketGroups.get(cursor.parentId);}
+  const allowedRoots=new Set(["Ships","Ship Equipment","Ammunition & Charges","Drones","Fighters","Implants & Boosters","Rigs","Subsystems","Deployable Structures","Filaments","Structure Equipment","Structure Modifications"]); const rootName=[...marketPath].reverse().find(name=>allowedRoots.has(name)) ?? marketPath[0] ?? categoryName;
+  const rack=source?Object.entries(RACK_EFFECT).find(([,effectId])=>source.effects.has(effectId))?.[0]:undefined; const placement=inferFittingPlacement(rootName,rack,categoryName,[...marketPath,groupName]);
+  const requirements=REQUIREMENTS.flatMap(([skillAttr,levelAttr])=>{const skillId=source?.attributes.get(skillAttr);if(!skillId)return[];return[{skillId:Number(skillId),name:base.names.get(Number(skillId)) ?? `Skill ${skillId}`,level:Number(source?.attributes.get(levelAttr) ?? 1)}];});
+  const attributes=[...(source?.attributes ?? new Map<number,number>())].map(([attributeId,value])=>{const a=meta.attributeMeta.get(attributeId);return{attributeId,name:a?.displayName ?? a?.name ?? `Attribute ${attributeId}`,internalName:a?.name,description:a?.description,value,unitId:a?.unitId,unit:a?.unitId==null?undefined:meta.units.get(a.unitId),categoryId:a?.categoryId,category:a?.categoryId==null?"Other":meta.attributeCategoryNames.get(a.categoryId) ?? "Other",highIsGood:a?.highIsGood,published:a?.published !== false};}).filter(item=>item.published).sort((a,b)=>String(a.category).localeCompare(String(b.category))||a.name.localeCompare(b.name));
+  const dogmaEffects=[...(source?.effects ?? new Set<number>())].map(effectId=>{const e=meta.effects.get(effectId);return{effectId,name:e?.name ?? `Effect ${effectId}`,category:e?.category ?? 0,description:e?.description};}).sort((a,b)=>a.name.localeCompare(b.name));
+  const fittingValues=[{attributeId:50,label:"CPU usage",unit:"tf"},{attributeId:30,label:"Powergrid usage",unit:"MW"},{attributeId:1153,label:"Calibration cost",unit:""},{attributeId:1132,label:"Calibration capacity",unit:""},{attributeId:1547,label:"Rig size",unit:""},{attributeId:128,label:"Charge size",unit:""}].flatMap(def=>{const value=source?.attributes.get(def.attributeId);return value==null?[]:[{...def,value}];});
+  return {typeId:id,name:type.name,description:type.description,group:{id:type.groupId,name:groupName},category:{id:categoryId,name:categoryName},marketGroup:type.marketGroupId==null?null:{id:type.marketGroupId,name:meta.marketGroups.get(type.marketGroupId)?.name ?? "Unknown",path:marketPath},placement,rack,metaLevel:type.metaLevel,techLevel:type.techLevel,published:type.published,iconId:type.iconId,physical:{volumeM3:type.volumeM3,massKg:type.massKg,capacityM3:type.capacityM3,radiusM:type.radiusM,portionSize:type.portionSize,basePrice:type.basePrice},fitting:fittingValues,requirements,attributes,effects:dogmaEffects};
+}
+
+export async function getFittingRemediesLocal(input: { hullTypeId:number; issueCodes?:string[]; itemTypeIds?:number[]; trainedSkills?:Array<{ skillId:number; level:number }> }) {
+  const issueCodes = new Set((input.issueCodes ?? []).map(String));
+  const wantsCpu = issueCodes.has("cpu-exceeded");
+  const wantsPowergrid = issueCodes.has("powergrid-exceeded");
+  if (!wantsCpu && !wantsPowergrid) return [];
+
+  const [{ dogma, names, groups, groupCategories, categoryNames, modifiers }, catalogue] = await Promise.all([index(), getFittingCatalogueLocal()]);
+  const hull = dogma.get(Number(input.hullTypeId));
+  const hullRigSize = attr(hull, 1547);
+  const fittedRequiredSkills = new Set<number>();
+  for (const typeId of input.itemTypeIds ?? []) {
+    for (const skillId of requiredSkillIds(dogma.get(Number(typeId)))) fittedRequiredSkills.add(skillId);
+  }
+
+  type Candidate = { kind:"skill"|"implant"|"rig"; typeId:number; name:string; solves:string[]; affectedAttributeId:number; effectValue:number; operation:number; skillTypeId?:number; skillName?:string; currentLevel?:number; targetLevel?:number; reason:string; score:number };
+  const byKey = new Map<string, Candidate>();
+  const targetFor = (attributeId:number) => attributeId === 48 || attributeId === 50 ? "cpu-exceeded" : attributeId === 11 || attributeId === 30 ? "powergrid-exceeded" : "";
+  const helpful = (attributeId:number, value:number, operation:number) => {
+    const baseline = 100;
+    const changed = applyVerifiedOperation(baseline, value, operation);
+    return attributeId === 48 || attributeId === 11 ? changed > baseline : attributeId === 50 || attributeId === 30 ? changed < baseline : false;
+  };
+
+  const trainedSkills = new Map((input.trainedSkills ?? []).map(skill => [Number(skill.skillId), Math.max(0, Math.min(5, Number(skill.level) || 0))]));
+  for (const [typeId, source] of dogma) {
+    const groupId = groups.get(typeId) ?? 0;
+    const categoryId = groupCategories.get(groupId) ?? 0;
+    if (String(categoryNames.get(categoryId) ?? "").toLowerCase() !== "skill") continue;
+    const currentLevel = trainedSkills.get(typeId) ?? 0;
+    if (currentLevel >= 5) continue;
+    const evaluated = evaluateTrainedSkillSource(source, currentLevel + 1, modifiers);
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect) continue;
+      for (const modifier of effect.modifiers) {
+        const affectedAttributeId = Number(modifier.modifiedAttributeID ?? 0);
+        const issue = targetFor(affectedAttributeId);
+        if (!issue || (issue === "cpu-exceeded" && !wantsCpu) || (issue === "powergrid-exceeded" && !wantsPowergrid)) continue;
+        if (modifier.modifyingAttributeID == null) continue;
+        const requiredTargetSkill = Number(modifier.skillTypeID ?? 0) || undefined;
+        if (requiredTargetSkill && !fittedRequiredSkills.has(requiredTargetSkill)) continue;
+        const effectValue = attr(evaluated, Number(modifier.modifyingAttributeID));
+        const operation = Number(modifier.operation ?? 0);
+        if (!helpful(affectedAttributeId, effectValue, operation)) continue;
+        const name = names.get(typeId) ?? `Skill ${typeId}`;
+        const key = `skill:${typeId}:${issue}`;
+        const targetName = affectedAttributeId === 48 ? "ship CPU output" : affectedAttributeId === 11 ? "ship powergrid output" : affectedAttributeId === 50 ? "module CPU need" : "module powergrid need";
+        const magnitude = operation === 6 ? Math.abs(effectValue) : Math.abs(applyVerifiedOperation(100, effectValue, operation) - 100);
+        const reason = requiredTargetSkill ? `Train ${name} to level ${currentLevel + 1}; CCP DOGMA applies it to fitted modules requiring ${names.get(requiredTargetSkill) ?? `Skill ${requiredTargetSkill}`}, improving ${targetName}.` : `Train ${name} to level ${currentLevel + 1}; CCP DOGMA improves ${targetName}.`;
+        const candidate: Candidate = { kind:"skill", typeId, name, solves:[issue], affectedAttributeId, effectValue, operation, skillTypeId:requiredTargetSkill, skillName:requiredTargetSkill ? names.get(requiredTargetSkill) : undefined, currentLevel, targetLevel:currentLevel + 1, reason, score:magnitude };
+        const previous = byKey.get(key);
+        if (!previous || candidate.score > previous.score) byKey.set(key, candidate);
+      }
+    }
+  }
+  for (const item of catalogue.items as Array<any>) {
+    const isRig = item.rootName === "Rigs";
+    const isImplant = item.rootName === "Implants & Boosters" && String(item.categoryName ?? "").toLowerCase().includes("implant");
+    if (!isRig && !isImplant) continue;
+    const source = dogma.get(Number(item.id));
+    if (!source) continue;
+    if (isRig) {
+      const candidateRigSize = attr(source, 1547);
+      if (hullRigSize && candidateRigSize && hullRigSize !== candidateRigSize) continue;
+    }
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect) continue;
+      for (const modifier of effect.modifiers) {
+        const affectedAttributeId = Number(modifier.modifiedAttributeID ?? 0);
+        const issue = targetFor(affectedAttributeId);
+        if (!issue || (issue === "cpu-exceeded" && !wantsCpu) || (issue === "powergrid-exceeded" && !wantsPowergrid)) continue;
+        if (modifier.modifyingAttributeID == null) continue;
+        const skillTypeId = Number(modifier.skillTypeID ?? 0) || undefined;
+        if (skillTypeId && !fittedRequiredSkills.has(skillTypeId)) continue;
+        const effectValue = attr(source, Number(modifier.modifyingAttributeID));
+        const operation = Number(modifier.operation ?? 0);
+        if (!helpful(affectedAttributeId, effectValue, operation)) continue;
+        const skillName = skillTypeId ? names.get(skillTypeId) : undefined;
+        const targetName = affectedAttributeId === 48 ? "ship CPU output" : affectedAttributeId === 11 ? "ship powergrid output" : affectedAttributeId === 50 ? "module CPU need" : "module powergrid need";
+        const magnitude = operation === 6 ? Math.abs(effectValue) : Math.abs(applyVerifiedOperation(100, effectValue, operation) - 100);
+        const itemName = names.get(Number(item.id)) ?? String(item.name);
+        const reason = skillName ? `${itemName} improves ${targetName} for modules requiring ${skillName}.` : `${itemName} improves ${targetName}.`;
+        const key = `${item.id}:${issue}`;
+        const candidate: Candidate = { kind:isRig ? "rig" : "implant", typeId:Number(item.id), name:itemName, solves:[issue], affectedAttributeId, effectValue, operation, skillTypeId, skillName, reason, score:magnitude };
+        const previous = byKey.get(key);
+        if (!previous || candidate.score > previous.score) byKey.set(key, candidate);
+      }
+    }
+  }
+
+  const candidates = [...byKey.values()];
+  const selected: Candidate[] = [];
+  for (const issue of ["cpu-exceeded", "powergrid-exceeded"]) {
+    if (!issueCodes.has(issue)) continue;
+    for (const kind of ["skill", "implant", "rig"] as const) {
+      selected.push(...candidates.filter(c => c.solves.includes(issue) && c.kind === kind).sort((a,b)=>b.score-a.score || a.name.localeCompare(b.name)).slice(0, kind === "skill" ? 8 : kind === "implant" ? 8 : 6));
+    }
+  }
+  const merged = new Map<number, Candidate>();
+  for (const candidate of selected) {
+    const existing = merged.get(candidate.typeId);
+    if (!existing) merged.set(candidate.typeId, candidate);
+    else if (!existing.solves.includes(candidate.solves[0])) existing.solves.push(candidate.solves[0]);
+  }
+  return [...merged.values()].map(({ score, ...candidate }) => candidate);
+}
+export async function getFittingChargesForModulesLocal(moduleTypeIds:number[]) {
+  const uniqueModules=[...new Set((moduleTypeIds ?? []).map(Number).filter(typeId=>Number.isInteger(typeId)&&typeId>0))];
+  if(!uniqueModules.length)return { compatibleTypeIds:[], checked:0 };
+  const [{ dogma, groups }, catalogue]=await Promise.all([index(),getFittingCatalogueLocal()]);
+  const rules=uniqueModules.flatMap(typeId=>{
+    const module=dogma.get(typeId);
+    if(!module)return [];
+    const allowedGroups=[604,605,606,609,610].map(attributeId=>attr(module,attributeId)).filter(Boolean);
+    if(!allowedGroups.length)return [];
+    return [{allowedGroups:new Set(allowedGroups),size:attr(module,128)}];
+  });
+  if(!rules.length)return { compatibleTypeIds:[], checked:0 };
+  const compatibleTypeIds:number[]=[]; let checked=0;
+  for(const item of catalogue.items as Array<any>){
+    if(item.rootName!=="Ammunition & Charges")continue;
+    checked++;
+    const chargeGroup=groups.get(Number(item.id)) ?? 0;
+    const charge=dogma.get(Number(item.id));
+    const chargeSize=attr(charge,128);
+    if(rules.some(rule=>rule.allowedGroups.has(chargeGroup)&&(!rule.size||!chargeSize||rule.size===chargeSize)))compatibleTypeIds.push(Number(item.id));
+  }
+  return { compatibleTypeIds:[...new Set(compatibleTypeIds)], checked };
+}
+
+export async function checkFittingChargeCompatibilityLocal(moduleTypeId:number, chargeTypeId:number) {
+  const { dogma, names, groups } = await index();
+  const module = dogma.get(moduleTypeId);
+  const charge = dogma.get(chargeTypeId);
+  if (!module) return { compatible:false, reason:`Module ${moduleTypeId} is not present in local CCP DOGMA data.` };
+  if (!charge) return { compatible:false, reason:`Charge ${chargeTypeId} is not present in local CCP DOGMA data.` };
+  const allowedGroups = [604, 605, 606, 609, 610].map((attributeId) => attr(module, attributeId)).filter(Boolean);
+  const chargeGroup = groups.get(chargeTypeId) ?? 0;
+  if (!allowedGroups.length) return { compatible:false, reason:`${names.get(moduleTypeId) ?? moduleTypeId} does not accept ammunition or charges.` };
+  if (!allowedGroups.includes(chargeGroup)) return { compatible:false, reason:`${names.get(chargeTypeId) ?? chargeTypeId} is not compatible with ${names.get(moduleTypeId) ?? moduleTypeId}.` };
+  const moduleSize = attr(module, 128);
+  const chargeSize = attr(charge, 128);
+  if (moduleSize && chargeSize && moduleSize !== chargeSize) return { compatible:false, reason:`${names.get(chargeTypeId) ?? chargeTypeId} has the wrong charge size for ${names.get(moduleTypeId) ?? moduleTypeId}.` };
+  return { compatible:true, reason:`${names.get(chargeTypeId) ?? chargeTypeId} can be loaded into ${names.get(moduleTypeId) ?? moduleTypeId}.` };
+}
+
+export async function checkFittingItemCompatibilityLocal(input: { hullTypeId:number; itemTypeId:number; placement?:string; fitted?:Array<{typeId:number; rack?:string}> }) {
+  const hullTypeId=Number(input?.hullTypeId); const itemTypeId=Number(input?.itemTypeId);
+  const { dogma, names, groups } = await index(); const hull=dogma.get(hullTypeId); const item=dogma.get(itemTypeId);
+  const hullName=names.get(hullTypeId) ?? String(hullTypeId); const itemName=names.get(itemTypeId) ?? String(itemTypeId);
+  if(!hull) return {compatible:false,code:'hull-missing',reason:`${hullName} is not present in local CCP DOGMA data.`};
+  if(!item) return {compatible:false,code:'item-missing',reason:`${itemName} is not present in local CCP DOGMA data.`};
+  const placement=String(input?.placement ?? ''); const rack=Object.entries(RACK_EFFECT).find(([,effectId])=>item.effects.has(effectId))?.[0];
+  const rackSlots:Record<string,number>={low:12,mid:13,high:14,rig:1137,subsystem:1367};
+  if(placement in rackSlots){ if(rack!==placement)return {compatible:false,code:'wrong-rack',reason:`${itemName} is not a ${placement}-slot item.`}; if(attr(hull,rackSlots[placement])<=0)return {compatible:false,code:'rack-unavailable',reason:`${hullName} has no ${placement} slots.`}; }
+  const hullGroup=groups.get(hullTypeId) ?? 0;
+  const allowedGroups=[1298,1299,1300,1301,1872,1879,1880,1881,2065,2396,2463,2476,2477,2478,2479,2480,2481,2482,2483,2484,2485].map(id=>attr(item,id)).filter(Boolean);
+  const allowedTypes=[1302,1303,1304,1305,1380,1944,2103,2463,2486,2487,2488,2758,5948].map(id=>attr(item,id)).filter(Boolean);
+  if((allowedGroups.length||allowedTypes.length)&&!allowedGroups.includes(hullGroup)&&!allowedTypes.includes(hullTypeId))return {compatible:false,code:'ship-restriction',reason:`${itemName} cannot be fitted to ${hullName}.`};
+  if(placement==='rig'&&attr(item,1547)&&attr(hull,1547)&&attr(item,1547)!==attr(hull,1547))return {compatible:false,code:'rig-size',reason:`${itemName} has the wrong rig size for ${hullName}.`};
+  if(placement==='subsystem'){const requiredHull=attr(item,1380);if(requiredHull&&requiredHull!==hullTypeId)return {compatible:false,code:'subsystem-hull',reason:`${itemName} belongs to ${names.get(requiredHull) ?? requiredHull}, not ${hullName}.`};}
+  if(placement==='fighter'&&attr(hull,2055)<=0)return {compatible:false,code:'fighter-bay-unavailable',reason:`${hullName} has no fighter hangar and cannot carry fitting fighters.`};
+  if(placement==='drone'&&attr(hull,283)<=0)return {compatible:false,code:'drone-bay-unavailable',reason:`${hullName} has no drone bay.`};
+  const fitted=(input?.fitted ?? []).filter(entry=>Number(entry?.typeId)>0);
+  if(rack==='high'&&item.effects.has(42)){const count=fitted.filter(entry=>entry.rack==='high'&&dogma.get(Number(entry.typeId))?.effects.has(42)).length;if(count>=attr(hull,102))return {compatible:false,code:'turret-hardpoints',reason:`${hullName} has no free turret hardpoints for ${itemName}.`};}
+  if(rack==='high'&&item.effects.has(40)){const count=fitted.filter(entry=>entry.rack==='high'&&dogma.get(Number(entry.typeId))?.effects.has(40)).length;if(count>=attr(hull,101))return {compatible:false,code:'launcher-hardpoints',reason:`${hullName} has no free launcher hardpoints for ${itemName}.`};}
+  const itemGroup=groups.get(itemTypeId) ?? 0; const maxFitted=attr(item,1544); if(maxFitted>0){const count=fitted.filter(entry=>(groups.get(Number(entry.typeId)) ?? 0)===itemGroup).length;if(count>=maxFitted)return {compatible:false,code:'max-group-fitted',reason:`Only ${maxFitted} module(s) from ${itemName}'s fitting group may be fitted.`};}
+  return {compatible:true,code:'ok',reason:`${itemName} can be fitted to ${hullName}.`};
+}
+
+export async function filterFittingItemsForHullLocal(input:{ hullTypeId:number; candidates?:Array<{typeId:number;placement?:string}>; fitted?:Array<{typeId:number;rack?:string}> }) {
+  const candidates=(input?.candidates ?? []).filter(candidate=>Number(candidate?.typeId)>0).slice(0,2000);
+  if(!Number(input?.hullTypeId) || !candidates.length) return { compatibleTypeIds:[], checked:0 };
+  const results=await Promise.all(candidates.map(async candidate=>({
+    typeId:Number(candidate.typeId),
+    result:await checkFittingItemCompatibilityLocal({ hullTypeId:Number(input.hullTypeId), itemTypeId:Number(candidate.typeId), placement:candidate.placement, fitted:input.fitted ?? [] }),
+  })));
+  return { compatibleTypeIds:results.filter(entry=>entry.result.compatible).map(entry=>entry.typeId), checked:results.length };
+}
+
+export async function getHullFittingProfileLocal(typeId:number) {
+  const { dogma } = await index(); const hull=dogma.get(typeId); if(!hull) throw new Error("Hull not found in local CCP dogma data.");
+  return { slots:{ high:attr(hull,14), mid:attr(hull,13), low:attr(hull,12), rig:attr(hull,1137), subsystem:attr(hull,1367) }, hardpoints:{ turret:attr(hull,102), launcher:attr(hull,101) }, storage:{ cargoM3:attr(hull,38), droneBayM3:attr(hull,283), droneBandwidth:attr(hull,1271), fighterHangarM3:attr(hull,2055), fighterTubes:attr(hull,2216) } };
+}
+export async function searchFittingTypesLocal(query: string, limit = 60) {
+  const { dogma, names, groups, groupCategories, categoryNames } = await index();
+  const term = query.trim().toLowerCase();
+  const browseRack = term.startsWith("@rack:") ? term.slice(6) : "";
+  const browseCategory = term.startsWith("@category:") ? Number(term.slice(10)) : 0;
+  if (!browseRack && !browseCategory && term.length < 2) return [];
+  const allowedCategories = new Set([7, 8, 18, 32]);
+  const rackFor = (typeId: number) => {
+    const effects = dogma.get(typeId)?.effects;
+    if (!effects) return undefined;
+    return (Object.entries(RACK_EFFECT).find(([, effectId]) => effects.has(effectId))?.[0]);
+  };
+  return [...names.entries()]
+    .flatMap(([id, name]) => {
+      const groupId = groups.get(id) ?? 0;
+      const categoryId = groupCategories.get(groupId) ?? 0;
+      if (!allowedCategories.has(categoryId)) return [];
+      const rack = rackFor(id);
+      if (browseRack && rack !== browseRack) return [];
+      if (browseCategory && categoryId !== browseCategory) return [];
+      if (!browseRack && !browseCategory && !name.toLowerCase().includes(term)) return [];
+      return [{ id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Unknown", rack }];
+    })
+    .sort((a, b) => {
+      if (browseRack || browseCategory) return a.name.localeCompare(b.name);
+      const ae = a.name.toLowerCase() === term ? 0 : a.name.toLowerCase().startsWith(term) ? 1 : 2;
+      const be = b.name.toLowerCase() === term ? 0 : b.name.toLowerCase().startsWith(term) ? 1 : 2;
+      return ae - be || a.name.localeCompare(b.name);
+    })
+    .slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
+}
 export async function resolveFittingTypeNamesLocal(requestedNames: string[]) {
   const { names, groups, groupCategories, categoryNames } = await index();
   const byName = new Map<string, { id: number; name: string; groupId: number; categoryId: number; categoryName: string }>();
@@ -291,6 +705,7 @@ export async function analyzeFittingDogma(input: {
   snapshot: any;
   targetProfile?: TargetProfile;
   damageProfile?: DamageProfile;
+  implantTypeIds?: number[];
   boosterTypeIds?: number[];
   boosterSideEffectIds?: number[];
   projectedItems?: Array<FittingItem & { effectiveness?: number }>;
@@ -330,11 +745,13 @@ export async function analyzeFittingDogma(input: {
         return Number.isInteger(typeId) && typeId > 0 ? [typeId] : [];
       })
     : [];
+  const plannedImplantTypeIds = (input.implantTypeIds ?? []).filter((typeId) => Number.isInteger(typeId) && typeId > 0);
+  const implantTypeIds = [...new Set([...snapshotImplantTypeIds, ...plannedImplantTypeIds])];
   const boosterTypeIds = (input.boosterTypeIds ?? []).filter((typeId) => Number.isInteger(typeId) && typeId > 0);
-  const enhancementTypeIds = [...new Set([...snapshotImplantTypeIds, ...boosterTypeIds])];
+  const enhancementTypeIds = [...new Set([...implantTypeIds, ...boosterTypeIds])];
   const enhancementSources = enhancementTypeIds.flatMap((typeId) => {
     const source = dogma.get(typeId);
-    return source ? [{ typeId, source, kind: snapshotImplantTypeIds.includes(typeId) ? "implant" as const : "booster" as const }] : [];
+    return source ? [{ typeId, source, kind: implantTypeIds.includes(typeId) ? "implant" as const : "booster" as const }] : [];
   });
   const selectedBoosterSideEffects = new Set((input.boosterSideEffectIds ?? []).filter((effectId) => Number.isInteger(effectId) && effectId > 0));
   const enhancementEffectAllowed = (enhancement: typeof enhancementSources[number], effectId: number, effect: EffectDefinition) => enhancement.kind !== "booster" || effect.fittingUsageChanceAttributeID == null || selectedBoosterSideEffects.has(effectId);
@@ -980,6 +1397,7 @@ export async function analyzeFittingDogma(input: {
   if (activeByClass.heavy > fighterHeavySlots) issues.push({ level: "error", code: "fighter-heavy-limit", message: `${activeByClass.heavy} heavy fighter squadrons exceed the ${fighterHeavySlots} heavy-fighter limit.` });
   const fighterSystem = { capacityM3: fighterCapacityM3, usedM3: fighterBayUsedM3, tubes: fighterTubes, lightSlots: fighterLightSlots, supportSlots: fighterSupportSlots, heavySlots: fighterHeavySlots, inventory: fighterInventory, activeSquadrons: activeCount, activeByClass };
 
+  const cargoVolume = input.items.filter((item) => item.rack === "cargo").reduce((total, item) => total + (volumes.get(item.typeId) ?? 0) * (item.quantity ?? 1), 0);
   const droneBandwidth = input.items
     .filter((item) => item.rack === "drone")
     .reduce(
@@ -1465,6 +1883,7 @@ export async function analyzeFittingDogma(input: {
         .map((skill) => ({ item: requirement.item, ...skill })),
     ),
     resources: { used, capacity },
+    storage: { cargoCapacityM3: shipAttr(38), cargoUsedM3: cargoVolume, droneBayCapacityM3: shipAttr(283), droneBayUsedM3: droneVolume, droneBandwidthCapacity: shipAttr(1271), droneBandwidthUsed: droneBandwidth },
     capacitor: {
       capacityGj: capacitorCapacity,
       rechargeSeconds,

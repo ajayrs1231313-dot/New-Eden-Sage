@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -43,7 +43,7 @@ import { listPublishedShips } from "./type-volumes";
 import { LOG_FILE, logEvent } from "./logger";
 import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
-import { analyzeFittingDogma, resolveFittingTypeNamesLocal } from "./fitting-dogma";
+import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
 import { analyzeBlueprintActivities, analyzeManufacturingPlan, getIndustrySystemCostIndices } from "./industrial-engine";
 import {
   beginRawMarketSnapshot,
@@ -58,6 +58,12 @@ import { searchRawMarketOrders } from "./raw-market-search";
 import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker } from "./analysis-job-manager";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
+import { typeImageProtocolResponse } from "./eve-assets";
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: "sage-asset",
+  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+}]);
 
 let window: BrowserWindow | null = null;
 
@@ -93,6 +99,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   const sendUpdateStatus = (status: string, detail?: unknown) => window?.webContents.send("update:status", { status, detail });
@@ -143,7 +150,24 @@ app.whenReady().then(() => {
     clipboard.writeText(value);
     return clipboard.readText() === value;
   });
-  ipcMain.handle("fitting:resolve-types-local", (_event, names: string[]) => resolveFittingTypeNamesLocal(names));
+  ipcMain.handle("fitting:resolve-types-local", (_event, names: string[]) => runFittingWorker("resolve-types", { names }));
+  ipcMain.handle("fitting:search-types-local", (_event, input: { query: string; limit?: number }) => runFittingWorker("search-types", { query: input?.query ?? "", limit: input?.limit ?? 60 }));
+  ipcMain.handle("fitting:prepare-local", (event) => runFittingWorker("prepare", {}, (progress) => {
+    if (!event.sender.isDestroyed()) event.sender.send("fitting:prepare-progress", progress);
+  }));
+  ipcMain.handle("fitting:compatible-items-local", (_event, input: any) => runFittingWorker("compatible-items", input ?? {}));
+  ipcMain.handle("fitting:charges-for-fit-local", (_event, moduleTypeIds: number[]) => runFittingWorker("charges-for-fit", { moduleTypeIds: Array.isArray(moduleTypeIds) ? moduleTypeIds : [] }));
+  ipcMain.handle("fitting:catalogue-local", () => runFittingWorker("catalogue"));
+  ipcMain.handle("fitting:type-info-local", (_event, typeId:number) => runFittingWorker("type-info", { typeId:Number(typeId) }));
+  ipcMain.handle("fitting:hull-profile-local", (_event, typeId:number) => runFittingWorker("hull-profile", { typeId }));
+  ipcMain.handle("fitting:mutation-options", (_event, typeId: number) => runFittingWorker("mutation-options", { typeId: Number(typeId) }));
+  ipcMain.handle("fitting:charge-compatibility-local", (_event, input: { moduleTypeId:number; chargeTypeId:number }) => runFittingWorker("charge-compatibility", { moduleTypeId:Number(input?.moduleTypeId), chargeTypeId:Number(input?.chargeTypeId) }));
+  ipcMain.handle("fitting:item-compatibility-local", (_event, input: any) => runFittingWorker("item-compatibility", input ?? {}));
+  ipcMain.handle("fitting:remedies-local", async (_event, input: any) => {
+    const snapshot = input?.characterId ? getSnapshot(String(input.characterId)) as any : undefined;
+    const trainedSkills = (snapshot?.skills?.skills ?? []).map((skill: any) => ({ skillId: Number(skill.skill_id), level: Number(skill.trained_skill_level ?? 0) }));
+    return runFittingWorker("remedies", { ...input, trainedSkills });
+  });
   ipcMain.handle("universe:resolve-types", async (_event, names: string[]) => {
     const unique = [
       ...new Set(names.map((name) => name.trim()).filter(Boolean)),
@@ -209,36 +233,56 @@ app.whenReady().then(() => {
   );
   ipcMain.handle(
     "industrial:manufacturing-plan",
-    async (_event, input: { characterId: string; blueprintTypeId: number; materialEfficiency?: number; timeEfficiency?: number; targetQuantity?: number; runs?: number; availableRuns?: number; includeConnectedStock?: boolean }) => {
+    async (_event, input: { characterId: string; blueprintTypeId: number; materialEfficiency?: number; timeEfficiency?: number; targetQuantity?: number; runs?: number; availableRuns?: number; includeConnectedStock?: boolean; sharedCharacterIds?: string[] }) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const assets = Array.isArray(snapshot.extended?.assets) ? snapshot.extended.assets : [];
-      const stockSources = input.includeConnectedStock
+      const activeCharacterId = String(input.characterId);
+      const permittedCharacterIds = new Set([activeCharacterId, ...(input.sharedCharacterIds ?? []).map(String)]);
+      const scopedSnapshots = input.includeConnectedStock
         ? (listSnapshots() as any[])
-            .filter((item) => item?.characterId)
-            .sort((a, b) => a.characterId === input.characterId ? -1 : b.characterId === input.characterId ? 1 : String(a.character?.name ?? "").localeCompare(String(b.character?.name ?? "")))
-            .map((item) => ({
-              characterId: String(item.characterId),
-              characterName: String(item.character?.name ?? item.characterId),
-              assets: Array.isArray(item.extended?.assets) ? item.extended.assets : [],
-            }))
+            .filter((item) => item?.characterId && permittedCharacterIds.has(String(item.characterId)))
+            .sort((a, b) => String(a.characterId) === activeCharacterId ? -1 : String(b.characterId) === activeCharacterId ? 1 : String(a.character?.name ?? "").localeCompare(String(b.character?.name ?? "")))
+        : [snapshot];
+      const enrichAssets = (item: any) => {
+        const characterId = String(item.characterId);
+        const rawAssets = Array.isArray(item.extended?.assets) ? item.extended.assets : [];
+        return rawAssets.map((asset: any, index: number) => ({
+          ...asset,
+          ownerCharacterId: characterId,
+          sourceAssetId: `${characterId}:${asset.item_id ?? `stack-${index}`}`,
+        }));
+      };
+      const assets = enrichAssets(snapshot);
+      const stockSources = input.includeConnectedStock
+        ? scopedSnapshots.map((item) => ({
+            characterId: String(item.characterId),
+            characterName: String(item.character?.name ?? item.characterId),
+            assets: enrichAssets(item),
+          }))
         : undefined;
-      const blueprintSnapshots = input.includeConnectedStock ? (listSnapshots() as any[]) : [snapshot];
-      const ownedBlueprints = blueprintSnapshots.flatMap((item) =>
-        (Array.isArray(item.extended?.blueprints) ? item.extended.blueprints : []).flatMap((blueprint: any) => {
+      const blueprintSnapshots = scopedSnapshots;
+      const ownedBlueprints = blueprintSnapshots.flatMap((item) => {
+        const personalBlueprintsForIndustry = Array.isArray(item.extended?.blueprints) ? item.extended.blueprints : [];
+        const corporationBlueprintsForIndustry = Array.isArray(item.extended?.corporation?.blueprints) ? item.extended.corporation.blueprints : [];
+        const trainedSkills = (item.skills?.skills ?? []).map((skill: any) => ({ skillId: Number(skill.skill_id), level: Number(skill.trained_skill_level ?? 0) }));
+        const mapBlueprint = (blueprint: any, corporation = false) => {
           const blueprintTypeId = Number(blueprint.type_id ?? 0);
           if (!blueprintTypeId) return [];
           return [{
-            characterId: String(item.characterId),
-            characterName: String(item.character?.name ?? item.characterId),
+            characterId: corporation ? `corp:${String(item.character?.corporation_id ?? item.characterId)}` : String(item.characterId),
+            characterName: corporation ? `${String(item.character?.corporation_name ?? "Corporation")} (corp, via ${String(item.character?.name ?? item.characterId)})` : String(item.character?.name ?? item.characterId),
             blueprintTypeId,
             materialEfficiency: Number(blueprint.material_efficiency ?? 0),
             timeEfficiency: Number(blueprint.time_efficiency ?? 0),
             availableRuns: Number(blueprint.runs ?? -1),
-            trainedSkills: (item.skills?.skills ?? []).map((skill: any) => ({ skillId: Number(skill.skill_id), level: Number(skill.trained_skill_level ?? 0) })),
+            trainedSkills,
           }];
-        }),
-      );
+        };
+        return [
+          ...personalBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint)),
+          ...corporationBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint, true)),
+        ];
+      });
       return analyzeManufacturingPlan({ ...input, assets, stockSources, ownedBlueprints, snapshot });
     },
   );
@@ -313,6 +357,7 @@ app.whenReady().then(() => {
         items?: Array<{ typeId: number; quantity?: number; rack?: string; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated" }>;
         targetProfile?: { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number };
         damageProfile?: { em: number; thermal: number; kinetic: number; explosive: number };
+        implantTypeIds?: number[];
         boosterTypeIds?: number[];
         boosterSideEffectIds?: number[];
         projectedItems?: Array<{ typeId: number; quantity?: number; rack?: string; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated"; effectiveness?: number }>;
@@ -323,12 +368,13 @@ app.whenReady().then(() => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
       if (input.hullTypeId) {
-        return analyzeFittingDogma({
+        return runFittingWorker("analyze", {
           hullTypeId: input.hullTypeId,
           items: input.items ?? input.itemTypeIds.map((typeId) => ({ typeId })),
           snapshot,
           targetProfile: input.targetProfile,
           damageProfile: input.damageProfile,
+          implantTypeIds: input.implantTypeIds,
           boosterTypeIds: input.boosterTypeIds,
           boosterSideEffectIds: input.boosterSideEffectIds,
           projectedItems: input.projectedItems,
@@ -1643,6 +1689,7 @@ function makeRadiusChatGPTMarkdown(data: {
 app.on("window-all-closed", () => {
   void logEvent("info", "app.window_all_closed");
   void disposeAnalysisWorker();
+  void disposeFittingWorker();
   void stopMcpWriteBridge();
   if (process.platform !== "darwin") app.quit();
 });

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CapabilityAnalysis, CapabilityResult, CharacterSnapshot } from "./types";
 import { TrainingTimeNotice } from "./TrainingTimeNotice";
+import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
 
 type CloneState = "alpha" | "omega";
 
@@ -25,24 +26,28 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
   const [selectedId, setSelectedId] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const requestSequence = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
+  const refresh = useCallback(async () => {
+    const requestId = ++requestSequence.current;
     setBusy(true);
     setError("");
-    window.sage
-      .getCapabilities({ characterId: snapshot.characterId, cloneState: cloneState ?? "omega" })
-      .then((result) => {
-        if (cancelled) return;
-        setAnalysis(result);
-        setSelectedId((current) => result.capabilities.some((item) => item.id === current) ? current : result.capabilities[0]?.id ?? "");
-      })
-      .catch((caught) => {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : "Could not calculate capability intelligence.");
-      })
-      .finally(() => !cancelled && setBusy(false));
-    return () => { cancelled = true; };
+    try {
+      const result = await window.sage.getCapabilities({ characterId: snapshot.characterId, cloneState: cloneState ?? "omega" });
+      if (requestId !== requestSequence.current) return;
+      setAnalysis(result);
+      setSelectedId((current) => result.capabilities.some((item) => item.id === current) ? current : result.capabilities[0]?.id ?? "");
+    } catch (caught) {
+      if (requestId !== requestSequence.current || isExpectedAnalysisCancellation(caught)) return;
+      setError(friendlyAnalysisError(caught, "Could not calculate capability intelligence."));
+    } finally {
+      if (requestId === requestSequence.current) setBusy(false);
+    }
   }, [snapshot.characterId, snapshot.updatedAt, cloneState]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   const selected = useMemo(
     () => analysis?.capabilities.find((item) => item.id === selectedId) ?? analysis?.capabilities[0],
@@ -52,7 +57,7 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
   if (busy && !analysis) {
     return <div className="capability-loading">Building personalised capability intelligence from skills, assets, fittings, wallet and activity readiness…</div>;
   }
-  if (error && !analysis) return <div className="capability-loading error">{error}</div>;
+  if (error && !analysis) return <div className="capability-loading error"><span>{error}</span><button onClick={() => void refresh()} disabled={busy}>Refresh analysis</button></div>;
   if (!analysis || !selected) return null;
 
   return (
@@ -96,8 +101,9 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
             <p className="eyebrow">CAPABILITY RADAR</p>
             <h3>What can this character actually do now?</h3>
           </div>
-          {busy && <small>Refreshing…</small>}
+          <div className="capability-refresh-actions">{busy && <small>Refreshing…</small>}<button onClick={() => void refresh()} disabled={busy}>{busy ? "Refreshing…" : "Refresh analysis"}</button></div>
         </div>
+        {error && <div className="capability-inline-error"><span>{error}</span><button onClick={() => void refresh()} disabled={busy}>Retry</button></div>}
         <ol className="capability-bars">
           {analysis.capabilities.map((item) => (
             <li key={item.id} className={selected.id === item.id ? "active" : ""} onClick={() => setSelectedId(item.id)}>

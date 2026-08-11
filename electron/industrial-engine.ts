@@ -65,6 +65,8 @@ function index() {
   }));
 }
 
+type OwnedAssetStack = { item_id?: number; type_id?: number; quantity?: number; sourceAssetId?: string; ownerCharacterId?: string };
+
 type IndustrialMarketQuote = {
   typeId: number;
   bestSell: number | null;
@@ -115,8 +117,8 @@ export async function analyzeManufacturingPlan(input: {
   targetQuantity?: number;
   runs?: number;
   availableRuns?: number;
-  assets?: Array<{ type_id?: number; quantity?: number }>;
-  stockSources?: Array<{ characterId: string; characterName: string; assets: Array<{ type_id?: number; quantity?: number }> }>;
+  assets?: OwnedAssetStack[];
+  stockSources?: Array<{ characterId: string; characterName: string; assets: OwnedAssetStack[] }>;
   ownedBlueprints?: Array<{ characterId: string; characterName: string; blueprintTypeId: number; materialEfficiency?: number; timeEfficiency?: number; availableRuns?: number; trainedSkills?: Array<{ skillId: number; level: number }> }>;
   snapshot?: any;
 }) {
@@ -140,12 +142,17 @@ export async function analyzeManufacturingPlan(input: {
     : [{ characterId: String(input.snapshot?.characterId ?? "selected"), characterName: String(input.snapshot?.character?.name ?? "Selected character"), assets: input.assets ?? [] }];
   const stockByOwner = stockSources.map((source) => {
     const quantities = new Map<number, number>();
-    for (const asset of source.assets ?? []) {
+    const stacks = new Map<number, Array<{ sourceAssetId: string; quantity: number }>>();
+    for (const [assetIndex, asset] of (source.assets ?? []).entries()) {
       const typeId = Number(asset.type_id ?? 0);
       const quantity = Number(asset.quantity ?? 0);
-      if (typeId > 0 && quantity > 0) quantities.set(typeId, (quantities.get(typeId) ?? 0) + quantity);
+      if (typeId <= 0 || quantity <= 0) continue;
+      quantities.set(typeId, (quantities.get(typeId) ?? 0) + quantity);
+      const list = stacks.get(typeId) ?? [];
+      list.push({ sourceAssetId: asset.sourceAssetId ?? `${source.characterId}:${asset.item_id ?? `stack-${assetIndex}`}`, quantity });
+      stacks.set(typeId, list);
     }
-    return { characterId: source.characterId, characterName: source.characterName, quantities };
+    return { characterId: source.characterId, characterName: source.characterName, quantities, stacks };
   });
 
   const ownedBlueprints = input.ownedBlueprints ?? [];
@@ -154,18 +161,30 @@ export async function analyzeManufacturingPlan(input: {
     characterId: owner.characterId,
     characterName: owner.characterName,
     quantities: new Map(owner.quantities),
+    stacks: new Map([...owner.stacks.entries()].map(([typeId, stacks]) => [typeId, stacks.map((stack) => ({ ...stack }))])),
   }));
   function allocateChainStock(typeId: number, quantity: number) {
     let remaining = Math.max(0, quantity);
-    const contributions: Array<{ characterId: string; characterName: string; used: number }> = [];
+    const contributions: Array<{ characterId: string; characterName: string; used: number; sourceAssetIds: string[] }> = [];
     for (const owner of chainStock) {
       if (remaining <= 0) break;
       const available = owner.quantities.get(typeId) ?? 0;
       if (available <= 0) continue;
-      const used = Math.min(remaining, available);
-      owner.quantities.set(typeId, available - used);
-      remaining -= used;
-      contributions.push({ characterId: owner.characterId, characterName: owner.characterName, used });
+      let ownerUsed = 0;
+      const sourceAssetIds: string[] = [];
+      for (const stack of owner.stacks.get(typeId) ?? []) {
+        if (remaining <= 0) break;
+        if (stack.quantity <= 0) continue;
+        const stackUsed = Math.min(remaining, stack.quantity);
+        stack.quantity -= stackUsed;
+        remaining -= stackUsed;
+        ownerUsed += stackUsed;
+        if (stackUsed > 0) sourceAssetIds.push(stack.sourceAssetId);
+      }
+      if (ownerUsed > 0) {
+        owner.quantities.set(typeId, Math.max(0, available - ownerUsed));
+        contributions.push({ characterId: owner.characterId, characterName: owner.characterName, used: ownerUsed, sourceAssetIds });
+      }
     }
     return { used: quantity - remaining, remaining, contributions };
   }
@@ -227,6 +246,7 @@ export async function analyzeManufacturingPlan(input: {
       characterName: owner.characterName,
       owned: owner.quantities.get(material.typeID) ?? 0,
       used: 0,
+      sourceAssetIds: (owner.stacks.get(material.typeID) ?? []).map((stack) => stack.sourceAssetId),
     })).filter((owner) => owner.owned > 0);
     let remaining = required;
     for (const owner of ownership) {
@@ -370,7 +390,7 @@ export async function analyzeManufacturingPlan(input: {
     skills,
     skillsReady: skills.every((skill) => skill.met),
     source: "CCP EVE static data (offline)",
-    stockSources: stockByOwner.map((owner) => ({ characterId: owner.characterId, characterName: owner.characterName })),
+    stockSources: stockByOwner.map((owner) => ({ characterId: owner.characterId, characterName: owner.characterName, assetStackCount: [...owner.stacks.values()].reduce((sum, stacks) => sum + stacks.length, 0) })),
     scope: `Blueprint ME/TE + ${stockByOwner.length > 1 ? "connected-character stock with ownership preserved" : "selected-character stock"}; facility, rig and final installation-cost modifiers are not yet applied.`,
   };
 }

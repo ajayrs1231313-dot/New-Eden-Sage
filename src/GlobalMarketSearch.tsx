@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import type { RawMarketSearchResult } from "./types";
+import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
 
 const money = (value: number) =>
   new Intl.NumberFormat("en-GB", { maximumFractionDigits: 2 }).format(value);
@@ -49,7 +50,8 @@ export function GlobalMarketSearch() {
       setResult(next);
       setSelectedTypeId(next.selectedType?.typeId);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Global market search failed.");
+      if (isExpectedAnalysisCancellation(caught)) return;
+      setError(friendlyAnalysisError(caught, "Global market search failed."));
     } finally {
       setBusy(false);
     }
@@ -94,7 +96,7 @@ export function GlobalMarketSearch() {
         </button>
       </form>
 
-      {error && <div className="global-market-message error">{error}</div>}
+      {error && <div className="global-market-message error"><span>{error}</span><button onClick={() => void search()} disabled={busy}>Retry</button></div>}
       {result?.message && <div className="global-market-message">{result.message}</div>}
 
       {result && !result.selectedType && result.typeMatches.length > 0 && (
