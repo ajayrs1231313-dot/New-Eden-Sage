@@ -43,3 +43,8 @@
 .industrial-opportunity-card>p strong{color:#a8d9e9;font-weight:700}
 @media(max-width:1050px){.industrial-opportunity-controls{grid-template-columns:1fr 1fr}.industrial-opportunity-system{grid-column:1/-1}}
 @media(max-width:760px){.industrial-opportunity-head{grid-template-columns:1fr}.industrial-opportunity-refresh{width:100%;margin-top:10px}.industrial-opportunity-controls{grid-template-columns:1fr}.industrial-opportunity-system{grid-column:auto}.industrial-opportunity-toggle-row{grid-auto-flow:row;grid-template-columns:repeat(3,1fr)}}
+
+/* Keep the app header visible while every Industrial tab gets a real page scroller. */
+main:has(.cached-view > .industrial-command){overflow-y:hidden}
+main>.cached-view:has(> .industrial-command){flex:1 1 0;min-height:0;overflow-x:hidden;overflow-y:auto;scrollbar-gutter:stable;padding-right:6px}
+main>.cached-view:has(> .industrial-command)[hidden]{display:none!important}
