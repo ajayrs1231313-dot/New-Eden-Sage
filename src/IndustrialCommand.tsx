@@ -417,6 +417,16 @@ export function IndustrialCommand({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.characterId, active.updatedAt, activeData.blueprints.length, activeData.corpBlueprints.length, opportunitySystem, opportunityJumpRadius, opportunitySecurity.high, opportunitySecurity.low, opportunitySecurity.null, assetSharing.enabled, assetSharing.characterIds.join(",")]);
 
+  const blueprintAssetByItemId = new Map<number, EnrichedAsset>(
+    activeData.assets
+      .filter((asset): asset is EnrichedAsset & { item_id: number } => typeof asset.item_id === "number")
+      .map((asset) => [asset.item_id, asset]),
+  );
+  function blueprintLocation(blueprint: BlueprintRecord) {
+    const asset = typeof blueprint.item_id === "number" ? blueprintAssetByItemId.get(blueprint.item_id) : undefined;
+    return asset?.station ?? asset?.system ?? blueprint.location_id ?? blueprint.location_flag ?? "—";
+  }
+
   const libraryBlueprints = planningBlueprints;
   const filteredBlueprints = libraryBlueprints.filter((blueprint) => {
     const typeName = blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint";
@@ -586,7 +596,7 @@ export function IndustrialCommand({
                   <span>{blueprint.material_efficiency ?? 0}%</span>
                   <span>{blueprint.time_efficiency ?? 0}%</span>
                   <span>{blueprint.quantity === -1 ? "∞" : blueprint.runs ?? 0}</span>
-                  <span>{blueprint.location_flag ?? blueprint.location_id ?? "—"}</span>
+                  <span>{blueprintLocation(blueprint)}</span>
                 </div>
               ))}
             </div>

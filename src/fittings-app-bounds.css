@@ -7,16 +7,16 @@
  *   [ catalogue ] [ additions         ] [ live stats ]
  */
 
-main:has(.cached-view > .fit-workspace-v2) {
+main:has(> .cached-view:not([hidden]) > .fit-workspace-v2) {
   overflow: hidden;
 }
 
-main:has(.cached-view > .fit-workspace-v2) > header,
-main:has(.cached-view > .fit-workspace-v2) > footer {
+main:has(> .cached-view:not([hidden]) > .fit-workspace-v2) > header,
+main:has(> .cached-view:not([hidden]) > .fit-workspace-v2) > footer {
   flex: 0 0 auto;
 }
 
-main:has(.cached-view > .fit-workspace-v2) > footer {
+main:has(> .cached-view:not([hidden]) > .fit-workspace-v2) > footer {
   margin-top: 8px;
 }
 

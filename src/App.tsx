@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, memo, useEffect, useRef, useState } from "react";
 import type {
   CharacterSnapshot,
   MarketItem,
@@ -45,13 +45,17 @@ const nav: Array<{ id: View; label: string; mark: string }> = [
 const money = (value: number) =>
   new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
 
+const RetainedSkillsWorkspace = memo(SkillsWorkspace);
+const RetainedIskLab = memo(IskLab);
+const RetainedFittingsWorkspace = memo(FittingsWorkspace, () => true);
+const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
+
 export default function App() {
   const [view, setView] = useState<View>("overview");
   const [marketDataRevision, setMarketDataRevision] = useState(0);
   const [plannerHullTypeId, setPlannerHullTypeId] = useState<number>();
   const [plannerFitIntent, setPlannerFitIntent] = useState<FitResolutionIntent>();
   const mountedViews = useRef(new Set<View>(["overview"]));
-  const [, setWarmRenderRevision] = useState(0);
   mountedViews.current.add(view);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [snapshots, setSnapshots] = useState<CharacterSnapshot[]>([]);
@@ -96,19 +100,6 @@ export default function App() {
     }).catch(() => undefined);
   }, [snapshots]);
 
-  useEffect(() => {
-    if (!config) return;
-    const warmOrder: View[] = ["market", "isk", "skills", "industrial", "fittings"];
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    warmOrder.forEach((target, index) => {
-      timers.push(setTimeout(() => {
-        if (mountedViews.current.has(target)) return;
-        mountedViews.current.add(target);
-        setWarmRenderRevision((value) => value + 1);
-      }, 750 + index * 900));
-    });
-    return () => timers.forEach(clearTimeout);
-  }, [config]);
 
   async function connect() {
     setBusy(true);
@@ -317,7 +308,7 @@ export default function App() {
         </header>
         {mountedViews.current.has("overview") && (
           <div className="cached-view" hidden={view !== "overview"}>
-            <Overview
+            <RetainedOverview
               snapshot={active}
               onConnect={connect}
               cloneState={active ? cloneStates[active.characterId] : undefined}
@@ -341,7 +332,7 @@ export default function App() {
         )}
         {mountedViews.current.has("skills") && (
           <div className="cached-view" hidden={view !== "skills"}>
-            <SkillsWorkspace
+            <RetainedSkillsWorkspace
               snapshot={active}
               cloneState={active ? cloneStates[active.characterId] : undefined}
               confirmationRequired={cloneConfirmationRequired}
@@ -352,7 +343,7 @@ export default function App() {
         )}
         {mountedViews.current.has("isk") && (
           <div className="cached-view" hidden={view !== "isk"}>
-            <IskLab
+            <RetainedIskLab
               snapshot={active}
               cloneState={active ? cloneStates[active.characterId] : undefined}
               marketDataRevision={marketDataRevision}
@@ -361,7 +352,7 @@ export default function App() {
         )}
         {mountedViews.current.has("market") && (
           <div className="cached-view" hidden={view !== "market"}>
-            <MarketWorkspace
+            <RetainedMarketWorkspace
               snapshot={active}
               cloneState={active ? cloneStates[active.characterId] : undefined}
               marketDataRevision={marketDataRevision}
@@ -379,12 +370,12 @@ export default function App() {
         )}
         {mountedViews.current.has("fittings") && (
           <div className="cached-view" hidden={view !== "fittings"}>
-            <FittingsWorkspace onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setView("skills"); }} />
+            <RetainedFittingsWorkspace onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setView("skills"); }} />
           </div>
         )}
         {mountedViews.current.has("industrial") && (
           <div className="cached-view" hidden={view !== "industrial"}>
-            <IndustrialCommand
+            <RetainedIndustrialCommand
               snapshots={snapshots}
               activeCharacterId={active?.characterId}
               onSelectCharacter={selectCharacter}
@@ -439,6 +430,7 @@ function MarketWorkspace({ snapshot, marketDataRevision, onMarketDataUpdated }: 
   </section>;
 }
 
+const RetainedMarketWorkspace = memo(MarketWorkspace, (a, b) => a.snapshot === b.snapshot && a.marketDataRevision === b.marketDataRevision);
 function UnderConstruction({ title }: { title: string }) {
   return <section className="construction-page">
     <div className="construction-banner">UNDER CONSTRUCTION</div>
@@ -602,6 +594,7 @@ function Overview({
   );
 }
 
+const RetainedOverview = memo(Overview, (a, b) => a.snapshot === b.snapshot && a.cloneState === b.cloneState);
 function duration(seconds: number | null) {
   if (seconds === null) return "Unavailable";
   if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
