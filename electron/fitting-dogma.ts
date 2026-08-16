@@ -22,6 +22,10 @@ const RACK_EFFECT: Record<string, number> = {
   rig: 2663,
   subsystem: 3772,
 };
+function fittingRack(dogma: Map<number, Dogma>, typeId: number) {
+  const effects = dogma.get(typeId)?.effects;
+  return effects ? Object.entries(RACK_EFFECT).find(([, effectId]) => effects.has(effectId))?.[0] : undefined;
+}
 
 export type FittingPlacement = "ship" | "high" | "mid" | "low" | "rig" | "subsystem" | "drone" | "fighter" | "implant" | "booster" | "charge" | "cargo";
 function inferFittingPlacement(rootName:string, rack:string|undefined, categoryName:string, marketPath:string[] = []) : FittingPlacement {
@@ -822,17 +826,12 @@ export async function searchFittingTypesLocal(query: string, limit = 60) {
   const browseCategory = term.startsWith("@category:") ? Number(term.slice(10)) : 0;
   if (!browseRack && !browseCategory && term.length < 2) return [];
   const allowedCategories = new Set([7, 8, 18, 32]);
-  const rackFor = (typeId: number) => {
-    const effects = dogma.get(typeId)?.effects;
-    if (!effects) return undefined;
-    return (Object.entries(RACK_EFFECT).find(([, effectId]) => effects.has(effectId))?.[0]);
-  };
   return [...names.entries()]
     .flatMap(([id, name]) => {
       const groupId = groups.get(id) ?? 0;
       const categoryId = groupCategories.get(groupId) ?? 0;
       if (!allowedCategories.has(categoryId)) return [];
-      const rack = rackFor(id);
+      const rack = fittingRack(dogma, id);
       if (browseRack && rack !== browseRack) return [];
       if (browseCategory && categoryId !== browseCategory) return [];
       if (!browseRack && !browseCategory && !name.toLowerCase().includes(term)) return [];
@@ -847,12 +846,12 @@ export async function searchFittingTypesLocal(query: string, limit = 60) {
     .slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
 }
 export async function resolveFittingTypeNamesLocal(requestedNames: string[]) {
-  const { names, groups, groupCategories, categoryNames } = await index();
-  const byName = new Map<string, { id: number; name: string; groupId: number; categoryId: number; categoryName: string }>();
+  const { dogma, names, groups, groupCategories, categoryNames } = await index();
+  const byName = new Map<string, { id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: string }>();
   for (const [id, name] of names) {
     const groupId = groups.get(id) ?? 0;
     const categoryId = groupCategories.get(groupId) ?? 0;
-    byName.set(name.toLowerCase(), { id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Unknown" });
+    byName.set(name.toLowerCase(), { id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Unknown", rack: fittingRack(dogma, id) });
   }
   const unique = [...new Set(requestedNames.map((name) => name.trim()).filter(Boolean))];
   return unique.flatMap((requested) => {

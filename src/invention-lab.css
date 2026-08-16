@@ -6,7 +6,11 @@
 .invention-filter:focus { border-color: #4caea6; }
 .invention-decryptor { display: grid; grid-template-columns: auto minmax(260px, 520px); align-items: center; gap: 10px; color: #6f8d94; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
 .invention-decryptor select { border: 1px solid #23444d; background: #061219; color: #d8e8eb; padding: 9px 10px; outline: none; }
+.invention-selectors { display: grid; grid-template-columns: minmax(340px, 1fr) minmax(280px, .7fr); gap: 12px; align-items: end; }
+.invention-selectors .invention-decryptor { grid-template-columns: auto minmax(180px, 1fr); }
+@media (max-width: 900px) { .invention-selectors { grid-template-columns: 1fr; } }
 .invention-table { border: 1px solid #1f4048; background: #07161c; }
+.invention-empty { padding: 24px; color: #6f8d94; text-align: center; font-size: 10px; }
 .invention-row { display: grid; grid-template-columns: minmax(250px, 1.5fr) .45fr .7fr .7fr .8fr .8fr; gap: 10px; align-items: center; }
 .invention-row.heading { padding: 7px 10px; border-bottom: 1px solid #24444c; color: #58757d; font-size: 8px; text-transform: uppercase; letter-spacing: .07em; }
 .invention-row.heading button { position: relative; min-width: 0; border: 0; background: transparent; color: #58757d; padding: 2px 0; font-size: 8px; text-align: left; text-transform: uppercase; letter-spacing: .07em; }

@@ -127,19 +127,11 @@ type Fit = {
   source: string;
 };
 
-const FITTING_APP_INSTRUCTIONS = `HOW TO USE NEW EDEN SAGE FITTINGS
+const FITTING_APP_INSTRUCTIONS = `NEW EDEN SAGE — UNIVERSAL FIT REQUEST FOR ANY LLM
 
-1. Ask ChatGPT to design an EVE Online fit for your ship, activity, skills and budget.
-2. Tell ChatGPT to use the New Eden Sage JSON structure below.
-3. Copy ChatGPT's JSON code block.
-4. Open Fittings in New Eden Sage and paste it into Import fitting code.
-5. Select Import and display.
-6. Review the ship, slots, drones, cargo and operating instructions.
-7. Select Find cheapest purchase route.
-8. Choose a connected character as the route origin.
-9. Leave Buy the entire fit unchecked to exclude owned assets, or check it to price everything.
+Paste this entire prompt into ChatGPT, Claude, Gemini or another LLM, then add your ship, activity, skills, budget and constraints.
 
-Standard EFT text beginning with [Ship, Fit name] is also accepted. JSON is recommended because it preserves slot groups, drones, cargo, type IDs and operating instructions.
+Return one complete EVE Online fitting. Prefer a single Sage JSON code block using the structure below. Do not put commentary outside the code block. Use exact current EVE item names, realistic quantities and the correct slot groups. Include charges, scripts, probes, nanite paste, drones, fighters, implants, boosters and concise operating instructions when relevant. If a type ID is uncertain, omit it rather than inventing it.
 
 When asking ChatGPT for a fit, request one JSON code block only with no text outside it, using this structure:
 
@@ -161,7 +153,7 @@ When asking ChatGPT for a fit, request one JSON code block only with no text out
   ]
 }
 
-Replace every 0 typeId with the correct EVE type ID when confident. If uncertain, omit typeId rather than inventing one. Keep modules in their correct slot arrays. Include realistic quantities for drones, ammunition, scripts, probes, nanite paste and consumables. Do not include comments inside the JSON.`;
+New Eden Sage also accepts PYFA/EFT text, PYFA XML, ESI fitting JSON, DNA strings, multi-fit exports and clearly labelled plain-text slot sections.`;
 
 function normalizeFit(value: any): Fit {
   return {
@@ -328,16 +320,16 @@ function resolveFit(fit: Fit, names: Map<string, number>) {
   return {
     ...fit,
     hull: resolve(fit.hull),
-    low: fit.low.map(resolve),
-    mid: fit.mid.map(resolve),
-    high: fit.high.map(resolve),
-    rig: fit.rig.map(resolve),
-    subsystem: fit.subsystem.map(resolve),
-    drones: fit.drones.map(resolve),
-    fighters: fit.fighters.map(resolve),
-    cargo: fit.cargo.map(resolve),
-    implants: fit.implants.map(resolve),
-    boosters: fit.boosters.map(resolve),
+    low: (fit.low ?? []).map(resolve),
+    mid: (fit.mid ?? []).map(resolve),
+    high: (fit.high ?? []).map(resolve),
+    rig: (fit.rig ?? []).map(resolve),
+    subsystem: (fit.subsystem ?? []).map(resolve),
+    drones: (fit.drones ?? []).map(resolve),
+    fighters: (fit.fighters ?? []).map(resolve),
+    cargo: (fit.cargo ?? []).map(resolve),
+    implants: (fit.implants ?? []).map(resolve),
+    boosters: (fit.boosters ?? []).map(resolve),
   };
 }
 
@@ -358,7 +350,13 @@ function fitItems(fit: Fit) {
 }
 
 async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
-  const locallyResolved = resolveFit(fit, known);
+  let locallyResolved: Fit = resolveFit(normalizeFit(fit), known);
+  const idItems = fitItems(locallyResolved).filter((item) => item.typeId && /^Type \d+$/i.test(item.name));
+  if (idItems.length) {
+    const byId = new Map((await window.sage.resolveTypeIds([...new Set(idItems.map((item) => item.typeId!))])).map((item) => [item.id, item.name]));
+    const rename = (item: FitItem) => item.typeId && byId.has(item.typeId) ? { ...item, name: byId.get(item.typeId)! } : item;
+    locallyResolved = { ...locallyResolved, hull: rename(locallyResolved.hull), low: locallyResolved.low.map(rename), mid: locallyResolved.mid.map(rename), high: locallyResolved.high.map(rename), rig: locallyResolved.rig.map(rename), subsystem: locallyResolved.subsystem.map(rename), drones: locallyResolved.drones.map(rename), fighters: locallyResolved.fighters.map(rename), cargo: locallyResolved.cargo.map(rename), implants: locallyResolved.implants.map(rename), boosters: locallyResolved.boosters.map(rename) };
+  }
   const missing = [
     ...new Set(
       fitItems(locallyResolved)
@@ -370,28 +368,31 @@ async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
 
   // Always ask the local SDE for bay-item metadata. EFT omits empty sections, so
   // blank-line position alone cannot reliably distinguish drones/fighters from cargo.
-  const bayNames = [...new Set([...locallyResolved.drones, ...locallyResolved.cargo].map((item) => item.name))];
-  const lookupNames = [...new Set([...missing, ...bayNames])];
+  const allNames = fitItems(locallyResolved).map((item) => item.name);
+  const lookupNames = [...new Set([...missing, ...allNames])];
   const resolved = lookupNames.length ? await window.sage.resolveFittingTypeNamesLocal(lookupNames) : [];
   const names = new Map(known);
   for (const item of resolved) names.set(item.name.toLowerCase(), item.id);
   const withIds = resolveFit(locallyResolved, names);
   const metadata = new Map(resolved.map((item: any) => [item.name.toLowerCase(), item]));
-  const drones: FitItem[] = [];
-  const fighters: FitItem[] = [];
+  const drones: FitItem[] = [...withIds.drones];
+  const fighters: FitItem[] = [...withIds.fighters];
   const cargo: FitItem[] = [];
-  const classify = (item: FitItem, fallback: "drones" | "cargo") => {
+  const movedRacks: Record<FitModuleRack, FitItem[]> = { low: [], mid: [], high: [], rig: [], subsystem: [] };
+  const implants: FitItem[] = [...withIds.implants];
+  const boosters: FitItem[] = [...withIds.boosters];
+  const classifyCargo = (item: FitItem) => {
     const info: any = metadata.get(item.name.toLowerCase());
-    if (!info) { (fallback === "drones" ? drones : cargo).push(item); return; }
+    if (!info) { cargo.push(item); return; }
     const category = String(info.categoryName ?? "").toLowerCase();
     if (category === "drone") drones.push(item);
     else if (category === "fighter") fighters.push(item);
+    else if (info.rack && movedRacks[info.rack as FitModuleRack]) movedRacks[info.rack as FitModuleRack].push(item);
+    else if (category.includes("implant")) implants.push(item);
     else cargo.push(item);
   };
-  withIds.drones.forEach((item) => classify(item, "drones"));
-  withIds.fighters.forEach((item) => fighters.push(item));
-  withIds.cargo.forEach((item) => classify(item, "cargo"));
-  return { ...withIds, drones, fighters, cargo };
+  withIds.cargo.forEach(classifyCargo);
+  return { ...withIds, low: [...withIds.low, ...movedRacks.low], mid: [...withIds.mid, ...movedRacks.mid], high: [...withIds.high, ...movedRacks.high], rig: [...withIds.rig, ...movedRacks.rig], subsystem: [...withIds.subsystem, ...movedRacks.subsystem], drones, fighters, cargo, implants, boosters };
 }
 
 export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (intent: FitResolutionIntent) => void }) {
@@ -694,7 +695,7 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
         {sideMode === "build" ? (
           <FitBuilder fit={active} onCreate={createBuilderFit} onAdd={addBuilderItem} onRemove={removeBuilderItem} onQuantity={setBuilderItemQuantity} onState={setBuilderItemState} onCharge={loadBuilderCharge} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} />
         ) : (
-          <div className="fit-v2-import"><p className="eyebrow">FIT IMPORT</p><h3>Import fitting code</h3><button className="copy-fit-prompt" onClick={copyChatGPTInstructions}>Copy ChatGPT instructions</button><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'[Ishtar, Example fit]\nDrone Damage Amplifier II\n...'} /><label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.txt,.json,.xml" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label><button onClick={importFit} disabled={!input.trim()}>Import and display</button><small>{status}</small>{lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}</div>
+          <div className="fit-v2-import"><p className="eyebrow">UNIVERSAL FIT IMPORT</p><h3>Paste a fit from anywhere</h3><button type="button" className="copy-fit-prompt" onClick={() => void copyChatGPTInstructions()}>Copy prompt for any LLM</button><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'Paste PYFA/EFT, XML, ESI JSON, DNA, Sage JSON, or a labelled plain-text fit…'} /><label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.fit,.txt,.json,.xml,.dna" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label><button type="button" onClick={() => void importFit()} disabled={!input.trim()}>Import and display</button><small>{status}</small>{lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}</div>
         )}
       </aside>
       <div className="fit-main">
