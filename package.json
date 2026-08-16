@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "private": true,
   "license": "MIT",
   "author": "New Eden Sage contributors",
@@ -101,6 +101,7 @@
         "deb"
       ],
       "category": "Utility",
+      "maintainer": "New Eden Sage contributors <ajayrs1231313-dot@users.noreply.github.com>",
       "icon": "build/icon.png",
       "artifactName": "New-Eden-Sage-${version}-${arch}.${ext}"
     },
