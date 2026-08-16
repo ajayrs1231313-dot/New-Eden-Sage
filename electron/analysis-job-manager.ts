@@ -263,3 +263,14 @@ export async function stopAnalysisWorkersForExclusiveTask() {
     if (currentWorker) await currentWorker.terminate().catch(() => undefined);
   }
 }
+
+/** Release the large market worker after its prepared result has been persisted. */
+export async function releaseIdleMarketAnalysisWorker() {
+  const state = lanes.market;
+  if (state.active || !state.worker) return false;
+  stopWatchdog("market");
+  const currentWorker = state.worker;
+  state.worker = null;
+  await currentWorker.terminate().catch(() => undefined);
+  return true;
+}

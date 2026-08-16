@@ -10,6 +10,11 @@ release/
 release-*/
 EVE data for gpt/
 vendor/*
+!vendor/tunnel-client/
+!vendor/tunnel-client/tunnel-client.exe
+!vendor/tunnel-client/LICENSE
+!vendor/tunnel-client/cloudflared-manifest.json
+vendor/tunnel-client/cloudflared.exe
 !vendor/fitting-data/
 !vendor/fitting-data/fitting-dogma-prepared-v1.json.gz
 !vendor/fitting-data/fitting-catalogue-prepared-v1.json.gz

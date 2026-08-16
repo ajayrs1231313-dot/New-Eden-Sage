@@ -134,7 +134,11 @@ export default function App() {
     setBusy(true);
     setMessage("Syncing all live Sage data…");
     try {
-      await window.sage.runMasterUpdate();
+      const result = await window.sage.runMasterUpdate() as { alreadySynced?: boolean } | undefined;
+      if (result?.alreadySynced) {
+        setMessage("Sage is already current. Sync All will be available again in a few seconds.");
+        return;
+      }
       setSnapshots(await window.sage.listSnapshots());
       setMarketDataRevision((value) => value + 1);
       setMessage("All live Sage data synced. Fittings and Industry are preparing quietly.");

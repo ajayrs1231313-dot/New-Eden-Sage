@@ -59,7 +59,7 @@ import { analyzeShipReadiness } from "./readiness";
 import { analyzeActivityReadiness } from "./activity-readiness";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker, stopAnalysisWorkersForExclusiveTask } from "./analysis-job-manager";
+import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker, stopAnalysisWorkersForExclusiveTask, releaseIdleMarketAnalysisWorker } from "./analysis-job-manager";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
 import { typeImageProtocolResponse } from "./eve-assets";
@@ -72,6 +72,8 @@ protocol.registerSchemesAsPrivileged([{
 let window: BrowserWindow | null = null;
 let masterUpdateActive = false;
 let quietTabPreparationActive = false;
+const STARTUP_SYNC_GUARD_MS = 30_000;
+const startupSyncGuardUntil = Date.now() + STARTUP_SYNC_GUARD_MS;
 
 function automaticSyncStatePath() {
   return path.join(app.getPath("userData"), "automatic-sync-state.json");
@@ -118,14 +120,21 @@ async function prepareTabsQuietly() {
         error: error instanceof Error ? error.message : String(error),
       }));
     }
+    // The result is persisted on disk, so keeping the multi-gigabyte market
+    // worker alive buys very little and can make Windows treat Sage as hung.
+    await releaseIdleMarketAnalysisWorker();
     await logEvent("info", "background_tabs.prepared", { tabs: ["industrial", "isk-lab"] });
   } finally {
     quietTabPreparationActive = false;
   }
 }
 
-async function runCompleteSync(sendProgress: (progress: unknown) => void) {
+async function runCompleteSync(sendProgress: (progress: unknown) => void, skipIfVersionSynced = false) {
   if (masterUpdateActive) return { alreadyRunning: true };
+  if (skipIfVersionSynced && await hasSyncedThisVersion()) {
+    await logEvent("info", "master_update.skipped_already_synced", { version: app.getVersion() });
+    return { alreadySynced: true, version: app.getVersion() };
+  }
   let lastProgress: unknown = null;
   masterUpdateActive = true;
   try {
@@ -906,7 +915,7 @@ app.whenReady().then(() => {
   ipcMain.handle("master:update-all", async (event) => {
     return runCompleteSync((progress) => {
       if (!event.sender.isDestroyed()) event.sender.send("master:update-progress", progress);
-    });
+    }, Date.now() < startupSyncGuardUntil);
   });
   ipcMain.on("diagnostics:renderer-error", (_event, report) => logCrash("renderer.javascript_error", { report }));
   ipcMain.handle("diagnostics:crash-log-path", () => CRASH_LOG_FILE);
@@ -1179,7 +1188,7 @@ app.whenReady().then(() => {
         await logEvent("info", "master_update.already_synced_this_version", { version: app.getVersion() });
         return;
       }
-      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress));
+      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true);
     }).catch((error) => logCrash("master_update.auto_start_failed", { error }));
   });
 });

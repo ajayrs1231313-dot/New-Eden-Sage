@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "license": "MIT",
   "author": "New Eden Sage contributors",
@@ -15,7 +15,8 @@
     "build": "tsc --noEmit && tsc -p tsconfig.electron.json && vite build",
     "preview": "vite preview",
     "icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run icon && npm run build && electron-builder --win nsis --publish never",
+    "dist:win": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --win nsis --publish never",
+    "verify:release-resources": "node scripts/verify-release-resources.cjs",
     "fitting:refresh-bundle": "tsc -p tsconfig.electron.json && node scripts/build-fitting-bundle.cjs"
   },
   "dependencies": {
