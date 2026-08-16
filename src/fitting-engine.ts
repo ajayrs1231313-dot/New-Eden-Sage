@@ -23,7 +23,10 @@ export type Fit = {
   rig: FitItem[];
   subsystem: FitItem[];
   drones: FitItem[];
+  fighters: FitItem[];
   cargo: FitItem[];
+  implants: FitItem[];
+  boosters: FitItem[];
   instructions: string[];
   source: string;
 };
@@ -121,8 +124,10 @@ function randomId() {
 
 function cleanCodeFence(text: string) {
   const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json|eft|txt|text)?\s*([\s\S]*?)\s*```$/i);
-  return (fenced?.[1] ?? trimmed).trim();
+  const blocks = [...trimmed.matchAll(/```(?:json|eft|xml|txt|text|pyfa|fit)?\s*([\s\S]*?)\s*```/gi)]
+    .map((match) => match[1].trim())
+    .filter((block) => block.startsWith("{") || block.startsWith("[") || block.startsWith("<") || /(?:ship|hull|fit\s*name|high\s*slots?|low\s*slots?)[\s:=]/i.test(block));
+  return (blocks.length ? blocks.join("\n\n") : trimmed).replace(/^>\s?/gm, "").trim();
 }
 
 function positiveInteger(value: unknown, fallback = 1) {
@@ -211,6 +216,14 @@ export function parseItem(value: unknown): FitItem {
 function itemArray(value: unknown): FitItem[] {
   if (value == null) return [];
   if (Array.isArray(value)) return value.map(parseItem);
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const itemFields = ["name", "typeName", "typeId", "type_id", "quantity", "qty"];
+    if (!itemFields.some((field) => field in record)) {
+      // Common compact JSON shape: { "Hobgoblin II": 5, "Nanite Repair Paste": 50 }
+      return Object.entries(record).map(([name, quantity]) => parseItem({ name, quantity }));
+    }
+  }
   return [parseItem(value)];
 }
 
@@ -221,6 +234,17 @@ function stringArray(value: unknown): string[] {
 }
 
 function parseJsonFit(source: string, raw: Record<string, unknown>): Fit {
+  if (Array.isArray(raw.items) && (raw.ship_type_id || raw.shipTypeId)) {
+    const groups: Record<SlotGroup | "drones" | "cargo", FitItem[]> = { low: [], mid: [], high: [], rig: [], subsystem: [], drones: [], cargo: [] };
+    for (const entry of raw.items as Array<Record<string, unknown>>) {
+      const flag = String(entry.flag ?? entry.location_flag ?? "cargo").toLowerCase();
+      const item = parseItem({ name: entry.name ?? `Type ${entry.type_id ?? entry.typeId}`, typeId: entry.type_id ?? entry.typeId, quantity: entry.quantity ?? entry.qty ?? 1 });
+      const target = flag.includes("low") ? "low" : flag.includes("med") || flag.includes("mid") ? "mid" : flag.includes("hi") || flag.includes("high") ? "high" : flag.includes("rig") ? "rig" : flag.includes("subsystem") ? "subsystem" : flag.includes("drone") || flag.includes("fighter") ? "drones" : "cargo";
+      groups[target].push(item);
+    }
+    const hullId = positiveTypeId(raw.ship_type_id ?? raw.shipTypeId);
+    return { id: randomId(), name: String(raw.name ?? raw.fitName ?? `Imported fit ${hullId ?? ""}`).trim(), hull: { name: hullId ? `Type ${hullId}` : requiredName(raw.ship_name), typeId: hullId, quantity: 1 }, ...groups, fighters: [], implants: [], boosters: [], instructions: stringArray(raw.description ?? raw.instructions ?? raw.notes), source };
+  }
   const rawModules = raw.modules;
   const modules = rawModules && typeof rawModules === "object" && !Array.isArray(rawModules)
     ? rawModules as Record<string, unknown>
@@ -231,13 +255,16 @@ function parseJsonFit(source: string, raw: Record<string, unknown>): Fit {
     id: randomId(),
     name: fitName || `${hull.name} fitting`,
     hull: { ...hull, quantity: 1 },
-    low: itemArray(modules.low ?? modules.lows ?? modules.lowSlots),
-    mid: itemArray(modules.mid ?? modules.mids ?? modules.med ?? modules.medium ?? modules.midSlots),
-    high: itemArray(modules.high ?? modules.highs ?? modules.highSlots),
-    rig: itemArray(modules.rig ?? modules.rigs ?? modules.rigSlots),
-    subsystem: itemArray(modules.subsystem ?? modules.subsystems),
+    low: itemArray(modules.low ?? modules.lows ?? modules.lowSlots ?? modules.low_slots),
+    mid: itemArray(modules.mid ?? modules.mids ?? modules.med ?? modules.medium ?? modules.midSlots ?? modules.mid_slots),
+    high: itemArray(modules.high ?? modules.highs ?? modules.highSlots ?? modules.high_slots),
+    rig: itemArray(modules.rig ?? modules.rigs ?? modules.rigSlots ?? modules.rig_slots),
+    subsystem: itemArray(modules.subsystem ?? modules.subsystems ?? modules.subsystem_slots),
     drones: itemArray(raw.drones ?? raw.droneBay ?? raw.dronebay),
+    fighters: itemArray(raw.fighters ?? raw.fighterBay ?? raw.fighterbay),
     cargo: itemArray(raw.cargo ?? raw.charges ?? raw.ammo),
+    implants: itemArray(raw.implants),
+    boosters: itemArray(raw.boosters ?? raw.drugs),
     instructions: stringArray(raw.instructions ?? raw.notes ?? raw.usage),
     source,
   };
@@ -302,7 +329,10 @@ function parseEftFit(source: string, trimmed: string): Fit {
     rig: rig.map(parseEftItem),
     subsystem: subsystem.map(parseEftItem),
     drones: drones.map(parseEftItem),
+    fighters: [],
     cargo: cargo.map(parseEftItem),
+    implants: [],
+    boosters: [],
     instructions: [],
     source,
   };
@@ -331,8 +361,61 @@ function parseXmlFits(source: string, xml: string): Fit[] {
       groups[target].push(item);
     }
     const description = node.querySelector("description")?.getAttribute("value")?.trim();
-    return { id: randomId(), name: node.getAttribute("name")?.trim() || `${hullName} fitting ${index + 1}`, hull, ...groups, instructions: description ? [description] : [], source };
+    return { id: randomId(), name: node.getAttribute("name")?.trim() || `${hullName} fitting ${index + 1}`, hull, ...groups, fighters: [], implants: [], boosters: [], instructions: description ? [description] : [], source };
   });
+}
+
+function parseDnaFit(source: string, value: string): Fit {
+  const dna = value.trim().replace(/^dna\s*[:=]\s*/i, "");
+  const parts = dna.split(":");
+  const hullId = positiveTypeId(parts.shift());
+  if (!hullId) throw new Error("The DNA fitting does not contain a valid ship type ID.");
+  const cargo: FitItem[] = [];
+  for (const segment of parts) {
+    if (!segment.trim()) continue;
+    const [rawId, rawQuantity] = segment.split(";");
+    const typeId = positiveTypeId(rawId);
+    if (typeId) cargo.push({ name: `Type ${typeId}`, typeId, quantity: positiveInteger(rawQuantity) });
+  }
+  return { id: randomId(), name: `Imported DNA fit ${hullId}`, hull: { name: `Type ${hullId}`, typeId: hullId, quantity: 1 }, low: [], mid: [], high: [], rig: [], subsystem: [], drones: [], fighters: [], cargo, implants: [], boosters: [], instructions: [], source };
+}
+
+function parseSectionedFit(source: string, value: string): Fit {
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let hull = "";
+  let name = "Imported fitting";
+  const groups: Record<SlotGroup | "drones" | "cargo", FitItem[]> = { low: [], mid: [], high: [], rig: [], subsystem: [], drones: [], cargo: [] };
+  let target: keyof typeof groups | null = null;
+  const hasSections = lines.some((candidate) => sectionName(candidate) != null);
+  function sectionName(line: string) {
+    const key = line.replace(/^#+\s*/, "").replace(/^\[|\]$/g, "").replace(/:$/, "").trim().toLowerCase();
+    if (/^(low|low slots?)$/.test(key)) return "low";
+    if (/^(mid|med|middle|mid slots?|med slots?)$/.test(key)) return "mid";
+    if (/^(high|hi|high slots?|hi slots?)$/.test(key)) return "high";
+    if (/^rigs?$/.test(key)) return "rig";
+    if (/^subsystems?$/.test(key)) return "subsystem";
+    if (/^(drones?|fighters?|drone bay|fighter bay)$/.test(key)) return "drones";
+    if (/^(cargo|ammo|charges?|cargo bay)$/.test(key)) return "cargo";
+    return null;
+  }
+  for (const line of lines) {
+    const shipMatch = line.match(/^(?:ship|hull|ship type)\s*[:=]\s*(.+)$/i);
+    if (shipMatch) { hull = shipMatch[1].trim(); continue; }
+    const nameMatch = line.match(/^(?:fit|fit name|fitting|name)\s*[:=]\s*(.+)$/i);
+    if (nameMatch) { name = nameMatch[1].trim(); continue; }
+    const next = sectionName(line);
+    if (next) { target = next; continue; }
+    if (!hull && target == null) { hull = line.replace(/^[-*•]\s*/, ""); continue; }
+    if (target && !/^[-=]{3,}$/.test(line)) groups[target].push(parseEftItem(line.replace(/^[-*•]\s*/, "")));
+    else if (!hasSections && hull && line !== hull && !/^[-=]{3,}$/.test(line)) groups.cargo.push(parseEftItem(line.replace(/^[-*•]\s*/, "")));
+  }
+  if (!hull) throw new Error("Could not identify the ship. Add a [Ship, Fit name] header or a Ship: line.");
+  return { id: randomId(), name, hull: { name: hull, quantity: 1 }, ...groups, fighters: [], implants: [], boosters: [], instructions: [], source };
+}
+
+function payloadStart(value: string) {
+  const markers = [value.search(/^\s*\[[^\r\n]+?,\s*[^\r\n]+?\]\s*$/m), value.search(/^\s*[<{]/m), value.search(/^\s*(?:dna\s*[:=]\s*)?\d+:(?:\d+;\d*:)+/mi), value.search(/^\s*(?:ship|hull|ship type)\s*[:=]/mi)].filter((index) => index >= 0);
+  return markers.length ? value.slice(Math.min(...markers)).trim() : value.trim();
 }
 
 export function parseFit(text: string): Fit {
@@ -356,9 +439,10 @@ export function parseFit(text: string): Fit {
 }
 
 export function parseFits(text: string): Fit[] {
-  const trimmed = cleanCodeFence(text);
+  const trimmed = payloadStart(cleanCodeFence(text));
   if (!trimmed) throw new Error("Paste a fitting before importing.");
   if (trimmed.startsWith("<")) return parseXmlFits(text, trimmed);
+  if (/^(?:dna\s*[:=]\s*)?\d+:(?:\d+;\d*:)+/i.test(trimmed)) return [parseDnaFit(text, trimmed.split(/\s+/)[0])];
   if (/^\[\s*\{/.test(trimmed)) {
     let raw: unknown;
     try { raw = JSON.parse(trimmed); } catch (error) { throw new Error(error instanceof Error ? `Invalid JSON: ${error.message}` : "Invalid JSON fittings."); }
@@ -368,9 +452,19 @@ export function parseFits(text: string): Fit[] {
       return parseJsonFit(text, entry as Record<string, unknown>);
     });
   }
-  if (trimmed.startsWith("{")) return [parseFit(trimmed)];
+  if (trimmed.startsWith("{")) {
+    let raw: any;
+    try { raw = JSON.parse(trimmed); } catch (error) { throw new Error(error instanceof Error ? `Invalid JSON: ${error.message}` : "Invalid JSON fitting."); }
+    const collection = raw?.fits ?? raw?.fittings;
+    if (Array.isArray(collection)) return collection.map((entry: unknown, index: number) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`JSON fitting ${index + 1} is not an object.`);
+      return parseJsonFit(text, entry as Record<string, unknown>);
+    });
+    if (raw?.fit && typeof raw.fit === "object") return [parseJsonFit(text, raw.fit)];
+    return [parseJsonFit(text, raw)];
+  }
   const starts = [...trimmed.matchAll(/^\[[^\r\n]+?,\s*[^\r\n]+?\]\s*$/gm)].map((match) => match.index ?? 0);
-  if (!starts.length) return [parseFit(trimmed)];
+  if (!starts.length) return [parseSectionedFit(text, trimmed)];
   return starts.map((start, index) => parseEftFit(text, trimmed.slice(start, starts[index + 1] ?? trimmed.length).trim()));
 }
 
@@ -388,7 +482,10 @@ export function fitItems(fit: Fit) {
     ...fit.rig,
     ...fit.subsystem,
     ...fit.drones,
+    ...fit.fighters,
     ...fit.cargo,
+    ...fit.implants,
+    ...fit.boosters,
   ];
 }
 

@@ -8,7 +8,7 @@ import { ensureStaticDataArchive, INDUSTRIAL_PREPARED_CACHE, prepareStaticDataFo
 import { loadLatestMarketDatasetByMode } from "./market-storage";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
-const INDUSTRIAL_PREPARED_SCHEMA = 1;
+const INDUSTRIAL_PREPARED_SCHEMA = 2;
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
@@ -33,6 +33,7 @@ type IndustrialIndex = {
   names: Map<number, string>;
   volumes: Map<number, number>;
   productBlueprints: Map<number, BlueprintDefinition[]>;
+  typeMeta: Map<number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null }>;
 };
 
 let cache: Promise<IndustrialIndex> | undefined;
@@ -44,12 +45,13 @@ type SerializedIndustrialIndex = {
   names: Array<[number, string]>;
   volumes: Array<[number, number]>;
   productBlueprints: Array<[number, number[]]>;
+  typeMeta: Array<[number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null }]>;
 };
 
 async function readPreparedIndustrialIndex(): Promise<IndustrialIndex | undefined> {
   try {
     const parsed = JSON.parse((await gunzipAsync(await fs.readFile(INDUSTRIAL_PREPARED_CACHE))).toString("utf8")) as SerializedIndustrialIndex;
-    if (parsed.schema !== INDUSTRIAL_PREPARED_SCHEMA || !Array.isArray(parsed.blueprints) || !Array.isArray(parsed.names) || !Array.isArray(parsed.volumes) || !Array.isArray(parsed.productBlueprints))
+    if (parsed.schema !== INDUSTRIAL_PREPARED_SCHEMA || !Array.isArray(parsed.blueprints) || !Array.isArray(parsed.names) || !Array.isArray(parsed.volumes) || !Array.isArray(parsed.productBlueprints) || !Array.isArray(parsed.typeMeta))
       return undefined;
     const blueprints = new Map(parsed.blueprints.map(([id, value]) => [Number(id), value]));
     return {
@@ -57,6 +59,7 @@ async function readPreparedIndustrialIndex(): Promise<IndustrialIndex | undefine
       names: new Map(parsed.names.map(([id, value]) => [Number(id), String(value)])),
       volumes: new Map(parsed.volumes.map(([id, value]) => [Number(id), Number(value)])),
       productBlueprints: new Map(parsed.productBlueprints.map(([productId, blueprintIds]) => [Number(productId), blueprintIds.map((id) => blueprints.get(Number(id))).filter((value): value is BlueprintDefinition => Boolean(value))])),
+      typeMeta: new Map(parsed.typeMeta.map(([id, value]) => [Number(id), value])),
     };
   } catch {
     return undefined;
@@ -72,6 +75,7 @@ async function savePreparedIndustrialIndex(index: IndustrialIndex) {
     names: [...index.names],
     volumes: [...index.volumes],
     productBlueprints: [...index.productBlueprints].map(([productId, blueprints]) => [productId, blueprints.map((blueprint) => blueprint.blueprintTypeID ?? blueprint._key)]),
+    typeMeta: [...index.typeMeta],
   };
   const partial = `${INDUSTRIAL_PREPARED_CACHE}.${process.pid}.partial`;
   await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(payload), "utf8"), { level: 6 }));
@@ -90,7 +94,8 @@ function index() {
     const zip = new AdmZip(ARCHIVE);
     const blueprintEntry = zip.getEntry("blueprints.jsonl");
     const typesEntry = zip.getEntry("types.jsonl");
-    if (!blueprintEntry || !typesEntry) throw new Error("Official CCP SDE industry data is unavailable.");
+    const groupsEntry = zip.getEntry("groups.jsonl");
+    if (!blueprintEntry || !typesEntry || !groupsEntry) throw new Error("Official CCP SDE industry data is unavailable.");
 
     const blueprints = new Map<number, BlueprintDefinition>();
     for (const line of blueprintEntry.getData().toString("utf8").split(/\r?\n/)) {
@@ -110,13 +115,23 @@ function index() {
 
     const names = new Map<number, string>();
     const volumes = new Map<number, number>();
+    const groups = new Map<number, { categoryId: number; name: string }>();
+    for (const line of groupsEntry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue;
+      const row = JSON.parse(line) as { _key: number; categoryID?: number; name?: { en?: string } };
+      groups.set(row._key, { categoryId: Number(row.categoryID ?? 0), name: row.name?.en ?? `Group ${row._key}` });
+    }
+    const typeMeta = new Map<number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null }>();
     for (const line of typesEntry.getData().toString("utf8").split(/\r?\n/)) {
       if (!line) continue;
-      const row = JSON.parse(line) as { _key: number; name?: { en?: string }; volume?: number };
+      const row = JSON.parse(line) as { _key: number; name?: { en?: string }; volume?: number; groupID?: number; metaGroupID?: number; techLevel?: number };
       if (row.name?.en) names.set(row._key, row.name.en);
       volumes.set(row._key, row.volume ?? 0);
+      const groupId = Number(row.groupID ?? 0);
+      const group = groups.get(groupId);
+      typeMeta.set(row._key, { categoryId: group?.categoryId ?? 0, groupId, groupName: group?.name ?? `Group ${groupId}`, metaGroupId: row.metaGroupID == null ? null : Number(row.metaGroupID), techLevel: row.techLevel == null ? null : Number(row.techLevel) });
     }
-    const value = { blueprints, names, volumes, productBlueprints };
+    const value = { blueprints, names, volumes, productBlueprints, typeMeta };
     await savePreparedIndustrialIndex(value);
     return value;
   }));
@@ -128,21 +143,39 @@ type IndustrialMarketQuote = {
   typeId: number;
   bestSell: number | null;
   bestBuy: number | null;
+  referencePrice: number | null;
+  referencePriceSource?: string;
   sellRegion?: string;
   sellLocation?: string;
   buyRegion?: string;
   buyLocation?: string;
 };
 
+let esiReferencePriceCache: { expiresAt: number; prices: Map<number, { value: number; source: string }> } | null = null;
+
+async function esiReferencePrices() {
+  if (esiReferencePriceCache && esiReferencePriceCache.expiresAt > Date.now()) return esiReferencePriceCache.prices;
+  const response = await fetch("https://esi.evetech.net/markets/prices/", { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`ESI market reference prices returned ${response.status}.`);
+  const prices = new Map<number, { value: number; source: string }>();
+  for (const row of await response.json() as Array<{ type_id: number; average_price?: number; adjusted_price?: number }>) {
+    const average = Number(row.average_price);
+    const adjusted = Number(row.adjusted_price);
+    if (Number.isFinite(average) && average > 0) prices.set(row.type_id, { value: average, source: "ESI average market price" });
+    else if (Number.isFinite(adjusted) && adjusted > 0) prices.set(row.type_id, { value: adjusted, source: "ESI adjusted reference price" });
+  }
+  esiReferencePriceCache = { expiresAt: Date.now() + 15 * 60_000, prices };
+  return prices;
+}
+
 async function marketPrices(typeIds: number[]) {
   const dataset = await loadLatestMarketDatasetByMode("all");
   const wanted = new Set(typeIds);
   const quotes = new Map<number, IndustrialMarketQuote>();
-  if (!dataset) return { createdAt: null as string | null, quotes };
-  for (const region of dataset.summaries as any[]) {
+  for (const region of (dataset?.summaries as any[] | undefined) ?? []) {
     for (const item of region?.items ?? []) {
       if (!wanted.has(item.typeId)) continue;
-      const current: IndustrialMarketQuote = quotes.get(item.typeId) ?? { typeId: Number(item.typeId), bestSell: null, bestBuy: null };
+      const current: IndustrialMarketQuote = quotes.get(item.typeId) ?? { typeId: Number(item.typeId), bestSell: null, bestBuy: null, referencePrice: null };
       if (typeof item.bestSell === "number" && (current.bestSell == null || item.bestSell < current.bestSell)) {
         const order = (item.topSellOrders ?? []).find((entry: any) => entry.price === item.bestSell) ?? item.topSellOrders?.[0];
         current.bestSell = item.bestSell;
@@ -158,7 +191,15 @@ async function marketPrices(typeIds: number[]) {
       quotes.set(item.typeId, current);
     }
   }
-  return { createdAt: dataset.createdAt, quotes };
+  const references = await esiReferencePrices().catch(() => new Map<number, { value: number; source: string }>());
+  for (const typeId of wanted) {
+    const current = quotes.get(typeId) ?? { typeId, bestSell: null, bestBuy: null, referencePrice: null };
+    const reference = references.get(typeId);
+    current.referencePrice = reference?.value ?? null;
+    current.referencePriceSource = reference?.source;
+    quotes.set(typeId, current);
+  }
+  return { createdAt: dataset?.createdAt ?? null, quotes };
 }
 
 function trainedSkillMap(snapshot: any) {
@@ -493,7 +534,7 @@ const INVENTION_DECRYPTORS = [
 ] as const;
 
 export async function analyzeInventionOpportunities(input: { snapshot?: any; decryptorTypeId?: number | null }) {
-  const { blueprints, names } = await index();
+  const { blueprints, names, typeMeta } = await index();
   const trained = trainedSkillMap(input.snapshot);
   const selectedDecryptor = INVENTION_DECRYPTORS.find((item) => item.typeId === Number(input.decryptorTypeId ?? 0)) ?? null;
   const ownedOriginals = new Set<number>(
@@ -530,18 +571,26 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
     }
   }
   const market = await marketPrices([...priceTypeIds]);
+  const purchasePrice = (quote: IndustrialMarketQuote | undefined) => quote?.bestSell ?? quote?.referencePrice ?? null;
+  const outputPrice = (quote: IndustrialMarketQuote | undefined) => quote?.bestBuy ?? quote?.bestSell ?? quote?.referencePrice ?? null;
   const decryptors = INVENTION_DECRYPTORS.map((decryptor) => ({
     ...decryptor,
-    marketCost: market.quotes.get(decryptor.typeId)?.bestSell ?? null,
+    marketCost: purchasePrice(market.quotes.get(decryptor.typeId)),
   }));
-  const selectedDecryptorCost = selectedDecryptor ? market.quotes.get(selectedDecryptor.typeId)?.bestSell ?? null : 0;
+  const selectedDecryptorCost = selectedDecryptor ? purchasePrice(market.quotes.get(selectedDecryptor.typeId)) : 0;
   const priced = candidates.map((candidate) => {
     const sourceBlueprintTypeId = candidate.sourceBlueprint.blueprintTypeID ?? candidate.sourceBlueprint._key;
     const inventedBlueprintTypeId = candidate.inventedBlueprint.blueprintTypeID ?? candidate.inventedBlueprint._key;
+    const sourceProductTypeId = candidate.sourceBlueprint.activities?.manufacturing?.products?.[0]?.typeID ?? null;
+    // Blueprint inventory types frequently have no tech-level metadata. Classify
+    // the source route by the item that source blueprint manufactures instead.
+    const sourceMeta = sourceProductTypeId == null ? undefined : typeMeta.get(sourceProductTypeId);
     const ownsSourceOriginal = ownedOriginals.has(sourceBlueprintTypeId);
     const priceLines = (materials: BlueprintMaterial[]) => materials.map((material) => {
-      const unitPrice = market.quotes.get(material.typeID)?.bestSell ?? null;
-      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity: material.quantity, unitPrice, cost: unitPrice == null ? null : unitPrice * material.quantity };
+      const quote = market.quotes.get(material.typeID);
+      const unitPrice = purchasePrice(quote);
+      const priceBasis = quote?.bestSell != null ? "Public sell order" : quote?.referencePriceSource ?? "No price available";
+      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity: material.quantity, unitPrice, priceBasis, cost: unitPrice == null ? null : unitPrice * material.quantity };
     });
     const inventionMaterials = priceLines(candidate.invention.materials ?? []);
     const skillRequirements = (candidate.invention.skills ?? []).map((skill) => ({
@@ -573,20 +622,37 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
     const timeEfficiency = 4 + Number(selectedDecryptor?.teModifier ?? 0);
     const manufacturingMaterials = (candidate.manufacturing.materials ?? []).map((material) => {
       const quantity = Math.max(1, Math.ceil(material.quantity * outputRuns * (1 - materialEfficiency / 100) - 1e-12));
-      const unitPrice = market.quotes.get(material.typeID)?.bestSell ?? null;
-      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity, unitPrice, cost: unitPrice == null ? null : unitPrice * quantity };
+      const quote = market.quotes.get(material.typeID);
+      const unitPrice = purchasePrice(quote);
+      const priceBasis = quote?.bestSell != null ? "Public sell order" : quote?.referencePriceSource ?? "No price available";
+      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity, unitPrice, priceBasis, cost: unitPrice == null ? null : unitPrice * quantity };
     });
     const manufacturingMaterialsPerRun = (candidate.manufacturing.materials ?? []).map((material) => {
       const quantity = Math.max(1, Math.ceil(material.quantity * (1 - materialEfficiency / 100) - 1e-12));
-      const unitPrice = market.quotes.get(material.typeID)?.bestSell ?? null;
-      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity, unitPrice, cost: unitPrice == null ? null : unitPrice * quantity };
+      const quote = market.quotes.get(material.typeID);
+      const unitPrice = purchasePrice(quote);
+      const priceBasis = quote?.bestSell != null ? "Public sell order" : quote?.referencePriceSource ?? "No price available";
+      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity, unitPrice, priceBasis, cost: unitPrice == null ? null : unitPrice * quantity };
     });
     const inventionMaterialCost = inventionMaterials.every((line) => line.cost != null) ? inventionMaterials.reduce((sum, line) => sum + Number(line.cost), 0) : null;
     const manufacturingCost = manufacturingMaterials.every((line) => line.cost != null) ? manufacturingMaterials.reduce((sum, line) => sum + Number(line.cost), 0) : null;
-    const sourceBlueprintMarketCost = ownsSourceOriginal ? 0 : market.quotes.get(sourceBlueprintTypeId)?.bestSell ?? null;
+    // BPCs are normally traded by contract and have no dependable public ESI
+    // quote. Do not poison the whole calculation or charge a full BPO per run.
+    const sourceBlueprintMarketCost = 0;
     const outputQuantity = Math.max(1, candidate.finalProduct.quantity || 1) * outputRuns;
     const productQuote = market.quotes.get(candidate.finalProduct.typeID);
-    const immediateSaleRevenue = productQuote?.bestBuy == null ? null : productQuote.bestBuy * outputQuantity;
+    const productMeta = typeMeta.get(candidate.finalProduct.typeID);
+    const productCategory = productMeta?.categoryId === 6 ? "ship"
+      : productMeta?.categoryId === 18 ? "drone"
+      : productMeta?.categoryId === 87 ? "fighter"
+      : productMeta?.categoryId === 8 ? "charge"
+      : productMeta?.categoryId === 32 ? "subsystem"
+      : productMeta?.categoryId === 7 && /rig/i.test(productMeta.groupName) ? "rig"
+      : productMeta?.categoryId === 7 ? "module"
+      : "other";
+    const revenueUnitPrice = outputPrice(productQuote);
+    const revenueBasis = productQuote?.bestBuy != null ? "Immediate public buy order" : productQuote?.bestSell != null ? "Lowest retained public sell-order valuation" : productQuote?.referencePriceSource ?? "No market or reference price";
+    const immediateSaleRevenue = revenueUnitPrice == null ? null : revenueUnitPrice * outputQuantity;
     const attemptCost = inventionMaterialCost == null || sourceBlueprintMarketCost == null || selectedDecryptorCost == null ? null : inventionMaterialCost + sourceBlueprintMarketCost + selectedDecryptorCost;
     const successCost = attemptCost == null || manufacturingCost == null ? null : attemptCost + manufacturingCost;
     const successfulCopyProfit = successCost == null || immediateSaleRevenue == null ? null : immediateSaleRevenue - successCost;
@@ -599,13 +665,22 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
     return {
       sourceBlueprintTypeId,
       sourceBlueprintName: names.get(sourceBlueprintTypeId) ?? `Blueprint ${sourceBlueprintTypeId}`,
+      sourceProductTypeId,
+      sourceProductName: sourceProductTypeId == null ? null : names.get(sourceProductTypeId) ?? `Type ${sourceProductTypeId}`,
+      sourceTechLevel: sourceMeta?.techLevel ?? null,
+      sourceMetaGroupId: sourceMeta?.metaGroupId ?? null,
       inventedBlueprintTypeId,
       inventedBlueprintName: names.get(inventedBlueprintTypeId) ?? `Blueprint ${inventedBlueprintTypeId}`,
       productTypeId: candidate.finalProduct.typeID,
       productName: names.get(candidate.finalProduct.typeID) ?? `Type ${candidate.finalProduct.typeID}`,
+      productCategory,
+      productCategoryId: productMeta?.categoryId ?? 0,
+      productGroupName: productMeta?.groupName ?? "Unknown",
+      productMetaGroupId: productMeta?.metaGroupId ?? null,
+      productTechLevel: productMeta?.techLevel ?? null,
       outputQuantity,
       ownsSourceOriginal,
-      sourceCopyCostBasis: ownsSourceOriginal ? "Owned BPO: source-copy acquisition treated as free" : sourceBlueprintMarketCost == null ? "No retained public market quote for source blueprint" : "Lowest retained public sell order for source blueprint",
+      sourceCopyCostBasis: ownsSourceOriginal ? "Owned BPO: source copy treated as free" : "BPC contract price unavailable: source-copy baseline set to zero; copying/facility fees excluded",
       sourceBlueprintMarketCost,
       baseProbability,
       probability,
@@ -628,6 +703,7 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
       manufacturingCost,
       manufacturingCostPerRun,
       immediateSaleRevenue,
+      revenueBasis,
       revenuePerRun,
       successfulCopyProfit,
       successfulRunProfit,
@@ -637,7 +713,7 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
   });
   priced.sort((a, b) => (b.expectedProfitPerAttempt ?? Number.NEGATIVE_INFINITY) - (a.expectedProfitPerAttempt ?? Number.NEGATIVE_INFINITY));
   return {
-    schema: 4,
+    schema: 9,
     generatedAt: new Date().toISOString(),
     marketCreatedAt: market.createdAt,
     candidateCount: priced.length,
@@ -649,6 +725,7 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
       "Invented blueprint copies are primarily traded through contracts, not the public regional order book; Sage values the manufacturable output instead of inventing a BPC market price.",
       "Character probability uses the relevant encryption-method skill and two science skills. The selected decryptor changes probability, output runs, ME, TE and attempt cost.",
       "Figures use current retained public orders and do not yet include facility, tax or job-installation modifiers.",
+      "Where no retained public order exists, Sage falls back to CCP ESI average market price, then adjusted reference price, so sparse categories remain comparable.",
     ],
   };
 }

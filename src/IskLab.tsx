@@ -23,7 +23,18 @@ function numberOrNull(value: string) {
 
 type LabTab = "market" | "opportunities" | "invention" | "pve";
 type InventionSort = "route" | "chance" | "attempt" | "build" | "success" | "expected";
+type InventionCategory = "all" | "t1" | "ship" | "module" | "rig" | "drone" | "charge" | "subsystem" | "other";
 type CloneState = "alpha" | "omega";
+
+function matchesInventionCategory(item: any, category: InventionCategory) {
+  if (category === "all") return true;
+  // “T1” describes the source blueprint route, not the invented output (which is
+  // normally T2). It is deliberately independent of whether the character owns it.
+  if (category === "t1") return item.sourceTechLevel === 1 || item.sourceMetaGroupId === 1;
+  if (category === "drone") return item.productCategory === "drone" || item.productCategory === "fighter";
+  if (category === "other") return !["ship", "module", "rig", "drone", "fighter", "charge", "subsystem"].includes(String(item.productCategory));
+  return item.productCategory === category;
+}
 
 export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; marketDataRevision?: number }) {
   const [tab, setTab] = useState<LabTab>("market");
@@ -36,6 +47,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
   const [inventionSort, setInventionSort] = useState<InventionSort>("expected");
   const [inventionSortDirection, setInventionSortDirection] = useState<"asc" | "desc">("desc");
   const [inventionDecryptor, setInventionDecryptor] = useState("");
+  const [inventionCategory, setInventionCategory] = useState<InventionCategory>("all");
   const [marketBusy, setMarketBusy] = useState(false);
   const [pveBusy, setPveBusy] = useState(false);
   const [marketProgress, setMarketProgress] = useState<AnalysisProgress | null>(null);
@@ -153,7 +165,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
   }
 
   useEffect(() => {
-    if (tab === "invention" && snapshot && inventionAnalysis?.schema !== 4 && !inventionBusy) void scanInvention();
+    if (tab === "invention" && snapshot && inventionAnalysis?.schema !== 9 && !inventionBusy) void scanInvention();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, inventionAnalysis?.schema]);
 
@@ -211,6 +223,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
     : item.expectedProfitPerAttempt;
   const visibleInventionOpportunities = (inventionAnalysis?.opportunities ?? [])
     .filter((item: any) => `${item.sourceBlueprintName} ${item.inventedBlueprintName} ${item.productName}`.toLowerCase().includes(inventionFilter.toLowerCase()))
+    .filter((item: any) => matchesInventionCategory(item, inventionCategory))
     .sort((a: any, b: any) => {
       const left = inventionSortValue(a);
       const right = inventionSortValue(b);
@@ -321,13 +334,10 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
             <button className="isk-rescan" onClick={() => void scanInvention()} disabled={inventionBusy}>{inventionBusy ? "Refreshing…" : "Refresh invention prices"}</button>
           </div>
           <input className="invention-filter" value={inventionFilter} onChange={(event) => setInventionFilter(event.target.value)} placeholder="Filter blueprint or final product…" />
-          <label className="invention-decryptor">
-            <span>Decryptor</span>
-            <select value={inventionDecryptor} onChange={(event) => { const value = event.target.value; setInventionDecryptor(value); void scanInvention(value); }}>
-              <option value="">No decryptor</option>
-              {(inventionAnalysis.decryptors ?? []).map((decryptor: any) => <option value={decryptor.typeId} key={decryptor.typeId}>{decryptor.name} · ×{decryptor.probabilityMultiplier.toFixed(1)} chance · {decryptor.runModifier >= 0 ? "+" : ""}{decryptor.runModifier} runs · {decryptor.marketCost == null ? "unpriced" : `${money(decryptor.marketCost)} ISK`}</option>)}
-            </select>
-          </label>
+          <div className="invention-selectors">
+            <label className="invention-decryptor"><span>Decryptor</span><select value={inventionDecryptor} onChange={(event) => { const value = event.target.value; setInventionDecryptor(value); void scanInvention(value); }}><option value="">No decryptor</option>{(inventionAnalysis.decryptors ?? []).map((decryptor: any) => <option value={decryptor.typeId} key={decryptor.typeId}>{decryptor.name} · ×{decryptor.probabilityMultiplier.toFixed(1)} chance · {decryptor.runModifier >= 0 ? "+" : ""}{decryptor.runModifier} runs · {decryptor.marketCost == null ? "unpriced" : `${money(decryptor.marketCost)} ISK`}</option>)}</select></label>
+            <label className="invention-decryptor"><span>Category</span><select value={inventionCategory} onChange={(event) => setInventionCategory(event.target.value as InventionCategory)}><option value="all">All invention routes</option><option value="t1">T1 source blueprints only</option><option value="ship">Ships only</option><option value="module">Modules only</option><option value="rig">Rigs only</option><option value="drone">Drones & fighters only</option><option value="charge">Ammo & charges only</option><option value="subsystem">Subsystems only</option><option value="other">Other outputs only</option></select></label>
+          </div>
           <div className="invention-table">
             <div className="invention-row heading">
               {([
@@ -352,13 +362,14 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
                   <span className={item.expectedProfitPerAttempt >= 0 ? "positive" : "negative"}>{item.expectedProfitPerAttempt == null ? "Unpriced" : `${money(item.expectedProfitPerAttempt)} ISK`}</span>
                 </summary>
                 <div className="invention-detail">
-                  <div><strong>Invention materials</strong>{item.inventionMaterials.map((line: any) => <small key={line.typeId}>{line.quantity}× {line.name} · {line.cost == null ? "no quote" : `${money(line.cost)} ISK`}</small>)}</div>
-                  <div><strong>Blueprint basis</strong><small>{item.sourceCopyCostBasis}</small><small>Successful BPC: {item.outputRuns} runs · ME {item.materialEfficiency} · TE {item.timeEfficiency}</small><small>Full BPC build cost: {item.manufacturingCost == null ? "unpriced" : `${money(item.manufacturingCost)} ISK`}</small><small>Full BPC immediate-sale revenue: {item.immediateSaleRevenue == null ? "unpriced" : `${money(item.immediateSaleRevenue)} ISK`}</small><small>Full successful-BPC profit: {item.successfulCopyProfit == null ? "unpriced" : `${money(item.successfulCopyProfit)} ISK`}</small></div>
-                  <div className="invention-skill-impact"><strong>Character invention chance</strong><small>Current adjusted chance: {item.probability == null ? "—" : `${(item.probability * 100).toFixed(2)}%`}</small><small>All relevant skills at V: {item.maxSkillsProbability == null ? "—" : `${(item.maxSkillsProbability * 100).toFixed(2)}%`}</small><small>Available through training: {item.trainingProbabilityGain == null ? "—" : `+${(item.trainingProbabilityGain * 100).toFixed(2)} percentage points`}</small>{item.skillImpacts.map((skill: any) => <div key={skill.typeId}><b>{skill.name} {skill.trainedLevel}/5</b><span>{skill.role} · currently +{(skill.currentRelativeBoost * 100).toFixed(2)}% to multiplier · another +{(skill.remainingRelativeBoost * 100).toFixed(2)}% available</span></div>)}</div>
-                  <div className="invention-one-run-materials"><strong>Build materials · 1 run</strong><small>Exact quantities at ME {item.materialEfficiency}; not multiplied by the BPC&apos;s {item.outputRuns} runs.</small>{item.manufacturingMaterialsPerRun.map((line: any) => <small key={line.typeId}>{line.quantity}× {line.name} · {line.cost == null ? "no quote" : `${money(line.cost)} ISK`}</small>)}</div>
+                  <div><strong>Invention materials</strong>{item.inventionMaterials.map((line: any, index: number) => <small key={`${line.typeId}:${index}`}>{line.quantity}× {line.name} · {line.cost == null ? "no quote" : `${money(line.cost)} ISK`} · {line.priceBasis}</small>)}</div>
+                  <div><strong>Blueprint basis</strong><small>{item.sourceCopyCostBasis}</small><small>Successful BPC: {item.outputRuns} runs · ME {item.materialEfficiency} · TE {item.timeEfficiency}</small><small>Full BPC build cost: {item.manufacturingCost == null ? "unpriced" : `${money(item.manufacturingCost)} ISK`}</small><small>Output valuation: {item.immediateSaleRevenue == null ? "unpriced" : `${money(item.immediateSaleRevenue)} ISK`} · {item.revenueBasis}</small><small>Full successful-BPC profit: {item.successfulCopyProfit == null ? "unpriced" : `${money(item.successfulCopyProfit)} ISK`}</small></div>
+                  <div className="invention-skill-impact"><strong>Character invention chance</strong><small>Current adjusted chance: {item.probability == null ? "—" : `${(item.probability * 100).toFixed(2)}%`}</small><small>All relevant skills at V: {item.maxSkillsProbability == null ? "—" : `${(item.maxSkillsProbability * 100).toFixed(2)}%`}</small><small>Available through training: {item.trainingProbabilityGain == null ? "—" : `+${(item.trainingProbabilityGain * 100).toFixed(2)} percentage points`}</small>{item.skillImpacts.map((skill: any, index: number) => <div key={`${skill.typeId}:${skill.role}:${index}`}><b>{skill.name} {skill.trainedLevel}/5</b><span>{skill.role} · currently +{(skill.currentRelativeBoost * 100).toFixed(2)}% to multiplier · another +{(skill.remainingRelativeBoost * 100).toFixed(2)}% available</span></div>)}</div>
+                  <div className="invention-one-run-materials"><strong>Build materials · 1 run</strong><small>Exact quantities at ME {item.materialEfficiency}; not multiplied by the BPC&apos;s {item.outputRuns} runs.</small>{item.manufacturingMaterialsPerRun.map((line: any, index: number) => <small key={`${line.typeId}:${index}`}>{line.quantity}× {line.name} · {line.cost == null ? "no quote" : `${money(line.cost)} ISK`} · {line.priceBasis}</small>)}</div>
                 </div>
               </details>
             ))}
+            {!visibleInventionOpportunities.length && <div className="invention-empty">No invention routes match this category and text filter.</div>}
           </div>
         </section>
       )}

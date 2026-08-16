@@ -340,7 +340,7 @@ app.whenReady().then(() => {
     async (_event, input: { characterId: string; marketDataRevision?: number; decryptorTypeId?: number | null }) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { schema: 4, characterId: input.characterId, snapshot: snapshot.updatedAt, marketDataRevision: Number(input.marketDataRevision ?? 0), decryptorTypeId: Number(input.decryptorTypeId ?? 0) };
+      const key = { schema: 9, characterId: input.characterId, snapshot: snapshot.updatedAt, marketDataRevision: Number(input.marketDataRevision ?? 0), decryptorTypeId: Number(input.decryptorTypeId ?? 0) };
       const saved = await loadPersistedResult("industry-invention-opportunities", key);
       if (saved) return saved;
       const result = await analyzeInventionOpportunities({ snapshot, decryptorTypeId: input.decryptorTypeId });
