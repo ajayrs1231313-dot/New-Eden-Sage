@@ -12,6 +12,7 @@ import { CommandIntelligence } from "./CommandIntelligence";
 import { SkillsWorkspace } from "./SkillsWorkspace";
 import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
 import { IndustrialCommand } from "./IndustrialCommand";
+import { Loot } from "./Loot";
 
 type View =
   | "overview"
@@ -24,9 +25,11 @@ type View =
   | "corporation"
   | "alliance"
   | "fittings"
+  | "loot"
   | "data"
   | "settings";
 type CloneState = "alpha" | "omega";
+type SyncProgress = { running: boolean; message: string; percent: number; completed?: number; total?: number };
 
 const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "overview", label: "Command", mark: "\u2726" },
@@ -35,6 +38,7 @@ const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "isk", label: "ISK Lab", mark: "\u25C8" },
   { id: "market", label: "Market", mark: "\u25C6" },
   { id: "fittings", label: "Fittings", mark: "\u2318" },
+  { id: "loot", label: "Loot", mark: "⌖" },
   { id: "industrial", label: "Industrial Command", mark: "\u2692" },
   { id: "corporation", label: "Corporation Management", mark: "\u25C9" },
   { id: "alliance", label: "Alliance Management", mark: "\u2727" },
@@ -48,6 +52,7 @@ const money = (value: number) =>
 const RetainedSkillsWorkspace = memo(SkillsWorkspace);
 const RetainedIskLab = memo(IskLab);
 const RetainedFittingsWorkspace = memo(FittingsWorkspace, () => true);
+const RetainedLoot = memo(Loot, () => true);
 const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
 
 export default function App() {
@@ -62,6 +67,8 @@ export default function App() {
   const [activeId, setActiveId] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("Local systems ready");
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const [initialSetupComplete, setInitialSetupComplete] = useState(true);
   const [cloneStates, setCloneStates] = useState<Record<string, CloneState>>(
     () => {
       try {
@@ -79,6 +86,7 @@ export default function App() {
         setConfig(nextConfig);
         setSnapshots(nextSnapshots);
         setActiveId(nextSnapshots[0]?.characterId ?? "");
+        setInitialSetupComplete(nextSnapshots.length > 0);
       },
     );
   }, []);
@@ -121,18 +129,15 @@ export default function App() {
     }
   }
 
-  async function refreshActive() {
-    if (!active) return;
+  async function syncAll() {
+    setInitialSetupComplete(true);
     setBusy(true);
-    setMessage(`Syncing ${active.character.name}…`);
+    setMessage("Syncing all live Sage data…");
     try {
-      const snapshot = await window.sage.refreshCharacter(active.characterId);
-      setSnapshots((current) =>
-        current.map((item) =>
-          item.characterId === snapshot.characterId ? snapshot : item,
-        ),
-      );
-      setMessage(`${snapshot.character.name} synced`);
+      await window.sage.runMasterUpdate();
+      setSnapshots(await window.sage.listSnapshots());
+      setMarketDataRevision((value) => value + 1);
+      setMessage("All live Sage data synced. Fittings and Industry are preparing quietly.");
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Character sync failed",
@@ -141,6 +146,18 @@ export default function App() {
       setBusy(false);
     }
   }
+
+  useEffect(() => window.sage.onMasterUpdateProgress((progress) => {
+    setSyncProgress(progress);
+    if (progress.running) {
+      setBusy(true);
+      setMessage(progress.message);
+    } else {
+      setBusy(false);
+      void window.sage.listSnapshots().then(setSnapshots);
+      setMarketDataRevision((value) => value + 1);
+    }
+  }), []);
 
   async function removeCharacter(characterId: string) {
     const remaining = await window.sage.removeCharacter(characterId);
@@ -179,6 +196,18 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {(!initialSetupComplete || syncProgress?.running) && (
+        <div className="sync-overlay" role="status" aria-live="polite">
+          <div className="sync-dialog">
+            <span className="pulse" />
+            <p className="eyebrow">SETTING UP NEW EDEN SAGE</p>
+            <h2>{syncProgress?.running ? "Syncing your live intelligence" : "Add your EVE characters"}</h2>
+            <p>{syncProgress?.running ? syncProgress.message : "Add every character you want Sage to track, then begin one complete sync."}</p>
+            {syncProgress?.running ? <div className="sync-progress-track"><i style={{ width: `${Math.max(2, syncProgress.percent)}%` }} /></div> : <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void syncAll()} disabled={!snapshots.length}>Begin Sync{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>}
+            <small>{syncProgress?.running ? "Fittings and Industry will finish quietly after this first sync." : snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character’s data separate and refreshes them together."}</small>
+          </div>
+        </div>
+      )}
       <aside>
         <div className="brand">
           <span className="brand-glyph">{"\u2726"}</span>
@@ -292,11 +321,9 @@ export default function App() {
             >
               Support Developer
             </button>
-            {active && (
-              <button className="sync" onClick={refreshActive} disabled={busy}>
-                ↻ Sync {active.character.name}
-              </button>
-            )}
+            <button className="sync" onClick={() => void syncAll()} disabled={busy}>
+              ↻ {busy ? "Syncing all…" : "Sync All"}
+            </button>
             <button
               className="connect"
               onClick={connect}
@@ -371,6 +398,11 @@ export default function App() {
         {mountedViews.current.has("fittings") && (
           <div className="cached-view" hidden={view !== "fittings"}>
             <RetainedFittingsWorkspace onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setView("skills"); }} />
+          </div>
+        )}
+        {mountedViews.current.has("loot") && (
+          <div className="cached-view" hidden={view !== "loot"}>
+            <RetainedLoot />
           </div>
         )}
         {mountedViews.current.has("industrial") && (
@@ -1166,42 +1198,6 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
       setBusy(false);
     }
   }
-  async function refreshEverything() {
-    if (!snapshot) {
-      setProgress("Connect and sync a character before refreshing everything.");
-      return;
-    }
-    marketProgressLocked.current = false;
-    setBusy(true);
-    setSelectedItem(null);
-    try {
-      setProgress("Step 1 of 3: syncing character location and information...");
-      await window.sage.refreshCharacter(snapshot.characterId);
-      setProgress("Step 2 of 3: pulling the 20-jump character market...");
-      await window.sage.pullMarket({
-        mode: "radius",
-        characterId: snapshot.characterId,
-        includeLowSec,
-      });
-      setProgress("Step 3 of 3: pulling every public regional market order...");
-      const stations = await window.sage.pullMarket({ mode: "all" });
-      setSummaries(stations.summaries);
-      onMarketDataUpdated();
-      const storageInfo = await window.sage.getMarketStorage();
-      setStorage(storageInfo);
-      await showRegion(selected);
-      marketProgressLocked.current = true;
-      setProgress("Market refresh successful.");
-    } catch (error) {
-      setProgress(
-        error instanceof Error
-          ? error.message
-          : "Complete market refresh failed.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
   const summary =
     summaries.find((item) => item.regionId === activeRegion) ??
     summaries.find((item) => item.regionId === selected);
@@ -1296,13 +1292,6 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
             />
             Include low-sec
           </label>
-          <button
-            className="all-regions refresh-everything"
-            onClick={refreshEverything}
-            disabled={busy || !snapshot}
-          >
-            {busy ? "Refreshing everything..." : "Refresh everything"}
-          </button>
         </div>
       </div>
       <div className="market-progress">

@@ -4,6 +4,7 @@ import { MarketOpportunityScanner } from "./MarketOpportunityScanner";
 import { OpportunityExplorer } from "./OpportunityExplorer";
 import { PveLocationIntel } from "./PveLocationIntel";
 import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
+import "./invention-lab.css";
 
 const money = (value: number) =>
   new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
@@ -20,13 +21,21 @@ function numberOrNull(value: string) {
   return value.trim() && Number.isFinite(parsed) ? parsed : null;
 }
 
-type LabTab = "market" | "opportunities" | "pve";
+type LabTab = "market" | "opportunities" | "invention" | "pve";
+type InventionSort = "route" | "chance" | "attempt" | "build" | "success" | "expected";
 type CloneState = "alpha" | "omega";
 
 export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; marketDataRevision?: number }) {
   const [tab, setTab] = useState<LabTab>("market");
   const [analysis, setAnalysis] = useState<OpportunityAnalysis | null>(null);
   const [pveAnalysis, setPveAnalysis] = useState<PveLocationAnalysis | null>(null);
+  const [inventionAnalysis, setInventionAnalysis] = useState<any>(null);
+  const [inventionBusy, setInventionBusy] = useState(false);
+  const [inventionStatus, setInventionStatus] = useState("Open Invention to rank every inventable blueprint against the retained market.");
+  const [inventionFilter, setInventionFilter] = useState("");
+  const [inventionSort, setInventionSort] = useState<InventionSort>("expected");
+  const [inventionSortDirection, setInventionSortDirection] = useState<"asc" | "desc">("desc");
+  const [inventionDecryptor, setInventionDecryptor] = useState("");
   const [marketBusy, setMarketBusy] = useState(false);
   const [pveBusy, setPveBusy] = useState(false);
   const [marketProgress, setMarketProgress] = useState<AnalysisProgress | null>(null);
@@ -45,6 +54,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
     setCargo("");
     setAnalysis(null);
     setPveAnalysis(null);
+    setInventionAnalysis(null);
   }, [snapshot?.characterId]);
 
   useEffect(() => window.sage.onAnalysisProgress((progress) => {
@@ -124,9 +134,28 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
     }
   }
 
-  async function scanAll() {
-    await Promise.allSettled([scanMarket(), scanPve(false)]);
+  async function scanInvention(decryptorValue = inventionDecryptor) {
+    if (!snapshot) {
+      setInventionStatus("Connect and sync a character so Sage can identify owned source BPOs.");
+      return;
+    }
+    setInventionBusy(true);
+    setInventionStatus("Pricing the complete cached invention graph against retained market orders…");
+    try {
+      const value = await (window.sage as any).getInventionOpportunities({ characterId: snapshot.characterId, marketDataRevision, decryptorTypeId: decryptorValue ? Number(decryptorValue) : null });
+      setInventionAnalysis(value);
+      setInventionStatus(`${value.candidateCount.toLocaleString()} invention outcomes ranked · ${value.ownedSourceCount.toLocaleString()} use an owned source BPO.`);
+    } catch (error) {
+      setInventionStatus(error instanceof Error ? error.message : "Invention analysis failed.");
+    } finally {
+      setInventionBusy(false);
+    }
   }
+
+  useEffect(() => {
+    if (tab === "invention" && snapshot && inventionAnalysis?.schema !== 4 && !inventionBusy) void scanInvention();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, inventionAnalysis?.schema]);
 
   useEffect(() => {
     void scanMarket();
@@ -136,7 +165,6 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
 
   function openPveTab() {
     setTab("pve");
-    if (snapshot && !pveAnalysis && !pveBusy) void scanPve(false);
   }
 
   async function cancelCurrentAnalysis() {
@@ -166,8 +194,32 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
     }
   }
 
-  const busy = marketBusy || pveBusy;
-  const status = tab === "pve" ? pveStatus : marketStatus;
+  const busy = marketBusy || pveBusy || inventionBusy;
+  const status = tab === "pve" ? pveStatus : tab === "invention" ? inventionStatus : marketStatus;
+  const changeInventionSort = (next: InventionSort) => {
+    if (next === inventionSort) setInventionSortDirection((direction) => direction === "asc" ? "desc" : "asc");
+    else {
+      setInventionSort(next);
+      setInventionSortDirection(next === "route" ? "asc" : "desc");
+    }
+  };
+  const inventionSortValue = (item: any) => inventionSort === "route" ? String(item.inventedBlueprintName ?? "").toLowerCase()
+    : inventionSort === "chance" ? item.probability
+    : inventionSort === "attempt" ? item.attemptCost
+    : inventionSort === "build" ? item.manufacturingCostPerRun
+    : inventionSort === "success" ? item.successfulRunProfit
+    : item.expectedProfitPerAttempt;
+  const visibleInventionOpportunities = (inventionAnalysis?.opportunities ?? [])
+    .filter((item: any) => `${item.sourceBlueprintName} ${item.inventedBlueprintName} ${item.productName}`.toLowerCase().includes(inventionFilter.toLowerCase()))
+    .sort((a: any, b: any) => {
+      const left = inventionSortValue(a);
+      const right = inventionSortValue(b);
+      if (left == null && right == null) return 0;
+      if (left == null) return 1;
+      if (right == null) return -1;
+      const comparison = typeof left === "string" ? left.localeCompare(String(right)) : Number(left) - Number(right);
+      return inventionSortDirection === "asc" ? comparison : -comparison;
+    });
 
   return (
     <section className="isk-lab isk-lab-v2">
@@ -222,9 +274,9 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
           </label>
         </div>
         <div className="isk-analysis-actions">
-          <button className="isk-rescan" onClick={scanAll}>{busy ? "Restart with these limits" : "Apply limits and analyze"}</button>
+          <button className="isk-rescan" onClick={() => void scanMarket()}>{marketBusy ? "Restart Market Scanner" : "Apply market limits"}</button>
           {busy && <button className="isk-cancel-analysis" onClick={cancelCurrentAnalysis}>Cancel</button>}
-          {tab === "pve" && snapshot && <button className="isk-refresh-intel" onClick={() => void scanPve(true)} disabled={pveBusy}>Refresh live PvE intel</button>}
+          {tab === "pve" && snapshot && <button className="isk-refresh-intel" onClick={() => void scanPve(true)} disabled={pveBusy}>{pveBusy ? "Loading PvE intel…" : "Load PvE intelligence"}</button>}
         </div>
       </section>
 
@@ -249,6 +301,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       <div className="isk-lab-tabs" role="tablist" aria-label="ISK Lab sections">
         <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>Market Scanner</button>
         <button className={tab === "opportunities" ? "active" : ""} onClick={() => setTab("opportunities")}>Opportunities</button>
+        <button className={tab === "invention" ? "active" : ""} onClick={() => setTab("invention")}>Invention</button>
         <button className={tab === "pve" ? "active" : ""} onClick={openPveTab}>PvE & Locations</button>
       </div>
 
@@ -258,6 +311,57 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
 
       {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} />}
       {tab === "opportunities" && !analysis && <div className="market-no-results">Market opportunities need a full public market snapshot. PvE/location intelligence remains available in its own tab.</div>}
+
+      {tab === "invention" && !snapshot && <div className="market-no-results">Connect and sync a character to include owned blueprint originals.</div>}
+      {tab === "invention" && snapshot && inventionBusy && !inventionAnalysis && <div className="planner-analysis-state">Building and pricing the complete invention catalogue…</div>}
+      {tab === "invention" && inventionAnalysis && (
+        <section className="invention-lab">
+          <div className="invention-head">
+            <div><p className="eyebrow">INVENTION PROFIT LAB</p><h3>Every inventable blueprint, priced as a successful build</h3><p>{inventionAnalysis.notes.join(" ")}</p></div>
+            <button className="isk-rescan" onClick={() => void scanInvention()} disabled={inventionBusy}>{inventionBusy ? "Refreshing…" : "Refresh invention prices"}</button>
+          </div>
+          <input className="invention-filter" value={inventionFilter} onChange={(event) => setInventionFilter(event.target.value)} placeholder="Filter blueprint or final product…" />
+          <label className="invention-decryptor">
+            <span>Decryptor</span>
+            <select value={inventionDecryptor} onChange={(event) => { const value = event.target.value; setInventionDecryptor(value); void scanInvention(value); }}>
+              <option value="">No decryptor</option>
+              {(inventionAnalysis.decryptors ?? []).map((decryptor: any) => <option value={decryptor.typeId} key={decryptor.typeId}>{decryptor.name} · ×{decryptor.probabilityMultiplier.toFixed(1)} chance · {decryptor.runModifier >= 0 ? "+" : ""}{decryptor.runModifier} runs · {decryptor.marketCost == null ? "unpriced" : `${money(decryptor.marketCost)} ISK`}</option>)}
+            </select>
+          </label>
+          <div className="invention-table">
+            <div className="invention-row heading">
+              {([
+                ['route', 'Invention route', 'The source BPC or ancient relic, the resulting advanced blueprint copy, and the item that copy manufactures.'],
+                ['chance', 'Chance', 'Your success probability for one invention attempt: CCP base chance, relevant encryption and science skills, then the selected decryptor multiplier.'],
+                ['attempt', 'Invention attempt', 'ISK consumed by one attempt: invention materials, selected decryptor and source blueprint/copy acquisition basis. Failed attempts still consume these inputs.'],
+                ['build', 'Build / run', 'Market cost of the exact materials required to manufacture one run from the successful BPC at its resulting ME.'],
+                ['success', 'Profit / run', 'Immediate-sale revenue for one manufactured item minus its one-run materials and one successful attempt cost spread across the BPC runs.'],
+                ['expected', 'Expected / invention', 'Long-run expected profit for one invention attempt: success chance × the full BPC manufacturing margin, minus the attempt cost. This is not guaranteed profit.'],
+              ] as Array<[InventionSort, string, string]>).map(([key, label, tooltip]) => (
+                <button type="button" className={inventionSort === key ? "active" : ""} data-tooltip={tooltip} aria-label={`${label}. ${tooltip}`} onClick={() => changeInventionSort(key)} key={key}>{label}<i>{inventionSort === key ? inventionSortDirection === "asc" ? "▲" : "▼" : "↕"}</i></button>
+              ))}
+            </div>
+            {visibleInventionOpportunities.map((item: any) => (
+              <details className="invention-result" key={`${item.sourceBlueprintTypeId}:${item.inventedBlueprintTypeId}`}>
+                <summary className="invention-row">
+                  <span><strong>{item.inventedBlueprintName}</strong><small>{item.sourceBlueprintName} → {item.productName}</small>{item.ownsSourceOriginal && <em>OWNED BPO · COPY FREE</em>}</span>
+                  <span><strong>{item.probability == null ? "—" : `${(item.probability * 100).toFixed(1)}%`}</strong><small>Base {item.baseProbability == null ? "—" : `${(item.baseProbability * 100).toFixed(1)}%`}</small></span>
+                  <span>{item.attemptCost == null ? "Unpriced" : `${money(item.attemptCost)} ISK`}</span>
+                  <span>{item.manufacturingCostPerRun == null ? "Unpriced" : `${money(item.manufacturingCostPerRun)} ISK`}</span>
+                  <span className={item.successfulRunProfit >= 0 ? "positive" : "negative"}>{item.successfulRunProfit == null ? "Unpriced" : `${money(item.successfulRunProfit)} ISK`}</span>
+                  <span className={item.expectedProfitPerAttempt >= 0 ? "positive" : "negative"}>{item.expectedProfitPerAttempt == null ? "Unpriced" : `${money(item.expectedProfitPerAttempt)} ISK`}</span>
+                </summary>
+                <div className="invention-detail">
+                  <div><strong>Invention materials</strong>{item.inventionMaterials.map((line: any) => <small key={line.typeId}>{line.quantity}× {line.name} · {line.cost == null ? "no quote" : `${money(line.cost)} ISK`}</small>)}</div>
+                  <div><strong>Blueprint basis</strong><small>{item.sourceCopyCostBasis}</small><small>Successful BPC: {item.outputRuns} runs · ME {item.materialEfficiency} · TE {item.timeEfficiency}</small><small>Full BPC build cost: {item.manufacturingCost == null ? "unpriced" : `${money(item.manufacturingCost)} ISK`}</small><small>Full BPC immediate-sale revenue: {item.immediateSaleRevenue == null ? "unpriced" : `${money(item.immediateSaleRevenue)} ISK`}</small><small>Full successful-BPC profit: {item.successfulCopyProfit == null ? "unpriced" : `${money(item.successfulCopyProfit)} ISK`}</small></div>
+                  <div className="invention-skill-impact"><strong>Character invention chance</strong><small>Current adjusted chance: {item.probability == null ? "—" : `${(item.probability * 100).toFixed(2)}%`}</small><small>All relevant skills at V: {item.maxSkillsProbability == null ? "—" : `${(item.maxSkillsProbability * 100).toFixed(2)}%`}</small><small>Available through training: {item.trainingProbabilityGain == null ? "—" : `+${(item.trainingProbabilityGain * 100).toFixed(2)} percentage points`}</small>{item.skillImpacts.map((skill: any) => <div key={skill.typeId}><b>{skill.name} {skill.trainedLevel}/5</b><span>{skill.role} · currently +{(skill.currentRelativeBoost * 100).toFixed(2)}% to multiplier · another +{(skill.remainingRelativeBoost * 100).toFixed(2)}% available</span></div>)}</div>
+                  <div className="invention-one-run-materials"><strong>Build materials · 1 run</strong><small>Exact quantities at ME {item.materialEfficiency}; not multiplied by the BPC&apos;s {item.outputRuns} runs.</small>{item.manufacturingMaterialsPerRun.map((line: any) => <small key={line.typeId}>{line.quantity}× {line.name} · {line.cost == null ? "no quote" : `${money(line.cost)} ISK`}</small>)}</div>
+                </div>
+              </details>
+            ))}
+          </div>
+        </section>
+      )}
 
       {tab === "pve" && !snapshot && <div className="market-no-results">Connect and sync a character so Sage can rank locations from your current system.</div>}
       {tab === "pve" && snapshot && !pveAnalysis && pveBusy && <div className="planner-analysis-state">Building PvE and location intelligence in the background...</div>}

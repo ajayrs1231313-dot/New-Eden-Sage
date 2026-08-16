@@ -1,9 +1,17 @@
 import AdmZip from "adm-zip";
+import { promises as fs } from "node:fs";
 import path from "node:path";
+import { gzip, gunzip } from "node:zlib";
+import { promisify } from "node:util";
 import { STATIC_DATA_ROOT } from "./data-paths";
-import { itemCategoryName } from "./type-volumes";
+import { ensureStaticDataArchive, itemCategoryName, MARKET_STATIC_PREPARED_CACHE, prepareStaticDataForProcess } from "./type-volumes";
 
 const SDE_ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
+const WORKER_LOOKUP_FILE = path.join(STATIC_DATA_ROOT, "market-worker-lookups-v1.json.gz");
+const MARKET_STATIC_PREPARED_NAME = "market-static-prepared-v1.json.gz";
+const MARKET_STATIC_PREPARED_SCHEMA = 1;
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 
 export type MarketTypeEntry = {
   typeId: number;
@@ -49,6 +57,63 @@ type SdeMarketGroup = {
 
 let indexPromise: Promise<MarketStaticIndex> | undefined;
 
+type SerializedMarketStaticIndex = {
+  schema: number;
+  generatedAt: string;
+  types: MarketTypeEntry[];
+  systems: MarketSystemEntry[];
+  taxonomy: MarketTaxonomy;
+};
+
+function preparedCandidates(includeBundled: boolean) {
+  const candidates = [MARKET_STATIC_PREPARED_CACHE];
+  if (includeBundled) {
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+    if (resourcesPath) candidates.push(path.join(resourcesPath, "market-data", MARKET_STATIC_PREPARED_NAME));
+    candidates.push(path.join(process.cwd(), "vendor", "market-data", MARKET_STATIC_PREPARED_NAME));
+  }
+  return [...new Set(candidates)];
+}
+
+async function readPreparedIndex(target: string): Promise<MarketStaticIndex | undefined> {
+  try {
+    const decoded = JSON.parse((await gunzipAsync(await fs.readFile(target))).toString("utf8")) as SerializedMarketStaticIndex;
+    if (decoded.schema !== MARKET_STATIC_PREPARED_SCHEMA || !Array.isArray(decoded.types) || !Array.isArray(decoded.systems) || !decoded.taxonomy)
+      return undefined;
+    return {
+      types: decoded.types,
+      typeById: new Map(decoded.types.map((type) => [type.typeId, type])),
+      systemById: new Map(decoded.systems.map((system) => [system.systemId, system])),
+      taxonomy: decoded.taxonomy,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadPreparedIndex(includeBundled: boolean) {
+  for (const candidate of preparedCandidates(includeBundled)) {
+    const index = await readPreparedIndex(candidate);
+    if (index) return index;
+  }
+  return undefined;
+}
+
+async function savePreparedIndex(index: MarketStaticIndex) {
+  await fs.mkdir(path.dirname(MARKET_STATIC_PREPARED_CACHE), { recursive: true });
+  const partial = `${MARKET_STATIC_PREPARED_CACHE}.${process.pid}.partial`;
+  const payload: SerializedMarketStaticIndex = {
+    schema: MARKET_STATIC_PREPARED_SCHEMA,
+    generatedAt: new Date().toISOString(),
+    types: index.types,
+    systems: [...index.systemById.values()],
+    taxonomy: index.taxonomy,
+  };
+  await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(payload), "utf8"), { level: 6 }));
+  await fs.rm(MARKET_STATIC_PREPARED_CACHE, { force: true }).catch(() => undefined);
+  await fs.rename(partial, MARKET_STATIC_PREPARED_CACHE);
+}
+
 function securityBand(value: number): MarketSystemEntry["securityBand"] {
   if (value >= 0.45) return "high";
   if (value > 0) return "low";
@@ -80,6 +145,12 @@ function pathForMarketGroup(
 async function loadMarketStaticIndex(): Promise<MarketStaticIndex> {
   if (indexPromise) return indexPromise;
   indexPromise = (async () => {
+    const processState = await prepareStaticDataForProcess();
+    // A bundled snapshot is only a first-install fallback. Once Sage has an
+    // active CCP archive, only its matching local snapshot may be reused.
+    const prepared = await loadPreparedIndex(!processState.hasArchive && !processState.promoted);
+    if (prepared) return prepared;
+    await ensureStaticDataArchive();
     const zip = new AdmZip(SDE_ARCHIVE);
     const typesEntry = zip.getEntry("types.jsonl");
     const groupsEntry = zip.getEntry("groups.jsonl");
@@ -228,7 +299,9 @@ async function loadMarketStaticIndex(): Promise<MarketStaticIndex> {
         securityBand: securityBand(system.securityStatus),
       });
     }
-    return { types, typeById, systemById, taxonomy };
+    const index = { types, typeById, systemById, taxonomy };
+    await savePreparedIndex(index);
+    return index;
   })();
   return indexPromise;
 }
@@ -255,6 +328,40 @@ export async function searchMarketTypes(query: string, limit = 50) {
 
 export async function getMarketTypeIndex() {
   return (await loadMarketStaticIndex()).typeById;
+}
+
+/** A compact shared lookup file so market shards never unpack the SDE archive. */
+export async function prepareMarketWorkerLookups() {
+  const index = await loadMarketStaticIndex();
+  const payload = {
+    types: index.types,
+    systems: [...index.systemById.values()],
+  };
+  await fs.mkdir(STATIC_DATA_ROOT, { recursive: true });
+  const partial = `${WORKER_LOOKUP_FILE}.${process.pid}.partial`;
+  await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(payload), "utf8"), { level: 1 }));
+  await fs.rm(WORKER_LOOKUP_FILE, { force: true }).catch(() => undefined);
+  await fs.rename(partial, WORKER_LOOKUP_FILE);
+  return WORKER_LOOKUP_FILE;
+}
+
+/** Creates the complete immutable market-static snapshot included with an app build. */
+export async function copyPreparedMarketStaticBundle(destination: string) {
+  await loadMarketStaticIndex();
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.copyFile(MARKET_STATIC_PREPARED_CACHE, destination);
+  return destination;
+}
+
+export async function loadMarketWorkerLookups(file: string) {
+  const payload = JSON.parse((await gunzipAsync(await fs.readFile(file))).toString("utf8")) as {
+    types: MarketTypeEntry[];
+    systems: MarketSystemEntry[];
+  };
+  return {
+    types: new Map(payload.types.map((type) => [type.typeId, type])),
+    systems: new Map(payload.systems.map((system) => [system.systemId, system])),
+  };
 }
 
 export async function getMarketType(typeId: number) {

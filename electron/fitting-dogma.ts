@@ -1,7 +1,10 @@
 import AdmZip from "adm-zip";
 import path from "node:path";
+import fs from "node:fs/promises";
+import { promisify } from "node:util";
+import { gzip, gunzip } from "node:zlib";
 import { STATIC_DATA_ROOT } from "./data-paths";
-import { ensureStaticDataArchive } from "./type-volumes";
+import { ensureStaticDataArchive, FITTING_CATALOGUE_CACHE, FITTING_PREPARED_CACHE, prepareStaticDataForProcess } from "./type-volumes";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const REQUIREMENTS = [
@@ -108,6 +111,144 @@ type FittingDogmaIndex = {
 
 let cache: Promise<FittingDogmaIndex> | undefined;
 const attributeDefaults = new Map<number, number>();
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
+const FITTING_PREPARED_SCHEMA = 1;
+const FITTING_PREPARED_NAME = "fitting-dogma-prepared-v1.json.gz";
+const FITTING_CATALOGUE_SCHEMA = 1;
+const FITTING_CATALOGUE_NAME = "fitting-catalogue-prepared-v1.json.gz";
+
+type SerializedFittingDogmaIndex = {
+  schema: number;
+  generatedAt: string;
+  dogma: Array<[number, { attributes: Array<[number, number]>; effects: number[] }]>;
+  names: Array<[number, string]>;
+  groups: Array<[number, number]>;
+  groupCategories: Array<[number, number]>;
+  categoryNames: Array<[number, string]>;
+  volumes: Array<[number, number]>;
+  masses: Array<[number, number]>;
+  capacities: Array<[number, number]>;
+  modifiers: Array<[number, EffectDefinition]>;
+  penalized: number[];
+  dbuffs: Array<[number, DBuffDefinition]>;
+  attributeDefaults: Array<[number, number]>;
+};
+
+function fittingPreparedCandidates(includeBundled: boolean) {
+  const candidates = [FITTING_PREPARED_CACHE];
+  if (includeBundled) {
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+    if (resourcesPath) candidates.push(path.join(resourcesPath, "fitting-data", FITTING_PREPARED_NAME));
+    candidates.push(path.join(process.cwd(), "vendor", "fitting-data", FITTING_PREPARED_NAME));
+  }
+  return [...new Set(candidates)];
+}
+
+function fittingCatalogueCandidates(includeBundled: boolean) {
+  const candidates = [FITTING_CATALOGUE_CACHE];
+  if (includeBundled) {
+    const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+    if (resourcesPath) candidates.push(path.join(resourcesPath, "fitting-data", FITTING_CATALOGUE_NAME));
+    candidates.push(path.join(process.cwd(), "vendor", "fitting-data", FITTING_CATALOGUE_NAME));
+  }
+  return [...new Set(candidates)];
+}
+
+async function readPreparedFittingCatalogue(target: string) {
+  try {
+    const value = JSON.parse((await gunzipAsync(await fs.readFile(target))).toString("utf8")) as { schema: number; catalogue: { groups: unknown[]; items: unknown[] } };
+    return value.schema === FITTING_CATALOGUE_SCHEMA && Array.isArray(value.catalogue?.groups) && Array.isArray(value.catalogue?.items) ? value.catalogue : undefined;
+  } catch { return undefined; }
+}
+
+async function loadPreparedFittingCatalogue(includeBundled: boolean) {
+  for (const candidate of fittingCatalogueCandidates(includeBundled)) {
+    const value = await readPreparedFittingCatalogue(candidate);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+async function savePreparedFittingCatalogue(catalogue: { groups: unknown[]; items: unknown[] }) {
+  await fs.mkdir(path.dirname(FITTING_CATALOGUE_CACHE), { recursive: true });
+  const partial = `${FITTING_CATALOGUE_CACHE}.${process.pid}.partial`;
+  await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify({ schema: FITTING_CATALOGUE_SCHEMA, generatedAt: new Date().toISOString(), catalogue }), "utf8"), { level: 6 }));
+  await fs.rm(FITTING_CATALOGUE_CACHE, { force: true }).catch(() => undefined);
+  await fs.rename(partial, FITTING_CATALOGUE_CACHE);
+}
+
+async function readPreparedFittingIndex(target: string): Promise<FittingDogmaIndex | undefined> {
+  try {
+    const compressed = await fs.readFile(target);
+    const decoded = JSON.parse((await gunzipAsync(compressed)).toString("utf8")) as SerializedFittingDogmaIndex;
+    if (decoded.schema !== FITTING_PREPARED_SCHEMA || !Array.isArray(decoded.dogma) || !Array.isArray(decoded.attributeDefaults)) return undefined;
+    attributeDefaults.clear();
+    for (const [attributeId, value] of decoded.attributeDefaults) attributeDefaults.set(Number(attributeId), Number(value));
+    return {
+      dogma: new Map(decoded.dogma.map(([typeId, value]) => [Number(typeId), { attributes: new Map(value.attributes.map(([id, numberValue]) => [Number(id), Number(numberValue)])), effects: new Set(value.effects.map(Number)) }])),
+      names: new Map(decoded.names.map(([id, value]) => [Number(id), String(value)])),
+      groups: new Map(decoded.groups.map(([id, value]) => [Number(id), Number(value)])),
+      groupCategories: new Map(decoded.groupCategories.map(([id, value]) => [Number(id), Number(value)])),
+      categoryNames: new Map(decoded.categoryNames.map(([id, value]) => [Number(id), String(value)])),
+      volumes: new Map(decoded.volumes.map(([id, value]) => [Number(id), Number(value)])),
+      masses: new Map(decoded.masses.map(([id, value]) => [Number(id), Number(value)])),
+      capacities: new Map(decoded.capacities.map(([id, value]) => [Number(id), Number(value)])),
+      modifiers: new Map(decoded.modifiers.map(([id, value]) => [Number(id), value])),
+      penalized: new Set(decoded.penalized.map(Number)),
+      dbuffs: new Map(decoded.dbuffs.map(([id, value]) => [Number(id), value])),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadPreparedFittingIndex(includeBundled: boolean) {
+  for (const candidate of fittingPreparedCandidates(includeBundled)) {
+    const prepared = await readPreparedFittingIndex(candidate);
+    if (prepared) return prepared;
+  }
+  return undefined;
+}
+
+async function savePreparedFittingIndex(value: FittingDogmaIndex) {
+  const serializable: SerializedFittingDogmaIndex = {
+    schema: FITTING_PREPARED_SCHEMA,
+    generatedAt: new Date().toISOString(),
+    dogma: [...value.dogma].map(([typeId, dogma]) => [typeId, { attributes: [...dogma.attributes], effects: [...dogma.effects] }]),
+    names: [...value.names],
+    groups: [...value.groups],
+    groupCategories: [...value.groupCategories],
+    categoryNames: [...value.categoryNames],
+    volumes: [...value.volumes],
+    masses: [...value.masses],
+    capacities: [...value.capacities],
+    modifiers: [...value.modifiers],
+    penalized: [...value.penalized],
+    dbuffs: [...value.dbuffs],
+    attributeDefaults: [...attributeDefaults],
+  };
+  await fs.mkdir(path.dirname(FITTING_PREPARED_CACHE), { recursive: true });
+  const partial = `${FITTING_PREPARED_CACHE}.${process.pid}.partial`;
+  const compressed = await gzipAsync(Buffer.from(JSON.stringify(serializable)), { level: 6 });
+  await fs.writeFile(partial, compressed);
+  await fs.rm(FITTING_PREPARED_CACHE, { force: true }).catch(() => undefined);
+  await fs.rename(partial, FITTING_PREPARED_CACHE);
+}
+
+export async function copyPreparedFittingDataBundle(destination: string) {
+  await index();
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.copyFile(FITTING_PREPARED_CACHE, destination);
+  return destination;
+}
+
+export async function copyPreparedFittingCatalogueBundle(destination: string) {
+  await getFittingCatalogueLocal();
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.copyFile(FITTING_CATALOGUE_CACHE, destination);
+  return destination;
+}
 type LocalPreparationProgress = { percent:number; message:string };
 function createLocalProgressChannel(){
   const listeners=new Set<(progress:LocalPreparationProgress)=>void>();
@@ -122,6 +263,14 @@ const cataloguePreparationProgress=createLocalProgressChannel();
 
 function index() {
   return (cache ??= Promise.resolve().then(async () => {
+    await prepareStaticDataForProcess();
+    // Fitting data is shipped with Sage and changes only with an app release.
+    // Never rebuild it merely because CCP static data refreshed in the background.
+    const prepared = await loadPreparedFittingIndex(true);
+    if (prepared) {
+      dogmaPreparationProgress.report(100, "Prepared fitting rules ready");
+      return prepared;
+    }
     await ensureStaticDataArchive();
     dogmaPreparationProgress.report(5,"Reading fitting rules…");
     const zip = new AdmZip(ARCHIVE);
@@ -223,8 +372,11 @@ function index() {
       masses.set(row._key, row.mass ?? 0);
       capacities.set(row._key, row.capacity ?? 0);
     }
+    const preparedIndex = { dogma, names, groups, groupCategories, categoryNames, volumes, masses, capacities, modifiers, penalized, dbuffs };
+    dogmaPreparationProgress.report(96,"Saving prepared fitting rules…");
+    await savePreparedFittingIndex(preparedIndex);
     dogmaPreparationProgress.report(100,"Core fitting rules ready");
-    return { dogma, names, groups, groupCategories, categoryNames, volumes, masses, capacities, modifiers, penalized, dbuffs };
+    return preparedIndex;
   }));
 }
 
@@ -359,6 +511,9 @@ export type FittingPreparationProgress = { percent:number; stage:string; message
 
 export async function getFittingCatalogueLocal() {
   return (fittingCatalogueCache ??= Promise.resolve().then(async () => {
+    await prepareStaticDataForProcess();
+    const prepared = await loadPreparedFittingCatalogue(true);
+    if (prepared) return prepared;
     await ensureStaticDataArchive();
     const zip = new AdmZip(ARCHIVE);
     const marketEntry = zip.getEntry("marketGroups.jsonl");
@@ -402,7 +557,9 @@ export async function getFittingCatalogueLocal() {
     const catalogueGroups=[...usedMarketGroups].map(id=>marketGroups.get(id)!).filter(Boolean).map(group=>({ id:group.id, name:group.name, parentId:allowedRoots.has(group.name) ? undefined : group.parentId, iconId:group.iconId })).sort((a,b)=>a.name.localeCompare(b.name));
     items.sort((a,b)=>a.name.localeCompare(b.name));
     cataloguePreparationProgress.report(100,"Module browser ready");
-    return { groups: catalogueGroups, items };
+    const catalogue = { groups: catalogueGroups, items };
+    await savePreparedFittingCatalogue(catalogue);
+    return catalogue;
   }));
 }
 
@@ -410,10 +567,14 @@ export async function prepareFittingDataLocal(onProgress?: (progress:FittingPrep
   const startedAt=Date.now();
   const report=(percent:number,stage:string,message:string)=>onProgress?.({percent,stage,message});
   report(4,"metadata","Preparing fitting data…");
-  await ensureStaticDataArchive();
-  report(12,"dogma","Parsing module data…");
+  const processState=await prepareStaticDataForProcess();
+  report(12,"dogma","Loading prepared fitting rules…");
   const stopDogmaProgress=dogmaPreparationProgress.subscribe(progress=>report(12+Math.round(progress.percent*0.44),"dogma",progress.message));
   try { await index(); } finally { stopDogmaProgress(); }
+  if(!processState.hasArchive){
+    report(100,"ready","Packaged fitting data ready");
+    return { catalogue:undefined, preparedAt:new Date().toISOString(), itemCount:0, groupCount:0, durationMs:Date.now()-startedAt, source:"packaged" };
+  }
   report(56,"restrictions","Loading ship restrictions…");
   const stopCatalogueProgress=cataloguePreparationProgress.subscribe(progress=>report(56+Math.round(progress.percent*0.34),"browser",progress.message));
   let catalogue:any;
@@ -421,7 +582,7 @@ export async function prepareFittingDataLocal(onProgress?: (progress:FittingPrep
   report(90,"browser","Preparing module browser…");
   report(96,"finalising","Finalising fitting data…");
   report(100,"ready","Fitting data ready");
-  return { catalogue, preparedAt:new Date().toISOString(), itemCount:catalogue.items.length, groupCount:catalogue.groups.length, durationMs:Date.now()-startedAt };
+  return { catalogue, preparedAt:new Date().toISOString(), itemCount:catalogue.items.length, groupCount:catalogue.groups.length, durationMs:Date.now()-startedAt, source:"current-sde" };
 }
 
 type FittingTypeInfoStatic = {

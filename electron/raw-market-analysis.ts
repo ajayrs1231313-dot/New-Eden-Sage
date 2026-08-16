@@ -1,17 +1,21 @@
-import { loadLatestMarketDatasetByMode } from "./market-storage";
-import { promises as fs } from "node:fs";
+import { createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
-import { gzip, gunzip } from "node:zlib";
+import { createGzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { Worker } from "node:worker_threads";
+import { loadLatestMarketDatasetByMode } from "./market-storage";
 import {
   loadCurrentRawMarketManifest,
   loadRawMarketRegion,
   RAW_MARKET_ROOT,
   type RawMarketSnapshot,
 } from "./raw-market-storage";
-import { getMarketSystemIndex, getMarketTypeIndex } from "./market-static-index";
+import { getMarketSystemIndex, getMarketTypeIndex, loadMarketWorkerLookups, prepareMarketWorkerLookups } from "./market-static-index";
 import type { MarketOrder } from "./market";
+import { logEvent } from "./logger";
 
 export type FullMarketOrder = {
   orderId: number;
@@ -74,6 +78,9 @@ export type FullMarketItem = {
 export type RawMarketAnalysisRuntime = {
   progress?: (progress: { stage: string; message: string; completed?: number; total?: number; percent?: number; cached?: boolean }) => void;
   shouldCancel?: () => boolean;
+  skipPersist?: boolean;
+  bypassCache?: boolean;
+  staticLookupPath?: string;
 };
 
 export type FullMarketAnalysisIndex = {
@@ -91,9 +98,9 @@ export type FullMarketAnalysisIndex = {
 // each side still gives trade ranking ample depth while keeping the full index
 // safely within desktop memory limits.
 const SIDE_DEPTH = 16;
-const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 const ANALYSIS_INDEX_SCHEMA = 3;
+const ANALYSIS_SAVE_TIMEOUT_MS = 5 * 60_000;
 let currentCache: { snapshotId: string; value: FullMarketAnalysisIndex } | null = null;
 const historicalCache = new Map<string, FullMarketAnalysisIndex>();
 let metadataCache: { createdAt: string; names: Map<number, string>; volumes: Map<number, number> } | null = null;
@@ -117,28 +124,109 @@ async function loadPersistedAnalysisIndex(snapshot: RawMarketSnapshot): Promise<
   }
 }
 
-async function savePersistedAnalysisIndex(snapshot: RawMarketSnapshot, value: FullMarketAnalysisIndex) {
-  const target = persistedIndexPath(snapshot);
-  const partial = `${target}.${process.pid}.${randomUUID()}.partial`;
-  const payload = {
-    schemaVersion: ANALYSIS_INDEX_SCHEMA,
-    snapshotId: value.snapshotId,
-    createdAt: value.createdAt,
-    orderCount: value.orderCount,
-    regionCount: value.regionCount,
-    sourceOrdersInspected: value.sourceOrdersInspected,
-    candidateDepthPerSide: value.candidateDepthPerSide,
-    items: [...value.items.values()].map((item) => ({
-      ...item,
-      regions: Object.fromEntries(Object.entries(item.regions).map(([key, region]) => {
-        const { security: _security, ...persistedRegion } = region;
-        return [key, persistedRegion];
-      })),
+function persistedItem(item: FullMarketItem): FullMarketItem {
+  return {
+    ...item,
+    regions: Object.fromEntries(Object.entries(item.regions).map(([key, region]) => {
+      const { security: _security, ...persistedRegion } = region;
+      return [key, persistedRegion];
     })),
   };
-  const compressed = await gzipAsync(Buffer.from(JSON.stringify(payload), "utf8"), { level: 6 });
-  await fs.writeFile(partial, compressed);
-  await fs.rename(partial, target);
+}
+
+async function savePersistedAnalysisIndex(snapshot: RawMarketSnapshot, value: FullMarketAnalysisIndex, runtime: RawMarketAnalysisRuntime) {
+  const target = persistedIndexPath(snapshot);
+  const partial = `${target}.${process.pid}.${randomUUID()}.partial`;
+  const startedAt = Date.now();
+  const itemCount = value.items.size;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+
+  await logEvent("info", "full_market_index.save_started", {
+    snapshotId: snapshot.id,
+    target,
+    itemCount,
+    sourceOrdersInspected: value.sourceOrdersInspected,
+  });
+
+  async function* serialisedPayload() {
+    const header = JSON.stringify({
+      schemaVersion: ANALYSIS_INDEX_SCHEMA,
+      snapshotId: value.snapshotId,
+      createdAt: value.createdAt,
+      orderCount: value.orderCount,
+      regionCount: value.regionCount,
+      sourceOrdersInspected: value.sourceOrdersInspected,
+      candidateDepthPerSide: value.candidateDepthPerSide,
+    });
+    yield Buffer.from(`${header.slice(0, -1)},"items":[`, "utf8");
+
+    let first = true;
+    let completed = 0;
+    for (const item of value.items.values()) {
+      yield Buffer.from(`${first ? "" : ","}${JSON.stringify(persistedItem(item))}`, "utf8");
+      first = false;
+      completed += 1;
+      if (completed % 250 === 0 || completed === itemCount) {
+        runtime.progress?.({
+          stage: "market-index-save",
+          message: `Saving compact analysis index: ${completed}/${itemCount} items…`,
+          completed,
+          total: itemCount,
+          percent: 99,
+        });
+      }
+      if (completed % 100 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    yield Buffer.from("]}", "utf8");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ANALYSIS_SAVE_TIMEOUT_MS);
+  timeout.unref();
+
+  try {
+    runtime.progress?.({ stage: "market-index-save", message: "Streaming compact analysis index to disk…", completed: 0, total: itemCount, percent: 99 });
+    await pipeline(
+      Readable.from(serialisedPayload()),
+      createGzip({ level: 6 }),
+      createWriteStream(partial, { flags: "wx" }),
+      { signal: controller.signal },
+    );
+    clearTimeout(timeout);
+
+    const staged = await fs.stat(partial);
+    await logEvent("info", "full_market_index.save_stream_complete", {
+      snapshotId: snapshot.id,
+      partial,
+      bytes: staged.size,
+      durationMs: Date.now() - startedAt,
+    });
+
+    runtime.progress?.({ stage: "market-index-save", message: "Promoting compact analysis index…", completed: itemCount, total: itemCount, percent: 99 });
+    await fs.rm(target, { force: true });
+    await fs.rename(partial, target);
+
+    await logEvent("info", "full_market_index.save_complete", {
+      snapshotId: snapshot.id,
+      target,
+      bytes: staged.size,
+      durationMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    clearTimeout(timeout);
+    await fs.rm(partial, { force: true }).catch(() => undefined);
+    const normalized = error instanceof Error ? error : new Error(String(error));
+    if (controller.signal.aborted && normalized.name === "AbortError") {
+      normalized.message = `Saving the full-market analysis index exceeded ${Math.round(ANALYSIS_SAVE_TIMEOUT_MS / 60_000)} minutes and was aborted.`;
+    }
+    await logEvent("error", "full_market_index.save_failed", {
+      snapshotId: snapshot.id,
+      target,
+      durationMs: Date.now() - startedAt,
+      error: normalized,
+    });
+    throw normalized;
+  }
 }
 
 async function retainedMarketMetadata() {
@@ -250,13 +338,13 @@ export async function buildFullMarketAnalysisIndex(
   const manifest = snapshot ?? (await loadCurrentRawMarketManifest("all"));
   if (!manifest?.complete || manifest.mode !== "all")
     throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
-  if (!snapshot && currentCache?.snapshotId === manifest.id) {
+  if (!runtime.bypassCache && !snapshot && currentCache?.snapshotId === manifest.id) {
     runtime.progress?.({ stage: "market-index", message: "Reusing the in-memory full-market index.", percent: 100, cached: true });
     return currentCache.value;
   }
-  const historical = historicalCache.get(manifest.id);
+  const historical = runtime.bypassCache ? undefined : historicalCache.get(manifest.id);
   if (snapshot && historical) return historical;
-  const persisted = await loadPersistedAnalysisIndex(manifest);
+  const persisted = runtime.bypassCache ? null : await loadPersistedAnalysisIndex(manifest);
   if (persisted) {
     if (snapshot) historicalCache.set(manifest.id, persisted); else currentCache = { snapshotId: manifest.id, value: persisted };
     runtime.progress?.({ stage: "market-index", message: "Loaded the saved full-market analysis index.", completed: manifest.regions.length, total: manifest.regions.length, percent: 100, cached: true });
@@ -264,8 +352,9 @@ export async function buildFullMarketAnalysisIndex(
   }
   runtime.progress?.({ stage: "market-index", message: "Reading the complete raw market order book…", completed: 0, total: manifest.regions.length, percent: 0 });
 
-  const systems = await getMarketSystemIndex();
-  const types = await getMarketTypeIndex();
+  const sharedLookups = runtime.staticLookupPath ? await loadMarketWorkerLookups(runtime.staticLookupPath) : null;
+  const systems = sharedLookups?.systems ?? await getMarketSystemIndex();
+  const types = sharedLookups?.types ?? await getMarketTypeIndex();
   const metadata = await retainedMarketMetadata();
   const locations = metadata.names;
   const items = new Map<number, FullMarketItem>();
@@ -347,20 +436,96 @@ export async function buildFullMarketAnalysisIndex(
     candidateDepthPerSide: SIDE_DEPTH,
     items,
   };
-  if (snapshot) historicalCache.set(manifest.id, value);
-  else currentCache = { snapshotId: manifest.id, value };
+  if (!runtime.bypassCache) {
+    if (snapshot) historicalCache.set(manifest.id, value);
+    else currentCache = { snapshotId: manifest.id, value };
+  }
   for (const key of historicalCache.keys()) if (key !== manifest.id && historicalCache.size > 3) historicalCache.delete(key);
-  runtime.progress?.({ stage: "market-index-save", message: "Saving the compact analysis index for fast reuse…", percent: 99 });
-  try {
-    await savePersistedAnalysisIndex(manifest, value);
-  } catch (error) {
-    runtime.progress?.({
-      stage: "market-index-save",
-      message: `Could not save the reusable market index: ${error instanceof Error ? error.message : String(error)}`,
-      percent: 100,
-    });
+  if (!runtime.skipPersist) {
+    runtime.progress?.({ stage: "market-index-save", message: "Saving the compact analysis index for fast reuse…", percent: 99 });
+    try {
+      await savePersistedAnalysisIndex(manifest, value, runtime);
+    } catch (error) {
+      runtime.progress?.({
+        stage: "market-index-save",
+        message: `Could not save the reusable market index: ${error instanceof Error ? error.message : String(error)}`,
+        percent: 100,
+      });
+    }
   }
   runtime.progress?.({ stage: "market-index", message: `Market index ready: ${sourceOrdersInspected.toLocaleString()} orders inspected.`, completed: manifest.regions.length, total: manifest.regions.length, percent: 100 });
+  return value;
+}
+
+function mergeFullMarketItem(target: FullMarketItem, source: FullMarketItem) {
+  target.totalBuyOrders += source.totalBuyOrders;
+  target.totalSellOrders += source.totalSellOrders;
+  target.totalBuyVolume += source.totalBuyVolume;
+  target.totalSellVolume += source.totalSellVolume;
+  for (const order of source.buys) insertCandidate(target.buys, order, true);
+  for (const order of source.sells) insertCandidate(target.sells, order, false);
+  Object.assign(target.regions, source.regions);
+}
+
+export async function buildFullMarketAnalysisIndexParallel(
+  workerCount: number,
+  runtime: RawMarketAnalysisRuntime = {},
+): Promise<FullMarketAnalysisIndex> {
+  const manifest = await loadCurrentRawMarketManifest("all");
+  if (!manifest?.complete) throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
+  const saved = await loadPersistedAnalysisIndex(manifest);
+  if (saved) return saved;
+  const count = Math.min(Math.max(1, workerCount), manifest.regions.length);
+  const staticLookupPath = await prepareMarketWorkerLookups();
+  // Keep each worker's live order graph bounded. Six workers stay active, but
+  // each receives a small batch and writes a fragment before taking another.
+  const regionsPerChunk = Math.max(1, Math.ceil(manifest.regions.length / (count * 5)));
+  const shards = Array.from({ length: Math.ceil(manifest.regions.length / regionsPerChunk) }, (_, index) =>
+    manifest.regions.slice(index * regionsPerChunk, (index + 1) * regionsPerChunk),
+  );
+  let completed = 0;
+  runtime.progress?.({ stage: "market-index", message: `Processing the full market across ${count} CPU cores…`, percent: 0 });
+  const runShard = (regions: typeof manifest.regions, index: number) => new Promise<{ path: string; sourceOrdersInspected: number }>((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, "master-full-market-shard-worker.js"), {
+      workerData: { manifest: { ...manifest, regions, regionCount: regions.length, orderCount: regions.reduce((sum, entry) => sum + entry.orderCount, 0) }, shard: index + 1, staticLookupPath },
+      env: process.env,
+      resourceLimits: { maxOldGenerationSizeMb: 384 },
+    });
+    let settled = false;
+    const finish = (callback: () => void) => { if (settled) return; settled = true; callback(); void worker.terminate().catch(() => undefined); };
+    worker.on("message", (message: any) => {
+      if (message?.type === "complete") finish(() => { completed += 1; runtime.progress?.({ stage: "market-index", message: `Market chunks complete: ${completed}/${shards.length}`, completed, total: shards.length, percent: Math.round((completed / shards.length) * 90) }); resolve(message.result); });
+      else if (message?.type === "error") finish(() => reject(new Error(message.error)));
+    });
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => { if (code !== 0) finish(() => reject(new Error(`Market CPU shard ${index + 1} stopped (${code}).`))); });
+  });
+  let nextShard = 0;
+  const partials: Array<{ path: string; sourceOrdersInspected: number }> = [];
+  await Promise.all(Array.from({ length: count }, async () => {
+    while (true) {
+      const index = nextShard++;
+      if (index >= shards.length) return;
+      partials[index] = await runShard(shards[index], index);
+    }
+  }));
+  const items = new Map<number, FullMarketItem>();
+  let sourceOrdersInspected = 0;
+  for (const partial of partials) {
+    sourceOrdersInspected += partial.sourceOrdersInspected;
+    const compressed = await fs.readFile(partial.path);
+    const entries = JSON.parse((await gunzipAsync(compressed)).toString("utf8")) as Array<[number, FullMarketItem]>;
+    for (const [typeId, source] of entries) {
+      const target = items.get(typeId);
+      if (target) mergeFullMarketItem(target, source);
+      else items.set(typeId, source);
+    }
+    await fs.rm(partial.path, { force: true }).catch(() => undefined);
+  }
+  const value: FullMarketAnalysisIndex = { snapshotId: manifest.id, createdAt: manifest.createdAt, orderCount: manifest.orderCount, regionCount: manifest.regionCount, sourceOrdersInspected, candidateDepthPerSide: SIDE_DEPTH, items };
+  currentCache = { snapshotId: manifest.id, value };
+  runtime.progress?.({ stage: "market-index-save", message: "Merging and saving the six-core market index…", percent: 95 });
+  await savePersistedAnalysisIndex(manifest, value, runtime);
   return value;
 }
 

@@ -13,7 +13,7 @@ const CURRENT_MANIFEST = path.join(RAW_MARKET_ROOT, "current.json");
 
 export type RawMarketMode = "single" | "all" | "radius";
 
-type RawRegionEntry = {
+export type RawRegionEntry = {
   regionId: number;
   regionName: string;
   orderCount: number;
@@ -77,11 +77,11 @@ export async function beginRawMarketSnapshot(mode: RawMarketMode): Promise<RawMa
   return snapshot;
 }
 
-export async function saveRawMarketRegion(
+export async function saveRawMarketRegionDetached(
   snapshot: RawMarketSnapshot,
   region: RegionInfo,
   orders: MarketOrder[],
-) {
+): Promise<RawRegionEntry> {
   const fileName = `${region.regionId}-${safeName(region.name)}.json.gz`;
   const relativeFile = path.join(snapshot.id, "regions", fileName);
   const finalPath = path.join(RAW_MARKET_ROOT, relativeFile);
@@ -98,14 +98,21 @@ export async function saveRawMarketRegion(
   const compressed = await gzipAsync(Buffer.from(JSON.stringify(payload), "utf8"), { level: 6 });
   await fs.writeFile(partialPath, compressed);
   await fs.rename(partialPath, finalPath);
-
-  const entry: RawRegionEntry = {
+  return {
     regionId: region.regionId,
     regionName: region.name,
     orderCount: orders.length,
     file: relativeFile,
     savedAt: new Date().toISOString(),
   };
+}
+
+export async function saveRawMarketRegion(
+  snapshot: RawMarketSnapshot,
+  region: RegionInfo,
+  orders: MarketOrder[],
+) {
+  const entry = await saveRawMarketRegionDetached(snapshot, region, orders);
   const existingIndex = snapshot.regions.findIndex((item) => item.regionId === region.regionId);
   if (existingIndex >= 0) snapshot.regions[existingIndex] = entry;
   else snapshot.regions.push(entry);

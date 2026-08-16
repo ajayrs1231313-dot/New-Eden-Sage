@@ -6,6 +6,7 @@ import {
 import AdmZip from "adm-zip";
 import path from "node:path";
 import { STATIC_DATA_ROOT } from "./data-paths";
+import { ensureStaticDataArchive } from "./type-volumes";
 
 const ESI = "https://esi.evetech.net";
 const REQUIREMENT_PAIRS = [
@@ -129,7 +130,8 @@ let masteryPromise: Promise<Map<number, Array<Map<number, number>>>> | undefined
 
 async function loadMasteries() {
   if (masteryPromise) return masteryPromise;
-  masteryPromise = Promise.resolve().then(() => {
+  masteryPromise = Promise.resolve().then(async () => {
+    await ensureStaticDataArchive();
     const zip = new AdmZip(path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip"));
     const masteries = zip.getEntry("masteries.jsonl");
     const certificates = zip.getEntry("certificates.jsonl");
@@ -158,6 +160,11 @@ async function loadMasteries() {
     return result;
   });
   return masteryPromise;
+}
+
+export async function prepareReadinessStaticData() {
+  const masteries = await loadMasteries();
+  return { masteryHulls: masteries.size, masteryTiers: [...masteries.values()].reduce((sum, tiers) => sum + tiers.length, 0) };
 }
 
 const headers = {

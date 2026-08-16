@@ -46,7 +46,7 @@ type FittingCatalogue = { groups:CatalogueGroup[]; items:CatalogueItem[] };
 type HullFittingProfile = { slots:{ high:number; mid:number; low:number; rig:number; subsystem:number }; hardpoints:{ turret:number; launcher:number }; storage:{ cargoM3:number; droneBayM3:number; droneBandwidth:number; fighterHangarM3:number; fighterTubes:number } };
 type FittingDragPayload = FittingSearchResult & { rootName?:string; marketGroupId?:number; metaLevel?:number };
 type FittingPreparationProgress = { percent:number; stage:string; message:string };
-type FittingPreparationResult = { catalogue:FittingCatalogue; preparedAt:string; itemCount:number; groupCount:number; durationMs:number };
+type FittingPreparationResult = { catalogue?:FittingCatalogue; preparedAt:string; itemCount:number; groupCount:number; durationMs:number; source?:string };
 type FittingStaticTree = { version:number; generatedAt:string; groups:CatalogueGroup[]; groupPlacements:Record<string,FittingPlacement[]>; ships:ShipChoice[] };
 const STATIC_FITTING_TREE=fittingStaticTree as FittingStaticTree;
 const STATIC_SHIPS=STATIC_FITTING_TREE.ships;
@@ -757,8 +757,7 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
     let cancelled=false; let hideTimer:number|undefined;
     if(sharedPreparationResult){
       liveReadyRef.current=true;
-      setCatalogue(sharedPreparationResult.catalogue);
-      setCatalogueSource("live");
+      if(sharedPreparationResult.catalogue){setCatalogue(sharedPreparationResult.catalogue);setCatalogueSource("live");}
       setProgressVisible(false);
       return;
     }
@@ -770,8 +769,7 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
     void beginSharedFittingPreparation().then(result=>{
       if(cancelled)return;
       liveReadyRef.current=true;
-      setCatalogue(result.catalogue);
-      setCatalogueSource("live");
+      if(result.catalogue){setCatalogue(result.catalogue);setCatalogueSource("live");}
       setPreparation({percent:100,stage:"ready",message:"Fitting data ready"});
       hideTimer=window.setTimeout(()=>setProgressVisible(false),900);
     }).catch(error=>{

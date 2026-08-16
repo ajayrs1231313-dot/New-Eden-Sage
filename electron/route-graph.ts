@@ -1,6 +1,7 @@
 import AdmZip from "adm-zip";
 import path from "node:path";
 import { STATIC_DATA_ROOT } from "./data-paths";
+import { ensureStaticDataArchive } from "./type-volumes";
 
 const SDE_ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 
@@ -28,7 +29,13 @@ async function loadGraph() {
   return graphPromise;
 }
 
+export async function prepareHighSecRouteGraph() {
+  const graph = await loadGraph();
+  return { systems: graph.neighbours.size };
+}
+
 async function buildGraph(): Promise<RouteGraph> {
+  await ensureStaticDataArchive();
   const zip = new AdmZip(SDE_ARCHIVE);
   const systemsEntry = zip.getEntry("mapSolarSystems.jsonl");
   const gatesEntry = zip.getEntry("mapStargates.jsonl");

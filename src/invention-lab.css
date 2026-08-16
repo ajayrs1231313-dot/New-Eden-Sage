@@ -1,0 +1,43 @@
+.invention-lab { display: grid; gap: 12px; }
+.invention-head { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
+.invention-head h3 { margin: 3px 0 5px; color: #dcebed; }
+.invention-head p:last-child { max-width: 900px; margin: 0; color: #6a8790; font-size: 10px; line-height: 1.45; }
+.invention-filter { width: min(520px, 100%); border: 1px solid #23444d; background: #061219; color: #d8e8eb; padding: 9px 10px; outline: none; }
+.invention-filter:focus { border-color: #4caea6; }
+.invention-decryptor { display: grid; grid-template-columns: auto minmax(260px, 520px); align-items: center; gap: 10px; color: #6f8d94; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+.invention-decryptor select { border: 1px solid #23444d; background: #061219; color: #d8e8eb; padding: 9px 10px; outline: none; }
+.invention-table { border: 1px solid #1f4048; background: #07161c; }
+.invention-row { display: grid; grid-template-columns: minmax(250px, 1.5fr) .45fr .7fr .7fr .8fr .8fr; gap: 10px; align-items: center; }
+.invention-row.heading { padding: 7px 10px; border-bottom: 1px solid #24444c; color: #58757d; font-size: 8px; text-transform: uppercase; letter-spacing: .07em; }
+.invention-row.heading button { position: relative; min-width: 0; border: 0; background: transparent; color: #58757d; padding: 2px 0; font-size: 8px; text-align: left; text-transform: uppercase; letter-spacing: .07em; }
+.invention-row.heading button:hover, .invention-row.heading button.active { color: #73e5d8; }
+.invention-row.heading button i { margin-left: 5px; color: #3f7775; font-size: 7px; font-style: normal; }
+.invention-row.heading button.active i { color: #73e5d8; }
+.invention-row.heading button::after { content: attr(data-tooltip); position: absolute; z-index: 30; top: calc(100% + 9px); left: 0; width: min(310px, 32vw); border: 1px solid #39736f; background: #07161c; box-shadow: 0 12px 30px #000b; color: #b5cbce; padding: 9px 10px; font-size: 9px; font-weight: 400; line-height: 1.5; letter-spacing: 0; text-transform: none; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-3px); transition: opacity .12s ease, transform .12s ease; }
+.invention-row.heading button:hover::after, .invention-row.heading button:focus-visible::after { opacity: 1; visibility: visible; transform: translateY(0); }
+.invention-result { border-bottom: 1px solid #15323a; }
+.invention-result:last-child { border-bottom: 0; }
+.invention-result > summary { list-style: none; padding: 10px; cursor: pointer; color: #9eb5ba; }
+.invention-result > summary::-webkit-details-marker { display: none; }
+.invention-result > summary:hover, .invention-result[open] > summary { background: #0a1d24; }
+.invention-result strong, .invention-result small { display: block; }
+.invention-result strong { color: #d5e5e7; font-size: 10px; }
+.invention-result small { margin-top: 3px; color: #627f87; font-size: 8px; }
+.invention-result em { display: inline-block; margin-top: 5px; border: 1px solid #397a70; background: #0d2927; color: #70dfd3; padding: 3px 5px; font-size: 7px; font-style: normal; letter-spacing: .07em; }
+.invention-result .positive { color: #69ddcf; }
+.invention-result .negative { color: #d87c82; }
+.invention-detail { display: grid; grid-template-columns: .8fr 1fr 1.15fr 1.25fr; gap: 8px; padding: 10px; background: #061319; border-top: 1px solid #1c3c44; }
+.invention-detail > div { border: 1px solid #17353d; background: #081920; padding: 9px; }
+.invention-detail strong { margin-bottom: 6px; color: #9bb6bb; font-size: 9px; }
+.invention-detail small { color: #68858d; font-size: 8px; line-height: 1.4; }
+.invention-detail .invention-skill-impact { border-color: #2c5c5b; background: #0a2023; }
+.invention-skill-impact > div { display: grid; grid-template-columns: minmax(180px, .6fr) 1fr; gap: 12px; margin-top: 7px; padding-top: 7px; border-top: 1px solid #193b40; }
+.invention-skill-impact b { color: #a9c8ca; font-size: 9px; }
+.invention-skill-impact span { color: #73a6a7; font-size: 8px; }
+.invention-one-run-materials { border-color: #315f5d !important; background: #091f22 !important; }
+@media (max-width: 760px) {
+  .invention-head { flex-direction: column; }
+  .invention-row.heading { display: none; }
+  .invention-row, .invention-detail { grid-template-columns: 1fr; }
+  .invention-row.heading button::after { width: min(280px, 75vw); }
+}

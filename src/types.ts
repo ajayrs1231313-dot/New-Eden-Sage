@@ -645,6 +645,8 @@ declare global {
       }): Promise<PveLocationAnalysis>;
       cancelAnalysis(kind?: "opportunity" | "capability" | "trade" | "raw-market" | "regional-filter" | "pve-location"): Promise<boolean>;
       getAnalysisStatus(): Promise<any>;
+      runMasterUpdate(): Promise<any>;
+      onMasterUpdateProgress(callback: (progress: { running:boolean; stage:string; message:string; percent:number; startedAt:string; cpuWorkers:number; downloadDurationMs?:number; totalDurationMs?:number; completed?:number; total?:number }) => void): () => void;
       onAnalysisProgress(callback: (progress: AnalysisProgress) => void): () => void;
       exportTopArbitrage(): Promise<string | null>;
       filterRegionalMarket(input: {

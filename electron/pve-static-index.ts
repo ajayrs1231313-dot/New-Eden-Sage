@@ -1,6 +1,7 @@
 import AdmZip from "adm-zip";
 import path from "node:path";
 import { STATIC_DATA_ROOT } from "./data-paths";
+import { ensureStaticDataArchive } from "./type-volumes";
 
 const SDE_ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 
@@ -44,7 +45,8 @@ function securityBand(value: number): PveSystemStatic["securityBand"] {
 
 export async function getPveStaticIndex(): Promise<PveStaticIndex> {
   if (indexPromise) return indexPromise;
-  indexPromise = Promise.resolve().then(() => {
+  indexPromise = Promise.resolve().then(async () => {
+    await ensureStaticDataArchive();
     const zip = new AdmZip(SDE_ARCHIVE);
     const regionsEntry = zip.getEntry("mapRegions.jsonl");
     const constellationsEntry = zip.getEntry("mapConstellations.jsonl");

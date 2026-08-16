@@ -9,7 +9,12 @@ dist-electron/
 release/
 release-*/
 EVE data for gpt/
-vendor/
+vendor/*
+!vendor/fitting-data/
+!vendor/fitting-data/fitting-dogma-prepared-v1.json.gz
+!vendor/fitting-data/fitting-catalogue-prepared-v1.json.gz
+!vendor/market-data/
+!vendor/market-data/market-static-prepared-v1.json.gz
 task10-*/
 task12-*/
 dogma-*/

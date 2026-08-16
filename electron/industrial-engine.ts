@@ -1,9 +1,16 @@
 import AdmZip from "adm-zip";
 import path from "node:path";
+import fs from "node:fs/promises";
+import { promisify } from "node:util";
+import { gzip, gunzip } from "node:zlib";
 import { STATIC_DATA_ROOT } from "./data-paths";
+import { ensureStaticDataArchive, INDUSTRIAL_PREPARED_CACHE, prepareStaticDataForProcess } from "./type-volumes";
 import { loadLatestMarketDatasetByMode } from "./market-storage";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
+const INDUSTRIAL_PREPARED_SCHEMA = 1;
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 
 type BlueprintMaterial = { typeID: number; quantity: number };
 type BlueprintProduct = { typeID: number; quantity: number; probability?: number };
@@ -30,8 +37,56 @@ type IndustrialIndex = {
 
 let cache: Promise<IndustrialIndex> | undefined;
 
+type SerializedIndustrialIndex = {
+  schema: number;
+  generatedAt: string;
+  blueprints: Array<[number, BlueprintDefinition]>;
+  names: Array<[number, string]>;
+  volumes: Array<[number, number]>;
+  productBlueprints: Array<[number, number[]]>;
+};
+
+async function readPreparedIndustrialIndex(): Promise<IndustrialIndex | undefined> {
+  try {
+    const parsed = JSON.parse((await gunzipAsync(await fs.readFile(INDUSTRIAL_PREPARED_CACHE))).toString("utf8")) as SerializedIndustrialIndex;
+    if (parsed.schema !== INDUSTRIAL_PREPARED_SCHEMA || !Array.isArray(parsed.blueprints) || !Array.isArray(parsed.names) || !Array.isArray(parsed.volumes) || !Array.isArray(parsed.productBlueprints))
+      return undefined;
+    const blueprints = new Map(parsed.blueprints.map(([id, value]) => [Number(id), value]));
+    return {
+      blueprints,
+      names: new Map(parsed.names.map(([id, value]) => [Number(id), String(value)])),
+      volumes: new Map(parsed.volumes.map(([id, value]) => [Number(id), Number(value)])),
+      productBlueprints: new Map(parsed.productBlueprints.map(([productId, blueprintIds]) => [Number(productId), blueprintIds.map((id) => blueprints.get(Number(id))).filter((value): value is BlueprintDefinition => Boolean(value))])),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+async function savePreparedIndustrialIndex(index: IndustrialIndex) {
+  await fs.mkdir(path.dirname(INDUSTRIAL_PREPARED_CACHE), { recursive: true });
+  const payload: SerializedIndustrialIndex = {
+    schema: INDUSTRIAL_PREPARED_SCHEMA,
+    generatedAt: new Date().toISOString(),
+    blueprints: [...index.blueprints],
+    names: [...index.names],
+    volumes: [...index.volumes],
+    productBlueprints: [...index.productBlueprints].map(([productId, blueprints]) => [productId, blueprints.map((blueprint) => blueprint.blueprintTypeID ?? blueprint._key)]),
+  };
+  const partial = `${INDUSTRIAL_PREPARED_CACHE}.${process.pid}.partial`;
+  await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(payload), "utf8"), { level: 6 }));
+  await fs.rm(INDUSTRIAL_PREPARED_CACHE, { force: true }).catch(() => undefined);
+  await fs.rename(partial, INDUSTRIAL_PREPARED_CACHE);
+}
+
 function index() {
-  return (cache ??= Promise.resolve().then(() => {
+  return (cache ??= Promise.resolve().then(async () => {
+    const processState = await prepareStaticDataForProcess();
+    if (!processState.promoted) {
+      const prepared = await readPreparedIndustrialIndex();
+      if (prepared) return prepared;
+    }
+    await ensureStaticDataArchive();
     const zip = new AdmZip(ARCHIVE);
     const blueprintEntry = zip.getEntry("blueprints.jsonl");
     const typesEntry = zip.getEntry("types.jsonl");
@@ -61,7 +116,9 @@ function index() {
       if (row.name?.en) names.set(row._key, row.name.en);
       volumes.set(row._key, row.volume ?? 0);
     }
-    return { blueprints, names, volumes, productBlueprints };
+    const value = { blueprints, names, volumes, productBlueprints };
+    await savePreparedIndustrialIndex(value);
+    return value;
   }));
 }
 
@@ -418,6 +475,183 @@ export async function analyzeBlueprintActivities(input: { blueprintTypeId: numbe
   return { blueprintTypeId: input.blueprintTypeId, blueprintName: names.get(input.blueprintTypeId) ?? `Blueprint ${input.blueprintTypeId}`, maxProductionLimit: blueprint.maxProductionLimit ?? null, activities, source: "CCP EVE static data (offline)" };
 }
 
+
+export async function prepareIndustrialDataLocal() {
+  const value = await index();
+  return { blueprints: value.blueprints.size, namedTypes: value.names.size, productMappings: value.productBlueprints.size };
+}
+
+const INVENTION_DECRYPTORS = [
+  { typeId: 34201, name: "Accelerant Decryptor", probabilityMultiplier: 1.2, runModifier: 1, meModifier: 2, teModifier: 10 },
+  { typeId: 34202, name: "Attainment Decryptor", probabilityMultiplier: 1.8, runModifier: 4, meModifier: -1, teModifier: 4 },
+  { typeId: 34203, name: "Augmentation Decryptor", probabilityMultiplier: 0.6, runModifier: 9, meModifier: -2, teModifier: 2 },
+  { typeId: 34204, name: "Parity Decryptor", probabilityMultiplier: 1.5, runModifier: 3, meModifier: 1, teModifier: -2 },
+  { typeId: 34205, name: "Process Decryptor", probabilityMultiplier: 1.1, runModifier: 0, meModifier: 3, teModifier: 6 },
+  { typeId: 34206, name: "Symmetry Decryptor", probabilityMultiplier: 1, runModifier: 2, meModifier: 1, teModifier: 8 },
+  { typeId: 34207, name: "Optimized Attainment Decryptor", probabilityMultiplier: 1.9, runModifier: 2, meModifier: 1, teModifier: -2 },
+  { typeId: 34208, name: "Optimized Augmentation Decryptor", probabilityMultiplier: 0.9, runModifier: 7, meModifier: 2, teModifier: 0 },
+] as const;
+
+export async function analyzeInventionOpportunities(input: { snapshot?: any; decryptorTypeId?: number | null }) {
+  const { blueprints, names } = await index();
+  const trained = trainedSkillMap(input.snapshot);
+  const selectedDecryptor = INVENTION_DECRYPTORS.find((item) => item.typeId === Number(input.decryptorTypeId ?? 0)) ?? null;
+  const ownedOriginals = new Set<number>(
+    [
+      ...(Array.isArray(input.snapshot?.extended?.blueprints) ? input.snapshot.extended.blueprints : []),
+      ...(Array.isArray(input.snapshot?.extended?.corporation?.blueprints) ? input.snapshot.extended.corporation.blueprints : []),
+    ]
+      .filter((blueprint: any) => Number(blueprint.quantity) === -1)
+      .map((blueprint: any) => Number(blueprint.type_id)),
+  );
+  const candidates: Array<{
+    sourceBlueprint: BlueprintDefinition;
+    invention: BlueprintActivity;
+    inventedBlueprint: BlueprintDefinition;
+    inventionProduct: BlueprintProduct;
+    manufacturing: BlueprintActivity;
+    finalProduct: BlueprintProduct;
+  }> = [];
+  const priceTypeIds = new Set<number>();
+  for (const decryptor of INVENTION_DECRYPTORS) priceTypeIds.add(decryptor.typeId);
+  for (const sourceBlueprint of blueprints.values()) {
+    const invention = sourceBlueprint.activities?.invention;
+    if (!invention?.products?.length) continue;
+    priceTypeIds.add(sourceBlueprint.blueprintTypeID ?? sourceBlueprint._key);
+    for (const material of invention.materials ?? []) priceTypeIds.add(material.typeID);
+    for (const inventionProduct of invention.products) {
+      const inventedBlueprint = blueprints.get(inventionProduct.typeID);
+      const manufacturing = inventedBlueprint?.activities?.manufacturing;
+      const finalProduct = manufacturing?.products?.[0];
+      if (!inventedBlueprint || !manufacturing || !finalProduct) continue;
+      priceTypeIds.add(finalProduct.typeID);
+      for (const material of manufacturing.materials ?? []) priceTypeIds.add(material.typeID);
+      candidates.push({ sourceBlueprint, invention, inventedBlueprint, inventionProduct, manufacturing, finalProduct });
+    }
+  }
+  const market = await marketPrices([...priceTypeIds]);
+  const decryptors = INVENTION_DECRYPTORS.map((decryptor) => ({
+    ...decryptor,
+    marketCost: market.quotes.get(decryptor.typeId)?.bestSell ?? null,
+  }));
+  const selectedDecryptorCost = selectedDecryptor ? market.quotes.get(selectedDecryptor.typeId)?.bestSell ?? null : 0;
+  const priced = candidates.map((candidate) => {
+    const sourceBlueprintTypeId = candidate.sourceBlueprint.blueprintTypeID ?? candidate.sourceBlueprint._key;
+    const inventedBlueprintTypeId = candidate.inventedBlueprint.blueprintTypeID ?? candidate.inventedBlueprint._key;
+    const ownsSourceOriginal = ownedOriginals.has(sourceBlueprintTypeId);
+    const priceLines = (materials: BlueprintMaterial[]) => materials.map((material) => {
+      const unitPrice = market.quotes.get(material.typeID)?.bestSell ?? null;
+      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity: material.quantity, unitPrice, cost: unitPrice == null ? null : unitPrice * material.quantity };
+    });
+    const inventionMaterials = priceLines(candidate.invention.materials ?? []);
+    const skillRequirements = (candidate.invention.skills ?? []).map((skill) => ({
+      typeId: skill.typeID,
+      name: names.get(skill.typeID) ?? `Skill ${skill.typeID}`,
+      requiredLevel: skill.level,
+      trainedLevel: trained.get(skill.typeID) ?? 0,
+    }));
+    const encryptionSkill = skillRequirements.find((skill) => /Encryption Methods/i.test(skill.name)) ?? skillRequirements[0];
+    const scienceSkills = skillRequirements.filter((skill) => skill.typeId !== encryptionSkill?.typeId).slice(0, 2);
+    const skillProbabilityMultiplier = 1 + Number(encryptionSkill?.trainedLevel ?? 0) / 40 + scienceSkills.reduce((sum, skill) => sum + skill.trainedLevel, 0) / 30;
+    const baseProbability = candidate.inventionProduct.probability ?? null;
+    const probability = baseProbability == null ? null : Math.min(1, baseProbability * skillProbabilityMultiplier * (selectedDecryptor?.probabilityMultiplier ?? 1));
+    const maxSkillProbabilityMultiplier = 1 + 5 / 40 + 10 / 30;
+    const maxSkillsProbability = baseProbability == null ? null : Math.min(1, baseProbability * maxSkillProbabilityMultiplier * (selectedDecryptor?.probabilityMultiplier ?? 1));
+    const skillImpacts = skillRequirements.map((skill) => {
+      const encryption = skill.typeId === encryptionSkill?.typeId;
+      const divisor = encryption ? 40 : 30;
+      return {
+        ...skill,
+        role: encryption ? "Encryption method" : "Science field",
+        currentRelativeBoost: skill.trainedLevel / divisor,
+        maximumRelativeBoost: 5 / divisor,
+        remainingRelativeBoost: Math.max(0, (5 - skill.trainedLevel) / divisor),
+      };
+    });
+    const outputRuns = Math.max(1, Number(candidate.inventionProduct.quantity || 1) + Number(selectedDecryptor?.runModifier ?? 0));
+    const materialEfficiency = 2 + Number(selectedDecryptor?.meModifier ?? 0);
+    const timeEfficiency = 4 + Number(selectedDecryptor?.teModifier ?? 0);
+    const manufacturingMaterials = (candidate.manufacturing.materials ?? []).map((material) => {
+      const quantity = Math.max(1, Math.ceil(material.quantity * outputRuns * (1 - materialEfficiency / 100) - 1e-12));
+      const unitPrice = market.quotes.get(material.typeID)?.bestSell ?? null;
+      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity, unitPrice, cost: unitPrice == null ? null : unitPrice * quantity };
+    });
+    const manufacturingMaterialsPerRun = (candidate.manufacturing.materials ?? []).map((material) => {
+      const quantity = Math.max(1, Math.ceil(material.quantity * (1 - materialEfficiency / 100) - 1e-12));
+      const unitPrice = market.quotes.get(material.typeID)?.bestSell ?? null;
+      return { typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity, unitPrice, cost: unitPrice == null ? null : unitPrice * quantity };
+    });
+    const inventionMaterialCost = inventionMaterials.every((line) => line.cost != null) ? inventionMaterials.reduce((sum, line) => sum + Number(line.cost), 0) : null;
+    const manufacturingCost = manufacturingMaterials.every((line) => line.cost != null) ? manufacturingMaterials.reduce((sum, line) => sum + Number(line.cost), 0) : null;
+    const sourceBlueprintMarketCost = ownsSourceOriginal ? 0 : market.quotes.get(sourceBlueprintTypeId)?.bestSell ?? null;
+    const outputQuantity = Math.max(1, candidate.finalProduct.quantity || 1) * outputRuns;
+    const productQuote = market.quotes.get(candidate.finalProduct.typeID);
+    const immediateSaleRevenue = productQuote?.bestBuy == null ? null : productQuote.bestBuy * outputQuantity;
+    const attemptCost = inventionMaterialCost == null || sourceBlueprintMarketCost == null || selectedDecryptorCost == null ? null : inventionMaterialCost + sourceBlueprintMarketCost + selectedDecryptorCost;
+    const successCost = attemptCost == null || manufacturingCost == null ? null : attemptCost + manufacturingCost;
+    const successfulCopyProfit = successCost == null || immediateSaleRevenue == null ? null : immediateSaleRevenue - successCost;
+    const manufacturingCostPerRun = manufacturingMaterialsPerRun.every((line) => line.cost != null) ? manufacturingMaterialsPerRun.reduce((sum, line) => sum + Number(line.cost), 0) : null;
+    const revenuePerRun = immediateSaleRevenue == null ? null : immediateSaleRevenue / outputRuns;
+    const successfulRunProfit = manufacturingCostPerRun == null || revenuePerRun == null || attemptCost == null ? null : revenuePerRun - manufacturingCostPerRun - attemptCost / outputRuns;
+    const expectedProfitPerAttempt = probability == null || inventionMaterialCost == null || manufacturingCost == null || sourceBlueprintMarketCost == null || selectedDecryptorCost == null || immediateSaleRevenue == null
+      ? null
+      : probability * (immediateSaleRevenue - manufacturingCost) - inventionMaterialCost - sourceBlueprintMarketCost - Number(selectedDecryptorCost ?? 0);
+    return {
+      sourceBlueprintTypeId,
+      sourceBlueprintName: names.get(sourceBlueprintTypeId) ?? `Blueprint ${sourceBlueprintTypeId}`,
+      inventedBlueprintTypeId,
+      inventedBlueprintName: names.get(inventedBlueprintTypeId) ?? `Blueprint ${inventedBlueprintTypeId}`,
+      productTypeId: candidate.finalProduct.typeID,
+      productName: names.get(candidate.finalProduct.typeID) ?? `Type ${candidate.finalProduct.typeID}`,
+      outputQuantity,
+      ownsSourceOriginal,
+      sourceCopyCostBasis: ownsSourceOriginal ? "Owned BPO: source-copy acquisition treated as free" : sourceBlueprintMarketCost == null ? "No retained public market quote for source blueprint" : "Lowest retained public sell order for source blueprint",
+      sourceBlueprintMarketCost,
+      baseProbability,
+      probability,
+      skillProbabilityMultiplier,
+      maxSkillProbabilityMultiplier,
+      maxSkillsProbability,
+      trainingProbabilityGain: probability == null || maxSkillsProbability == null ? null : Math.max(0, maxSkillsProbability - probability),
+      skillImpacts,
+      encryptionSkill,
+      scienceSkills,
+      outputRuns,
+      materialEfficiency,
+      timeEfficiency,
+      selectedDecryptor: selectedDecryptor ? { ...selectedDecryptor, marketCost: selectedDecryptorCost } : null,
+      inventionMaterials,
+      manufacturingMaterials,
+      manufacturingMaterialsPerRun,
+      inventionMaterialCost,
+      attemptCost,
+      manufacturingCost,
+      manufacturingCostPerRun,
+      immediateSaleRevenue,
+      revenuePerRun,
+      successfulCopyProfit,
+      successfulRunProfit,
+      expectedProfitPerAttempt,
+      skills: skillRequirements,
+    };
+  });
+  priced.sort((a, b) => (b.expectedProfitPerAttempt ?? Number.NEGATIVE_INFINITY) - (a.expectedProfitPerAttempt ?? Number.NEGATIVE_INFINITY));
+  return {
+    schema: 4,
+    generatedAt: new Date().toISOString(),
+    marketCreatedAt: market.createdAt,
+    candidateCount: priced.length,
+    ownedSourceCount: priced.filter((item) => item.ownsSourceOriginal).length,
+    decryptors,
+    selectedDecryptorTypeId: selectedDecryptor?.typeId ?? null,
+    opportunities: priced,
+    notes: [
+      "Invented blueprint copies are primarily traded through contracts, not the public regional order book; Sage values the manufacturable output instead of inventing a BPC market price.",
+      "Character probability uses the relevant encryption-method skill and two science skills. The selected decryptor changes probability, output runs, ME, TE and attempt cost.",
+      "Figures use current retained public orders and do not yet include facility, tax or job-installation modifiers.",
+    ],
+  };
+}
 
 type IndustrySystemRow = { solar_system_id: number; cost_indices: Array<{ activity: string; cost_index: number }> };
 let industrySystemCache: { expiresAt: number; rows: IndustrySystemRow[] } | null = null;

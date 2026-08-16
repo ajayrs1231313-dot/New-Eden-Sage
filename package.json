@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "license": "MIT",
   "author": "New Eden Sage contributors",
@@ -15,7 +15,8 @@
     "build": "tsc --noEmit && tsc -p tsconfig.electron.json && vite build",
     "preview": "vite preview",
     "icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run icon && npm run build && electron-builder --win nsis --publish never"
+    "dist:win": "npm run icon && npm run build && electron-builder --win nsis --publish never",
+    "fitting:refresh-bundle": "tsc -p tsconfig.electron.json && node scripts/build-fitting-bundle.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -68,6 +69,21 @@
       {
         "from": "vendor/tunnel-client",
         "to": "tunnel-client"
+      },
+      {
+        "from": "vendor/fitting-data",
+        "to": "fitting-data",
+        "filter": [
+          "fitting-dogma-prepared-v1.json.gz",
+          "fitting-catalogue-prepared-v1.json.gz"
+        ]
+      },
+      {
+        "from": "vendor/market-data",
+        "to": "market-data",
+        "filter": [
+          "market-static-prepared-v1.json.gz"
+        ]
       }
     ],
     "win": {

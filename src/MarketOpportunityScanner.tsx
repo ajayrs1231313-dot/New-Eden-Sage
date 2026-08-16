@@ -28,6 +28,7 @@ export function MarketOpportunityScanner({
     maxMinutes: analysis.constraints.maxMinutes,
   });
   const [page, setPage] = useState(0);
+  const [columnSort, setColumnSort] = useState<{ key: "item" | "sell" | "buy" | "route" | "confidence" | "profit"; direction: "asc" | "desc" }>({ key: "profit", direction: "desc" });
   const pageSize = 50;
 
   useEffect(() => {
@@ -49,7 +50,31 @@ export function MarketOpportunityScanner({
     () => filterMarketOpportunities(analysis.market.opportunities, filters),
     [analysis.market.opportunities, filters],
   );
-  const visible = filtered.slice(page * pageSize, (page + 1) * pageSize);
+  const sorted = useMemo(() => [...filtered].sort((a, b) => {
+    const value = (trade: typeof a) => {
+      switch (columnSort.key) {
+        case "item": return trade.item.toLocaleLowerCase();
+        case "sell": return `${trade.sell.regionName} ${trade.sell.systemName}`.toLocaleLowerCase();
+        case "buy": return `${trade.buy.regionName} ${trade.buy.systemName}`.toLocaleLowerCase();
+        case "route": return trade.jumps;
+        case "confidence": return trade.fillScore;
+        case "profit": return trade.profit;
+      }
+    };
+    const aa = value(a); const bb = value(b);
+    const order = typeof aa === "string" && typeof bb === "string" ? aa.localeCompare(bb) : Number(aa) - Number(bb);
+    return columnSort.direction === "asc" ? order : -order;
+  }), [filtered, columnSort]);
+  const visible = sorted.slice(page * pageSize, (page + 1) * pageSize);
+
+  function sortColumn(key: typeof columnSort.key) {
+    setColumnSort((current) => current.key === key ? { key, direction: current.direction === "asc" ? "desc" : "asc" } : { key, direction: key === "item" || key === "sell" || key === "buy" ? "asc" : "desc" });
+    setPage(0);
+  }
+
+  function sortLabel(label: string, key: typeof columnSort.key) {
+    return `${label}${columnSort.key === key ? columnSort.direction === "asc" ? " ↑" : " ↓" : ""}`;
+  }
 
   function patch(next: Partial<MarketOpportunityFilters>) {
     setFilters((current) => ({ ...current, ...next }));
@@ -227,7 +252,7 @@ export function MarketOpportunityScanner({
 
       <div className="market-trade-table">
         <div className="market-trade-row heading">
-          <span>Item / score</span><span>Buy stock</span><span>Sell to buyer</span><span>Capital / cargo</span><span>Route / confidence</span><span>Profit</span>
+          <button onClick={() => sortColumn("item")}>{sortLabel("Item / score", "item")}</button><button onClick={() => sortColumn("sell")}>{sortLabel("Buy stock", "sell")}</button><button onClick={() => sortColumn("buy")}>{sortLabel("Sell to buyer", "buy")}</button><span>Capital / cargo</span><span><button onClick={() => sortColumn("route")}>{sortLabel("Route", "route")}</button><button onClick={() => sortColumn("confidence")}>{sortLabel("Confidence", "confidence")}</button></span><button onClick={() => sortColumn("profit")}>{sortLabel("Profit", "profit")}</button>
         </div>
         {visible.map((trade) => (
           <details className="market-trade-row market-trade-result" key={trade.id}>

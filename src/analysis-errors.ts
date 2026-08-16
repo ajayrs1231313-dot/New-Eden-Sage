@@ -4,7 +4,7 @@ export function analysisErrorMessage(error: unknown) {
 
 export function isExpectedAnalysisCancellation(error: unknown) {
   const message = analysisErrorMessage(error);
-  return /Replaced by a newer analysis request|Analysis request superseded|ANALYSIS_CANCELLED|Analysis cancelled/i.test(message);
+  return /Replaced by a newer analysis request|Analysis request superseded|ANALYSIS_CANCELLED|Analysis cancelled|Paused for exclusive Master Update/i.test(message);
 }
 
 export function friendlyAnalysisError(error: unknown, fallback: string) {

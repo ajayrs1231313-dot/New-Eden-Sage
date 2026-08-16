@@ -1,5 +1,19 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+function rendererErrorReport(kind: string, value: unknown) {
+  const error = value instanceof Error ? value : null;
+  ipcRenderer.send("diagnostics:renderer-error", {
+    kind,
+    message: error?.message ?? String(value),
+    name: error?.name,
+    stack: error?.stack,
+    href: globalThis.location?.href,
+  });
+}
+
+globalThis.addEventListener("error", (event) => rendererErrorReport("error", event.error ?? event.message));
+globalThis.addEventListener("unhandledrejection", (event) => rendererErrorReport("unhandledrejection", event.reason));
+
 const transientAnalysisError = (error: unknown) => /ANALYSIS_(WATCHDOG|WORKER_CRASH|WORKER_EXIT)|stopped responding|worker crashed|worker exited unexpectedly/i.test(error instanceof Error ? error.message : String(error));
 
 async function invokeAnalysis(channel: string, ...args: unknown[]) {
@@ -61,8 +75,12 @@ contextBridge.exposeInMainWorld("sage", {
   resolveTypeIds: (ids: number[]) =>
     ipcRenderer.invoke("universe:resolve-type-ids", ids),
   listShips: () => ipcRenderer.invoke("universe:ships"),
+  searchLootItems: (query: string, limit = 60) => ipcRenderer.invoke("loot:search", { query, limit }),
+  getLootAcquisition: (typeId: number) => ipcRenderer.invoke("loot:acquisition", typeId),
+  prepareLootDataLocal: () => ipcRenderer.invoke("loot:prepare"),
   getManufacturingPlan: (input: unknown) => ipcRenderer.invoke("industrial:manufacturing-plan", input),
   getBlueprintActivities: (input: unknown) => ipcRenderer.invoke("industrial:blueprint-activities", input),
+  getInventionOpportunities: (input: unknown) => ipcRenderer.invoke("industrial:invention-opportunities", input),
   getIndustrySystemCostIndex: (input: unknown) => ipcRenderer.invoke("industrial:system-cost-index", input),
   getIndustrialOpportunityRouteScope: (input: unknown) => ipcRenderer.invoke("industrial:opportunity-route-scope", input),
   getShipReadiness: (input: unknown) =>
@@ -100,6 +118,12 @@ contextBridge.exposeInMainWorld("sage", {
     invokeAnalysis("pve:locations", input),
   cancelAnalysis: (kind?: string) => ipcRenderer.invoke("analysis:cancel", kind),
   getAnalysisStatus: () => ipcRenderer.invoke("analysis:status"),
+  runMasterUpdate: () => ipcRenderer.invoke("master:update-all"),
+  onMasterUpdateProgress: (callback: (progress: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress);
+    ipcRenderer.on("master:update-progress", listener);
+    return () => ipcRenderer.removeListener("master:update-progress", listener);
+  },
   onAnalysisProgress: (callback: (progress: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress);
     ipcRenderer.on("analysis:progress", listener);

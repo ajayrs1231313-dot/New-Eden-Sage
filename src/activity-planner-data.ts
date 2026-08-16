@@ -815,6 +815,21 @@ export const activityDefinitions: ActivityDefinition[] = [
             ],
           },
           {
+            id: "wh-rampant-drone-fabricator",
+            label: "Rampant Drone Fabricator",
+            description: "Escalating Rogue Drone site found in C1-C6 wormholes. Rampancy scales the threat; large Severe and Critical waves can now field an Infested Drone Naglfar with a Capital Energy Neutralizer and concentrated high EHP/DPS pressure.",
+            difficulty: "Expert",
+            experience: "Experienced wormhole fleet with strong capacitor discipline, target calling, logistics awareness and an exit/refit plan between waves.",
+            ships: ["Paladin", "Vargur", "Nestor", "Leshak", "Loki"],
+            coreSkills: [...core.fitting, ...core.capacitor],
+            supportSkills: [{ skill: "Thermodynamics", level: 4 }, { skill: "Astrometrics", level: 4 }, { skill: "Cloaking", level: 4 }],
+            incomeHooks: ["Fabricator Data", "Rogue Drone loot", "Escalating wormhole PvE rewards"],
+            selectors: [
+              { id: "threat", label: "Threat target", options: ["Lower threat", "Severe", "Critical"] },
+            ],
+          },
+
+          {
             id: "wh-c5-c6",
             label: "C5/C6 fleet PvE",
             description: "High-class wormhole PvE with capital/escalation mechanics, fleet coordination and major risk.",

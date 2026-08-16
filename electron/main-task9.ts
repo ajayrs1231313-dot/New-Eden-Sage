@@ -2,6 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import AdmZip from "adm-zip";
 import ExcelJS from "exceljs";
 import {
@@ -39,12 +40,14 @@ import {
   MARKET_DATA_ROOT,
   saveMarketDataset,
 } from "./market-storage";
-import { listPublishedShips } from "./type-volumes";
-import { LOG_FILE, logEvent } from "./logger";
+import { listPublishedShips, stageStaticDataRefreshLowImpact } from "./type-volumes";
+import { runMasterUpdate } from "./master-update";
+import { CRASH_LOG_FILE, LOG_FILE, logCrash, logEvent } from "./logger";
 import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
 import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
-import { analyzeBlueprintActivities, analyzeManufacturingPlan, getIndustrySystemCostIndices } from "./industrial-engine";
+import { analyzeBlueprintActivities, analyzeInventionOpportunities, analyzeManufacturingPlan, getIndustrySystemCostIndices } from "./industrial-engine";
+import { getLootAcquisition, prepareLootDataLocal, searchLootItems } from "./loot-engine";
 import {
   beginRawMarketSnapshot,
   completeRawMarketSnapshot,
@@ -54,8 +57,9 @@ import {
 } from "./raw-market-storage";
 import { analyzeShipReadiness } from "./readiness";
 import { analyzeActivityReadiness } from "./activity-readiness";
+import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker } from "./analysis-job-manager";
+import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker, stopAnalysisWorkersForExclusiveTask } from "./analysis-job-manager";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
 import { typeImageProtocolResponse } from "./eve-assets";
@@ -66,6 +70,83 @@ protocol.registerSchemesAsPrivileged([{
 }]);
 
 let window: BrowserWindow | null = null;
+let masterUpdateActive = false;
+let quietTabPreparationActive = false;
+
+function automaticSyncStatePath() {
+  return path.join(app.getPath("userData"), "automatic-sync-state.json");
+}
+
+async function hasSyncedThisVersion() {
+  try {
+    const state = JSON.parse(await fs.readFile(automaticSyncStatePath(), "utf8")) as { version?: string };
+    return state.version === app.getVersion();
+  } catch {
+    return false;
+  }
+}
+
+async function markVersionSynced() {
+  await fs.writeFile(automaticSyncStatePath(), JSON.stringify({ version: app.getVersion(), syncedAt: new Date().toISOString() }), "utf8");
+}
+
+async function prepareTabsQuietly() {
+  if (quietTabPreparationActive) return;
+  quietTabPreparationActive = true;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, "quiet-tab-prep-worker.js"), {
+        env: { ...process.env, NEW_EDEN_SAGE_USER_DATA: app.getPath("userData") },
+      });
+      worker.once("message", (message: any) => message?.type === "complete" ? resolve() : reject(new Error(message?.error ?? "Quiet tab preparation failed.")));
+      worker.once("error", reject);
+      worker.once("exit", (code) => { if (code !== 0) reject(new Error(`Quiet tab preparation worker exited (${code}).`)); });
+    });
+    // Build each character's default ISK Lab result once against the just-saved
+    // market snapshot. The retained analysis worker then serves the tab's
+    // matching initial request from memory instead of scanning every item again.
+    const snapshots = listSnapshots() as any[];
+    for (const snapshot of snapshots) {
+      await runOpportunityAnalysis({
+        characterId: snapshot.characterId,
+        maxCapital: null,
+        cargoCapacityM3: null,
+        maxJumps: null,
+        maxMinutes: null,
+      }, snapshots).catch((error) => logEvent("warn", "background_isk_lab.prepare_failed", {
+        characterId: snapshot.characterId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+    await logEvent("info", "background_tabs.prepared", { tabs: ["industrial", "isk-lab"] });
+  } finally {
+    quietTabPreparationActive = false;
+  }
+}
+
+async function runCompleteSync(sendProgress: (progress: unknown) => void) {
+  if (masterUpdateActive) return { alreadyRunning: true };
+  let lastProgress: unknown = null;
+  masterUpdateActive = true;
+  try {
+    await Promise.all([disposeFittingWorker(), stopAnalysisWorkersForExclusiveTask()]);
+    await logEvent("info", "master_update.sync_started", { source: "automatic-or-sync-all" });
+    const result = await runMasterUpdate((progress) => {
+      lastProgress = progress;
+      sendProgress(progress);
+    });
+    if (!(result as any).alreadyRunning && !(result as any).failures?.length) await markVersionSynced();
+    // Fitting and Industry deliberately start only after the live app data is
+    // ready, so neither delays the initial experience or competes for cores.
+    void prepareTabsQuietly();
+    return result;
+  } catch (error) {
+    logCrash("master_update.crashed", { error, lastProgress });
+    throw error;
+  } finally {
+    masterUpdateActive = false;
+  }
+}
 
 process.on(
   "uncaughtException",
@@ -213,6 +294,10 @@ app.whenReady().then(() => {
     }
     return resolved;
   });
+  ipcMain.handle("loot:search", (_event, input: { query?: string; limit?: number }) =>
+    searchLootItems(String(input?.query ?? ""), Number(input?.limit ?? 60)));
+  ipcMain.handle("loot:acquisition", (_event, typeId: number) => getLootAcquisition(Number(typeId)));
+  ipcMain.handle("loot:prepare", () => prepareLootDataLocal());
   ipcMain.handle(
     "industrial:system-cost-index",
     async (_event, input: { characterId: string }) => {
@@ -220,7 +305,12 @@ app.whenReady().then(() => {
       if (!snapshot) throw new Error("Select and sync a connected character.");
       const solarSystemId = Number(snapshot.location?.solar_system_id ?? 0);
       if (!solarSystemId) throw new Error("The selected character has no resolved solar-system location.");
-      return getIndustrySystemCostIndices(solarSystemId);
+      const key = { system: solarSystemId, snapshot: snapshot.updatedAt, market: (await loadCurrentRawMarketManifest("all"))?.id };
+      const saved = await loadPersistedResult("industry-system-cost", key);
+      if (saved) return saved;
+      const result = await getIndustrySystemCostIndices(solarSystemId);
+      await savePersistedResult("industry-system-cost", key, result);
+      return result;
     },
   );
   ipcMain.handle(
@@ -228,7 +318,25 @@ app.whenReady().then(() => {
     async (_event, input: { characterId: string; blueprintTypeId: number }) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      return analyzeBlueprintActivities({ ...input, snapshot });
+      const key = { input, snapshot: snapshot.updatedAt };
+      const saved = await loadPersistedResult("industry-blueprint-activities", key);
+      if (saved) return saved;
+      const result = await analyzeBlueprintActivities({ ...input, snapshot });
+      await savePersistedResult("industry-blueprint-activities", key, result);
+      return result;
+    },
+  );
+  ipcMain.handle(
+    "industrial:invention-opportunities",
+    async (_event, input: { characterId: string; marketDataRevision?: number; decryptorTypeId?: number | null }) => {
+      const snapshot = getSnapshot(input.characterId) as any;
+      if (!snapshot) throw new Error("Select and sync a connected character.");
+      const key = { schema: 4, characterId: input.characterId, snapshot: snapshot.updatedAt, marketDataRevision: Number(input.marketDataRevision ?? 0), decryptorTypeId: Number(input.decryptorTypeId ?? 0) };
+      const saved = await loadPersistedResult("industry-invention-opportunities", key);
+      if (saved) return saved;
+      const result = await analyzeInventionOpportunities({ snapshot, decryptorTypeId: input.decryptorTypeId });
+      await savePersistedResult("industry-invention-opportunities", key, result);
+      return result;
     },
   );
   ipcMain.handle(
@@ -283,7 +391,12 @@ app.whenReady().then(() => {
           ...corporationBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint, true)),
         ];
       });
-      return analyzeManufacturingPlan({ ...input, assets, stockSources, ownedBlueprints, snapshot });
+      const key = { input, snapshots: scopedSnapshots.map((item) => [item.characterId, item.updatedAt]) };
+      const saved = await loadPersistedResult("industry-manufacturing-plan", key);
+      if (saved) return saved;
+      const result = await analyzeManufacturingPlan({ ...input, assets, stockSources, ownedBlueprints, snapshot });
+      await savePersistedResult("industry-manufacturing-plan", key, result);
+      return result;
     },
   );
   ipcMain.handle("universe:ships", () => listPublishedShips());
@@ -295,12 +408,17 @@ app.whenReady().then(() => {
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      return analyzeShipReadiness(
+      const key = { input, snapshot: snapshot.updatedAt };
+      const saved = await loadPersistedResult("ship-readiness", key);
+      if (saved) return saved;
+      const result = await analyzeShipReadiness(
         snapshot,
         input.hullTypeId,
         input.cloneState ?? "omega",
         input.masteryLevel ?? 5,
       );
+      await savePersistedResult("ship-readiness", key, result);
+      return result;
     },
   );
   ipcMain.handle(
@@ -324,7 +442,10 @@ app.whenReady().then(() => {
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      return analyzeActivityReadiness(snapshot, {
+      const key = { input, snapshot: snapshot.updatedAt };
+      const saved = await loadPersistedResult("activity-readiness", key);
+      if (saved) return saved;
+      const result = await analyzeActivityReadiness(snapshot, {
         hullTypeId: input.hullTypeId,
         cloneState: input.cloneState,
         coreSkills: input.coreSkills,
@@ -332,6 +453,8 @@ app.whenReady().then(() => {
         context: input.context,
         archetypeId: input.archetypeId,
       });
+      await savePersistedResult("activity-readiness", key, result);
+      return result;
     },
   );
   ipcMain.handle(
@@ -780,6 +903,13 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("analysis:cancel", async (_event, kind) => cancelAnalysis("Analysis cancelled.", kind));
   ipcMain.handle("analysis:status", () => analysisStatus());
+  ipcMain.handle("master:update-all", async (event) => {
+    return runCompleteSync((progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("master:update-progress", progress);
+    });
+  });
+  ipcMain.on("diagnostics:renderer-error", (_event, report) => logCrash("renderer.javascript_error", { report }));
+  ipcMain.handle("diagnostics:crash-log-path", () => CRASH_LOG_FILE);
   ipcMain.handle("trade:export-top1000", async () => {
     if (!window) return null;
     const analysis = await runTradeAnalysis(
@@ -1039,6 +1169,19 @@ app.whenReady().then(() => {
     },
   );
   createWindow();
+  window?.webContents.once("did-finish-load", () => {
+    void readConfig().then(async (config) => {
+      if (!Object.keys(config.encryptedRefreshTokens ?? {}).length) {
+        await logEvent("info", "master_update.awaiting_first_characters", {});
+        return;
+      }
+      if (await hasSyncedThisVersion()) {
+        await logEvent("info", "master_update.already_synced_this_version", { version: app.getVersion() });
+        return;
+      }
+      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress));
+    }).catch((error) => logCrash("master_update.auto_start_failed", { error }));
+  });
 });
 
 function makeChatGPTMarkdown(data: ReturnType<typeof exportDatabaseData>) {

@@ -249,3 +249,17 @@ export async function disposeAnalysisWorker() {
     if (currentWorker) await currentWorker.terminate().catch(() => undefined);
   }
 }
+
+/** Stops every analysis lane without permanently shutting the service down. */
+export async function stopAnalysisWorkersForExclusiveTask() {
+  for (const lane of Object.keys(lanes) as AnalysisLane[]) stopWatchdog(lane);
+  for (const lane of Object.keys(lanes) as AnalysisLane[]) {
+    const state = lanes[lane];
+    const current = state.active;
+    state.active = null;
+    current?.reject(analysisError("Paused for exclusive Master Update.", "ANALYSIS_CANCELLED"));
+    const currentWorker = state.worker;
+    state.worker = null;
+    if (currentWorker) await currentWorker.terminate().catch(() => undefined);
+  }
+}

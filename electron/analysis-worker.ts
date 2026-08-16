@@ -1,4 +1,9 @@
 import { parentPort } from "node:worker_threads";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { createHash } from "node:crypto";
+import { gzip, gunzip } from "node:zlib";
+import { promisify } from "node:util";
 import { analyzeOpportunities, type OpportunityQuery } from "./opportunity-engine";
 import { analyzeCapabilities } from "./capability-engine";
 import { findFullMarketTrades, type FullTradeAnalysisMode, type FullTradeSearchConstraints, type FullTradeRuntime } from "./full-market-trade";
@@ -29,6 +34,36 @@ if (!parentPort) throw new Error("Analysis worker requires a parent port.");
 
 const resultCache = new Map<string, { expiresAt: number; result: unknown }>();
 let activeJobId: string | null = null;
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
+const PERSISTED_ANALYSIS_ROOT = path.join(process.env.NEW_EDEN_SAGE_USER_DATA ?? process.cwd(), "Analysis Cache");
+
+function persistedResultPath(kind: string, key: string) {
+  return path.join(PERSISTED_ANALYSIS_ROOT, `${kind}-${createHash("sha256").update(key).digest("hex")}.json.gz`);
+}
+
+async function loadPersistedResult(kind: string, key: string) {
+  try {
+    return JSON.parse((await gunzipAsync(await fs.readFile(persistedResultPath(kind, key)))).toString("utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+async function savePersistedResult(kind: string, key: string, result: unknown) {
+  await fs.mkdir(PERSISTED_ANALYSIS_ROOT, { recursive: true });
+  const target = persistedResultPath(kind, key);
+  const partial = `${target}.${process.pid}.partial`;
+  await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(result), "utf8"), { level: 6 }));
+  await fs.rename(partial, target).catch(async () => {
+    await fs.rm(target, { force: true });
+    await fs.rename(partial, target);
+  });
+}
+
+function genericCacheKey(kind: string, input: unknown, snapshots: unknown) {
+  return JSON.stringify({ kind, input, snapshots });
+}
 
 function post(message: unknown) {
   parentPort!.postMessage(message);
@@ -81,30 +116,47 @@ parentPort.on("message", async (message: WorkerMessage) => {
         cached = true;
         progress(message.jobId, { stage: "cache", message: "Reusing the completed analysis for these limits.", percent: 100, cached: true });
       } else {
-        result = await analyzeOpportunities(message.input, {
-          snapshots: message.snapshots,
-          progress: (value) => progress(message.jobId, value),
-        });
+        const persisted = await loadPersistedResult("opportunity", key);
+        if (persisted) {
+          result = persisted;
+          cached = true;
+          progress(message.jobId, { stage: "disk-cache", message: "Loaded the prepared ISK Lab result for this market snapshot.", percent: 100, cached: true });
+        } else {
+          result = await analyzeOpportunities(message.input, {
+            snapshots: message.snapshots,
+            progress: (value) => progress(message.jobId, value),
+          });
+          await savePersistedResult("opportunity", key, result);
+        }
         resultCache.set(key, { expiresAt: Date.now() + 5 * 60_000, result });
       }
     } else if (message.type === "run-capability") {
-      progress(message.jobId, { stage: "capabilities", message: "Evaluating character capabilities in the background…", percent: 10 });
-      result = await analyzeCapabilities(message.snapshot, message.cloneState);
-      progress(message.jobId, { stage: "capabilities", message: "Capability analysis complete.", percent: 100 });
+      const key = genericCacheKey("capability", message.cloneState, { id: message.snapshot?.characterId, updatedAt: message.snapshot?.updatedAt });
+      result = await loadPersistedResult("capability", key);
+      if (result) {
+        cached = true;
+        progress(message.jobId, { stage: "disk-cache", message: "Loaded saved character progression intelligence.", percent: 100, cached: true });
+      } else {
+        progress(message.jobId, { stage: "capabilities", message: "Evaluating character capabilities in the background…", percent: 10 });
+        result = await analyzeCapabilities(message.snapshot, message.cloneState);
+        await savePersistedResult("capability", key, result);
+        progress(message.jobId, { stage: "capabilities", message: "Capability analysis complete.", percent: 100 });
+      }
     } else if (message.type === "run-trade") {
-      const runtime: FullTradeRuntime = {
-        snapshots: message.snapshots,
-        progress: (value) => progress(message.jobId, value),
-      };
-      result = await findFullMarketTrades(message.mode, message.constraints, runtime);
+      const key = await opportunityCacheKey({ ...(message.constraints as any), mode: message.mode } as OpportunityQuery, message.snapshots);
+      result = await loadPersistedResult("trade", key);
+      if (result) { cached = true; progress(message.jobId, { stage: "disk-cache", message: "Loaded saved market trade analysis.", percent: 100, cached: true }); }
+      else { const runtime: FullTradeRuntime = { snapshots: message.snapshots, progress: (value) => progress(message.jobId, value) }; result = await findFullMarketTrades(message.mode, message.constraints, runtime); await savePersistedResult("trade", key, result); }
     } else if (message.type === "run-raw-market") {
-      progress(message.jobId, { stage: "market-search", message: "Searching the complete raw market order book…", percent: 20 });
-      result = await searchRawMarketOrders(message.input);
-      progress(message.jobId, { stage: "market-search", message: "Market search complete.", percent: 100 });
+      const manifest = await loadCurrentRawMarketManifest("all"); const key = genericCacheKey("raw-market", message.input, manifest?.id);
+      result = await loadPersistedResult("raw-market", key);
+      if (result) { cached = true; progress(message.jobId, { stage: "disk-cache", message: "Loaded saved market search.", percent: 100, cached: true }); }
+      else { progress(message.jobId, { stage: "market-search", message: "Searching the complete raw market order book…", percent: 20 }); result = await searchRawMarketOrders(message.input); await savePersistedResult("raw-market", key, result); progress(message.jobId, { stage: "market-search", message: "Market search complete.", percent: 100 }); }
     } else if (message.type === "run-regional-filter") {
-      progress(message.jobId, { stage: "regional-filter", message: "Filtering the regional market index…", percent: 20 });
-      result = await filterRegionalMarket(message.input, { progress: (value) => progress(message.jobId, value) });
-      progress(message.jobId, { stage: "regional-filter", message: "Regional market filter complete.", percent: 100 });
+      const manifest = await loadCurrentRawMarketManifest("all"); const key = genericCacheKey("regional-filter", message.input, manifest?.id);
+      result = await loadPersistedResult("regional-filter", key);
+      if (result) { cached = true; progress(message.jobId, { stage: "disk-cache", message: "Loaded saved regional market result.", percent: 100, cached: true }); }
+      else { progress(message.jobId, { stage: "regional-filter", message: "Filtering the regional market index…", percent: 20 }); result = await filterRegionalMarket(message.input, { progress: (value) => progress(message.jobId, value) }); await savePersistedResult("regional-filter", key, result); progress(message.jobId, { stage: "regional-filter", message: "Regional market filter complete.", percent: 100 }); }
     } else {
       const key = pveCacheKey(message.input, message.snapshot, message.cloneState);
       const existing = !message.input.forceLive ? resultCache.get(key) : undefined;
@@ -113,11 +165,17 @@ parentPort.on("message", async (message: WorkerMessage) => {
         cached = true;
         progress(message.jobId, { stage: "pve-cache", message: "Reusing recent PvE/location intelligence for these travel limits.", percent: 100, cached: true });
       } else {
-        result = await analyzePveLocations(message.input, {
+        const persisted = !message.input.forceLive ? await loadPersistedResult("pve", key) : undefined;
+        if (persisted) {
+          result = persisted;
+          cached = true;
+          progress(message.jobId, { stage: "disk-cache", message: "Loaded saved PvE and location intelligence.", percent: 100, cached: true });
+        } else result = await analyzePveLocations(message.input, {
           snapshot: message.snapshot,
           cloneState: message.cloneState,
           progress: (value) => progress(message.jobId, value),
         });
+        if (!message.input.forceLive && !persisted) await savePersistedResult("pve", key, result);
         resultCache.set(key, { expiresAt: Date.now() + 2 * 60_000, result });
       }
     }

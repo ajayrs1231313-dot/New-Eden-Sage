@@ -1,18 +1,23 @@
 import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
-import { createGzip, createGunzip } from "node:zlib";
+import { createGzip, createGunzip, gunzip } from "node:zlib";
+import { promisify } from "node:util";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import {
   loadCurrentRawMarketManifest,
   loadRawMarketRegion,
   RAW_MARKET_ROOT,
   type RawMarketSnapshot,
 } from "./raw-market-storage";
-import { getMarketSystemIndex } from "./market-static-index";
+import { getMarketSystemIndex, loadMarketWorkerLookups, prepareMarketWorkerLookups } from "./market-static-index";
 import type { MarketOrder } from "./market";
+import type { FullMarketAnalysisIndex, FullMarketBandMetrics } from "./raw-market-analysis";
+
+const gunzipAsync = promisify(gunzip);
 
 export type RegionalMarketSecurityBand = "all" | "high" | "low" | "null";
 
@@ -63,6 +68,32 @@ export type RegionalMarketIndexRuntime = {
 const SCHEMA_VERSION = 1;
 const FILE_NAME = "regional-filter-index-v1.jsonl.gz";
 let currentCache: { snapshotId: string; value: RegionalMarketAggregateIndex } | null = null;
+
+export async function buildRegionalRowsForEntries(
+  manifest: RawMarketSnapshot,
+  entries: RawMarketSnapshot["regions"],
+  staticLookupPath?: string,
+) {
+  const sharedLookups = staticLookupPath ? await loadMarketWorkerLookups(staticLookupPath) : null;
+  const systems = sharedLookups?.systems ?? await getMarketSystemIndex();
+  const rows: RegionalMarketAggregateRow[] = [];
+  for (const regionEntry of entries) {
+    const region = await loadRawMarketRegion(regionEntry.regionId, manifest);
+    if (!region) continue;
+    const byType = new Map<number, RegionalMarketAggregateRow>();
+    for (const order of region.orders) {
+      let row = byType.get(order.type_id);
+      if (!row) {
+        row = { typeId: order.type_id, regionId: regionEntry.regionId, regionName: regionEntry.regionName, all: emptyBand(), high: emptyBand(), low: emptyBand(), null: emptyBand() };
+        byType.set(order.type_id, row);
+      }
+      recordOrder(row.all, order);
+      recordOrder(row[systems.get(order.system_id)?.securityBand ?? "null"], order);
+    }
+    rows.push(...byType.values());
+  }
+  return rows;
+}
 
 function persistedPath(snapshot: RawMarketSnapshot) {
   return path.join(RAW_MARKET_ROOT, snapshot.id, FILE_NAME);
@@ -166,6 +197,68 @@ function buildCheapestSellMap(rows: RegionalMarketAggregateRow[]) {
   return result;
 }
 
+function regionalBand(metrics: FullMarketBandMetrics): RegionalMarketBandMetrics {
+  return {
+    buyOrders: metrics.buyOrders,
+    sellOrders: metrics.sellOrders,
+    buyVolume: metrics.buyVolume,
+    sellVolume: metrics.sellVolume,
+    bestBuy: metrics.bestBuy,
+    bestBuySystemId: metrics.bestBuySystemId,
+    bestBuyVolume: metrics.bestBuyVolume,
+    bestSell: metrics.bestSell,
+    bestSellSystemId: metrics.bestSellSystemId,
+    bestSellVolume: metrics.bestSellVolume,
+  };
+}
+
+/**
+ * Produces the Regional view from the already-complete canonical market index.
+ * No raw order files are opened again; this preserves the same all/high/low/null
+ * aggregates that were calculated while the full index read each order.
+ */
+export async function buildRegionalMarketAggregateIndexFromFull(
+  full: FullMarketAnalysisIndex,
+  runtime: RegionalMarketIndexRuntime = {},
+): Promise<RegionalMarketAggregateIndex> {
+  const manifest = await loadCurrentRawMarketManifest("all");
+  if (!manifest?.complete || manifest.id !== full.snapshotId)
+    throw new Error("The full-market snapshot changed before its regional view could be published.");
+  const rows: RegionalMarketAggregateRow[] = [];
+  let inspected = 0;
+  for (const item of full.items.values()) {
+    for (const region of Object.values(item.regions)) {
+      if (!region.security) throw new Error("Full-market index is missing regional security-band metrics.");
+      rows.push({
+        typeId: item.typeId,
+        regionId: region.regionId,
+        regionName: region.regionName,
+        all: regionalBand(region),
+        high: regionalBand(region.security.high),
+        low: regionalBand(region.security.low),
+        null: regionalBand(region.security.null),
+      });
+    }
+    inspected += 1;
+    if (inspected % 500 === 0) {
+      runtime.progress?.({ stage: "regional-index", message: `Deriving regional intelligence: ${inspected}/${full.items.size} items`, completed: inspected, total: full.items.size, percent: Math.round((inspected / full.items.size) * 100) });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+  const value: RegionalMarketAggregateIndex = {
+    snapshotId: full.snapshotId,
+    createdAt: full.createdAt,
+    orderCount: full.orderCount,
+    regionCount: full.regionCount,
+    rows,
+    cheapestSellByType: buildCheapestSellMap(rows),
+  };
+  currentCache = { snapshotId: full.snapshotId, value };
+  await savePersisted(manifest, value);
+  runtime.progress?.({ stage: "regional-index", message: `Regional intelligence derived from the canonical market index: ${rows.length.toLocaleString()} rows.`, completed: full.items.size, total: full.items.size, percent: 100 });
+  return value;
+}
+
 async function loadPersisted(snapshot: RawMarketSnapshot): Promise<RegionalMarketAggregateIndex | null> {
   const target = persistedPath(snapshot);
   try {
@@ -251,6 +344,7 @@ async function savePersisted(snapshot: RawMarketSnapshot, value: RegionalMarketA
 
 export async function buildRegionalMarketAggregateIndex(
   runtime: RegionalMarketIndexRuntime = {},
+  workerCount = 1,
 ): Promise<RegionalMarketAggregateIndex> {
   const manifest = await loadCurrentRawMarketManifest("all");
   if (!manifest?.complete)
@@ -268,44 +362,34 @@ export async function buildRegionalMarketAggregateIndex(
   }
 
   runtime.progress?.({ stage: "regional-index", message: "Building the security-aware regional market index…", completed: 0, total: manifest.regionCount, percent: 0 });
-  const systems = await getMarketSystemIndex();
-  const rows: RegionalMarketAggregateRow[] = [];
+  const parallelism = Math.min(Math.max(1, workerCount), manifest.regions.length);
+  const staticLookupPath = await prepareMarketWorkerLookups();
+  const chunkSize = Math.max(1, Math.ceil(manifest.regions.length / (parallelism * 4)));
+  const chunks = Array.from({ length: Math.ceil(manifest.regions.length / chunkSize) }, (_, index) => manifest.regions.slice(index * chunkSize, (index + 1) * chunkSize));
   let completed = 0;
-
-  for (const regionEntry of manifest.regions) {
-    const region = await loadRawMarketRegion(regionEntry.regionId, manifest);
-    if (!region) continue;
-    const byType = new Map<number, RegionalMarketAggregateRow>();
-    let regionOrders = 0;
-    for (const order of region.orders) {
-      regionOrders += 1;
-      if (regionOrders % 25_000 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
-      let row = byType.get(order.type_id);
-      if (!row) {
-        row = {
-          typeId: order.type_id,
-          regionId: regionEntry.regionId,
-          regionName: regionEntry.regionName,
-          all: emptyBand(),
-          high: emptyBand(),
-          low: emptyBand(),
-          null: emptyBand(),
-        };
-        byType.set(order.type_id, row);
-      }
-      recordOrder(row.all, order);
-      const security = systems.get(order.system_id)?.securityBand ?? "null";
-      recordOrder(row[security], order);
+  const runChunk = (entries: RawMarketSnapshot["regions"], index: number) => new Promise<{ path: string }>((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, "master-regional-market-shard-worker.js"), { workerData: { manifest, entries, index, staticLookupPath }, env: process.env, resourceLimits: { maxOldGenerationSizeMb: 384 } });
+    let settled = false;
+    const finish = (callback: () => void) => { if (settled) return; settled = true; callback(); void worker.terminate().catch(() => undefined); };
+    worker.once("message", (message: any) => finish(() => message?.ok ? resolve(message) : reject(new Error(message?.error ?? "Regional market shard failed."))));
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => { if (code !== 0) finish(() => reject(new Error(`Regional market shard ${index + 1} stopped (${code}).`))); });
+  });
+  let next = 0;
+  const fragments: Array<{ path: string }> = [];
+  await Promise.all(Array.from({ length: parallelism }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= chunks.length) return;
+      fragments[index] = await runChunk(chunks[index], index);
+      completed += chunks[index].length;
+      runtime.progress?.({ stage: "regional-index", message: `Building regional index: ${completed}/${manifest.regionCount} regions`, completed, total: manifest.regionCount, percent: Math.round((completed / Math.max(1, manifest.regionCount)) * 100) });
     }
-    rows.push(...byType.values());
-    completed += 1;
-    runtime.progress?.({
-      stage: "regional-index",
-      message: `Building regional index: ${completed}/${manifest.regionCount} regions`,
-      completed,
-      total: manifest.regionCount,
-      percent: Math.round((completed / Math.max(1, manifest.regionCount)) * 100),
-    });
+  }));
+  const rows: RegionalMarketAggregateRow[] = [];
+  for (const fragment of fragments) {
+    rows.push(...JSON.parse((await gunzipAsync(await fs.readFile(fragment.path))).toString("utf8")) as RegionalMarketAggregateRow[]);
+    await fs.rm(fragment.path, { force: true }).catch(() => undefined);
   }
 
   const value: RegionalMarketAggregateIndex = {

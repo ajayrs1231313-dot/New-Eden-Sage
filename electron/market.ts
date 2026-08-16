@@ -551,6 +551,7 @@ async function resolveNames(ids: number[]) {
     method: "POST",
     headers: { ...HEADERS, "Content-Type": "application/json" },
     body: JSON.stringify(ids),
+    signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok)
     throw new Error(`Market type-name lookup failed (${response.status}).`);

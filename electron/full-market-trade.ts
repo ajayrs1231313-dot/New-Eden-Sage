@@ -2,6 +2,9 @@ import { loadRecentRawMarketManifests } from "./raw-market-storage";
 import { buildFullMarketAnalysisIndex, type FullMarketOrder } from "./raw-market-analysis";
 import { universeRoute } from "./universe-route-graph";
 import { itemCategoryIds } from "./type-volumes";
+import { availableParallelism } from "node:os";
+import path from "node:path";
+import { Worker } from "node:worker_threads";
 
 export type FullTradeRuntime = {
   snapshots?: any[];
@@ -104,6 +107,28 @@ function securityBand(minimumSecurityStatus: number) {
   return "null" as const;
 }
 
+async function buildCandidatesInParallel(market: any, previousMarket: any, cargoCapacity: number, capitalLimit: number, runtime: FullTradeRuntime) {
+  const entries = [...market.items] as Array<[number, any]>;
+  const workers = Math.max(1, Math.min(6, availableParallelism(), entries.length));
+  const previousMargins: Record<string, number | null> = {};
+  if (previousMarket) for (const [typeId, item] of previousMarket.items) previousMargins[String(typeId)] = marketMargin(item);
+  const chunkSize = Math.ceil(entries.length / workers);
+  let completed = 0;
+  const results = await Promise.all(Array.from({ length: workers }, (_, index) => new Promise<{ prelim: any[]; pairCount: number }>((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, "trade-candidate-worker.js"), {
+      workerData: { entries: entries.slice(index * chunkSize, (index + 1) * chunkSize), previousMargins, cargoCapacity, capitalLimit },
+      resourceLimits: { maxOldGenerationSizeMb: 256 },
+    });
+    worker.on("message", (message: any) => {
+      if (message?.type === "complete") { completed += 1; runtime.progress?.({ stage: "candidates", message: `Building candidates across ${workers} cores: ${completed}/${workers} batches`, completed, total: workers, percent: Math.round(completed / workers * 100) }); resolve(message); }
+      if (message?.type === "error") reject(new Error(message.error));
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => { if (code !== 0) reject(new Error(`Trade candidate worker exited (${code}).`)); });
+  })));
+  return { prelim: results.flatMap((result) => result.prelim), pairCount: results.reduce((sum, result) => sum + result.pairCount, 0) };
+}
+
 function rankTrades<
   T extends {
     profit: number;
@@ -154,44 +179,8 @@ export async function findFullMarketTrades(
       : Math.max(0, Number(constraints.maxCapital));
   const maxJumps = constraints.maxJumps == null ? null : Math.max(0, Number(constraints.maxJumps));
   const maxMinutes = constraints.maxMinutes == null ? null : Math.max(0, Number(constraints.maxMinutes));
-  const prelim: any[] = [];
-  let pairCount = 0;
-
-  let processedItems = 0;
-  runtime.progress?.({ stage: "candidates", message: "Building executable market candidates…", completed: 0, total: market.items.size, percent: 0 });
-  for (const [typeId, item] of market.items) {
-    if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
-    processedItems += 1;
-    if (processedItems % 500 === 0) {
-      runtime.progress?.({ stage: "candidates", message: `Building candidates: ${processedItems.toLocaleString()}/${market.items.size.toLocaleString()} items`, completed: processedItems, total: market.items.size, percent: Math.round((processedItems / Math.max(1, market.items.size)) * 100) });
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    if (!item.buys.length || !item.sells.length) continue;
-    const pairs = candidatePairs(item.sells, item.buys);
-    pairCount += pairs.length;
-    const previousMargin = previousMarket ? marketMargin(previousMarket.items.get(typeId)) : null;
-    for (const { sell, buy } of pairs) {
-      const availableUnits = Math.min(sell.volumeRemain, buy.volumeRemain);
-      const cargoUnits = item.itemVolumeM3 > 0 ? Math.floor(cargoCapacity / item.itemVolumeM3) : availableUnits;
-      const capitalUnits = Math.floor(capitalLimit / sell.price);
-      const units = Math.min(availableUnits, cargoUnits, capitalUnits);
-      if (units <= 0 || buy.minVolume > units) continue;
-      const profit = (buy.price - sell.price) * units;
-      if (profit <= 0) continue;
-      prelim.push({
-        typeId,
-        item: item.typeName,
-        categoryId: item.categoryId,
-        categoryName: item.categoryName,
-        itemVolumeM3: item.itemVolumeM3,
-        sell,
-        buy,
-        units,
-        profit,
-        previousMargin,
-      });
-    }
-  }
+  runtime.progress?.({ stage: "candidates", message: "Building executable market candidates across all available cores…", completed: 0, total: Math.min(6, availableParallelism()), percent: 0 });
+  const { prelim, pairCount } = await buildCandidatesInParallel(market, previousMarket, cargoCapacity, capitalLimit, runtime);
 
   const routesToCheck = prelim
     .sort((a, b) => b.profit - a.profit)
