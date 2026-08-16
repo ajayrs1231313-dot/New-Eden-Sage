@@ -9,8 +9,15 @@ permissions:
   contents: write
 
 jobs:
-  windows-installer:
-    runs-on: windows-latest
+  installers:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            build: npm run dist:win
+          - os: ubuntu-latest
+            build: npm run dist:linux
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -18,12 +25,15 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run dist:win
+      - run: ${{ matrix.build }}
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*.exe
             release/*.exe.blockmap
+            release/*.AppImage
+            release/*.deb
             release/latest.yml
+            release/latest-linux.yml
             README.md
           generate_release_notes: true
