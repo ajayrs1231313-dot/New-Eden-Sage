@@ -59,9 +59,32 @@ import { analyzeShipReadiness } from "./readiness";
 import { analyzeActivityReadiness } from "./activity-readiness";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker, stopAnalysisWorkersForExclusiveTask, releaseIdleMarketAnalysisWorker } from "./analysis-job-manager";
+import {
+  runOpportunityAnalysis,
+  runCapabilityAnalysis,
+  runTradeAnalysis,
+  runRawMarketSearch,
+  runRegionalMarketFilter,
+  runPveLocationAnalysis,
+  loadPreparedOpportunityAnalysis,
+  loadPreparedPveLocationAnalysis,
+  cancelAnalysis,
+  analysisStatus,
+  disposeAnalysisWorker,
+  stopAnalysisWorkersForExclusiveTask,
+  releaseIdleMarketAnalysisWorker,
+} from "./analysis-job-manager";
+import {
+  getBlueprintActivitiesPrepared,
+  getIndustrialOpportunitiesPrepared,
+  getManufacturingPlanPrepared,
+  getSystemCostIndexPrepared,
+  loadIndustrialPreparedState,
+  prepareIndustrialCommand,
+} from "./industrial-preparation";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
+import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus } from "./claude-integration";
 import { typeImageProtocolResponse } from "./eve-assets";
 
 protocol.registerSchemesAsPrivileged([{
@@ -71,12 +94,27 @@ protocol.registerSchemesAsPrivileged([{
 
 let window: BrowserWindow | null = null;
 let masterUpdateActive = false;
-let quietTabPreparationActive = false;
 const STARTUP_SYNC_GUARD_MS = 30_000;
 const startupSyncGuardUntil = Date.now() + STARTUP_SYNC_GUARD_MS;
 
 function automaticSyncStatePath() {
   return path.join(app.getPath("userData"), "automatic-sync-state.json");
+}
+
+function syncPreparationPreferencesPath() {
+  return path.join(app.getPath("userData"), "sync-preparation-preferences.json");
+}
+
+async function readSyncPreparationOptions(): Promise<CompleteSyncOptions> {
+  try {
+    return JSON.parse(await fs.readFile(syncPreparationPreferencesPath(), "utf8")) as CompleteSyncOptions;
+  } catch {
+    return {};
+  }
+}
+
+async function saveSyncPreparationOptions(options: CompleteSyncOptions) {
+  await fs.writeFile(syncPreparationPreferencesPath(), JSON.stringify(options), "utf8");
 }
 
 async function hasSyncedThisVersion() {
@@ -92,71 +130,342 @@ async function markVersionSynced() {
   await fs.writeFile(automaticSyncStatePath(), JSON.stringify({ version: app.getVersion(), syncedAt: new Date().toISOString() }), "utf8");
 }
 
-async function prepareTabsQuietly() {
-  if (quietTabPreparationActive) return;
-  quietTabPreparationActive = true;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const worker = new Worker(path.join(__dirname, "quiet-tab-prep-worker.js"), {
-        env: { ...process.env, NEW_EDEN_SAGE_USER_DATA: app.getPath("userData") },
-      });
-      worker.once("message", (message: any) => message?.type === "complete" ? resolve() : reject(new Error(message?.error ?? "Quiet tab preparation failed.")));
-      worker.once("error", reject);
-      worker.once("exit", (code) => { if (code !== 0) reject(new Error(`Quiet tab preparation worker exited (${code}).`)); });
-    });
-    // Build each character's default ISK Lab result once against the just-saved
-    // market snapshot. The retained analysis worker then serves the tab's
-    // matching initial request from memory instead of scanning every item again.
-    const snapshots = listSnapshots() as any[];
-    for (const snapshot of snapshots) {
-      await runOpportunityAnalysis({
-        characterId: snapshot.characterId,
-        maxCapital: null,
-        cargoCapacityM3: null,
-        maxJumps: null,
-        maxMinutes: null,
-      }, snapshots).catch((error) => logEvent("warn", "background_isk_lab.prepare_failed", {
-        characterId: snapshot.characterId,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    }
-    // The result is persisted on disk, so keeping the multi-gigabyte market
-    // worker alive buys very little and can make Windows treat Sage as hung.
-    await releaseIdleMarketAnalysisWorker();
-    await logEvent("info", "background_tabs.prepared", { tabs: ["industrial", "isk-lab"] });
-  } finally {
-    quietTabPreparationActive = false;
-  }
+type PrepTrackStatus = "waiting" | "running" | "done" | "error";
+type PrepTrackId = "core" | "industrial-command" | "isk-lab" | "market-scanner" | "opportunities" | "inventions" | "pve-locations" | "progression";
+type PrepTrack = { id: PrepTrackId; label: string; percent: number; status: PrepTrackStatus; message: string };
+type CompleteSyncOptions = { cloneStates?: Record<string, "alpha" | "omega"> };
+
+const DEFAULT_ACTIVITY_PREPARATION = {
+  activityId: "pve",
+  subcategoryId: "missions",
+  contentId: "missions-l1-l2",
+  selectorValues: { shipClass: "Destroyer" },
+  coreSkills: [
+    { skill: "CPU Management", level: 5 },
+    { skill: "Power Grid Management", level: 5 },
+    { skill: "Navigation", level: 4 },
+    { skill: "Evasive Maneuvering", level: 4 },
+  ],
+  supportSkills: [
+    { skill: "Target Management", level: 3 },
+    { skill: "Social", level: 3 },
+  ],
+  shipNames: ["Cormorant", "Catalyst", "Coercer", "Thrasher"],
+};
+
+const PREP_TRACK_LABELS: Array<[PrepTrackId, string]> = [
+  ["core", "Live data & indexes"],
+  ["industrial-command", "Industrial Command"],
+  ["isk-lab", "ISK Lab"],
+  ["market-scanner", "Market Scanner"],
+  ["opportunities", "Opportunities"],
+  ["inventions", "Invention results"],
+  ["pve-locations", "PvE & Locations"],
+  ["progression", "Progression"],
+];
+
+function newPrepTracks(): PrepTrack[] {
+  return PREP_TRACK_LABELS.map(([id, label]) => ({ id, label, percent: 0, status: "waiting", message: "Waiting for shared data." }));
 }
 
-async function runCompleteSync(sendProgress: (progress: unknown) => void, skipIfVersionSynced = false) {
+function clampPrepPercent(value: unknown) {
+  const numeric = Number(value ?? 0);
+  return Math.max(0, Math.min(100, Number.isFinite(numeric) ? numeric : 0));
+}
+
+function prepTrack(tracks: PrepTrack[], id: PrepTrackId) {
+  const track = tracks.find((item) => item.id === id);
+  if (!track) throw new Error(`Preparation track ${id} is missing.`);
+  return track;
+}
+
+function refreshIskLabTrack(tracks: PrepTrack[]) {
+  const children = (["market-scanner", "opportunities", "inventions", "pve-locations"] as PrepTrackId[]).map((id) => prepTrack(tracks, id));
+  const parent = prepTrack(tracks, "isk-lab");
+  parent.percent = Math.round(children.reduce((sum, item) => sum + item.percent, 0) / children.length);
+  parent.status = children.some((item) => item.status === "error")
+    ? "error"
+    : children.every((item) => item.status === "done")
+      ? "done"
+      : children.some((item) => item.status === "running" || item.percent > 0)
+        ? "running"
+        : "waiting";
+  parent.message = parent.status === "done"
+    ? "All ISK Lab intelligence is prepared."
+    : parent.status === "error"
+      ? "One or more ISK Lab preparations need retrying."
+      : "Preparing the ISK Lab intelligence set.";
+}
+
+function completeSyncPercent(tracks: PrepTrack[]) {
+  const core = prepTrack(tracks, "core").percent;
+  const leaves = (["industrial-command", "market-scanner", "inventions", "pve-locations", "progression"] as PrepTrackId[]).map((id) => prepTrack(tracks, id).percent);
+  const prepared = leaves.reduce((sum, value) => sum + value, 0) / Math.max(1, leaves.length);
+  return Math.min(99, Math.round(core * 0.55 + prepared * 0.45));
+}
+
+function runFeaturePrepWorker<T = unknown>(workerData: unknown, onProgress?: (progress: { percent?: number; message?: string }) => void) {
+  return new Promise<T>((resolve, reject) => {
+    const worker = new Worker(path.join(__dirname, "feature-prep-worker.js"), {
+      workerData,
+      env: { ...process.env, NEW_EDEN_SAGE_USER_DATA: app.getPath("userData") },
+    });
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      callback();
+      void worker.terminate().catch(() => undefined);
+    };
+    timeout = setTimeout(() => finish(() => reject(new Error("Feature preparation timed out after 15 minutes."))), 15 * 60_000);
+    timeout.unref();
+    worker.on("message", (message: any) => {
+      if (message?.type === "progress") onProgress?.(message);
+      if (message?.type === "complete") finish(() => resolve(message.result as T));
+      if (message?.type === "error") finish(() => reject(new Error(String(message.error ?? "Feature preparation failed."))));
+    });
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => {
+      if (!settled) finish(() => reject(new Error(`Feature preparation worker exited before completion (${code}).`)));
+    });
+  });
+}
+
+async function inventionPreparedCacheKey(input: { characterId: string; decryptorTypeId?: number | null }, snapshot: any) {
+  const manifest = await loadCurrentRawMarketManifest("all");
+  return {
+    schema: 10,
+    characterId: input.characterId,
+    snapshot: snapshot.updatedAt,
+    marketSnapshotId: manifest?.id ?? "none",
+    decryptorTypeId: Number(input.decryptorTypeId ?? 0),
+  };
+}
+
+async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVersionSynced = false, options: CompleteSyncOptions = {}) {
   if (masterUpdateActive) return { alreadyRunning: true };
   if (skipIfVersionSynced && await hasSyncedThisVersion()) {
     await logEvent("info", "master_update.skipped_already_synced", { version: app.getVersion() });
     return { alreadySynced: true, version: app.getVersion() };
   }
-  let lastProgress: unknown = null;
+
+  const startedAtMs = Date.now();
+  let lastProgress: any = null;
   masterUpdateActive = true;
+  const tracks = newPrepTracks();
+  const preparationFailures: Array<{ track: PrepTrackId; error: string }> = [];
+  let coreResult: any = null;
+
+  const publish = (message: string, extra: Record<string, unknown> = {}, running = true) => {
+    refreshIskLabTrack(tracks);
+    sendProgress({
+      ...extra,
+      running,
+      message,
+      percent: running ? completeSyncPercent(tracks) : 100,
+      tracks: tracks.map((item) => ({ ...item })),
+    });
+  };
+
+  const updateTrack = (id: PrepTrackId, patch: Partial<PrepTrack>, announce = true) => {
+    Object.assign(prepTrack(tracks, id), patch);
+    refreshIskLabTrack(tracks);
+    if (announce) publish(patch.message ?? prepTrack(tracks, id).message);
+  };
+
+  const runTrack = async (id: PrepTrackId, work: (report: (percent: number, message: string) => void) => Promise<void>) => {
+    updateTrack(id, { percent: 1, status: "running", message: `Preparing ${prepTrack(tracks, id).label}.` });
+    try {
+      await work((percent, message) => updateTrack(id, { percent: clampPrepPercent(percent), status: "running", message }));
+      updateTrack(id, { percent: 100, status: "done", message: `${prepTrack(tracks, id).label} ready.` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      preparationFailures.push({ track: id, error: message });
+      updateTrack(id, { percent: 100, status: "error", message: `${prepTrack(tracks, id).label} needs retrying.` });
+      await logEvent("error", "master_update.feature_prepare_failed", { track: id, error: message });
+    }
+  };
+
+  const cloneStateFor = (snapshot: any): "alpha" | "omega" => options.cloneStates?.[String(snapshot.characterId)] ?? "omega";
+  const combinedCharacterPercent = (index: number, total: number, localPercent: number) => total ? ((index + clampPrepPercent(localPercent) / 100) / total) * 100 : 100;
+
   try {
     await Promise.all([disposeFittingWorker(), stopAnalysisWorkersForExclusiveTask()]);
     await logEvent("info", "master_update.sync_started", { source: "automatic-or-sync-all" });
-    const result = await runMasterUpdate((progress) => {
+    updateTrack("core", { percent: 0, status: "running", message: "Refreshing live data and shared indexes." });
+
+    coreResult = await runMasterUpdate((progress: any) => {
       lastProgress = progress;
-      sendProgress(progress);
+      Object.assign(prepTrack(tracks, "core"), {
+        percent: clampPrepPercent(progress.percent),
+        status: progress.percent >= 100 ? "done" : "running",
+        message: String(progress.message ?? "Refreshing shared data."),
+      });
+      publish(String(progress.message ?? "Refreshing shared data."), { ...progress, running: true });
     });
-    if (!(result as any).alreadyRunning && !(result as any).failures?.length) await markVersionSynced();
-    // Fitting and Industry deliberately start only after the live app data is
-    // ready, so neither delays the initial experience or competes for cores.
-    void prepareTabsQuietly();
-    return result;
+
+    const coreFailures = Array.isArray(coreResult?.failures) ? coreResult.failures : [];
+    updateTrack("core", {
+      percent: 100,
+      status: coreFailures.length ? "error" : "done",
+      message: coreFailures.length ? `Core update completed with ${coreFailures.length} failed job(s).` : "Live data and shared indexes ready.",
+    });
+
+    const snapshots = listSnapshots() as any[];
+    if (!snapshots.length) {
+      updateTrack("market-scanner", { percent: 100, status: "done", message: "No connected characters to prepare." }, false);
+      updateTrack("opportunities", { percent: 100, status: "done", message: "No connected characters to prepare." });
+    } else {
+      updateTrack("market-scanner", { percent: 1, status: "running", message: "Preparing retained market scanner results." }, false);
+      updateTrack("opportunities", { percent: 1, status: "running", message: "Preparing ranked opportunities." });
+      try {
+        for (let index = 0; index < snapshots.length; index += 1) {
+          const snapshot = snapshots[index];
+          const input = {
+            characterId: snapshot.characterId,
+            maxCapital: snapshot.wallet ? Math.round(Number(snapshot.wallet)) : null,
+            cargoCapacityM3: null,
+            maxJumps: null,
+            maxMinutes: null,
+          };
+          await runOpportunityAnalysis(input, snapshots, (progress) => {
+            const percent = combinedCharacterPercent(index, snapshots.length, progress.percent ?? 0);
+            const message = `${snapshot.character?.name ?? "Character"}: ${progress.message}`;
+            updateTrack("market-scanner", { percent, status: "running", message }, false);
+            updateTrack("opportunities", { percent, status: "running", message });
+          });
+        }
+        updateTrack("market-scanner", { percent: 100, status: "done", message: "Market Scanner ready." }, false);
+        updateTrack("opportunities", { percent: 100, status: "done", message: "Opportunities ready." });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        preparationFailures.push({ track: "market-scanner", error: message });
+        updateTrack("market-scanner", { percent: 100, status: "error", message: "Market Scanner needs retrying." }, false);
+        updateTrack("opportunities", { percent: 100, status: "error", message: "Opportunities need retrying." });
+        await logEvent("error", "master_update.feature_prepare_failed", { track: "market-scanner", error: message });
+      } finally {
+        await releaseIdleMarketAnalysisWorker().catch(() => undefined);
+      }
+    }
+
+    const inventionPrep = runTrack("inventions", async (report) => {
+      if (!snapshots.length) { report(100, "No connected characters to prepare."); return; }
+      for (let index = 0; index < snapshots.length; index += 1) {
+        const snapshot = snapshots[index];
+        report((index / snapshots.length) * 100, `Refreshing character + market invention results for ${snapshot.character?.name ?? "character"}.`);
+        const key = await inventionPreparedCacheKey({ characterId: String(snapshot.characterId), decryptorTypeId: null }, snapshot);
+        const saved = await loadPersistedResult("industry-invention-opportunities", key);
+        if (!saved) await runFeaturePrepWorker({ task: "invention", snapshot, decryptorTypeId: null, cacheKey: key });
+        report(((index + 1) / snapshots.length) * 100, `Invention results ready for ${snapshot.character?.name ?? "character"}.`);
+      }
+    });
+
+    const pvePrep = runTrack("pve-locations", async (report) => {
+      if (!snapshots.length) { report(100, "No connected characters to prepare."); return; }
+      for (let index = 0; index < snapshots.length; index += 1) {
+        const snapshot = snapshots[index];
+        await runPveLocationAnalysis(
+          { characterId: String(snapshot.characterId), maxJumps: null, maxMinutes: null, forceLive: false },
+          snapshot,
+          cloneStateFor(snapshot),
+          (progress) => report(combinedCharacterPercent(index, snapshots.length, progress.percent ?? 0), `${snapshot.character?.name ?? "Character"}: ${progress.message}`),
+        );
+        report(((index + 1) / snapshots.length) * 100, `PvE/location intelligence ready for ${snapshot.character?.name ?? "character"}.`);
+      }
+    });
+
+    const progressionPrep = runTrack("progression", async (report) => {
+      if (!snapshots.length) { report(100, "No connected characters to prepare."); return; }
+      for (let index = 0; index < snapshots.length; index += 1) {
+        const snapshot = snapshots[index];
+        const cloneState = cloneStateFor(snapshot);
+        const segmentStart = index / snapshots.length * 100;
+        const segmentSize = 100 / snapshots.length;
+        await runCapabilityAnalysis(snapshot, cloneState, (progress) => {
+          report(segmentStart + segmentSize * 0.45 * clampPrepPercent(progress.percent ?? 0) / 100, `${snapshot.character?.name ?? "Character"}: ${progress.message}`);
+        });
+        const hullTypeId = Number(snapshot.ship?.ship_type_id ?? 0);
+        if (hullTypeId > 0) {
+          const input = { characterId: String(snapshot.characterId), hullTypeId, cloneState, masteryLevel: 3 };
+          const key = { input, snapshot: snapshot.updatedAt, readinessModel: "strict-skill-aware-fits-v4" };
+          const saved = await loadPersistedResult("ship-readiness", key);
+          if (!saved) await runFeaturePrepWorker({ task: "ship-readiness", snapshot, hullTypeId, cloneState, masteryLevel: 3, cacheKey: key });
+        }
+        const shipCatalogue = await listPublishedShips();
+        const shipByName = new Map(shipCatalogue.map((ship) => [ship.name, ship]));
+        const activityShips = DEFAULT_ACTIVITY_PREPARATION.shipNames
+          .map((name) => shipByName.get(name))
+          .filter((ship): ship is { typeId: number; name: string } => Boolean(ship));
+        for (let activityIndex = 0; activityIndex < activityShips.length; activityIndex += 1) {
+          const ship = activityShips[activityIndex];
+          const activityInput = {
+            characterId: String(snapshot.characterId),
+            hullTypeId: ship.typeId,
+            cloneState,
+            coreSkills: DEFAULT_ACTIVITY_PREPARATION.coreSkills,
+            supportSkills: DEFAULT_ACTIVITY_PREPARATION.supportSkills,
+            context: {
+              activityId: DEFAULT_ACTIVITY_PREPARATION.activityId,
+              subcategoryId: DEFAULT_ACTIVITY_PREPARATION.subcategoryId,
+              contentId: DEFAULT_ACTIVITY_PREPARATION.contentId,
+              selectorValues: DEFAULT_ACTIVITY_PREPARATION.selectorValues,
+            },
+          };
+          const key = { input: activityInput, snapshot: snapshot.updatedAt, readinessModel: "strict-skill-aware-fits-v4" };
+          const saved = await loadPersistedResult("activity-readiness", key);
+          if (!saved) {
+            const result = await analyzeActivityReadiness(snapshot, activityInput);
+            await savePersistedResult("activity-readiness", key, result);
+          }
+          report(
+            segmentStart + segmentSize * (0.55 + 0.4 * ((activityIndex + 1) / Math.max(1, activityShips.length))),
+            `${snapshot.character?.name ?? "Character"}: preparing default Activity Planner readiness.`,
+          );
+        }
+        report(((index + 1) / snapshots.length) * 100, `Progression ready for ${snapshot.character?.name ?? "character"}.`);
+      }
+    });
+
+    const industrialPrep = runTrack("industrial-command", async (report) => {
+      if (!snapshots.length) { report(100, "No connected characters to prepare."); return; }
+      for (let index = 0; index < snapshots.length; index += 1) {
+        const snapshot = snapshots[index];
+        await prepareIndustrialCommand(String(snapshot.characterId), (percent, message) => {
+          report(combinedCharacterPercent(index, snapshots.length, percent), message);
+        });
+        report(((index + 1) / snapshots.length) * 100, `Industrial Command ready for ${snapshot.character?.name ?? "character"}.`);
+      }
+    });
+
+    await Promise.all([inventionPrep, pvePrep, progressionPrep, industrialPrep]);
+
+    const coreFailuresAfter = Array.isArray(coreResult?.failures) ? coreResult.failures : [];
+    if (!coreFailuresAfter.length && !preparationFailures.length) await markVersionSynced();
+    const totalDurationMs = Date.now() - startedAtMs;
+    const failures = [...coreFailuresAfter, ...preparationFailures];
+    const finalMessage = failures.length
+      ? `Update finished, but ${failures.length} preparation step(s) need retrying.`
+      : "Everything is synced and prepared. Sage is ready.";
+    publish(finalMessage, {
+      stage: failures.length ? "complete-with-errors" : "complete",
+      totalDurationMs,
+      downloadDurationMs: coreResult?.downloadDurationMs,
+      completed: PREP_TRACK_LABELS.length,
+      total: PREP_TRACK_LABELS.length,
+    }, false);
+    await logEvent("info", "master_update.full_preparation_completed", { totalDurationMs, preparationFailures });
+    return { ...coreResult, totalDurationMs, preparationFailures };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     logCrash("master_update.crashed", { error, lastProgress });
+    publish(`Update stopped: ${message}`, { stage: "failed", totalDurationMs: Date.now() - startedAtMs }, false);
     throw error;
   } finally {
     masterUpdateActive = false;
   }
 }
-
 process.on(
   "uncaughtException",
   (error) => void logEvent("error", "process.uncaught_exception", { error }),
@@ -211,6 +520,7 @@ app.whenReady().then(() => {
   ipcMain.handle("external:open-support", () =>
     shell.openExternal("https://www.paypal.com/donate/?hosted_button_id=5ZE4R48W6UWMC"),
   );
+  ipcMain.handle("external:open-zkillboard", () => shell.openExternal("https://zkillboard.com/"));
   ipcMain.handle("mcp:get-setup", () => {
     const command = app.getPath("exe");
     const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
@@ -222,8 +532,12 @@ app.whenReady().then(() => {
       json: JSON.stringify({ mcpServers: { "new-eden-sage": { command, args, env } } }, null, 2),
       codex: `[mcp_servers.new-eden-sage]\ncommand = ${JSON.stringify(command)}\nargs = [${JSON.stringify(script)}]\nenv = { ELECTRON_RUN_AS_NODE = "1" }`,
       access: "Local read access plus explicit fitting write actions. Live EVE writes require Sage to be open and a reconnected character. Credentials, tokens, secrets and encrypted values are never exposed.",
+      claudeDesktop: claudeSetupText().desktopJson,
+      claudeCode: claudeSetupText().claudeCodeCommand,
     };
   });
+  ipcMain.handle("mcp:claude-status", () => getClaudeCompatibilityStatus());
+  ipcMain.handle("mcp:claude-repair", () => ensureClaudeCompatibility());
   ipcMain.handle("mcp:tunnel-status", () => getMcpTunnelStatus());
   ipcMain.handle("mcp:tunnel-configure", (_event, input: { tunnelId: string; runtimeKey: string }) => configureAndStartMcpTunnel(input));
   ipcMain.handle("mcp:open-chatgpt", () => shell.openExternal("https://chatgpt.com/plugins"));
@@ -231,6 +545,9 @@ app.whenReady().then(() => {
   ipcMain.handle("mcp:open-api-keys", () => shell.openExternal("https://platform.openai.com/settings/organization/api-keys"));
   void startMcpTunnel().catch((error) => void logEvent("error", "mcp.tunnel_start_failed", { error }));
   void startMcpWriteBridge(() => window).catch((error) => void logEvent("error", "mcp.write_bridge_start_failed", { error }));
+  void ensureClaudeCompatibility()
+    .then((status) => void logEvent("info", "mcp.claude_compatibility", { desktop: status.desktop, code: status.code }))
+    .catch((error) => void logEvent("warn", "mcp.claude_compatibility_failed", { error }));
   ipcMain.handle("mcp:sync-renderer-data", async (_event, value: unknown) => {
     const target = path.join(app.getPath("userData"), "mcp-renderer-data.json");
     await fs.writeFile(target, JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
@@ -307,40 +624,16 @@ app.whenReady().then(() => {
     searchLootItems(String(input?.query ?? ""), Number(input?.limit ?? 60)));
   ipcMain.handle("loot:acquisition", (_event, typeId: number) => getLootAcquisition(Number(typeId)));
   ipcMain.handle("loot:prepare", () => prepareLootDataLocal());
-  ipcMain.handle(
-    "industrial:system-cost-index",
-    async (_event, input: { characterId: string }) => {
-      const snapshot = getSnapshot(input.characterId) as any;
-      if (!snapshot) throw new Error("Select and sync a connected character.");
-      const solarSystemId = Number(snapshot.location?.solar_system_id ?? 0);
-      if (!solarSystemId) throw new Error("The selected character has no resolved solar-system location.");
-      const key = { system: solarSystemId, snapshot: snapshot.updatedAt, market: (await loadCurrentRawMarketManifest("all"))?.id };
-      const saved = await loadPersistedResult("industry-system-cost", key);
-      if (saved) return saved;
-      const result = await getIndustrySystemCostIndices(solarSystemId);
-      await savePersistedResult("industry-system-cost", key, result);
-      return result;
-    },
-  );
-  ipcMain.handle(
-    "industrial:blueprint-activities",
-    async (_event, input: { characterId: string; blueprintTypeId: number }) => {
-      const snapshot = getSnapshot(input.characterId) as any;
-      if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { input, snapshot: snapshot.updatedAt };
-      const saved = await loadPersistedResult("industry-blueprint-activities", key);
-      if (saved) return saved;
-      const result = await analyzeBlueprintActivities({ ...input, snapshot });
-      await savePersistedResult("industry-blueprint-activities", key, result);
-      return result;
-    },
-  );
+  ipcMain.handle("industrial:system-cost-index", async (_event, input: { characterId: string; force?: boolean }) =>
+    getSystemCostIndexPrepared(String(input.characterId), Boolean(input.force)));
+  ipcMain.handle("industrial:blueprint-activities", async (_event, input: { characterId: string; blueprintTypeId: number; force?: boolean }) =>
+    getBlueprintActivitiesPrepared({ characterId: String(input.characterId), blueprintTypeId: Number(input.blueprintTypeId) }, Boolean(input.force)));
   ipcMain.handle(
     "industrial:invention-opportunities",
     async (_event, input: { characterId: string; marketDataRevision?: number; decryptorTypeId?: number | null }) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { schema: 9, characterId: input.characterId, snapshot: snapshot.updatedAt, marketDataRevision: Number(input.marketDataRevision ?? 0), decryptorTypeId: Number(input.decryptorTypeId ?? 0) };
+      const key = await inventionPreparedCacheKey(input, snapshot);
       const saved = await loadPersistedResult("industry-invention-opportunities", key);
       if (saved) return saved;
       const result = await analyzeInventionOpportunities({ snapshot, decryptorTypeId: input.decryptorTypeId });
@@ -348,66 +641,12 @@ app.whenReady().then(() => {
       return result;
     },
   );
-  ipcMain.handle(
-    "industrial:manufacturing-plan",
-    async (_event, input: { characterId: string; blueprintTypeId: number; materialEfficiency?: number; timeEfficiency?: number; targetQuantity?: number; runs?: number; availableRuns?: number; includeConnectedStock?: boolean; sharedCharacterIds?: string[] }) => {
-      const snapshot = getSnapshot(input.characterId) as any;
-      if (!snapshot) throw new Error("Select and sync a connected character.");
-      const activeCharacterId = String(input.characterId);
-      const permittedCharacterIds = new Set([activeCharacterId, ...(input.sharedCharacterIds ?? []).map(String)]);
-      const scopedSnapshots = input.includeConnectedStock
-        ? (listSnapshots() as any[])
-            .filter((item) => item?.characterId && permittedCharacterIds.has(String(item.characterId)))
-            .sort((a, b) => String(a.characterId) === activeCharacterId ? -1 : String(b.characterId) === activeCharacterId ? 1 : String(a.character?.name ?? "").localeCompare(String(b.character?.name ?? "")))
-        : [snapshot];
-      const enrichAssets = (item: any) => {
-        const characterId = String(item.characterId);
-        const rawAssets = Array.isArray(item.extended?.assets) ? item.extended.assets : [];
-        return rawAssets.map((asset: any, index: number) => ({
-          ...asset,
-          ownerCharacterId: characterId,
-          sourceAssetId: `${characterId}:${asset.item_id ?? `stack-${index}`}`,
-        }));
-      };
-      const assets = enrichAssets(snapshot);
-      const stockSources = input.includeConnectedStock
-        ? scopedSnapshots.map((item) => ({
-            characterId: String(item.characterId),
-            characterName: String(item.character?.name ?? item.characterId),
-            assets: enrichAssets(item),
-          }))
-        : undefined;
-      const blueprintSnapshots = scopedSnapshots;
-      const ownedBlueprints = blueprintSnapshots.flatMap((item) => {
-        const personalBlueprintsForIndustry = Array.isArray(item.extended?.blueprints) ? item.extended.blueprints : [];
-        const corporationBlueprintsForIndustry = Array.isArray(item.extended?.corporation?.blueprints) ? item.extended.corporation.blueprints : [];
-        const trainedSkills = (item.skills?.skills ?? []).map((skill: any) => ({ skillId: Number(skill.skill_id), level: Number(skill.trained_skill_level ?? 0) }));
-        const mapBlueprint = (blueprint: any, corporation = false) => {
-          const blueprintTypeId = Number(blueprint.type_id ?? 0);
-          if (!blueprintTypeId) return [];
-          return [{
-            characterId: corporation ? `corp:${String(item.character?.corporation_id ?? item.characterId)}` : String(item.characterId),
-            characterName: corporation ? `${String(item.character?.corporation_name ?? "Corporation")} (corp, via ${String(item.character?.name ?? item.characterId)})` : String(item.character?.name ?? item.characterId),
-            blueprintTypeId,
-            materialEfficiency: Number(blueprint.material_efficiency ?? 0),
-            timeEfficiency: Number(blueprint.time_efficiency ?? 0),
-            availableRuns: Number(blueprint.runs ?? -1),
-            trainedSkills,
-          }];
-        };
-        return [
-          ...personalBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint)),
-          ...corporationBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint, true)),
-        ];
-      });
-      const key = { input, snapshots: scopedSnapshots.map((item) => [item.characterId, item.updatedAt]) };
-      const saved = await loadPersistedResult("industry-manufacturing-plan", key);
-      if (saved) return saved;
-      const result = await analyzeManufacturingPlan({ ...input, assets, stockSources, ownedBlueprints, snapshot });
-      await savePersistedResult("industry-manufacturing-plan", key, result);
-      return result;
-    },
-  );
+  ipcMain.handle("industrial:manufacturing-plan", async (_event, input: any) =>
+    getManufacturingPlanPrepared(input, Boolean(input?.force)));
+  ipcMain.handle("industrial:opportunities", async (_event, input: any) =>
+    getIndustrialOpportunitiesPrepared(input, { force: Boolean(input?.force) }));
+  ipcMain.handle("industrial:prepared-state", async (_event, input: { characterId: string }) =>
+    loadIndustrialPreparedState(String(input.characterId)));
   ipcMain.handle("universe:ships", () => listPublishedShips());
   ipcMain.handle(
     "skills:ship-readiness",
@@ -417,7 +656,7 @@ app.whenReady().then(() => {
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { input, snapshot: snapshot.updatedAt };
+      const key = { input, snapshot: snapshot.updatedAt, readinessModel: "strict-skill-aware-fits-v4" };
       const saved = await loadPersistedResult("ship-readiness", key);
       if (saved) return saved;
       const result = await analyzeShipReadiness(
@@ -451,7 +690,7 @@ app.whenReady().then(() => {
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { input, snapshot: snapshot.updatedAt };
+      const key = { input, snapshot: snapshot.updatedAt, readinessModel: "strict-skill-aware-fits-v4" };
       const saved = await loadPersistedResult("activity-readiness", key);
       if (saved) return saved;
       const result = await analyzeActivityReadiness(snapshot, {
@@ -893,13 +1132,14 @@ app.whenReady().then(() => {
       (progress) => window?.webContents.send("analysis:progress", progress),
     ),
   );
-  ipcMain.handle("opportunity:analyze", async (_event, input) =>
-    runOpportunityAnalysis(
-      input ?? {},
+  ipcMain.handle("opportunity:analyze", async (_event, input: any) => {
+    const { force = false, ...query } = input ?? {};
+    return runOpportunityAnalysis(
+      query,
       listSnapshots() as any[],
       (progress) => window?.webContents.send("analysis:progress", progress),
-    ),
-  );
+    );
+  });
   ipcMain.handle("pve:locations", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega"; maxJumps?: number | null; maxMinutes?: number | null; forceLive?: boolean }) => {
     const snapshot = getSnapshot(input.characterId) as any;
     if (!snapshot) throw new Error("Select and sync a connected character.");
@@ -910,12 +1150,35 @@ app.whenReady().then(() => {
       (progress) => window?.webContents.send("analysis:progress", progress),
     );
   });
+  ipcMain.handle("prepared:isk-lab", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega" }) => {
+    const snapshot = getSnapshot(input.characterId) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    const snapshots = listSnapshots() as any[];
+    const marketInput = {
+      characterId: String(snapshot.characterId),
+      maxCapital: snapshot.wallet ? Math.round(Number(snapshot.wallet)) : null,
+      cargoCapacityM3: null,
+      maxJumps: null,
+      maxMinutes: null,
+    };
+    const pveInput = { characterId: String(snapshot.characterId), maxJumps: null, maxMinutes: null, forceLive: false };
+    const inventionKey = await inventionPreparedCacheKey({ characterId: String(snapshot.characterId), decryptorTypeId: null }, snapshot);
+    const [market, pve, invention] = await Promise.all([
+      loadPreparedOpportunityAnalysis(marketInput, snapshots),
+      loadPreparedPveLocationAnalysis(pveInput, snapshot, input.cloneState ?? "omega"),
+      loadPersistedResult("industry-invention-opportunities", inventionKey),
+    ]);
+    await releaseIdleMarketAnalysisWorker().catch(() => undefined);
+    return { market: market ?? null, pve: pve ?? null, invention: invention ?? null };
+  });
   ipcMain.handle("analysis:cancel", async (_event, kind) => cancelAnalysis("Analysis cancelled.", kind));
   ipcMain.handle("analysis:status", () => analysisStatus());
-  ipcMain.handle("master:update-all", async (event) => {
+  ipcMain.handle("master:update-all", async (event, input?: CompleteSyncOptions) => {
+    const options = input ?? {};
+    if (options.cloneStates) await saveSyncPreparationOptions(options);
     return runCompleteSync((progress) => {
       if (!event.sender.isDestroyed()) event.sender.send("master:update-progress", progress);
-    }, Date.now() < startupSyncGuardUntil);
+    }, Date.now() < startupSyncGuardUntil, options);
   });
   ipcMain.on("diagnostics:renderer-error", (_event, report) => logCrash("renderer.javascript_error", { report }));
   ipcMain.handle("diagnostics:crash-log-path", () => CRASH_LOG_FILE);
@@ -1188,7 +1451,7 @@ app.whenReady().then(() => {
         await logEvent("info", "master_update.already_synced_this_version", { version: app.getVersion() });
         return;
       }
-      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true);
+      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true, await readSyncPreparationOptions());
     }).catch((error) => logCrash("master_update.auto_start_failed", { error }));
   });
 });

@@ -522,6 +522,11 @@ export async function prepareIndustrialDataLocal() {
   return { blueprints: value.blueprints.size, namedTypes: value.names.size, productMappings: value.productBlueprints.size };
 }
 
+export async function getIndustrialTypeNames(typeIds: number[]) {
+  const value = await index();
+  return Object.fromEntries([...new Set(typeIds.map(Number).filter((typeId) => Number.isInteger(typeId) && typeId > 0))].map((typeId) => [typeId, value.names.get(typeId) ?? `Type ${typeId}`]));
+}
+
 const INVENTION_DECRYPTORS = [
   { typeId: 34201, name: "Accelerant Decryptor", probabilityMultiplier: 1.2, runModifier: 1, meModifier: 2, teModifier: 10 },
   { typeId: 34202, name: "Attainment Decryptor", probabilityMultiplier: 1.8, runModifier: 4, meModifier: -1, teModifier: 4 },

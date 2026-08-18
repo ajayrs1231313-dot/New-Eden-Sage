@@ -14,6 +14,16 @@ function rendererErrorReport(kind: string, value: unknown) {
 globalThis.addEventListener("error", (event) => rendererErrorReport("error", event.error ?? event.message));
 globalThis.addEventListener("unhandledrejection", (event) => rendererErrorReport("unhandledrejection", event.reason));
 
+function rendererHeartbeat() {
+  ipcRenderer.send("diagnostics:renderer-heartbeat", {
+    timestamp: new Date().toISOString(),
+    href: globalThis.location?.href,
+    visibilityState: globalThis.document?.visibilityState,
+  });
+}
+rendererHeartbeat();
+setInterval(rendererHeartbeat, 2000);
+
 const transientAnalysisError = (error: unknown) => /ANALYSIS_(WATCHDOG|WORKER_CRASH|WORKER_EXIT)|stopped responding|worker crashed|worker exited unexpectedly/i.test(error instanceof Error ? error.message : String(error));
 
 async function invokeAnalysis(channel: string, ...args: unknown[]) {
@@ -33,7 +43,10 @@ contextBridge.exposeInMainWorld("sage", {
   downloadUpdate: () => ipcRenderer.invoke("update:download"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
   openSupportPage: () => ipcRenderer.invoke("external:open-support"),
+  openZkillboard: () => ipcRenderer.invoke("external:open-zkillboard"),
   getMcpSetup: () => ipcRenderer.invoke("mcp:get-setup"),
+  getClaudeMcpStatus: () => ipcRenderer.invoke("mcp:claude-status"),
+  repairClaudeMcp: () => ipcRenderer.invoke("mcp:claude-repair"),
   getMcpTunnelStatus: () => ipcRenderer.invoke("mcp:tunnel-status"),
   configureMcpTunnel: (input: unknown) => ipcRenderer.invoke("mcp:tunnel-configure", input),
   openChatGptPlugins: () => ipcRenderer.invoke("mcp:open-chatgpt"),
@@ -82,7 +95,10 @@ contextBridge.exposeInMainWorld("sage", {
   getBlueprintActivities: (input: unknown) => ipcRenderer.invoke("industrial:blueprint-activities", input),
   getInventionOpportunities: (input: unknown) => ipcRenderer.invoke("industrial:invention-opportunities", input),
   getIndustrySystemCostIndex: (input: unknown) => ipcRenderer.invoke("industrial:system-cost-index", input),
+  getIndustrialOpportunities: (input: unknown) => ipcRenderer.invoke("industrial:opportunities", input),
+  getPreparedIndustrialCommand: (input: unknown) => ipcRenderer.invoke("industrial:prepared-state", input),
   getIndustrialOpportunityRouteScope: (input: unknown) => ipcRenderer.invoke("industrial:opportunity-route-scope", input),
+  getPreparedIskLab: (input: unknown) => ipcRenderer.invoke("prepared:isk-lab", input),
   getShipReadiness: (input: unknown) =>
     ipcRenderer.invoke("skills:ship-readiness", input),
   getActivityReadiness: (input: unknown) =>
@@ -101,6 +117,14 @@ contextBridge.exposeInMainWorld("sage", {
   removeCharacter: (characterId: string) =>
     ipcRenderer.invoke("character:remove", characterId),
   getEveNews: (force = false) => ipcRenderer.invoke("news:list", force),
+  searchSolarSystems: (query: string, limit = 20) => ipcRenderer.invoke("system-intelligence:search", query, limit),
+  getSystemIntelligence: (systemId: number) => ipcRenderer.invoke("system-intelligence:get", systemId),
+  refreshWatchedSystemIntelligence: (systemIds: number[]) => ipcRenderer.invoke("system-intelligence:refresh-watched", systemIds),
+  onSystemKillmailsUpdated: (callback: (value: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
+    ipcRenderer.on("system-intelligence:killmails-updated", listener);
+    return () => ipcRenderer.removeListener("system-intelligence:killmails-updated", listener);
+  },
   exportData: (
     format: "json" | "chatgpt" | "chatgpt-radius",
     characterId?: string,
@@ -118,7 +142,7 @@ contextBridge.exposeInMainWorld("sage", {
     invokeAnalysis("pve:locations", input),
   cancelAnalysis: (kind?: string) => ipcRenderer.invoke("analysis:cancel", kind),
   getAnalysisStatus: () => ipcRenderer.invoke("analysis:status"),
-  runMasterUpdate: () => ipcRenderer.invoke("master:update-all"),
+  runMasterUpdate: (input?: unknown) => ipcRenderer.invoke("master:update-all", input),
   onMasterUpdateProgress: (callback: (progress: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress);
     ipcRenderer.on("master:update-progress", listener);

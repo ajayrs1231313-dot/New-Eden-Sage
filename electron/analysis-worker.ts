@@ -14,6 +14,9 @@ import { analyzePveLocations, type PveLocationQuery } from "./pve-location-intel
 import type { CloneState } from "./skill-training";
 
 type WorkerMessage =
+  | { type: "peek-opportunity"; jobId: string; input: OpportunityQuery; snapshots: any[] }
+  | { type: "peek-capability"; jobId: string; snapshot: any; cloneState: CloneState }
+  | { type: "peek-pve-location"; jobId: string; input: PveLocationQuery; snapshot: any; cloneState: CloneState }
   | { type: "run-opportunity"; jobId: string; input: OpportunityQuery; snapshots: any[] }
   | { type: "run-capability"; jobId: string; snapshot: any; cloneState: CloneState }
   | { type: "run-trade"; jobId: string; mode: FullTradeAnalysisMode; constraints: FullTradeSearchConstraints; snapshots: any[] }
@@ -108,7 +111,22 @@ parentPort.on("message", async (message: WorkerMessage) => {
     let result: unknown;
     let cached = false;
 
-    if (message.type === "run-opportunity") {
+    if (message.type === "peek-opportunity") {
+      const key = await opportunityCacheKey(message.input, message.snapshots);
+      result = await loadPersistedResult("opportunity", key) ?? null;
+      cached = Boolean(result);
+      progress(message.jobId, { stage: cached ? "disk-cache" : "cache-miss", message: cached ? "Loaded prepared ISK Lab result." : "No prepared ISK Lab result exists for this snapshot.", percent: 100, cached });
+    } else if (message.type === "peek-capability") {
+      const key = genericCacheKey("capability", message.cloneState, { id: message.snapshot?.characterId, updatedAt: message.snapshot?.updatedAt });
+      result = await loadPersistedResult("capability", key) ?? null;
+      cached = Boolean(result);
+      progress(message.jobId, { stage: cached ? "disk-cache" : "cache-miss", message: cached ? "Loaded prepared progression intelligence." : "No prepared progression intelligence exists for this snapshot.", percent: 100, cached });
+    } else if (message.type === "peek-pve-location") {
+      const key = pveCacheKey(message.input, message.snapshot, message.cloneState);
+      result = await loadPersistedResult("pve", key) ?? null;
+      cached = Boolean(result);
+      progress(message.jobId, { stage: cached ? "disk-cache" : "cache-miss", message: cached ? "Loaded prepared PvE/location intelligence." : "No prepared PvE/location intelligence exists for this snapshot.", percent: 100, cached });
+    } else if (message.type === "run-opportunity") {
       const key = await opportunityCacheKey(message.input, message.snapshots);
       const existing = resultCache.get(key);
       if (existing && existing.expiresAt > Date.now()) {

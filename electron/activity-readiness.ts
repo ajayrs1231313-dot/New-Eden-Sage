@@ -53,11 +53,14 @@ export type ActivityArchetypeReadiness = {
   missingFitSkills: number;
   itemTypeIds: number[];
   items: ContextFitArchetype["items"];
+  fitChoices: ContextFitArchetype["representativeFits"];
+  recommendedFit?: ContextFitArchetype["representativeFits"][number];
 };
 
 export type ActivityReadinessResult = {
   hullTypeId: number;
   hull: string;
+  hullAccessReady: boolean;
   context: ActivityContext;
   model: ReturnType<typeof resolveContextRule>["model"];
   overallPercent: number;
@@ -251,18 +254,12 @@ export async function analyzeActivityReadiness(
 
   const activityEvidence = await getActivityContextEvidence(input.context);
 
-  const fitEvidence = rule.includeFit
-    ? await getContextFitEvidence(input.hullTypeId, hullName, input.context, rule)
-    : {
-        status: "no-data" as const,
-        source: "none" as const,
-        contextSpecific: true,
-        fetchedAt: new Date().toISOString(),
-        sampleCount: 0,
-        confidence: "none" as const,
-        note: "A fitted-ship profile is not part of readiness for this activity.",
-        archetypes: [],
-      };
+  const fitEvidence = await getContextFitEvidence(
+    input.hullTypeId,
+    hullName,
+    input.context,
+    rule.includeFit ? rule : { ...rule, includeFit: true },
+  );
 
   const hasFitEvidence = rule.includeFit && fitEvidence.status === "ready" && fitEvidence.archetypes.length > 0;
   const weights = effectiveWeights(rule.weights, {
@@ -275,9 +272,25 @@ export async function analyzeActivityReadiness(
   const archetypeResults: ActivityArchetypeReadiness[] = [];
   for (const archetype of fitEvidence.archetypes) {
     const fitPlan = await analyzeTrainingPlan(snapshot, archetype.itemTypeIds, [], cloneState);
+    let recommendedFit: ContextFitArchetype["representativeFits"][number] | undefined;
+    let recommendedFitReadiness = -1;
+    let recommendedFitMissing = Number.MAX_SAFE_INTEGER;
+    const scoredFits: Array<{ fit: ContextFitArchetype["representativeFits"][number]; readiness: number; missing: number; usable: boolean }> = [];
+    for (const representative of archetype.representativeFits ?? []) {
+      const representativePlan = await analyzeTrainingPlan(snapshot, representative.itemTypeIds, [], cloneState);
+      scoredFits.push({ fit: representative, readiness: representativePlan.readinessPercent, missing: representativePlan.missingSkills.length, usable: representativePlan.ready });
+      // A recommendation is skill-aware only when every requirement for every
+      // fitted item is already trained. Partial readiness remains useful for the
+      // progression score but must never become an exportable recommendation.
+      if (representativePlan.ready && (representativePlan.readinessPercent > recommendedFitReadiness || (representativePlan.readinessPercent === recommendedFitReadiness && representativePlan.missingSkills.length < recommendedFitMissing))) {
+        recommendedFit = representative;
+        recommendedFitReadiness = representativePlan.readinessPercent;
+        recommendedFitMissing = representativePlan.missingSkills.length;
+      }
+    }
     let overallPercent = weightedScore(
       {
-        hull: hull?.readinessPercent ?? 100,
+        hull: hull ? (hull.hullAccessReady ? 100 : 0) : 100,
         fit: fitPlan.readinessPercent,
         activity: activityPercent,
         context: contextCoverage.percent,
@@ -308,6 +321,11 @@ export async function analyzeActivityReadiness(
       missingFitSkills: fitPlan.missingSkills.length,
       itemTypeIds: archetype.itemTypeIds,
       items: archetype.items,
+      fitChoices: scoredFits
+        .filter((item) => item.usable)
+        .sort((a, b) => b.readiness - a.readiness || a.missing - b.missing || a.fit.name.localeCompare(b.fit.name))
+        .map((item) => item.fit),
+      recommendedFit,
     });
   }
   archetypeResults.sort((a, b) =>
@@ -349,7 +367,7 @@ export async function analyzeActivityReadiness(
 
   let overallPercent = weightedScore(
     {
-      hull: hull?.readinessPercent ?? 100,
+      hull: hull ? (hull.hullAccessReady ? 100 : 0) : 100,
       fit: selectedFitPercent,
       activity: activityPercent,
       context: contextCoverage.percent,
@@ -370,7 +388,7 @@ export async function analyzeActivityReadiness(
 
   const reasons: string[] = [];
   if (rule.includeHull)
-    reasons.push(`Hull access contributes ${weights.hull}%: ${hull?.readinessPercent ?? 0}%.`);
+    reasons.push(`Hull access contributes ${weights.hull}%: ${hull?.hullAccessPercent ?? 0}%.`);
   if (rule.includeFit) {
     if (selectedArchetype)
       reasons.push(
@@ -412,6 +430,7 @@ export async function analyzeActivityReadiness(
   return {
     hullTypeId: input.hullTypeId,
     hull: hullName,
+    hullAccessReady: hull?.hullAccessReady ?? !rule.includeHull,
     context: input.context,
     model: rule.model,
     overallPercent,
@@ -421,9 +440,9 @@ export async function analyzeActivityReadiness(
     compatibilityReason: "reason" in compatibility ? compatibility.reason : undefined,
     components: {
       hull: {
-        percent: hull?.readinessPercent ?? null,
+        percent: hull ? (hull.hullAccessReady ? 100 : 0) : null,
         weight: weights.hull,
-        missing: hull?.missingSkills.length ?? null,
+        missing: hull?.missingHullAccessSkills.length ?? null,
       },
       fit: {
         percent: selectedArchetype?.fitPercent ?? null,

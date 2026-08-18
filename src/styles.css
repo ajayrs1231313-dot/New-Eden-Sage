@@ -2082,3 +2082,21 @@ footer {
 .sync-overlay{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;background:rgba(2,10,14,.76);backdrop-filter:blur(5px)}
 .sync-dialog{width:min(520px,calc(100vw - 40px));border:1px solid #4d9b99;background:linear-gradient(145deg,#0a2026,#061116);box-shadow:0 24px 80px #000c;padding:28px;text-align:center}.sync-dialog .pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:#82e3d7;box-shadow:0 0 18px #82e3d7;margin-bottom:8px}.sync-dialog h2{margin:4px 0 10px;color:#e4f7f5}.sync-dialog p{min-height:24px;margin:0;color:#a9c6c8}.sync-dialog small{display:block;margin-top:16px;color:#78969a;line-height:1.45}.sync-progress-track{height:6px;margin-top:20px;background:#162c32;overflow:hidden}.sync-progress-track i{display:block;height:100%;background:linear-gradient(90deg,#4ecfc1,#a8eee4);transition:width .25s ease}
 .sync-setup-actions{display:flex;justify-content:center;gap:10px;margin-top:20px}.sync-setup-actions button{min-width:132px}
+
+
+/* Full-sync preparation dashboard */
+.sync-dialog{width:min(860px,calc(100vw - 40px));max-height:min(90vh,860px);overflow:auto;padding:30px 32px;text-align:left}
+.sync-dialog>.pulse,.sync-dialog>.eyebrow,.sync-dialog>h2,.sync-dialog>p{text-align:center}
+.sync-overall-row{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:22px;color:#bfd5d7;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}
+.sync-overall-row strong{color:#e9fffb;font-size:14px}.sync-progress-overall{margin-top:8px;height:8px;border-radius:999px}
+.sync-track-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:18px}
+.sync-track-card{min-width:0;border:1px solid #1b3b43;background:#07171c;padding:10px 11px;border-radius:7px}
+.sync-track-card.running{border-color:#357f7b}.sync-track-card.done{border-color:#285b57}.sync-track-card.error{border-color:#8f4c52}
+.sync-track-head{display:flex;justify-content:space-between;gap:12px;align-items:center;color:#c9dddf;font-size:12px;font-weight:700}
+.sync-track-head strong{font-size:11px;color:#83d9cf;text-transform:uppercase;letter-spacing:.06em}.sync-track-card.error .sync-track-head strong{color:#f0a0a8}
+.sync-track-bar{height:4px;background:#142a30;margin-top:7px;overflow:hidden;border-radius:999px}.sync-track-bar i{display:block;height:100%;background:linear-gradient(90deg,#4ecfc1,#a8eee4);transition:width .2s ease}.sync-track-card.error .sync-track-bar i{background:#b86872}
+.sync-track-card small{display:block;margin-top:6px;color:#6f9297;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px;line-height:1.3}
+.sync-dialog .sync-footnote{margin-top:16px;text-align:center}
+@media(max-width:700px){.sync-dialog{padding:22px 18px}.sync-track-grid{grid-template-columns:1fr}}
+
+.mcp-claude-panel{display:grid;gap:10px;padding:14px;border:1px solid #3a536c;background:#091720}.mcp-claude-panel>strong{color:#dcebed}.mcp-claude-panel>p{margin:0;color:#809aa4;line-height:1.5}.mcp-client-status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mcp-client-status-grid>div{display:grid;gap:5px;border:1px solid #213c48;background:#07141a;padding:10px}.mcp-client-status-grid span{color:#a9c1c7;font-size:11px;text-transform:uppercase;letter-spacing:.06em}.mcp-client-status-grid b{font-size:12px}.mcp-client-status-grid b.ready{color:#72ddd0}.mcp-client-status-grid b.attention{color:#e4c16b}.mcp-client-status-grid b.muted{color:#647e85}.mcp-client-status-grid small{overflow-wrap:anywhere}.mcp-client-error{color:#e38e96!important}.mcp-claude-panel>small{color:#66838a;line-height:1.5}@media(max-width:760px){.mcp-client-status-grid{grid-template-columns:1fr}}

@@ -176,6 +176,14 @@ function normalizeFit(value: any): Fit {
   };
 }
 
+function takePendingFit(): Fit | null {
+  const pendingRaw = localStorage.getItem("new-eden-sage-pending-fit");
+  if (!pendingRaw) return null;
+  const pending = normalizeFit(JSON.parse(pendingRaw));
+  localStorage.removeItem("new-eden-sage-pending-fit");
+  return pending;
+}
+
 const emptyFit = (): Fit => ({
   id: crypto.randomUUID(),
   name: "New fitting",
@@ -398,7 +406,10 @@ async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
 export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (intent: FitResolutionIntent) => void }) {
   const [fits, setFits] = useState<Fit[]>(() => {
     try {
-      return (JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]") as any[]).map(normalizeFit);
+      const existing = (JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]") as any[]).map(normalizeFit);
+      const pending = takePendingFit();
+      if (!pending) return existing;
+      return [pending, ...existing.filter((fit) => fit.id !== pending.id)];
     } catch {
       return [];
     }
@@ -422,6 +433,22 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   const [libraryMeta, setLibraryMeta] = useState<FitLibraryMetaMap>(() => {
     try { return JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") ?? "{}"); } catch { return {}; }
   });
+  useEffect(() => {
+    const importPendingFit = () => {
+      try {
+        const pending = takePendingFit();
+        if (!pending) return;
+        setFits((current) => [pending, ...current.filter((fit) => fit.id !== pending.id)]);
+        setActiveId(pending.id);
+        setSideMode("build");
+        setStatus(`${pending.name} imported from Progression.`);
+      } catch (caught) {
+        setStatus(caught instanceof Error ? caught.message : "Could not import the Progression fit.");
+      }
+    };
+    window.addEventListener("sage:navigate-fittings", importPendingFit);
+    return () => window.removeEventListener("sage:navigate-fittings", importPendingFit);
+  }, []);
   useEffect(() => {
     window.sage.listSnapshots().then((loaded) => {
       setCharacters(loaded);
@@ -471,7 +498,13 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
     void window.sage.syncMcpRendererData({ savedFits: fits, fitLibraryMeta: libraryMeta });
   }, [fits, libraryMeta]);
   useEffect(() => window.sage.onMcpFitDataUpdated((value) => {
-    if (Array.isArray(value.savedFits)) setFits(value.savedFits as Fit[]);
+    if (Array.isArray(value.savedFits)) {
+      const normalized = value.savedFits
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+        .map((candidate) => normalizeFit(candidate));
+      setFits(normalized);
+      setActiveId((current) => normalized.some((fit) => fit.id === current) ? current : (normalized[0]?.id ?? ""));
+    }
     if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
   }), []);
   // Saved fits render immediately. Resolving the complete CCP DOGMA index on
@@ -1403,7 +1436,7 @@ function FitPerformance({
             <div className="base-stat-grid">
               <article><span>Capacitor demand</span><strong>{analysis.capacitor.demandGjPerSecond.toFixed(2)} GJ/s</strong></article>
               <article><span>Peak recharge</span><strong>{analysis.capacitor.peakRechargeGjPerSecond.toFixed(2)} GJ/s</strong></article>
-              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable Â· ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
+              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable · ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
             </div>
           )}
           {analysis.damage && (
@@ -1412,7 +1445,7 @@ function FitPerformance({
               <article><span>Weapon / drone DPS</span><strong>{analysis.damage.weaponDps.toFixed(1)} / {analysis.damage.droneDps.toFixed(1)}</strong></article>
               <article><span>Total volley</span><strong>{analysis.damage.totalVolley.toFixed(1)}</strong></article>
               <article><span>Active drones</span><strong>{analysis.damage.activeDrones.length}</strong><small>{analysis.damage.activeDrones.map((drone: any) => drone.name).join(", ") || "None selected"}</small></article>
-              {analysis.damage.weaponProfiles.map((weapon: any, index: number) => <article key={`${weapon.typeId}-${index}`}><span>{weapon.name}</span><strong>{weapon.kind === "turret" ? `${(weapon.optimalM / 1000).toFixed(1)} + ${(weapon.falloffM / 1000).toFixed(1)} km` : `${(weapon.maximumRangeM / 1000).toFixed(1)} km`}</strong><small>{weapon.kind === "turret" ? `${weapon.tracking.toFixed(3)} tracking` : `${weapon.explosionRadiusM.toFixed(0)} m explosion Â· ${weapon.explosionVelocity.toFixed(0)} m/s`}</small></article>)}
+              {analysis.damage.weaponProfiles.map((weapon: any, index: number) => <article key={`${weapon.typeId}-${index}`}><span>{weapon.name}</span><strong>{weapon.kind === "turret" ? `${(weapon.optimalM / 1000).toFixed(1)} + ${(weapon.falloffM / 1000).toFixed(1)} km` : `${(weapon.maximumRangeM / 1000).toFixed(1)} km`}</strong><small>{weapon.kind === "turret" ? `${weapon.tracking.toFixed(3)} tracking` : `${weapon.explosionRadiusM.toFixed(0)} m explosion · ${weapon.explosionVelocity.toFixed(0)} m/s`}</small></article>)}
             </div>
           )}
           {analysis.defence && (
@@ -1427,9 +1460,9 @@ function FitPerformance({
           {analysis.navigation && analysis.targeting && (
             <div className="base-stat-grid">
               <article><span>Align time</span><strong>{analysis.navigation.alignSeconds.toFixed(2)} s</strong></article>
-              <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s Â· {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
-              <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km Â· {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
-              <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m Â· {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
+              <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s · {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
+              <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km · {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
+              <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m · {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
             </div>
           )}
           {analysis.heat && (
@@ -1691,7 +1724,3 @@ function ItemBay({ title, items, activeDroneSelection = false, onActiveQuantityC
     </div>
   );
 }
-
-
-
-

@@ -55,6 +55,47 @@ function sourceLabel(source: ActivityReadinessResult["fitEvidence"]["source"]) {
   return "No fitted-ship evidence required";
 }
 
+function fitChoiceCopy(
+  fit: ActivityReadinessResult["selectedArchetype"] extends infer _T
+    ? NonNullable<ActivityReadinessResult["selectedArchetype"]>["fitChoices"][number]
+    : never,
+  index: number,
+) {
+  const fitted = [
+    ...fit.fit.high,
+    ...fit.fit.mid,
+    ...fit.fit.low,
+    ...fit.fit.rig,
+    ...fit.fit.subsystem,
+    ...fit.fit.drones,
+    ...fit.fit.fighters,
+  ];
+  const text = fitted.map((item) => item.name.toLowerCase()).join(" ");
+  const roles: string[] = [];
+  if (/ice harvester/.test(text)) roles.push("ice harvesting");
+  else if (/strip miner|mining laser/.test(text)) roles.push("ore mining");
+  else if (/gas cloud harvester/.test(text)) roles.push("gas harvesting");
+  else if (/missile|rocket|torpedo|launcher/.test(text)) roles.push("missiles");
+  else if (/autocannon|artillery/.test(text)) roles.push("projectiles");
+  else if (/blaster|railgun/.test(text)) roles.push("hybrids");
+  else if (/laser|maser/.test(text)) roles.push("lasers");
+  else if (fit.fit.drones.length) roles.push("drones");
+  if (/shield booster|shield extender|shield hardener|invulnerability|multispectrum shield/.test(text)) roles.push("shield tank");
+  else if (/armor repair|armor plate|energized|armor hardener/.test(text)) roles.push("armour tank");
+  if (/micro ?warpdrive|afterburner/.test(text)) roles.push("propulsion");
+  const profile = roles.slice(0, 3).join(" · ") || "general-purpose setup";
+  const keyItems = fitted
+    .map((item) => item.name)
+    .filter((name) => name && !/^Type \d+$/i.test(name))
+    .slice(0, 4);
+  return {
+    title: index === 0 ? `Recommended fit · ${profile}` : `Alternative fit ${index} · ${profile}`,
+    description: keyItems.length
+      ? `Key equipment: ${keyItems.join(", ")}.`
+      : `${fitted.length} fitted item type${fitted.length === 1 ? "" : "s"} for this route.`,
+  };
+}
+
 function orderedArchetypes(analysis: ActivityReadinessResult) {
   const all = [
     ...(analysis.selectedArchetype ? [analysis.selectedArchetype] : []),
@@ -110,6 +151,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
   const [shipAnalyses, setShipAnalyses] = useState<ShipAnalysis[]>([]);
   const [selectedShipId, setSelectedShipId] = useState(0);
   const [selectedArchetypeId, setSelectedArchetypeId] = useState("");
+  const [selectedFitId, setSelectedFitId] = useState("");
   const [archetypeBusy, setArchetypeBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -151,7 +193,8 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     }
 
     let cancelled = false;
-    setBusy(true);
+    setBusy(false);
+    const busyTimer = setTimeout(() => { if (!cancelled) setBusy(true); }, 150);
     setError("");
     mapLimited(candidates, 4, async (ship) => ({
         ship,
@@ -202,9 +245,13 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
           );
         }
       })
-      .finally(() => !cancelled && setBusy(false));
+      .finally(() => {
+        clearTimeout(busyTimer);
+        if (!cancelled) setBusy(false);
+      });
     return () => {
       cancelled = true;
+      clearTimeout(busyTimer);
     };
   }, [
     activity.id,
@@ -219,9 +266,17 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
 
   const selectedShip =
     shipAnalyses.find((item) => item.ship.typeId === selectedShipId) ?? shipAnalyses[0];
+  const fitChoices = selectedShip?.analysis.selectedArchetype?.fitChoices ??
+    (selectedShip?.analysis.selectedArchetype?.recommendedFit
+      ? [selectedShip.analysis.selectedArchetype.recommendedFit]
+      : []);
+  const selectedFit = fitChoices.find((fit) => fit.id === selectedFitId) ??
+    selectedShip?.analysis.selectedArchetype?.recommendedFit ??
+    fitChoices[0];
 
   useEffect(() => {
     setSelectedArchetypeId(selectedShip?.analysis.selectedArchetype?.id ?? "");
+    setSelectedFitId(selectedShip?.analysis.selectedArchetype?.recommendedFit?.id ?? "");
   }, [selectedShip?.ship.typeId, content.id, selectorKey]);
 
   const skillByName = useMemo(
@@ -252,6 +307,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setShipAnalyses([]);
     setSelectedShipId(0);
     setSelectedArchetypeId("");
+    setSelectedFitId("");
   }
   function chooseSubcategory(nextId: string) {
     const nextSubcategory =
@@ -263,6 +319,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setShipAnalyses([]);
     setSelectedShipId(0);
     setSelectedArchetypeId("");
+    setSelectedFitId("");
   }
   function chooseContent(nextId: string) {
     const nextContent =
@@ -272,6 +329,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setShipAnalyses([]);
     setSelectedShipId(0);
     setSelectedArchetypeId("");
+    setSelectedFitId("");
   }
 
   async function chooseArchetype(archetypeId: string) {
@@ -301,6 +359,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
         ),
       );
       setSelectedArchetypeId(analysis.selectedArchetype?.id ?? archetypeId);
+      setSelectedFitId(analysis.selectedArchetype?.recommendedFit?.id ?? "");
     } catch (caught) {
       setSelectedArchetypeId(previousArchetypeId);
       setError(caught instanceof Error ? caught.message : "Could not switch fitting route.");
@@ -309,6 +368,34 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     }
   }
 
+  function exportRecommendedFit() {
+    const recommendation = selectedFit;
+    if (!selectedShip?.analysis.hullAccessReady || !recommendation) return;
+    const contextText = [activity.label, subcategory.label, content.label, ...Object.values(selectorValues).filter(Boolean)].join(" · ");
+    const payload = {
+      id: crypto.randomUUID(),
+      name: `${selectedShip.ship.name} · ${content.label} · Sage recommended`,
+      hull: { name: selectedShip.ship.name, typeId: selectedShip.ship.typeId, quantity: 1 },
+      low: recommendation.fit.low ?? [],
+      mid: recommendation.fit.mid ?? [],
+      high: recommendation.fit.high ?? [],
+      rig: recommendation.fit.rig ?? [],
+      subsystem: recommendation.fit.subsystem ?? [],
+      drones: recommendation.fit.drones ?? [],
+      fighters: recommendation.fit.fighters ?? [],
+      cargo: recommendation.fit.cargo ?? [],
+      implants: [],
+      boosters: [],
+      instructions: [
+        `Generated for ${snapshot.character.name}: ${contextText}.`,
+        `Selected archetype: ${selectedShip.analysis.selectedArchetype?.label ?? "observed fit"}.`,
+        "Recommendation uses the full selected activity route, every route option and this pilot's current synced skills; verify final fitting resources in Fittings.",
+      ],
+      source: `Activity Planner · ${contextText}`,
+    };
+    localStorage.setItem("new-eden-sage-pending-fit", JSON.stringify(payload));
+    window.dispatchEvent(new CustomEvent("sage:navigate-fittings"));
+  }
   async function copyTrainingPlan() {
     if (!selectedShip?.analysis.recommendedQueue.length) return;
     const header = `${activity.label} → ${subcategory.label} → ${content.label} → ${selectedShip.ship.name}`;
@@ -473,7 +560,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
               <button
                 key={ship.typeId}
                 className={`${selectedShip?.ship.typeId === ship.typeId ? "active" : ""} readiness-${analysis.tier.id}`}
-                onClick={() => { setSelectedShipId(ship.typeId); setSelectedArchetypeId(analysis.selectedArchetype?.id ?? ""); }}
+                onClick={() => { setSelectedShipId(ship.typeId); setSelectedArchetypeId(analysis.selectedArchetype?.id ?? ""); setSelectedFitId(analysis.selectedArchetype?.recommendedFit?.id ?? ""); }}
               >
                 <div><strong>{ship.name}</strong>{owned && <em>Owned</em>}</div>
                 <span>{analysis.overallPercent}% ready</span>
@@ -634,6 +721,45 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
             <div className="planner-ready-state">{snapshot.character.name} meets every identified mandatory requirement for this exact route.</div>
           )}
 
+          <section className="activity-recommended-fit-panel">
+            <div>
+              <p className="eyebrow">RECOMMENDED FIT</p>
+              <h3>{selectedShip.ship.name} for this exact activity route</h3>
+              {selectedShip.analysis.hullAccessReady ? (
+                selectedFit ? (
+                  <>
+                    <p>Choose one of the fits from <strong>{selectedShip.analysis.selectedArchetype?.label ?? "this route"}</strong>. Every choice shown is fully usable with this character&apos;s currently trained skills; Sage preselects the strongest match.</p>
+                    <small>{Object.values(selectorValues).filter(Boolean).join(" · ")}</small>
+                    <div className="archetype-choice-grid recommended-fit-choice-grid">
+                      {fitChoices.map((fit, index) => {
+                        const copy = fitChoiceCopy(fit, index);
+                        return (
+                          <button
+                            type="button"
+                            key={fit.id}
+                            className={selectedFit?.id === fit.id ? "active" : ""}
+                            aria-pressed={selectedFit?.id === fit.id}
+                            onClick={() => setSelectedFitId(fit.id)}
+                          >
+                            <strong>{copy.title}</strong>
+                            <span>{copy.description}</span>
+                            <small>{fit.itemTypeIds.length} fitted item type{fit.itemTypeIds.length === 1 ? "" : "s"}{index === 0 ? " · best match for your skills" : ""}</small>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <p>No observed fit for this route is fully usable with this character&apos;s current skills, so Sage will not label or export one as recommended. Use the training route above or try another archetype.</p>
+                )
+              ) : (
+                <p>This character cannot currently sit in the selected hull. Sage will keep showing the training route, but fitted export stays unavailable until hull access is trained.</p>
+              )}
+            </div>
+            <button type="button" onClick={exportRecommendedFit} disabled={!selectedShip.analysis.hullAccessReady || !selectedFit}>
+              {selectedFit ? "Export selected fit to Fittings" : "Fit unavailable"}
+            </button>
+          </section>
           <section className="mastery-panel">
             <div><p className="eyebrow">OPTIONAL TRAINING</p><h3>Useful next skills</h3><p>These aren't required to get started, but they'll improve performance and efficiency.</p></div>
             <strong>{selectedShip.analysis.masteryPercent}%</strong>

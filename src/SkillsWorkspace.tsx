@@ -413,7 +413,8 @@ function ShipPlanner({
   useEffect(() => {
     if (!selectedTypeId) return;
     let cancelled = false;
-    setBusy(true);
+    setBusy(false);
+    const busyTimer = setTimeout(() => { if (!cancelled) setBusy(true); }, 150);
     setError("");
     window.sage
       .getShipReadiness({
@@ -435,9 +436,13 @@ function ShipPlanner({
           );
         }
       })
-      .finally(() => !cancelled && setBusy(false));
+      .finally(() => {
+        clearTimeout(busyTimer);
+        if (!cancelled) setBusy(false);
+      });
     return () => {
       cancelled = true;
+      clearTimeout(busyTimer);
     };
   }, [selectedTypeId, snapshot.characterId, snapshot.updatedAt, cloneState, targetMasteryLevel]);
 

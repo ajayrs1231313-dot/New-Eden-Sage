@@ -5,6 +5,7 @@ import type {
   MarketSummary,
   PublicConfig,
   FitResolutionIntent,
+  ClaudeCompatibilityStatus,
 } from "./types";
 import { FittingsWorkspace } from "./Fittings";
 import { IskLab } from "./IskLab";
@@ -13,6 +14,7 @@ import { SkillsWorkspace } from "./SkillsWorkspace";
 import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
 import { IndustrialCommand } from "./IndustrialCommand";
 import { Loot } from "./Loot";
+import { CorporationManagement } from "./CorporationManagement";
 
 type View =
   | "overview"
@@ -29,7 +31,8 @@ type View =
   | "data"
   | "settings";
 type CloneState = "alpha" | "omega";
-type SyncProgress = { running: boolean; message: string; percent: number; completed?: number; total?: number };
+type SyncTrack = { id: string; label: string; percent: number; status: "waiting" | "running" | "done" | "error"; message: string };
+type SyncProgress = { running: boolean; message: string; percent: number; completed?: number; total?: number; tracks?: SyncTrack[] };
 
 const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "overview", label: "Command", mark: "\u2726" },
@@ -38,7 +41,7 @@ const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "isk", label: "ISK Lab", mark: "\u25C8" },
   { id: "market", label: "Market", mark: "\u25C6" },
   { id: "fittings", label: "Fittings", mark: "\u2318" },
-  { id: "loot", label: "Loot", mark: "⌖" },
+  { id: "loot", label: "Loot", mark: "\u2727" },
   { id: "industrial", label: "Industrial Command", mark: "\u2692" },
   { id: "corporation", label: "Corporation Management", mark: "\u25C9" },
   { id: "alliance", label: "Alliance Management", mark: "\u2727" },
@@ -57,6 +60,11 @@ const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots 
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
+  useEffect(() => {
+    const navigateToFittings = () => setView("fittings");
+    window.addEventListener("sage:navigate-fittings", navigateToFittings);
+    return () => window.removeEventListener("sage:navigate-fittings", navigateToFittings);
+  }, []);
   const [marketDataRevision, setMarketDataRevision] = useState(0);
   const [plannerHullTypeId, setPlannerHullTypeId] = useState<number>();
   const [plannerFitIntent, setPlannerFitIntent] = useState<FitResolutionIntent>();
@@ -111,7 +119,7 @@ export default function App() {
 
   async function connect() {
     setBusy(true);
-    setMessage("Waiting for EVE authorization…");
+    setMessage("Waiting for EVE authorization\u2026");
     try {
       const result = await window.sage.loginWithEve();
       setSnapshots((current) => [
@@ -130,18 +138,20 @@ export default function App() {
   }
 
   async function syncAll() {
-    setInitialSetupComplete(true);
     setBusy(true);
-    setMessage("Syncing all live Sage data…");
+    setMessage("Syncing and preparing all Sage intelligence\u2026");
     try {
-      const result = await window.sage.runMasterUpdate() as { alreadySynced?: boolean } | undefined;
+      const result = await window.sage.runMasterUpdate({ cloneStates }) as { alreadySynced?: boolean; preparationFailures?: unknown[] } | undefined;
       if (result?.alreadySynced) {
+        setInitialSetupComplete(true);
         setMessage("Sage is already current. Sync All will be available again in a few seconds.");
         return;
       }
-      setSnapshots(await window.sage.listSnapshots());
+      const nextSnapshots = await window.sage.listSnapshots();
+      setSnapshots(nextSnapshots);
+      setActiveId((current) => nextSnapshots.some((item) => item.characterId === current) ? current : nextSnapshots[0]?.characterId ?? "");
       setMarketDataRevision((value) => value + 1);
-      setMessage("All live Sage data synced. Fittings and Industry are preparing quietly.");
+      setMessage(result?.preparationFailures?.length ? "Update finished with preparation warnings. The affected bars show what needs retrying." : "Everything is synced and prepared.");
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Character sync failed",
@@ -158,6 +168,8 @@ export default function App() {
       setMessage(progress.message);
     } else {
       setBusy(false);
+      setMessage(progress.message);
+      setInitialSetupComplete(true);
       void window.sage.listSnapshots().then(setSnapshots);
       setMarketDataRevision((value) => value + 1);
     }
@@ -207,8 +219,20 @@ export default function App() {
             <p className="eyebrow">SETTING UP NEW EDEN SAGE</p>
             <h2>{syncProgress?.running ? "Syncing your live intelligence" : "Add your EVE characters"}</h2>
             <p>{syncProgress?.running ? syncProgress.message : "Add every character you want Sage to track, then begin one complete sync."}</p>
-            {syncProgress?.running ? <div className="sync-progress-track"><i style={{ width: `${Math.max(2, syncProgress.percent)}%` }} /></div> : <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void syncAll()} disabled={!snapshots.length}>Begin Sync{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>}
-            <small>{syncProgress?.running ? "Fittings and Industry will finish quietly after this first sync." : snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character’s data separate and refreshes them together."}</small>
+            {syncProgress?.running ? (
+              <>
+                <div className="sync-overall-row"><span>Overall preparation</span><strong>{Math.round(syncProgress.percent)}%</strong></div>
+                <div className="sync-progress-track sync-progress-overall"><i style={{ width: `${Math.max(2, syncProgress.percent)}%` }} /></div>
+                {syncProgress.tracks?.length ? <div className="sync-track-grid">
+                  {syncProgress.tracks.map((track) => <div className={`sync-track-card ${track.status}`} key={track.id} title={track.message}>
+                    <div className="sync-track-head"><span>{track.label}</span><strong>{track.status === "done" ? "Ready" : track.status === "error" ? "Retry" : track.status === "waiting" ? "Waiting" : `${Math.round(track.percent)}%`}</strong></div>
+                    <div className="sync-track-bar"><i style={{ width: `${Math.max(track.status === "waiting" ? 0 : 2, track.percent)}%` }} /></div>
+                    <small>{track.message}</small>
+                  </div>)}
+                </div> : null}
+              </>
+            ) : <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void syncAll()} disabled={!snapshots.length}>Begin Sync{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>}
+            <small className="sync-footnote">{syncProgress?.running ? "This can take up to 5 minutes on some machines." : snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character’s data separate and refreshes them together."}</small>
           </div>
         </div>
       )}
@@ -326,14 +350,14 @@ export default function App() {
               Support Developer
             </button>
             <button className="sync" onClick={() => void syncAll()} disabled={busy}>
-              ↻ {busy ? "Syncing all…" : "Sync All"}
+              {"\u21bb"} {busy ? "Syncing all\u2026" : "Sync All"}
             </button>
             <button
               className="connect"
               onClick={connect}
               disabled={busy}
             >
-              {busy ? "Connecting…" : "+ Add character"}
+              {busy ? "Connecting\u2026" : "+ Add character"}
             </button>
           </div>
         </header>
@@ -418,7 +442,8 @@ export default function App() {
             />
           </div>
         )}
-        {(view === "corporation" || view === "alliance") && (
+        {view === "corporation" && <CorporationManagement />}
+        {view === "alliance" && (
           <UnderConstruction title={nav.find((item) => item.id === view)?.label ?? "New module"} />
         )}
         <footer>
@@ -456,7 +481,7 @@ function UpdateControl() {
       }
     }
   }
-  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Install & restart" : state.status === "checking" ? "Checking…" : state.status === "current" ? `Up to date · v${version}` : state.status === "error" ? "Update failed · retry" : `Check updates · v${version}`;
+  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Install & restart" : state.status === "checking" ? "Checking\u2026" : state.status === "current" ? `Up to date \u00b7 v${version}` : state.status === "error" ? "Update failed \u00b7 retry" : `Check updates \u00b7 v${version}`;
   return <button className="update-control" onClick={act} disabled={state.status === "checking" || state.status === "downloading"} title={state.status === "error" ? String(state.detail) : "Install the latest full Sage release from GitHub"}>{label}</button>;
 }
 
@@ -746,18 +771,32 @@ function Settings({
   config: PublicConfig;
   onSaved(config: PublicConfig): void;
 }) {
-  const [mcpSetup, setMcpSetup] = useState<{ command: string; args: string[]; json: string; codex: string; access: string } | null>(null);
+  const [mcpSetup, setMcpSetup] = useState<{ command: string; args: string[]; json: string; codex: string; access: string; claudeDesktop: string; claudeCode: string } | null>(null);
   const [mcpMessage, setMcpMessage] = useState("");
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
   const [tunnelReady, setTunnelReady] = useState(false);
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeCompatibilityStatus | null>(null);
   useEffect(() => {
     void window.sage.getMcpSetup().then(setMcpSetup);
     void window.sage.getMcpTunnelStatus().then((value) => { setTunnelId(value.tunnelId); setTunnelReady(value.ready); });
+    void window.sage.getClaudeMcpStatus().then(setClaudeStatus);
   }, []);
   async function copyMcp(value: string, label: string) {
     await window.sage.copyText(value);
     setMcpMessage(`${label} copied.`);
+  }
+  async function repairClaude() {
+    setMcpMessage("Checking Claude integration...");
+    try {
+      const status = await window.sage.repairClaudeMcp();
+      setClaudeStatus(status);
+      const desktop = status.desktop.detected ? (status.desktop.configured ? "Claude Desktop configured" : "Claude Desktop needs attention") : "Claude Desktop not detected";
+      const code = status.code.detected ? (status.code.configured ? "Claude Code configured" : "Claude Code needs attention") : "Claude Code not detected";
+      setMcpMessage(`${desktop}. ${code}.`);
+    } catch (error) {
+      setMcpMessage(error instanceof Error ? error.message : "Could not repair Claude integration.");
+    }
   }
   async function connectChatGpt() {
     setMcpMessage("Starting secure ChatGPT tunnel...");
@@ -787,7 +826,7 @@ function Settings({
       </div>
       <div className="settings-connection-card mcp-settings-card">
         <strong>AI / MCP access</strong>
-        <p>Connect ChatGPT or Codex to Sage's complete local read-only dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are always removed.</p>
+        <p>Connect ChatGPT, Claude or Codex to Sage's complete local dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are always removed.</p>
         <div className="mcp-tunnel-panel">
           <strong>ChatGPT Secure MCP Tunnel</strong>
           <small>Status: {tunnelReady ? "Ready" : "Not connected"}</small>
@@ -801,6 +840,35 @@ function Settings({
           </div>
           <small>The runtime key is encrypted with Windows secure storage and remains only on this PC. Keep the tunnel running while ChatGPT uses Sage.</small>
         </div>
+        <div className="mcp-claude-panel">
+          <strong>Claude compatibility</strong>
+          <p>Sage automatically registers the bundled local MCP server with Claude Desktop and Claude Code when either client is installed. Existing Claude MCP servers are preserved.</p>
+          <div className="mcp-client-status-grid">
+            <div>
+              <span>Claude Desktop</span>
+              <b className={claudeStatus?.desktop.configured ? "ready" : claudeStatus?.desktop.detected ? "attention" : "muted"}>
+                {claudeStatus?.desktop.configured ? "Configured" : claudeStatus?.desktop.detected ? "Needs repair" : "Not detected"}
+              </b>
+              {claudeStatus?.desktop.path && <small>{claudeStatus.desktop.path}</small>}
+              {claudeStatus?.desktop.restartRequired && <small>Fully quit and reopen Claude Desktop to load the updated MCP entry.</small>}
+              {claudeStatus?.desktop.error && <small className="mcp-client-error">{claudeStatus.desktop.error}</small>}
+            </div>
+            <div>
+              <span>Claude Code</span>
+              <b className={claudeStatus?.code.configured ? "ready" : claudeStatus?.code.detected ? "attention" : "muted"}>
+                {claudeStatus?.code.configured ? "Configured (user scope)" : claudeStatus?.code.detected ? "Needs repair" : "Not detected"}
+              </b>
+              {claudeStatus?.code.path && <small>{claudeStatus.code.path}</small>}
+              {claudeStatus?.code.error && <small className="mcp-client-error">{claudeStatus.code.error}</small>}
+            </div>
+          </div>
+          <div className="mcp-setup-actions">
+            <button onClick={() => void repairClaude()}>Repair Claude integration</button>
+            {mcpSetup && <button onClick={() => void copyMcp(mcpSetup.claudeDesktop, "Claude Desktop configuration")}>Copy Claude Desktop config</button>}
+            {mcpSetup && <button onClick={() => void copyMcp(mcpSetup.claudeCode, "Claude Code command")}>Copy Claude Code command</button>}
+          </div>
+          <small>If Claude Desktop was installed after Sage, launch Claude once, reopen Sage or use Repair, then fully restart Claude Desktop. Claude Code is registered at user scope so Sage is available in every project.</small>
+        </div>
         {mcpSetup && <>
           <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
           <div className="mcp-setup-actions">
@@ -813,10 +881,11 @@ function Settings({
               <li>Sync your characters and refresh any market data you want the AI to inspect.</li>
               <li>For ChatGPT, create an OpenAI tunnel and runtime key with the buttons above, then save and start the tunnel.</li>
               <li>Choose <b>Add in ChatGPT</b>, create a developer-mode app using <b>Tunnel</b>, and select the New Eden Sage tunnel.</li>
+              <li>For Claude Desktop or Claude Code, Sage configures the local MCP automatically when the client is detected. If Claude was installed later, use <b>Repair Claude integration</b> above.</li>
               <li>For Codex local access, choose <b>Copy Codex config</b> and add it to your Codex <code>config.toml</code>.</li>
               <li>Ask the AI to list Sage characters or available Sage data points before requesting detailed analysis.</li>
             </ol>
-            <small>Sage does not need to remain open while the AI reads already-saved data. Open Fittings once after changing saved fits so the MCP copy is refreshed. New character or market data becomes available after the relevant Sage sync completes.</small>
+            <small>Sage does not need to remain open while an AI reads already-saved data. Keep Sage open for MCP fitting writes or live EVE fitting actions. New character or market data becomes available after the relevant Sage sync completes.</small>
           </div>
           <code>{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
         </>}
@@ -1532,9 +1601,3 @@ function OrderDepth({
     </div>
   );
 }
-
-
-
-
-
-

@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { decrypt, encrypt, readConfig, writeConfig } from "./config";
 import { refreshEveToken } from "./eve";
+import { importFits, validateImportedFit } from "./fitting-import";
 
 type BridgeAction =
   | "save_sage_fit"
@@ -26,9 +27,36 @@ async function readRendererData(): Promise<RendererData> {
   } catch { return { savedFits: [], fitLibraryMeta: {} }; }
 }
 
+async function mergeWindowRendererData(value: RendererData, getWindow: () => BrowserWindow | null): Promise<RendererData> {
+  const window = getWindow();
+  if (!window || window.isDestroyed()) return value;
+  try {
+    const local = await window.webContents.executeJavaScript(`(() => {
+      try {
+        return {
+          savedFits: JSON.parse(localStorage.getItem("new-eden-sage-fits") || "[]"),
+          fitLibraryMeta: JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") || "{}")
+        };
+      } catch { return { savedFits: [], fitLibraryMeta: {} }; }
+    })()`, true) as Partial<RendererData>;
+    const merged = [...value.savedFits];
+    for (const fit of Array.isArray(local.savedFits) ? local.savedFits : []) {
+      if (!merged.some((item) => item.id === fit.id)) merged.push(fit);
+    }
+    return { savedFits: merged, fitLibraryMeta: { ...(local.fitLibraryMeta ?? {}), ...value.fitLibraryMeta } };
+  } catch { return value; }
+}
+
 async function saveRendererData(value: RendererData, getWindow: () => BrowserWindow | null) {
   await fs.writeFile(rendererPath(), JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
-  getWindow()?.webContents.send("mcp:fit-data-updated", value);
+  const window = getWindow();
+  if (window && !window.isDestroyed()) {
+    const fitsJson = JSON.stringify(JSON.stringify(value.savedFits));
+    const metaJson = JSON.stringify(JSON.stringify(value.fitLibraryMeta));
+    const script = "localStorage.setItem(\"new-eden-sage-fits\", " + fitsJson + "); localStorage.setItem(\"new-eden-sage-fit-library-meta\", " + metaJson + ");";
+    await window.webContents.executeJavaScript(script, true).catch(() => undefined);
+    window.webContents.send("mcp:fit-data-updated", value);
+  }
   return value;
 }
 
@@ -65,17 +93,22 @@ async function eveRequest(characterId: string, pathname: string, method: "POST" 
 
 async function perform(action: BridgeAction, input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
   if (action === "save_sage_fit") {
-    const fit = input.fit as Record<string, unknown> | undefined;
-    if (!fit || typeof fit.id !== "string" || !fit.id || typeof fit.name !== "string") throw new Error("Fit must include a non-empty id and name.");
-    const data = await readRendererData();
-    const index = data.savedFits.findIndex((item) => item.id === fit.id);
-    if (index >= 0) data.savedFits[index] = fit; else data.savedFits.push(fit);
+    const payload = input.fit ?? input.payload ?? input.text;
+    const imported = importFits(payload).map(validateImportedFit);
+    if (!imported.length) throw new Error("No fitting could be parsed from the MCP payload.");
+    const data = await mergeWindowRendererData(await readRendererData(), getWindow);
+    const operations: Array<{ fitId: string; operation: "created" | "updated" }> = [];
+    for (const fit of imported) {
+      const index = data.savedFits.findIndex((item) => item.id === fit.id);
+      if (index >= 0) data.savedFits[index] = fit; else data.savedFits.push(fit);
+      operations.push({ fitId: fit.id, operation: index >= 0 ? "updated" : "created" });
+    }
     await saveRendererData(data, getWindow);
-    return { success: true, fitId: fit.id, operation: index >= 0 ? "updated" : "created" };
+    return { success: true, count: imported.length, fits: operations, fitId: operations[0]?.fitId, operation: operations[0]?.operation };
   }
   if (action === "delete_sage_fit") {
     const fitId = String(input.fitId ?? "");
-    const data = await readRendererData();
+    const data = await mergeWindowRendererData(await readRendererData(), getWindow);
     const before = data.savedFits.length;
     data.savedFits = data.savedFits.filter((item) => item.id !== fitId);
     delete data.fitLibraryMeta[fitId];

@@ -236,6 +236,18 @@ export function runPveLocationAnalysis(input: PveLocationQuery, snapshot: any, c
   return runJob("pve-location", { type: "run-pve-location", input, snapshot, cloneState }, onProgress);
 }
 
+export function loadPreparedOpportunityAnalysis(input: OpportunityQuery, snapshots: any[]) {
+  return runJob("opportunity", { type: "peek-opportunity", input, snapshots });
+}
+
+export function loadPreparedCapabilityAnalysis(snapshot: any, cloneState: CloneState) {
+  return runJob("capability", { type: "peek-capability", snapshot, cloneState });
+}
+
+export function loadPreparedPveLocationAnalysis(input: PveLocationQuery, snapshot: any, cloneState: CloneState) {
+  return runJob("pve-location", { type: "peek-pve-location", input, snapshot, cloneState });
+}
+
 export async function disposeAnalysisWorker() {
   disposed = true;
   for (const lane of Object.keys(lanes) as AnalysisLane[]) stopWatchdog(lane);

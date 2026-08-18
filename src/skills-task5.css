@@ -233,3 +233,18 @@
 .fit-resolution-note { margin:0; color:#68858c; font-size:9px; line-height:1.45; }
 @media(max-width:1100px){.fit-resolution-grid{grid-template-columns:1fr}}
 
+
+.activity-recommended-fit-panel {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 18px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--border, #2d3b47);
+  border-radius: 10px;
+  background: rgba(255,255,255,.025);
+}
+.activity-recommended-fit-panel h3 { margin: 4px 0 8px; }
+.activity-recommended-fit-panel p { margin: 0 0 8px; max-width: 780px; }
+.activity-recommended-fit-panel button { min-width: 150px; }

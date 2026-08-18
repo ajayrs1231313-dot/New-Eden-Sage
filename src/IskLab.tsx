@@ -86,6 +86,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
         cargoCapacityM3: numberOrNull(cargo),
         maxJumps: numberOrNull(maxJumps),
         maxMinutes: numberOrNull(maxMinutes),
+        force: true,
       });
       if (requestId !== marketRequestSequence.current) return null;
       setAnalysis(next);
@@ -165,15 +166,50 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
   }
 
   useEffect(() => {
-    if (tab === "invention" && snapshot && inventionAnalysis?.schema !== 9 && !inventionBusy) void scanInvention();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, inventionAnalysis?.schema]);
-
-  useEffect(() => {
-    void scanMarket();
-    // Character source revisions and completed market refreshes rerun against the newest saved dataset.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot?.characterId, snapshot?.updatedAt, marketDataRevision]);
+    let cancelled = false;
+    if (!snapshot) {
+      setAnalysis(null);
+      setPveAnalysis(null);
+      setInventionAnalysis(null);
+      return () => { cancelled = true; };
+    }
+    void window.sage.getPreparedIskLab({ characterId: snapshot.characterId, cloneState }).then((prepared) => {
+      if (cancelled) return;
+      setAnalysis(prepared.market);
+      setPveAnalysis(prepared.pve);
+      setInventionAnalysis(prepared.invention);
+      if (prepared.market) {
+        setMarketStatus(
+          `${prepared.market.market.opportunities.length.toLocaleString()} candidate routes ready from ${prepared.market.signals.marketOrdersInspected.toLocaleString()} retained public orders across ${prepared.market.signals.marketRegionsInspected.toLocaleString()} regions.`,
+        );
+        setCargo(String(Math.round(prepared.market.constraints.cargoCapacityM3)));
+        if (prepared.market.constraints.maxCapital != null) setCapital(String(Math.round(prepared.market.constraints.maxCapital)));
+      } else {
+        setMarketStatus("No prepared Market Scanner result is available. Run Sync All to prepare it.");
+      }
+      if (prepared.pve) {
+        setPveStatus(
+          `${prepared.pve.locations.length} PvE/location leads are ready from ${prepared.pve.character.systemName}. Public activity data is ${ageLabel(prepared.pve.dataStatus.ageMinutes)}.`,
+        );
+      } else {
+        setPveStatus("No prepared PvE/location result is available. Run Sync All to prepare it.");
+      }
+      if (prepared.invention) {
+        setInventionStatus(
+          `${prepared.invention.candidateCount.toLocaleString()} invention outcomes ready · ${prepared.invention.ownedSourceCount.toLocaleString()} use an owned source BPO.`,
+        );
+      } else {
+        setInventionStatus("No prepared invention result is available. Run Sync All to prepare it.");
+      }
+    }).catch((error) => {
+      if (cancelled) return;
+      const message = error instanceof Error ? error.message : "Prepared ISK Lab data could not be read.";
+      setMarketStatus(message);
+      setPveStatus(message);
+      setInventionStatus(message);
+    });
+    return () => { cancelled = true; };
+  }, [snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, cloneState]);
 
   function openPveTab() {
     setTab("pve");
@@ -319,11 +355,11 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       </div>
 
       {tab === "market" && !analysis && marketBusy && <div className="planner-analysis-state">Analyzing retained market data in the background...</div>}
-      {tab === "market" && !analysis && !marketBusy && <div className="market-no-results">Run a full public market pull in Regional Market, then analyze it here.</div>}
+      {tab === "market" && !analysis && !marketBusy && <div className="market-no-results">No prepared Market Scanner result is available. Run Sync All to prepare it.</div>}
       {analysis && tab === "market" && <MarketOpportunityScanner analysis={analysis} onExport={exportTop1000} />}
 
       {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} />}
-      {tab === "opportunities" && !analysis && <div className="market-no-results">Market opportunities need a full public market snapshot. PvE/location intelligence remains available in its own tab.</div>}
+      {tab === "opportunities" && !analysis && <div className="market-no-results">No prepared Opportunities result is available. Run Sync All to prepare it.</div>}
 
       {tab === "invention" && !snapshot && <div className="market-no-results">Connect and sync a character to include owned blueprint originals.</div>}
       {tab === "invention" && snapshot && inventionBusy && !inventionAnalysis && <div className="planner-analysis-state">Building and pricing the complete invention catalogue…</div>}
@@ -376,7 +412,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
 
       {tab === "pve" && !snapshot && <div className="market-no-results">Connect and sync a character so Sage can rank locations from your current system.</div>}
       {tab === "pve" && snapshot && !pveAnalysis && pveBusy && <div className="planner-analysis-state">Building PvE and location intelligence in the background...</div>}
-      {tab === "pve" && snapshot && !pveAnalysis && !pveBusy && <div className="market-no-results">Run PvE/location analysis to rank current activity and staging areas.</div>}
+      {tab === "pve" && snapshot && !pveAnalysis && !pveBusy && <div className="market-no-results">No prepared PvE/location result is available. Run Sync All to prepare it.</div>}
       {tab === "pve" && pveAnalysis && <PveLocationIntel analysis={pveAnalysis} />}
     </section>
   );

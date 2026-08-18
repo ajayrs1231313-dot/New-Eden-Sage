@@ -125,6 +125,9 @@ export interface ShipReadinessResult {
   };
 }
 
+export interface ActivityFitPayloadItem { typeId: number; name: string; quantity: number }
+export interface ActivityFitPayload { low: ActivityFitPayloadItem[]; mid: ActivityFitPayloadItem[]; high: ActivityFitPayloadItem[]; rig: ActivityFitPayloadItem[]; subsystem: ActivityFitPayloadItem[]; drones: ActivityFitPayloadItem[]; fighters: ActivityFitPayloadItem[]; cargo: ActivityFitPayloadItem[] }
+export interface ActivityRecommendedFit { id: string; name: string; itemTypeIds: number[]; fit: ActivityFitPayload }
 export interface ActivityFitArchetypeReadiness {
   id: string;
   label: string;
@@ -137,6 +140,8 @@ export interface ActivityFitArchetypeReadiness {
   missingFitSkills: number;
   itemTypeIds: number[];
   items: Array<{ typeId: number; name: string; presencePercent: number }>;
+  fitChoices: ActivityRecommendedFit[];
+  recommendedFit?: ActivityRecommendedFit;
 }
 
 export interface ActivityContextEvidence {
@@ -160,6 +165,7 @@ export interface ActivityContextEvidence {
 export interface ActivityReadinessResult {
   hullTypeId: number;
   hull: string;
+  hullAccessReady: boolean;
   context: { activityId: string; subcategoryId: string; contentId: string; selectorValues?: Record<string, string> };
   model: "combat" | "harvesting" | "exploration" | "hauling" | "industry" | "trading" | "capital" | "general";
   overallPercent: number;
@@ -518,6 +524,12 @@ export type FitResolutionIntent = {
   resources?: { used: { cpu:number; powergrid:number; calibration:number }; capacity: { cpu:number; powergrid:number; calibration:number } };
 };
 
+
+export type ClaudeCompatibilityStatus = {
+  desktop: { detected: boolean; configured: boolean; changed?: boolean; restartRequired?: boolean; path?: string; error?: string };
+  code: { detected: boolean; configured: boolean; changed?: boolean; restartRequired?: boolean; path?: string; error?: string };
+  launch: { command: string; args: string[]; env: Record<string, string> };
+};
 declare global {
   interface Window {
     sage: {
@@ -527,7 +539,9 @@ declare global {
       downloadUpdate(): Promise<unknown>;
       installUpdate(): Promise<boolean>;
       openSupportPage(): Promise<void>;
-      getMcpSetup(): Promise<{ command: string; args: string[]; json: string; codex: string; access: string }>;
+      getMcpSetup(): Promise<{ command: string; args: string[]; json: string; codex: string; access: string; claudeDesktop: string; claudeCode: string }>;
+      getClaudeMcpStatus(): Promise<ClaudeCompatibilityStatus>;
+      repairClaudeMcp(): Promise<ClaudeCompatibilityStatus>;
       getMcpTunnelStatus(): Promise<{ configured: boolean; tunnelId: string; running: boolean; ready: boolean; healthUrl: string }>;
       configureMcpTunnel(input: { tunnelId: string; runtimeKey: string }): Promise<{ configured: boolean; tunnelId: string; running: boolean; ready: boolean; healthUrl: string }>;
       openChatGptPlugins(): Promise<void>;
@@ -557,6 +571,14 @@ declare global {
       getFittingRemediesLocal(input: { characterId?:string; hullTypeId:number; issueCodes:string[]; itemTypeIds:number[] }): Promise<FitRemedyCandidate[]>;
       resolveTypeIds(ids: number[]): Promise<Array<{ id: number; name: string }>>;
       listShips(): Promise<Array<{ typeId: number; name: string }>>;
+      getManufacturingPlan(input: any): Promise<any>;
+      getBlueprintActivities(input: any): Promise<any>;
+      getInventionOpportunities(input: any): Promise<any>;
+      getIndustrySystemCostIndex(input: any): Promise<any>;
+      getIndustrialOpportunities(input: any): Promise<any>;
+      getPreparedIndustrialCommand(input: { characterId: string }): Promise<any>;
+      getIndustrialOpportunityRouteScope(input: any): Promise<any>;
+      getPreparedIskLab(input: { characterId: string; cloneState?: "alpha" | "omega" }): Promise<{ market: OpportunityAnalysis | null; pve: PveLocationAnalysis | null; invention: any | null }>;
       getShipReadiness(input: {
         characterId: string;
         hullTypeId: number;
@@ -635,6 +657,7 @@ declare global {
         cargoCapacityM3?: number | null;
         maxJumps?: number | null;
         maxMinutes?: number | null;
+        force?: boolean;
       }): Promise<OpportunityAnalysis>;
       getPveLocationAnalysis(input: {
         characterId: string;
@@ -645,8 +668,8 @@ declare global {
       }): Promise<PveLocationAnalysis>;
       cancelAnalysis(kind?: "opportunity" | "capability" | "trade" | "raw-market" | "regional-filter" | "pve-location"): Promise<boolean>;
       getAnalysisStatus(): Promise<any>;
-      runMasterUpdate(): Promise<any>;
-      onMasterUpdateProgress(callback: (progress: { running:boolean; stage:string; message:string; percent:number; startedAt:string; cpuWorkers:number; downloadDurationMs?:number; totalDurationMs?:number; completed?:number; total?:number }) => void): () => void;
+      runMasterUpdate(input?: { cloneStates?: Record<string, "alpha" | "omega"> }): Promise<any>;
+      onMasterUpdateProgress(callback: (progress: { running:boolean; stage:string; message:string; percent:number; startedAt?:string; cpuWorkers?:number; downloadDurationMs?:number; totalDurationMs?:number; completed?:number; total?:number; tracks?: Array<{ id:string; label:string; percent:number; status:"waiting" | "running" | "done" | "error"; message:string }> }) => void): () => void;
       onAnalysisProgress(callback: (progress: AnalysisProgress) => void): () => void;
       exportTopArbitrage(): Promise<string | null>;
       filterRegionalMarket(input: {

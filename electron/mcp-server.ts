@@ -10,6 +10,7 @@ import { loadCurrentRawMarketManifest, loadRawMarketRegion } from "./raw-market-
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+const FIT_IMPORT_INSTRUCTIONS = `When creating or importing a fit into New Eden Sage, call save_sage_fit. The fit payload is intentionally flexible: you may send a normal LLM JSON object, Sage JSON, ESI fitting JSON, a JSON array or wrapped collection of fits, EFT/PYFA text, PYFA XML, EVE DNA, fenced code blocks, or clearly labelled plain text sections. Prefer exact current EVE item names and realistic quantities. Type IDs are optional; omit uncertain IDs rather than inventing them. For JSON, preferred fields are: name, ship or hull, modules.high/mid/low/rig/subsystem, drones, fighters, cargo, implants, boosters, and instructions. Each item may be a string or an object such as { name, typeId?, quantity?, charge?, chargeTypeId?, chargeQuantity?, state? }. Multiple fits may be supplied at once. Sage normalizes all supported formats into its canonical fitting shape before saving.`;
 const database = new DatabaseSync(path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "new-eden-sage", "new-eden-sage.sqlite"), { readOnly: true });
 const rendererDataPath = path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "new-eden-sage", "mcp-renderer-data.json");
 
@@ -109,13 +110,13 @@ export async function startMcpServer() {
   }, async () => result(listImportedInformation()));
 
   server.registerTool("get_saved_fittings", {
-    title: "Read saved fittings", description: "Read every fit and fitting-library metadata saved in the Sage renderer.", inputSchema: {}, annotations: READ_ONLY,
+    title: "Read saved fittings", description: "Read every fit and fitting-library metadata saved in the Sage renderer. For importing or creating fits, use save_sage_fit; call get_fit_import_instructions if you need the accepted formats and preferred fields.", inputSchema: {}, annotations: READ_ONLY,
   }, async () => result(await rendererData()));
 
   server.registerTool("save_sage_fit", {
     title: "Create or update a Sage fit",
-    description: "Save a complete New Eden Sage fitting object to the local fitting library. An existing fit with the same id is replaced. Sage must be open.",
-    inputSchema: { fit: z.record(z.string(), z.unknown()) }, annotations: WRITE,
+    description: FIT_IMPORT_INSTRUCTIONS + " Sage must be open.",
+    inputSchema: { fit: z.unknown() }, annotations: WRITE,
   }, async ({ fit }) => result(await writeAction("save_sage_fit", { fit })));
 
   server.registerTool("delete_sage_fit", {
