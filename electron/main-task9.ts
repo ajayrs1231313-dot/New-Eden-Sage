@@ -497,7 +497,19 @@ function createWindow() {
   else window.loadFile(path.join(__dirname, "../dist/index.html"));
 }
 
-app.whenReady().then(() => {
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+
+  app.whenReady().then(() => {
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -1454,7 +1466,8 @@ app.whenReady().then(() => {
       await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true, await readSyncPreparationOptions());
     }).catch((error) => logCrash("master_update.auto_start_failed", { error }));
   });
-});
+  });
+}
 
 function makeChatGPTMarkdown(data: ReturnType<typeof exportDatabaseData>) {
   const snapshots = data.characterSnapshots

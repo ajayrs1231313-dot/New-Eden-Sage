@@ -187,7 +187,7 @@ export async function stageStaticDataRefreshLowImpact(force = false, aggressive 
           staticRoot: STATIC_ROOT,
           activeArchive: SDE_ARCHIVE,
           stagedArchive: SDE_STAGED_ARCHIVE,
-          partialArchive: SDE_PARTIAL_ARCHIVE,
+          partialArchive: SDE_PARTIAL_ARCHIVE + "." + process.pid,
           statePath: SDE_UPDATE_STATE,
           force,
           aggressive,

@@ -8,10 +8,55 @@ const electronPath = require('electron');
 const logRoot = path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage', 'Logs');
 const monitorRoot = path.join(logRoot, 'Crash Monitor');
 const monitorScript = path.join(root, 'scripts', 'electron-crash-monitor.cjs');
+const launcherLockFile = path.join(logRoot, 'dev-launcher.lock');
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireLauncherLock() {
+  fs.mkdirSync(logRoot, { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(launcherLockFile, 'wx');
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), 'utf8');
+      fs.closeSync(fd);
+      return true;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      try {
+        const owner = JSON.parse(fs.readFileSync(launcherLockFile, 'utf8'));
+        if (pidAlive(Number(owner?.pid))) return false;
+      } catch {}
+      try { fs.unlinkSync(launcherLockFile); } catch {}
+    }
+  }
+  return false;
+}
+
+function releaseLauncherLock() {
+  try {
+    const owner = JSON.parse(fs.readFileSync(launcherLockFile, 'utf8'));
+    if (Number(owner?.pid) === process.pid) fs.unlinkSync(launcherLockFile);
+  } catch {}
+}
+
+if (!acquireLauncherLock()) {
+  console.log('[sage-dev] Another Electron dev launcher is already running; not starting a duplicate.');
+  process.exit(0);
+}
 let child = null;
 let stopping = false;
 let restartTimer = null;
 let restartQueued = false;
+let restartInFlight = null;
+let queuedRestartReason = null;
 let activeSession = null;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,10 +161,29 @@ async function stopChild(reason = 'source restart') {
 
 async function restart(reason) {
   if (stopping) return;
-  console.log(`[sage-dev] Electron source changed (${reason}); restarting Electron/preload...`);
-  await stopChild(`compiled Electron source changed: ${reason}`);
-  await waitForReady();
-  launch();
+  queuedRestartReason = reason;
+  if (restartInFlight) return restartInFlight;
+
+  restartInFlight = (async () => {
+    while (!stopping && queuedRestartReason) {
+      const nextReason = queuedRestartReason;
+      queuedRestartReason = null;
+      console.log(`[sage-dev] Electron source changed (${nextReason}); restarting Electron/preload...`);
+      await stopChild(`compiled Electron source changed: ${nextReason}`);
+      await waitForReady();
+      if (stopping) break;
+      launch();
+      // TypeScript emits several compiled files in one build. Give that burst
+      // time to settle so a second watcher callback cannot launch another
+      // Electron main process alongside the first.
+      await sleep(400);
+    }
+  })().finally(() => {
+    restartInFlight = null;
+    if (!stopping && queuedRestartReason) void restart(queuedRestartReason);
+  });
+
+  return restartInFlight;
 }
 
 function scheduleRestart(filename) {
@@ -145,6 +209,7 @@ async function shutdown() {
 process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 process.on('exit', () => {
+  releaseLauncherLock();
   if (child) {
     if (activeSession) writeJson(activeSession.controlFile, { expected: true, reason: 'development launcher exited', timestamp: new Date().toISOString() });
     child.kill();

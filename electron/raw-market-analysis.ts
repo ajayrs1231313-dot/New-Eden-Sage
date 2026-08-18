@@ -99,7 +99,7 @@ export type FullMarketAnalysisIndex = {
 // safely within desktop memory limits.
 const SIDE_DEPTH = 16;
 const gunzipAsync = promisify(gunzip);
-const ANALYSIS_INDEX_SCHEMA = 3;
+const ANALYSIS_INDEX_SCHEMA = 4;
 const ANALYSIS_SAVE_TIMEOUT_MS = 5 * 60_000;
 let currentCache: { snapshotId: string; value: FullMarketAnalysisIndex } | null = null;
 const historicalCache = new Map<string, FullMarketAnalysisIndex>();
@@ -125,13 +125,10 @@ async function loadPersistedAnalysisIndex(snapshot: RawMarketSnapshot): Promise<
 }
 
 function persistedItem(item: FullMarketItem): FullMarketItem {
-  return {
-    ...item,
-    regions: Object.fromEntries(Object.entries(item.regions).map(([key, region]) => {
-      const { security: _security, ...persistedRegion } = region;
-      return [key, persistedRegion];
-    })),
-  };
+  // Regional high/low/null metrics are part of the canonical full-market
+  // index. Persist them intact so the regional view can be reconstructed
+  // without reopening 1.5m+ raw orders.
+  return item;
 }
 
 async function savePersistedAnalysisIndex(snapshot: RawMarketSnapshot, value: FullMarketAnalysisIndex, runtime: RawMarketAnalysisRuntime) {

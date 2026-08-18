@@ -548,7 +548,7 @@ declare global {
       openOpenAiTunnels(): Promise<void>;
       openOpenAiApiKeys(): Promise<void>;
       syncMcpRendererData(value: unknown): Promise<boolean>;
-      onMcpFitDataUpdated(callback: (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown> }) => void): () => void;
+      onMcpFitDataUpdated(callback: (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown>; selectedFitId?: string }) => void): () => void;
       onUpdateStatus(callback: (value: { status: string; detail?: any }) => void): () => void;
       copyText(value: string): Promise<boolean>;
       resolveTypeNames(

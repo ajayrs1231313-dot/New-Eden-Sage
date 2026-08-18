@@ -400,7 +400,18 @@ async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
     else cargo.push(item);
   };
   withIds.cargo.forEach(classifyCargo);
-  return { ...withIds, low: [...withIds.low, ...movedRacks.low], mid: [...withIds.mid, ...movedRacks.mid], high: [...withIds.high, ...movedRacks.high], rig: [...withIds.rig, ...movedRacks.rig], subsystem: [...withIds.subsystem, ...movedRacks.subsystem], drones, fighters, cargo, implants, boosters };
+  const expandRack = (items: FitItem[]) => items.flatMap((item) =>
+    Array.from({ length: Math.max(1, Math.floor(item.quantity || 1)) }, () => ({ ...item, quantity: 1 })),
+  );
+  return {
+    ...withIds,
+    low: expandRack([...withIds.low, ...movedRacks.low]),
+    mid: expandRack([...withIds.mid, ...movedRacks.mid]),
+    high: expandRack([...withIds.high, ...movedRacks.high]),
+    rig: expandRack([...withIds.rig, ...movedRacks.rig]),
+    subsystem: expandRack([...withIds.subsystem, ...movedRacks.subsystem]),
+    drones, fighters, cargo, implants, boosters,
+  };
 }
 
 export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (intent: FitResolutionIntent) => void }) {
@@ -497,16 +508,48 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   useEffect(() => {
     void window.sage.syncMcpRendererData({ savedFits: fits, fitLibraryMeta: libraryMeta });
   }, [fits, libraryMeta]);
-  useEffect(() => window.sage.onMcpFitDataUpdated((value) => {
-    if (Array.isArray(value.savedFits)) {
-      const normalized = value.savedFits
-        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
-        .map((candidate) => normalizeFit(candidate));
-      setFits(normalized);
-      setActiveId((current) => normalized.some((fit) => fit.id === current) ? current : (normalized[0]?.id ?? ""));
-    }
-    if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
-  }), []);
+  useEffect(() => {
+    let updateSequence = 0;
+    const applyMcpFitUpdate = async (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown>; selectedFitId?: string }) => {
+      const sequence = ++updateSequence;
+      if (Array.isArray(value.savedFits)) {
+        const normalized = value.savedFits
+          .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+          .map((candidate) => normalizeFit(candidate));
+        let resolved = normalized;
+        try {
+          resolved = await Promise.all(normalized.map((fit) => resolveFitFromEve(fit, new Map<string, number>())));
+        } catch (caught) {
+          if (sequence !== updateSequence) return;
+          setStatus(caught instanceof Error ? `MCP fit received, but local SDE resolution failed: ${caught.message}` : "MCP fit received, but local SDE resolution failed.");
+        }
+        if (sequence !== updateSequence) return;
+        setFits(resolved);
+        const selected = typeof value.selectedFitId === "string" && resolved.some((fit) => fit.id === value.selectedFitId)
+          ? value.selectedFitId
+          : undefined;
+        setActiveId((current) => selected ?? (resolved.some((fit) => fit.id === current) ? current : (resolved[0]?.id ?? "")));
+        if (selected) {
+          const fit = resolved.find((candidate) => candidate.id === selected);
+          if (fit) {
+            const unresolved = fitItems(fit).filter((item) => !item.typeId).length;
+            setSideMode("build");
+            setStatus(unresolved ? `${fit.name} received from MCP; ${unresolved} item name(s) could not be resolved.` : `${fit.name} received from MCP and resolved against the local SDE.`);
+          }
+        }
+      }
+      if (sequence !== updateSequence) return;
+      if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
+    };
+    const removeIpcListener = window.sage.onMcpFitDataUpdated((value) => { void applyMcpFitUpdate(value); });
+    const onDirectRendererUpdate = (event: Event) => { void applyMcpFitUpdate((event as CustomEvent).detail ?? {}); };
+    window.addEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
+    return () => {
+      updateSequence += 1;
+      removeIpcListener();
+      window.removeEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
+    };
+  }, []);
   // Saved fits render immediately. Resolving the complete CCP DOGMA index on
   // mount used to freeze the entire app the first time Fittings was opened.
   // Type resolution now happens only when a fit is imported or analyzed.
