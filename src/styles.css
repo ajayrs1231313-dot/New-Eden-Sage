@@ -1276,10 +1276,13 @@ footer {
   align-items: center;
   color: #8ba4ac;
   font-size: 11px;
-  margin-right: auto;
+  margin-right: 0;
 }
 .route-controls input {
   accent-color: #65e1d2;
+}
+.route-controls > button:first-of-type {
+  margin-left: auto;
 }
 .route-metrics {
   display: grid;
@@ -2100,3 +2103,9 @@ footer {
 @media(max-width:700px){.sync-dialog{padding:22px 18px}.sync-track-grid{grid-template-columns:1fr}}
 
 .mcp-claude-panel{display:grid;gap:10px;padding:14px;border:1px solid #3a536c;background:#091720}.mcp-claude-panel>strong{color:#dcebed}.mcp-claude-panel>p{margin:0;color:#809aa4;line-height:1.5}.mcp-client-status-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mcp-client-status-grid>div{display:grid;gap:5px;border:1px solid #213c48;background:#07141a;padding:10px}.mcp-client-status-grid span{color:#a9c1c7;font-size:11px;text-transform:uppercase;letter-spacing:.06em}.mcp-client-status-grid b{font-size:12px}.mcp-client-status-grid b.ready{color:#72ddd0}.mcp-client-status-grid b.attention{color:#e4c16b}.mcp-client-status-grid b.muted{color:#647e85}.mcp-client-status-grid small{overflow-wrap:anywhere}.mcp-client-error{color:#e38e96!important}.mcp-claude-panel>small{color:#66838a;line-height:1.5}@media(max-width:760px){.mcp-client-status-grid{grid-template-columns:1fr}}
+
+.fit-eve-export-status {
+  display: block;
+  margin: 6px 0 0;
+  color: #8ba4ac;
+}

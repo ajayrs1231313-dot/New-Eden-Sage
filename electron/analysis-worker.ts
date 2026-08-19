@@ -1,7 +1,7 @@
 import { parentPort } from "node:worker_threads";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
 import { analyzeOpportunities, type OpportunityQuery } from "./opportunity-engine";
@@ -36,7 +36,18 @@ type WorkerProgress = {
 if (!parentPort) throw new Error("Analysis worker requires a parent port.");
 
 const resultCache = new Map<string, { expiresAt: number; result: unknown }>();
+const MAX_MEMORY_RESULT_CACHE_ENTRIES = 2;
 let activeJobId: string | null = null;
+
+function rememberResult(key: string, result: unknown, ttlMs: number) {
+  resultCache.delete(key);
+  resultCache.set(key, { expiresAt: Date.now() + ttlMs, result });
+  while (resultCache.size > MAX_MEMORY_RESULT_CACHE_ENTRIES) {
+    const oldest = resultCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    resultCache.delete(oldest);
+  }
+}
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 const PERSISTED_ANALYSIS_ROOT = path.join(process.env.NEW_EDEN_SAGE_USER_DATA ?? process.cwd(), "Analysis Cache");
@@ -56,12 +67,29 @@ async function loadPersistedResult(kind: string, key: string) {
 async function savePersistedResult(kind: string, key: string, result: unknown) {
   await fs.mkdir(PERSISTED_ANALYSIS_ROOT, { recursive: true });
   const target = persistedResultPath(kind, key);
-  const partial = `${target}.${process.pid}.partial`;
+  const partial = `${target}.${process.pid}.${randomUUID()}.partial`;
   await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(result), "utf8"), { level: 6 }));
-  await fs.rename(partial, target).catch(async () => {
-    await fs.rm(target, { force: true });
+  try {
     await fs.rename(partial, target);
-  });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
+    const backup = `${target}.${process.pid}.${randomUUID()}.backup`;
+    let backedUp = false;
+    try {
+      await fs.rename(target, backup);
+      backedUp = true;
+    } catch (targetError) {
+      if ((targetError as NodeJS.ErrnoException).code !== "ENOENT") throw targetError;
+    }
+    try {
+      await fs.rename(partial, target);
+    } catch (replaceError) {
+      if (backedUp) await fs.rename(backup, target).catch(() => undefined);
+      throw replaceError;
+    }
+    if (backedUp) await fs.rm(backup, { force: true }).catch(() => undefined);
+  }
 }
 
 function genericCacheKey(kind: string, input: unknown, snapshots: unknown) {
@@ -146,7 +174,7 @@ parentPort.on("message", async (message: WorkerMessage) => {
           });
           await savePersistedResult("opportunity", key, result);
         }
-        resultCache.set(key, { expiresAt: Date.now() + 5 * 60_000, result });
+        rememberResult(key, result, 5 * 60_000);
       }
     } else if (message.type === "run-capability") {
       const key = genericCacheKey("capability", message.cloneState, { id: message.snapshot?.characterId, updatedAt: message.snapshot?.updatedAt });
@@ -194,7 +222,7 @@ parentPort.on("message", async (message: WorkerMessage) => {
           progress: (value) => progress(message.jobId, value),
         });
         if (!message.input.forceLive && !persisted) await savePersistedResult("pve", key, result);
-        resultCache.set(key, { expiresAt: Date.now() + 2 * 60_000, result });
+        rememberResult(key, result, 2 * 60_000);
       }
     }
 

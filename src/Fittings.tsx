@@ -1052,6 +1052,8 @@ function FitDisplay({
   const [tab, setTab] = useState<"fitting" | "performance">("fitting");
   const [analysis, setAnalysis] = useState<any>(null);
   const [remedies, setRemedies] = useState<FitRemedyCandidate[]>([]);
+  const [eveExporting, setEveExporting] = useState(false);
+  const [eveExportStatus, setEveExportStatus] = useState("");
   const [hullProfile, setHullProfile] = useState<HullFittingProfile | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1177,6 +1179,20 @@ function FitDisplay({
       resources: analysis?.resources ? { used: { ...analysis.resources.used }, capacity: { ...analysis.resources.capacity } } : undefined,
     });
   };
+  async function exportCurrentFitToEve() {
+    if (!characterId) return;
+    setEveExporting(true);
+    setEveExportStatus("Saving fit to EVE...");
+    try {
+      await window.sage.exportFitToEve({ characterId, fit });
+      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      setEveExportStatus(`Saved to ${characterName}'s EVE fitting library.`);
+    } catch (error) {
+      setEveExportStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
+    } finally {
+      setEveExporting(false);
+    }
+  }
   const fitSummary = summarizeFit(fit);
   return (
     <div className="fit-display fit-display-v3">
@@ -1201,6 +1217,9 @@ function FitDisplay({
             <button onClick={onRename}>Rename</button>
             <button onClick={onDuplicate}>Duplicate</button>
             <button onClick={onExport}>Copy JSON</button>
+            <button onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>
+              {eveExporting ? "Exporting..." : "Export to EVE"}
+            </button>
             <button className="route-fit" onClick={onRoute}>
               Find cheapest purchase route
             </button>
@@ -1210,6 +1229,7 @@ function FitDisplay({
         <div className="fit-library-summary">
           <span>{fitSummary.moduleCount} modules</span><span>{fitSummary.droneCount} drones</span><span>{fitSummary.resolvedItems} resolved</span><span>{fitSummary.unresolvedItems} unresolved</span>
         </div>
+        {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
         <div className="fit-tabs">
           <button
             className={tab === "fitting" ? "active" : ""}
@@ -1570,12 +1590,14 @@ function FitRouteScreen({
     characters[0]?.characterId ?? "",
   );
   const [buyEntireFit, setBuyEntireFit] = useState(false);
+  const [highSecOnly, setHighSecOnly] = useState(true);
+  const [eveAction, setEveAction] = useState<"route" | "fit" | null>(null);
   const [result, setResult] = useState<any>(null);
   const [status, setStatus] = useState(
     "Choose a character whose current location will be the route origin.",
   );
   async function calculate() {
-    setStatus("Comparing owned assets, prices and secure routes...");
+    setStatus(`Comparing owned assets, prices and ${highSecOnly ? "high-sec-only" : "unrestricted"} routes...`);
     setResult(null);
     try {
       const items = [
@@ -1591,14 +1613,40 @@ function FitRouteScreen({
       const next = await window.sage.buildFitShoppingRoute({
         characterId,
         buyEntireFit,
+        highSecOnly,
         items,
       });
       setResult(next);
-      setStatus(`Route calculated from ${next.origin}.`);
+      setStatus(`Route calculated from ${next.origin}${highSecOnly ? " using high-sec-only travel" : " using unrestricted shortest routes"}.`);
     } catch (error) {
       setStatus(
         error instanceof Error ? error.message : "Route calculation failed.",
       );
+    }
+  }
+  async function exportRouteToEve() {
+    if (!result?.routeStops?.length || !characterId) return;
+    setEveAction("route");
+    try {
+      const exported = await window.sage.exportShoppingRouteToEve({ characterId, stops: result.routeStops });
+      setStatus(`Exported ${exported.waypoints} shopping waypoint${exported.waypoints === 1 ? "" : "s"} to ${result.character} in EVE.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export the shopping route to EVE.");
+    } finally {
+      setEveAction(null);
+    }
+  }
+  async function exportFitToEve() {
+    if (!characterId) return;
+    setEveAction("fit");
+    try {
+      await window.sage.exportFitToEve({ characterId, fit });
+      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      setStatus(`Saved ${fit.name} to ${characterName}'s EVE fitting library.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
+    } finally {
+      setEveAction(null);
     }
   }
   return (
@@ -1626,12 +1674,26 @@ function FitRouteScreen({
           <input
             type="checkbox"
             checked={buyEntireFit}
-            onChange={(event) => setBuyEntireFit(event.target.checked)}
+            onChange={(event) => { setBuyEntireFit(event.target.checked); setResult(null); setStatus("Purchase options changed. Recalculate the shopping route."); }}
           />
           Buy the entire fit; ignore owned assets
         </label>
+        <label title="Only choose sellers reachable without entering low-sec or null-sec.">
+          <input
+            type="checkbox"
+            checked={highSecOnly}
+            onChange={(event) => { setHighSecOnly(event.target.checked); setResult(null); setStatus("Route safety changed. Recalculate the shopping route."); }}
+          />
+          High-sec only shopping
+        </label>
         <button onClick={calculate} disabled={!characterId}>
           Calculate optimal route
+        </button>
+        <button onClick={exportRouteToEve} disabled={!characterId || !result?.routeStops?.length || eveAction !== null}>
+          {eveAction === "route" ? "Exporting route..." : "Export route to EVE"}
+        </button>
+        <button onClick={exportFitToEve} disabled={!characterId || eveAction !== null}>
+          {eveAction === "fit" ? "Exporting fit..." : "Export fit to EVE"}
         </button>
       </div>
       {result && (

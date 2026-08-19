@@ -134,6 +134,10 @@ contextBridge.exposeInMainWorld("sage", {
   listMarketRegions: () => ipcRenderer.invoke("market:regions"),
   buildFitShoppingRoute: (input: unknown) =>
     ipcRenderer.invoke("fit:shopping-route", input),
+  exportShoppingRouteToEve: (input: unknown) =>
+    ipcRenderer.invoke("eve:export-shopping-route", input),
+  exportFitToEve: (input: unknown) =>
+    ipcRenderer.invoke("eve:export-fit", input),
   findRadiusTrades: (mode: string) =>
     ipcRenderer.invoke("trade:radius-opportunities", mode),
   getOpportunityAnalysis: (input: unknown) =>

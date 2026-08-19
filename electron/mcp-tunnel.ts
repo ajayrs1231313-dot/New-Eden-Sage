@@ -110,15 +110,26 @@ export async function startMcpTunnel() {
   yaml = yaml.replace(/# url_file:.*$/m, `url_file: "${healthFile.replaceAll("\\", "/")}"`);
   await fs.writeFile(profile, yaml, { encoding: "utf8", mode: 0o600 });
   const key = decryptRuntimeKey(config);
+  // spawn() duplicates/inherits the supplied descriptors for the child. Keep the
+  // parent FileHandle objects alive only until spawn returns, then close them
+  // explicitly so Electron never relies on GC to release descriptors.
   const stdout = await fs.open(path.join(root, "tunnel.stdout.log"), "a");
-  const stderr = await fs.open(path.join(root, "tunnel.stderr.log"), "a");
-  tunnelProcess = spawn(tunnelExecutable(), ["run", "--profile-dir", profileDir, "--profile", "new-eden-sage"], {
-    detached: true,
-    windowsHide: true,
-    stdio: ["ignore", stdout.fd, stderr.fd],
-    env: { ...process.env, CONTROL_PLANE_API_KEY: key },
-  });
-  tunnelProcess.unref();
+  try {
+    const stderr = await fs.open(path.join(root, "tunnel.stderr.log"), "a");
+    try {
+      tunnelProcess = spawn(tunnelExecutable(), ["run", "--profile-dir", profileDir, "--profile", "new-eden-sage"], {
+        detached: true,
+        windowsHide: true,
+        stdio: ["ignore", stdout.fd, stderr.fd],
+        env: { ...process.env, CONTROL_PLANE_API_KEY: key },
+      });
+      tunnelProcess.unref();
+    } finally {
+      await stderr.close().catch(() => undefined);
+    }
+  } finally {
+    await stdout.close().catch(() => undefined);
+  }
   await new Promise((resolve) => setTimeout(resolve, 1200));
   return getMcpTunnelStatus();
 }

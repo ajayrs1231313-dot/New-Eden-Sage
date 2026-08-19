@@ -61,6 +61,13 @@ function workerPath() {
   return path.join(__dirname, "analysis-worker.js");
 }
 
+function workerHeapLimitMb(lane: AnalysisLane) {
+  // Market analysis can legitimately build large indexes, but an unbounded
+  // worker must never be allowed to consume the whole Electron process.
+  if (lane === "market" || lane === "raw-query" || lane === "regional-query") return 1024;
+  return 512;
+}
+
 function analysisError(message: string, code: string) {
   const error = new Error(message) as Error & { code?: string };
   error.code = code;
@@ -150,6 +157,10 @@ function ensureWorker(lane: AnalysisLane) {
     env: {
       ...process.env,
       NEW_EDEN_SAGE_USER_DATA: app.getPath("userData"),
+    },
+    resourceLimits: {
+      maxOldGenerationSizeMb: workerHeapLimitMb(lane),
+      maxYoungGenerationSizeMb: 64,
     },
   });
   state.worker = next;

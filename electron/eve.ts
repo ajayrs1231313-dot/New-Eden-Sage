@@ -18,6 +18,7 @@ export const EVE_SCOPES = [
   "esi-contracts.read_character_contracts.v1",
   "esi-fittings.read_fittings.v1",
   "esi-fittings.write_fittings.v1",
+  "esi-ui.write_waypoint.v1",
   "esi-industry.read_character_jobs.v1",
   "esi-killmails.read_killmails.v1",
   "esi-location.read_location.v1",

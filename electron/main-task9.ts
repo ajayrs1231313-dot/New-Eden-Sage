@@ -478,6 +478,89 @@ process.on(
     }),
 );
 
+async function eveWriteAccessToken(characterId: string) {
+  const config = await readConfig();
+  const stored = config.encryptedRefreshTokens[characterId];
+  if (!stored) throw new Error("This character is not connected. Reconnect it in Settings first.");
+  const tokens = await refreshEveToken(config.eveClientId, decrypt(stored));
+  if (tokens.refresh_token) {
+    config.encryptedRefreshTokens[characterId] = encrypt(tokens.refresh_token);
+    await writeConfig(config);
+  }
+  return tokens.access_token;
+}
+
+async function eveWriteRequest(characterId: string, url: string, body?: unknown, accessToken?: string) {
+  const token = accessToken ?? await eveWriteAccessToken(characterId);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Compatibility-Date": "2026-08-02",
+      "X-User-Agent": "NewEdenSage/1.1.7",
+    },
+    body: body == null ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 500);
+    const error = new Error(`EVE action failed (${response.status})${detail ? `: ${detail}` : "."}`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
+  if (response.status === 204) return { success: true };
+  return response.json() as Promise<any>;
+}
+
+function eveFittingPayload(fit: any) {
+  const hullTypeId = Number(fit?.hull?.typeId);
+  if (!Number.isSafeInteger(hullTypeId) || hullTypeId <= 0) throw new Error("Resolve the fitting hull before exporting it to EVE.");
+  const items: Array<{ type_id: number; flag: string; quantity: number }> = [];
+  const rack = (values: any[], prefix: string) => {
+    let slot = 0;
+    for (const item of values ?? []) {
+      const typeId = Number(item?.typeId);
+      if (!Number.isSafeInteger(typeId) || typeId <= 0) throw new Error(`Resolve ${item?.name ?? "a fitted module"} before exporting to EVE.`);
+      const quantity = Math.max(1, Math.floor(Number(item?.quantity ?? 1)));
+      for (let index = 0; index < quantity; index += 1) items.push({ type_id: typeId, flag: `${prefix}${slot++}`, quantity: 1 });
+    }
+  };
+  rack(fit.low, "LoSlot");
+  rack(fit.mid, "MedSlot");
+  rack(fit.high, "HiSlot");
+  rack(fit.rig, "RigSlot");
+  rack(fit.subsystem, "SubSystemSlot");
+  const bay = new Map<string, { type_id: number; flag: string; quantity: number }>();
+  const addBay = (values: any[], flag: string) => {
+    for (const item of values ?? []) {
+      const typeId = Number(item?.typeId);
+      if (!Number.isSafeInteger(typeId) || typeId <= 0) throw new Error(`Resolve ${item?.name ?? "a fitting item"} before exporting to EVE.`);
+      const quantity = Math.max(1, Math.floor(Number(item?.quantity ?? 1)));
+      const key = `${flag}:${typeId}`;
+      const current = bay.get(key);
+      bay.set(key, { type_id: typeId, flag, quantity: (current?.quantity ?? 0) + quantity });
+    }
+  };
+  addBay(fit.drones, "DroneBay");
+  addBay(fit.fighters, "FighterBay");
+  addBay(fit.cargo, "Cargo");
+  const fitted = [...(fit.low ?? []), ...(fit.mid ?? []), ...(fit.high ?? [])];
+  for (const item of fitted) {
+    const chargeTypeId = Number(item?.chargeTypeId);
+    if (!Number.isSafeInteger(chargeTypeId) || chargeTypeId <= 0) continue;
+    const quantity = Math.max(1, Math.floor(Number(item?.chargeQuantity ?? 1)));
+    const key = `Cargo:${chargeTypeId}`;
+    const current = bay.get(key);
+    bay.set(key, { type_id: chargeTypeId, flag: "Cargo", quantity: (current?.quantity ?? 0) + quantity });
+  }
+  items.push(...bay.values());
+  return {
+    name: String(fit?.name || fit?.hull?.name || "New Eden Sage fit").slice(0, 50),
+    description: "Exported from New Eden Sage.",
+    ship_type_id: hullTypeId,
+    items,
+  };
+}
 function createWindow() {
   window = new BrowserWindow({
     width: 1360,
@@ -1136,6 +1219,46 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("fit:shopping-route", async (_event, input) =>
     buildFitShoppingRoute(input),
   );
+  ipcMain.handle("eve:export-shopping-route", async (_event, input: { characterId: string; stops: Array<{ locationId?: number; systemId: number }> }) => {
+    const characterId = String(input?.characterId ?? "");
+    const stops = Array.isArray(input?.stops) ? input.stops : [];
+    if (!characterId || !stops.length) throw new Error("Calculate a shopping route before exporting waypoints to EVE.");
+    let exported = 0;
+    const accessToken = await eveWriteAccessToken(characterId);
+    for (let index = 0; index < stops.length; index += 1) {
+      const stop = stops[index];
+      const systemId = Number(stop.systemId);
+      let destinationId = Number(stop.locationId ?? systemId);
+      if (!Number.isSafeInteger(destinationId) || destinationId <= 0) destinationId = systemId;
+      const makeUrl = (destination: number) => {
+        const url = new URL("https://esi.evetech.net/v2/ui/autopilot/waypoint");
+        url.searchParams.set("add_to_beginning", "false");
+        url.searchParams.set("clear_other_waypoints", index === 0 ? "true" : "false");
+        url.searchParams.set("destination_id", String(destination));
+        return url.toString();
+      };
+      try {
+        await eveWriteRequest(characterId, makeUrl(destinationId), undefined, accessToken);
+      } catch (error) {
+        const status = (error as Error & { status?: number }).status;
+        if (destinationId !== systemId && (status === 400 || status === 404)) await eveWriteRequest(characterId, makeUrl(systemId), undefined, accessToken);
+        else if (status === 403) throw new Error("EVE denied waypoint access. Reconnect this character in Sage once to grant route-export permission.");
+        else throw error;
+      }
+      exported += 1;
+    }
+    return { success: true, waypoints: exported };
+  });
+  ipcMain.handle("eve:export-fit", async (_event, input: { characterId: string; fit: unknown }) => {
+    const characterId = String(input?.characterId ?? "");
+    if (!characterId) throw new Error("Choose a connected character before exporting the fit.");
+    try {
+      return await eveWriteRequest(characterId, `https://esi.evetech.net/v2/characters/${characterId}/fittings`, eveFittingPayload(input.fit));
+    } catch (error) {
+      if ((error as Error & { status?: number }).status === 403) throw new Error("EVE denied fitting-write access. Reconnect this character in Sage to refresh its fitting permission.");
+      throw error;
+    }
+  });
   ipcMain.handle("trade:radius-opportunities", async (_event, mode) =>
     runTradeAnalysis(
       mode,

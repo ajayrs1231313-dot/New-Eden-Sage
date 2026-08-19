@@ -637,8 +637,14 @@ declare global {
       buildFitShoppingRoute(input: {
         characterId: string;
         buyEntireFit: boolean;
+        highSecOnly?: boolean;
         items: Array<{ typeId?: number; name: string; quantity: number }>;
       }): Promise<any>;
+      exportShoppingRouteToEve(input: {
+        characterId: string;
+        stops: Array<{ locationId?: number; systemId: number; station: string; system: string }>;
+      }): Promise<{ success: boolean; waypoints: number }>;
+      exportFitToEve(input: { characterId: string; fit: unknown }): Promise<{ fitting_id?: number; success?: boolean }>;
       findRadiusTrades(
         mode:
           | "top"
