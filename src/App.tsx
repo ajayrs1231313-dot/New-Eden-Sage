@@ -795,10 +795,10 @@ function Settings({
       const desktop = !status.desktop.detected
         ? "Claude Desktop not detected"
         : status.desktop.installPending
-          ? "Claude Desktop installer opened - approve New Eden Sage in Claude"
+          ? "Claude Desktop configured automatically"
           : status.desktop.configured
-            ? "Claude Desktop extension installed"
-            : status.desktop.error ?? "Claude Desktop extension is ready to install";
+            ? "Claude Desktop configured"
+            : status.desktop.error ?? "Claude Desktop is ready to configure";
       const code = status.code.detected ? (status.code.configured ? "Claude Code configured" : "Claude Code needs attention") : "Claude Code not detected";
       setMcpMessage(`${desktop}. ${code}.`);
     } catch (error) {
@@ -861,9 +861,9 @@ function Settings({
 
             <section className="mcp-claude-panel settings-integration-card">
               <div className="settings-integration-head"><div><span>CLAUDE</span><strong>Desktop & Code</strong></div><b className={claudeStatus?.desktop.configured || claudeStatus?.code.configured ? "ready" : "muted"}>{claudeStatus?.desktop.configured || claudeStatus?.code.configured ? "Configured" : "Detecting"}</b></div>
-              <p>Claude Desktop uses Sage's local MCP Bundle/Desktop Extension installer. Claude Code is registered separately at user scope. No Claude Desktop JSON editing is required.</p>
+              <p>Sage configures Claude Desktop automatically on this PC and preserves your existing Claude settings and MCP servers. Claude Code is registered separately at user scope.</p>
               <div className="mcp-client-status-grid">
-                <div><span>Claude Desktop</span><b className={claudeStatus?.desktop.configured ? "ready" : claudeStatus?.desktop.installPending ? "attention" : claudeStatus?.desktop.detected ? "attention" : "muted"}>{claudeStatus?.desktop.configured ? "Extension installed" : claudeStatus?.desktop.installPending ? "Approve install in Claude" : claudeStatus?.desktop.detected ? "Ready to install" : "Not detected"}</b>{claudeStatus?.desktop.bundlePath && <small>MCPB: {claudeStatus.desktop.bundlePath}</small>}{claudeStatus?.desktop.installPending && <small>Claude Desktop should be showing the New Eden Sage extension install dialog. Approve it there.</small>}{claudeStatus?.desktop.error && <small className="mcp-client-error">{claudeStatus.desktop.error}</small>}</div>
+                <div><span>Claude Desktop</span><b className={claudeStatus?.desktop.configured ? "ready" : claudeStatus?.desktop.installPending ? "attention" : claudeStatus?.desktop.detected ? "attention" : "muted"}>{claudeStatus?.desktop.configured ? "Configured" : claudeStatus?.desktop.installPending ? "Configured" : claudeStatus?.desktop.detected ? "Ready to configure" : "Not detected"}</b>{claudeStatus?.desktop.bundlePath && <small>MCPB: {claudeStatus.desktop.bundlePath}</small>}{claudeStatus?.desktop.installPending && <small>Sage has configured Claude Desktop directly.</small>}{claudeStatus?.desktop.error && <small className="mcp-client-error">{claudeStatus.desktop.error}</small>}</div>
                 <div><span>Claude Code</span><b className={claudeStatus?.code.configured ? "ready" : claudeStatus?.code.detected ? "attention" : "muted"}>{claudeStatus?.code.configured ? "Configured (user scope)" : claudeStatus?.code.detected ? "Needs repair" : "Not detected"}</b>{claudeStatus?.code.path && <small>{claudeStatus.code.path}</small>}{claudeStatus?.code.error && <small className="mcp-client-error">{claudeStatus.code.error}</small>}</div>
               </div>
               <div className="mcp-setup-actions">
@@ -878,7 +878,7 @@ function Settings({
             <div className="mcp-advanced-body">
               <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
               <div className="mcp-setup-actions"><button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button><button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button></div>
-              <div className="mcp-instructions"><strong>Manual connection notes</strong><ol><li>Sync characters and refresh any market data the AI needs.</li><li>For ChatGPT, create a tunnel and runtime key above, then choose <b>Add in ChatGPT</b>.</li><li>For Claude Desktop, use <b>Install / repair Claude</b> and approve the New Eden Sage Desktop Extension in Claude.</li><li>For Codex, copy the Codex configuration into its <code>config.toml</code>.</li><li>Ask the AI to list Sage characters or available Sage data before detailed analysis.</li></ol><small>Sage can serve already-saved read data through the configured MCP transport; keep the desktop app available for workflows that require live Sage writes.</small></div>
+              <div className="mcp-instructions"><strong>Manual connection notes</strong><ol><li>Sync characters and refresh any market data the AI needs.</li><li>For ChatGPT, create a tunnel and runtime key above, then choose <b>Add in ChatGPT</b>.</li><li>For Claude Desktop, use <b>Install / repair Claude</b>. Sage detects the installed Claude app and configures New Eden Sage automatically.</li><li>For Codex, copy the Codex configuration into its <code>config.toml</code>.</li><li>Ask the AI to list Sage characters or available Sage data before detailed analysis.</li></ol><small>Sage can serve already-saved read data through the configured MCP transport; keep the desktop app available for workflows that require live Sage writes.</small></div>
               <code className="mcp-command-preview">{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
             </div>
           </details>}

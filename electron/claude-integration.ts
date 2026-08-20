@@ -40,7 +40,7 @@ export function sageMcpLaunch() {
   };
 }
 
-function desktopConfigDirectory() {
+function legacyDesktopConfigDirectory() {
   if (process.platform === "win32") {
     const base = process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming");
     return path.join(base, "Claude");
@@ -49,6 +49,25 @@ function desktopConfigDirectory() {
     return path.join(os.homedir(), "Library", "Application Support", "Claude");
   }
   return path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "Claude");
+}
+
+async function desktopConfigDirectory() {
+  if (process.platform !== "win32") return legacyDesktopConfigDirectory();
+
+  const script = [
+    "$p = Get-AppxPackage Claude | Select-Object -First 1",
+    "if ($p) {",
+    "  $candidate = Join-Path $env:LOCALAPPDATA ('Packages\\' + $p.PackageFamilyName + '\\LocalCache\\Roaming\\Claude')",
+    "  if (Test-Path -LiteralPath $candidate) { Write-Output $candidate; exit 0 }",
+    "}",
+    "exit 1",
+  ].join("; ");
+  const result = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], 5000);
+  if (result.code === 0) {
+    const resolved = result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
+    if (resolved) return resolved;
+  }
+  return legacyDesktopConfigDirectory();
 }
 
 function desktopBundleDirectory() {
@@ -86,7 +105,7 @@ async function readManifestIfSage(file: string) {
 }
 
 async function findInstalledClaudeDesktopExtension() {
-  const base = desktopConfigDirectory();
+  const base = await desktopConfigDirectory();
   const roots = [
     path.join(base, "Claude Extensions"),
     path.join(base, "extensions"),
@@ -113,7 +132,7 @@ async function findInstalledClaudeDesktopExtension() {
 }
 
 async function getClaudeDesktopStatus(): Promise<ClaudeClientStatus> {
-  const directory = desktopConfigDirectory();
+  const directory = await desktopConfigDirectory();
   let configDirectoryExists = true;
   try { await fs.access(directory); }
   catch { configDirectoryExists = false; }
@@ -189,10 +208,63 @@ async function openClaudeDesktopBundle(bundlePath: string) {
   return shell.openPath(bundlePath);
 }
 
+async function ensureClaudeDesktopDirectConfig() {
+  const directory = await desktopConfigDirectory();
+  const configPath = path.join(directory, "claude_desktop_config.json");
+  const launch = sageMcpLaunch();
+  let current: Record<string, unknown> = {};
+  try {
+    const raw = await fs.readFile(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed as Record<string, unknown>;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") throw error;
+  }
+
+  const existingServers = current.mcpServers && typeof current.mcpServers === "object" && !Array.isArray(current.mcpServers)
+    ? current.mcpServers as Record<string, unknown>
+    : {};
+  const desired = { command: launch.command, args: launch.args, env: launch.env };
+  const unchanged = JSON.stringify(existingServers[SERVER_NAME]) === JSON.stringify(desired);
+  if (!unchanged) {
+    const next = { ...current, mcpServers: { ...existingServers, [SERVER_NAME]: desired } };
+    await fs.mkdir(directory, { recursive: true });
+    const partial = configPath + "." + process.pid + ".tmp";
+    await fs.writeFile(partial, JSON.stringify(next, null, 2) + "\n", "utf8");
+    await fs.rename(partial, configPath);
+  }
+  return { directory, configPath, changed: !unchanged };
+}
+
 export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatus> {
-  const directory = desktopConfigDirectory();
+  const directory = await desktopConfigDirectory();
   const before = await findInstalledClaudeDesktopExtension();
   const prepared = await prepareClaudeDesktopBundle();
+
+  try {
+    const direct = await ensureClaudeDesktopDirectConfig();
+    const executable = await findClaudeDesktopExecutable().catch(() => "");
+    if (executable) {
+      try {
+        const child = spawn(executable, [], { detached: true, stdio: "ignore", windowsHide: false, env: process.env });
+        child.unref();
+      } catch { }
+    }
+    return {
+      detected: Boolean(executable) || Boolean(before),
+      configured: true,
+      changed: direct.changed,
+      installPending: false,
+      restartRequired: direct.changed,
+      method: "mcpb",
+      path: direct.configPath,
+      bundlePath: prepared.path,
+    };
+  } catch {
+    // Managed/policy-restricted installs fall back to Claude Desktop Extension install.
+  }
+
   const openError = await openClaudeDesktopBundle(prepared.path);
   if (openError) {
     shell.showItemInFolder(prepared.path);
