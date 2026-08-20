@@ -924,8 +924,8 @@ export interface NavigationPlanInput {
 }
 
 export type ClaudeCompatibilityStatus = {
-  desktop: { detected: boolean; configured: boolean; changed?: boolean; restartRequired?: boolean; installPending?: boolean; path?: string; bundlePath?: string; method?: "mcpb" | "claude-code"; error?: string };
-  code: { detected: boolean; configured: boolean; changed?: boolean; restartRequired?: boolean; installPending?: boolean; path?: string; bundlePath?: string; method?: "mcpb" | "claude-code"; error?: string };
+  desktop: { detected: boolean; configured: boolean; changed?: boolean; restartRequired?: boolean; installPending?: boolean; path?: string; bundlePath?: string; method?: "mcpb" | "direct-config" | "claude-code"; error?: string };
+  code: { detected: boolean; configured: boolean; changed?: boolean; restartRequired?: boolean; installPending?: boolean; path?: string; bundlePath?: string; method?: "mcpb" | "direct-config" | "claude-code"; error?: string };
   launch: { command: string; args: string[]; env: Record<string, string> };
 };
 declare global {

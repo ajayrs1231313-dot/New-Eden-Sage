@@ -16,7 +16,7 @@ export type ClaudeClientStatus = {
   installPending?: boolean;
   path?: string;
   bundlePath?: string;
-  method?: "mcpb" | "claude-code";
+  method?: "mcpb" | "direct-config" | "claude-code";
   error?: string;
 };
 
@@ -157,7 +157,7 @@ async function getClaudeDesktopStatus(): Promise<ClaudeClientStatus> {
     configured: Boolean(installedManifest) || directConfigured,
     path: installedManifest || (directConfigured ? path.join(directory, "claude_desktop_config.json") : executable || directory),
     bundlePath: prepared?.path ?? desktopBundlePath(),
-    method: "mcpb",
+    method: directConfigured ? "direct-config" : "mcpb",
   };
 }
 
@@ -190,6 +190,41 @@ async function findClaudeDesktopExecutable() {
   }
 
   return "";
+}
+
+async function isClaudeDesktopRunning() {
+  if (process.platform !== "win32") return false;
+  const result = await runCommand(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", "$p = Get-Process claude -ErrorAction SilentlyContinue; if ($p) { exit 0 } else { exit 1 }"],
+    3000,
+  );
+  return result.code === 0;
+}
+
+async function relaunchClaudeDesktop() {
+  if (process.platform === "win32") {
+    await runCommand(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$p = Get-Process claude -ErrorAction SilentlyContinue; if ($p) { $p | ForEach-Object { $_.CloseMainWindow() | Out-Null }; Start-Sleep -Milliseconds 800; Get-Process claude -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 400 }",
+      ],
+      5000,
+    );
+    await shell.openExternal("claude://claude.ai/new");
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    const result = await runCommand("open", ["-a", "Claude"], 5000);
+    if (result.code !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || "Claude Desktop could not be relaunched.");
+    return;
+  }
+
+  await shell.openExternal("claude://claude.ai/new");
 }
 
 async function openClaudeDesktopBundle(bundlePath: string) {
@@ -253,8 +288,10 @@ export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatu
   const directory = await desktopConfigDirectory();
   const before = await findInstalledClaudeDesktopExtension();
   const prepared = await prepareClaudeDesktopBundle();
+  const executable = await findClaudeDesktopExecutable().catch(() => "");
 
   if (before) {
+    if (executable) await relaunchClaudeDesktop().catch(() => undefined);
     return {
       detected: true,
       configured: true,
@@ -269,20 +306,14 @@ export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatu
 
   try {
     const direct = await ensureClaudeDesktopDirectConfig();
-    const executable = await findClaudeDesktopExecutable().catch(() => "");
-    if (executable) {
-      try {
-        const child = spawn(executable, [], { detached: true, stdio: "ignore", windowsHide: false, env: process.env });
-        child.unref();
-      } catch { }
-    }
+    if (executable) await relaunchClaudeDesktop();
     return {
-      detected: Boolean(executable) || Boolean(before),
+      detected: Boolean(executable) || true,
       configured: true,
       changed: direct.changed,
       installPending: false,
-      restartRequired: direct.changed,
-      method: "mcpb",
+      restartRequired: false,
+      method: "direct-config",
       path: direct.configPath,
       bundlePath: prepared.path,
     };
@@ -295,23 +326,23 @@ export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatu
     shell.showItemInFolder(prepared.path);
     return {
       detected: true,
-      configured: Boolean(before),
+      configured: false,
       changed: false,
       installPending: false,
       method: "mcpb",
-      path: before || directory,
+      path: directory,
       bundlePath: prepared.path,
       error: `Sage prepared the Claude extension but could not open Claude automatically (${openError}). In Claude Desktop use Settings > Extensions > Advanced settings > Install Extension and select the highlighted ${BUNDLE_NAME} file.`,
     };
   }
   return {
     detected: true,
-    configured: Boolean(before),
+    configured: false,
     changed: true,
     installPending: true,
     restartRequired: false,
     method: "mcpb",
-    path: before || directory,
+    path: directory,
     bundlePath: prepared.path,
   };
 }
@@ -409,10 +440,55 @@ export async function getClaudeCompatibilityStatus(): Promise<ClaudeCompatibilit
   return { desktop, code, launch: sageMcpLaunch() };
 }
 
+async function ensureClaudeDesktopQuietly(): Promise<ClaudeClientStatus> {
+  const directory = await desktopConfigDirectory();
+  let configDirectoryExists = true;
+  try { await fs.access(directory); } catch { configDirectoryExists = false; }
+  const executable = await findClaudeDesktopExecutable().catch(() => "");
+  const detected = Boolean(executable) || configDirectoryExists;
+  if (!detected) return { detected: false, configured: false, method: "direct-config" };
+
+  const installedManifest = configDirectoryExists ? await findInstalledClaudeDesktopExtension() : "";
+  const prepared = await prepareClaudeDesktopBundle().catch(() => null);
+  if (installedManifest) {
+    return {
+      detected: true,
+      configured: true,
+      changed: false,
+      restartRequired: false,
+      method: "mcpb",
+      path: installedManifest,
+      bundlePath: prepared?.path ?? desktopBundlePath(),
+    };
+  }
+
+  try {
+    const direct = await ensureClaudeDesktopDirectConfig();
+    return {
+      detected: true,
+      configured: true,
+      changed: direct.changed,
+      restartRequired: direct.changed && await isClaudeDesktopRunning(),
+      method: "direct-config",
+      path: direct.configPath,
+      bundlePath: prepared?.path ?? desktopBundlePath(),
+    };
+  } catch (error) {
+    return {
+      detected: true,
+      configured: false,
+      method: "direct-config",
+      path: directory,
+      bundlePath: prepared?.path ?? desktopBundlePath(),
+      error: error instanceof Error ? error.message : "Claude Desktop configuration could not be written.",
+    };
+  }
+}
+
 /** Prepare the Desktop MCP bundle without popping Claude, and keep Claude Code registered. */
 export async function ensureClaudeCompatibility(): Promise<ClaudeCompatibilityStatus> {
   const [desktop, code] = await Promise.all([
-    getClaudeDesktopStatus(),
+    ensureClaudeDesktopQuietly(),
     ensureClaudeCode(),
   ]);
   return { desktop, code, launch: sageMcpLaunch() };
