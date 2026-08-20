@@ -131,6 +131,17 @@ async function findInstalledClaudeDesktopExtension() {
   return "";
 }
 
+async function hasClaudeDesktopDirectConfig() {
+  const directory = await desktopConfigDirectory();
+  const configPath = path.join(directory, "claude_desktop_config.json");
+  try {
+    const parsed = JSON.parse(await fs.readFile(configPath, "utf8")) as { mcpServers?: Record<string, unknown> };
+    return Boolean(parsed?.mcpServers && parsed.mcpServers[SERVER_NAME]);
+  } catch {
+    return false;
+  }
+}
+
 async function getClaudeDesktopStatus(): Promise<ClaudeClientStatus> {
   const directory = await desktopConfigDirectory();
   let configDirectoryExists = true;
@@ -139,11 +150,12 @@ async function getClaudeDesktopStatus(): Promise<ClaudeClientStatus> {
   const executable = await findClaudeDesktopExecutable().catch(() => "");
   const detected = Boolean(executable) || configDirectoryExists;
   const installedManifest = configDirectoryExists ? await findInstalledClaudeDesktopExtension() : "";
+  const directConfigured = configDirectoryExists ? await hasClaudeDesktopDirectConfig() : false;
   const prepared = await prepareClaudeDesktopBundle().catch(() => null);
   return {
     detected,
-    configured: Boolean(installedManifest),
-    path: installedManifest || executable || directory,
+    configured: Boolean(installedManifest) || directConfigured,
+    path: installedManifest || (directConfigured ? path.join(directory, "claude_desktop_config.json") : executable || directory),
     bundlePath: prepared?.path ?? desktopBundlePath(),
     method: "mcpb",
   };
@@ -241,6 +253,19 @@ export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatu
   const directory = await desktopConfigDirectory();
   const before = await findInstalledClaudeDesktopExtension();
   const prepared = await prepareClaudeDesktopBundle();
+
+  if (before) {
+    return {
+      detected: true,
+      configured: true,
+      changed: false,
+      installPending: false,
+      restartRequired: false,
+      method: "mcpb",
+      path: before,
+      bundlePath: prepared.path,
+    };
+  }
 
   try {
     const direct = await ensureClaudeDesktopDirectConfig();
