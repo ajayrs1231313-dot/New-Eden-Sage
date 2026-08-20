@@ -25,7 +25,6 @@ export function MarketOpportunityScanner({
     ...defaultMarketOpportunityFilters,
     maxInvestment: analysis.constraints.maxCapital,
     maxJumps: analysis.constraints.maxJumps,
-    maxMinutes: analysis.constraints.maxMinutes,
   });
   const [page, setPage] = useState(0);
   const [columnSort, setColumnSort] = useState<{ key: "item" | "sell" | "buy" | "route" | "confidence" | "profit"; direction: "asc" | "desc" }>({ key: "profit", direction: "desc" });
@@ -36,14 +35,12 @@ export function MarketOpportunityScanner({
       ...current,
       maxInvestment: analysis.constraints.maxCapital,
       maxJumps: analysis.constraints.maxJumps,
-      maxMinutes: analysis.constraints.maxMinutes,
     }));
     setPage(0);
   }, [
     analysis.generatedAt,
     analysis.constraints.maxCapital,
     analysis.constraints.maxJumps,
-    analysis.constraints.maxMinutes,
   ]);
 
   const filtered = useMemo(
@@ -91,9 +88,9 @@ export function MarketOpportunityScanner({
 
   function preset(id: string) {
     if (id === "confidence")
-      patch({ risks: ["Low"], minFillScore: 78, sort: "fill" });
+      patch({ risks: ["Low"], sort: "fill" });
     if (id === "fast")
-      patch({ maxJumps: 10, maxMinutes: 35, sort: "jumps" });
+      patch({ maxJumps: 10, sort: "jumps" });
     if (id === "margin")
       patch({ minMarginPercent: 20, sort: "margin" });
     if (id === "capital")
@@ -111,7 +108,7 @@ export function MarketOpportunityScanner({
           <p className="eyebrow">MARKET SCANNER</p>
           <h3>Search and filter candidate station-to-station trades</h3>
           <p>
-            Results already respect the capital, cargo, jump and time limits above. Use these filters to narrow the matching routes.
+            Filter the matching trade set below. Column sorting applies across every page.
           </p>
         </div>
         <div className="market-scanner-count">
@@ -134,7 +131,6 @@ export function MarketOpportunityScanner({
               ...defaultMarketOpportunityFilters,
               maxInvestment: analysis.constraints.maxCapital,
               maxJumps: analysis.constraints.maxJumps,
-              maxMinutes: analysis.constraints.maxMinutes,
             })
           }
         >
@@ -196,10 +192,6 @@ export function MarketOpportunityScanner({
           <input value={filters.minMarginPercent ?? ""} onChange={(event) => patch({ minMarginPercent: numberOrNull(event.target.value) })} placeholder="%" inputMode="decimal" />
         </label>
         <label>
-          Minimum fill confidence
-          <input value={filters.minFillScore ?? ""} onChange={(event) => patch({ minFillScore: numberOrNull(event.target.value) })} placeholder="0-100" inputMode="numeric" />
-        </label>
-        <label>
           Minimum ISK / m3
           <input value={filters.minIskPerM3 ?? ""} onChange={(event) => patch({ minIskPerM3: numberOrNull(event.target.value) })} placeholder="ISK/m3" inputMode="numeric" />
         </label>
@@ -210,18 +202,6 @@ export function MarketOpportunityScanner({
         <label>
           Maximum jumps
           <input value={filters.maxJumps ?? ""} onChange={(event) => patch({ maxJumps: numberOrNull(event.target.value) })} placeholder="Any" inputMode="numeric" />
-        </label>
-        <label>
-          Maximum planning time
-          <input value={filters.maxMinutes ?? ""} onChange={(event) => patch({ maxMinutes: numberOrNull(event.target.value) })} placeholder="Minutes" inputMode="numeric" />
-        </label>
-        <label>
-          Minimum units
-          <input value={filters.minUnits ?? ""} onChange={(event) => patch({ minUnits: numberOrNull(event.target.value) })} placeholder="Units" inputMode="numeric" />
-        </label>
-        <label className="wide">
-          Exclude words
-          <input value={filters.exclude} onChange={(event) => patch({ exclude: event.target.value })} placeholder="Comma or space separated" />
         </label>
         <label>
           Sort by
@@ -247,7 +227,7 @@ export function MarketOpportunityScanner({
         {(["Low", "Medium", "High"] as OpportunityRisk[]).map((risk) => (
           <button key={risk} className={filters.risks.includes(risk) ? "active" : ""} onClick={() => toggleRisk(risk)}>{risk}</button>
         ))}
-        <button className="market-export" onClick={onExport}>Export Top 1,000 CSV</button>
+        <button className="market-export" onClick={onExport}>Export CSV</button>
       </div>
 
       <div className="market-trade-table">
@@ -288,7 +268,7 @@ export function MarketOpportunityScanner({
       {filtered.length > pageSize && (
         <div className="isk-pagination">
           <button disabled={page === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>Previous</button>
-          <span>{page * pageSize + 1}-{Math.min((page + 1) * pageSize, filtered.length)} of {filtered.length.toLocaleString()}</span>
+          <span>Page {page + 1} of {Math.ceil(filtered.length / pageSize).toLocaleString()} · {page * pageSize + 1}-{Math.min((page + 1) * pageSize, filtered.length)} of {filtered.length.toLocaleString()}</span>
           <button disabled={(page + 1) * pageSize >= filtered.length} onClick={() => setPage((current) => current + 1)}>Next</button>
         </div>
       )}

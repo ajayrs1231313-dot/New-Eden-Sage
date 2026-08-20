@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
 const dist = path.join(root, 'dist-electron');
@@ -9,6 +10,7 @@ const logRoot = path.join(process.env.APPDATA || process.env.LOCALAPPDATA || roo
 const monitorRoot = path.join(logRoot, 'Crash Monitor');
 const monitorScript = path.join(root, 'scripts', 'electron-crash-monitor.cjs');
 const launcherLockFile = path.join(logRoot, 'dev-launcher.lock');
+const launcherCommandFile = path.join(logRoot, 'dev-launcher-command.json');
 
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -48,12 +50,20 @@ function releaseLauncherLock() {
 }
 
 if (!acquireLauncherLock()) {
-  console.log('[sage-dev] Another Electron dev launcher is already running; not starting a duplicate.');
+  try {
+    fs.mkdirSync(logRoot, { recursive: true });
+    fs.writeFileSync(launcherCommandFile, JSON.stringify({ action: 'open', requestedAt: new Date().toISOString(), requesterPid: process.pid }), 'utf8');
+    console.log('[sage-dev] Existing Electron launcher found; sent open/focus request instead of starting a duplicate.');
+  } catch (error) {
+    console.error('[sage-dev] Existing launcher found but open/focus request could not be written.', error);
+  }
   process.exit(0);
 }
 let child = null;
 let stopping = false;
 let restartTimer = null;
+const compiledFingerprints = new Map();
+const pendingCompiledEvents = new Set();
 let restartQueued = false;
 let restartInFlight = null;
 let queuedRestartReason = null;
@@ -186,16 +196,80 @@ async function restart(reason) {
   return restartInFlight;
 }
 
+function compiledFingerprint(filename) {
+  const target = path.resolve(dist, filename);
+  const relative = path.relative(dist, target);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
+  try {
+    return createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function seedCompiledFingerprints(directory = dist) {
+  if (!fs.existsSync(directory)) return;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      seedCompiledFingerprints(target);
+      continue;
+    }
+    if (!entry.name.endsWith('.js')) continue;
+    const relative = path.relative(dist, target);
+    const fingerprint = compiledFingerprint(relative);
+    if (fingerprint) compiledFingerprints.set(relative, fingerprint);
+  }
+}
+
 function scheduleRestart(filename) {
   if (!filename || !filename.endsWith('.js')) return;
+  pendingCompiledEvents.add(filename);
   clearTimeout(restartTimer);
-  restartTimer = setTimeout(() => void restart(filename), 220);
+  restartTimer = setTimeout(() => {
+    const events = [...pendingCompiledEvents];
+    pendingCompiledEvents.clear();
+    const changed = [];
+    for (const candidate of events) {
+      const fingerprint = compiledFingerprint(candidate);
+      if (!fingerprint) continue;
+      const previous = compiledFingerprints.get(candidate);
+      compiledFingerprints.set(candidate, fingerprint);
+      if (previous !== fingerprint) changed.push(candidate);
+    }
+    if (!changed.length) {
+      console.log('[sage-dev] Ignoring compiled-file notification with unchanged content.');
+      return;
+    }
+    void restart(changed.join(', '));
+  }, 220);
+}
+
+async function handleLauncherCommand() {
+  let command = null;
+  try {
+    command = JSON.parse(fs.readFileSync(launcherCommandFile, 'utf8'));
+    fs.unlinkSync(launcherCommandFile);
+  } catch { return; }
+  if (command?.action !== 'open' || stopping) return;
+  if (!child) {
+    console.log('[sage-dev] Open request received with no Electron child; launching it against the existing Vite server.');
+    await waitForReady();
+    if (!stopping && !child) launch();
+    return;
+  }
+  console.log('[sage-dev] Open request received; asking the running Sage instance to show/focus itself.');
+  const pulse = spawn(electronPath, ['.', '--dev', '--focus-existing'], { cwd: root, stdio: 'ignore', windowsHide: true, env: process.env });
+  pulse.unref();
 }
 
 async function main() {
   await waitForReady();
+  seedCompiledFingerprints();
   launch();
   fs.watch(dist, { recursive: true }, (_event, filename) => scheduleRestart(String(filename || '')));
+  const commandTimer = setInterval(() => void handleLauncherCommand(), 500);
+  commandTimer.unref();
 }
 
 async function shutdown() {

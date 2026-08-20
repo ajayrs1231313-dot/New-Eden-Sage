@@ -109,7 +109,7 @@ function snapshotFingerprint(snapshots: any[]) {
 
 async function opportunityCacheKey(input: OpportunityQuery, snapshots: any[]) {
   const manifest = await loadCurrentRawMarketManifest("all");
-  return JSON.stringify({ snapshotId: manifest?.id ?? "none", input, characters: snapshotFingerprint(snapshots) });
+  return JSON.stringify({ version: 3, snapshotId: manifest?.id ?? "none", input, characters: snapshotFingerprint(snapshots) });
 }
 
 function pveCacheKey(input: PveLocationQuery, snapshot: any, cloneState: CloneState) {

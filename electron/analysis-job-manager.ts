@@ -208,10 +208,23 @@ export function analysisStatus() {
   }));
 }
 
-async function runJob(kind: AnalysisKind, payload: Record<string, unknown>, onProgress?: (progress: AnalysisProgress) => void) {
+type RunJobOptions = {
+  /** Read-only cache probes must never interrupt real analysis work. */
+  skipWhenBusy?: boolean;
+};
+
+async function runJob(
+  kind: AnalysisKind,
+  payload: Record<string, unknown>,
+  onProgress?: (progress: AnalysisProgress) => void,
+  options: RunJobOptions = {},
+) {
   const lane = laneFor(kind);
   const state = lanes[lane];
-  if (state.active) await cancelLane(lane, "Replaced by a newer analysis request.");
+  if (state.active) {
+    if (options.skipWhenBusy) return null;
+    await cancelLane(lane, "Replaced by a newer analysis request.");
+  }
   const jobId = randomUUID();
   const startedAt = new Date().toISOString();
   const target = ensureWorker(lane);
@@ -248,15 +261,15 @@ export function runPveLocationAnalysis(input: PveLocationQuery, snapshot: any, c
 }
 
 export function loadPreparedOpportunityAnalysis(input: OpportunityQuery, snapshots: any[]) {
-  return runJob("opportunity", { type: "peek-opportunity", input, snapshots });
+  return runJob("opportunity", { type: "peek-opportunity", input, snapshots }, undefined, { skipWhenBusy: true });
 }
 
 export function loadPreparedCapabilityAnalysis(snapshot: any, cloneState: CloneState) {
-  return runJob("capability", { type: "peek-capability", snapshot, cloneState });
+  return runJob("capability", { type: "peek-capability", snapshot, cloneState }, undefined, { skipWhenBusy: true });
 }
 
 export function loadPreparedPveLocationAnalysis(input: PveLocationQuery, snapshot: any, cloneState: CloneState) {
-  return runJob("pve-location", { type: "peek-pve-location", input, snapshot, cloneState });
+  return runJob("pve-location", { type: "peek-pve-location", input, snapshot, cloneState }, undefined, { skipWhenBusy: true });
 }
 
 export async function disposeAnalysisWorker() {

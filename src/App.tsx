@@ -15,6 +15,7 @@ import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
 import { IndustrialCommand } from "./IndustrialCommand";
 import { Loot } from "./Loot";
 import { CorporationManagement } from "./CorporationManagement";
+import { NavigationCommand } from "./NavigationCommand";
 
 type View =
   | "overview"
@@ -23,12 +24,11 @@ type View =
   | "isk"
   | "market"
   | "regional"
+  | "navigation"
   | "industrial"
   | "corporation"
-  | "alliance"
   | "fittings"
   | "loot"
-  | "data"
   | "settings";
 type CloneState = "alpha" | "omega";
 type SyncTrack = { id: string; label: string; percent: number; status: "waiting" | "running" | "done" | "error"; message: string };
@@ -40,12 +40,11 @@ const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "skills", label: "Progression", mark: "\u25B3" },
   { id: "isk", label: "ISK Lab", mark: "\u25C8" },
   { id: "market", label: "Market", mark: "\u25C6" },
+  { id: "navigation", label: "Navigation Command", mark: "⌖" },
   { id: "fittings", label: "Fittings", mark: "\u2318" },
   { id: "loot", label: "Loot", mark: "\u2727" },
   { id: "industrial", label: "Industrial Command", mark: "\u2692" },
   { id: "corporation", label: "Corporation Management", mark: "\u25C9" },
-  { id: "alliance", label: "Alliance Management", mark: "\u2727" },
-  { id: "data", label: "Data Vault", mark: "\u25A3" },
   { id: "settings", label: "Settings", mark: "\u2699" },
 ];
 
@@ -57,13 +56,19 @@ const RetainedIskLab = memo(IskLab);
 const RetainedFittingsWorkspace = memo(FittingsWorkspace, () => true);
 const RetainedLoot = memo(Loot, () => true);
 const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
+const RetainedNavigationCommand = memo(NavigationCommand, () => true);
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
   useEffect(() => {
     const navigateToFittings = () => setView("fittings");
+    const navigateToCorpDoctrines = () => setView("corporation");
     window.addEventListener("sage:navigate-fittings", navigateToFittings);
-    return () => window.removeEventListener("sage:navigate-fittings", navigateToFittings);
+    window.addEventListener("sage:navigate-corp-doctrines", navigateToCorpDoctrines);
+    return () => {
+      window.removeEventListener("sage:navigate-fittings", navigateToFittings);
+      window.removeEventListener("sage:navigate-corp-doctrines", navigateToCorpDoctrines);
+    };
   }, []);
   const [marketDataRevision, setMarketDataRevision] = useState(0);
   const [plannerHullTypeId, setPlannerHullTypeId] = useState<number>();
@@ -129,7 +134,11 @@ export default function App() {
       setActiveId(result.characterId);
       setConfig(await window.sage.getConfig());
       setView("overview");
-      setMessage(`${result.characterName} connected`);
+      setMessage(result.onlineIdentityError
+        ? `${result.characterName} connected locally · Sage Online: ${result.onlineIdentityError}`
+        : result.becamePrimaryIdentity
+          ? `${result.characterName} connected · Sage Account ID ${result.sageAccountId} created`
+          : `${result.characterName} connected · linked to Sage Account ${result.sageAccountId}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "EVE login failed");
     } finally {
@@ -218,7 +227,13 @@ export default function App() {
             <span className="pulse" />
             <p className="eyebrow">SETTING UP NEW EDEN SAGE</p>
             <h2>{syncProgress?.running ? "Syncing your live intelligence" : "Add your EVE characters"}</h2>
-            <p>{syncProgress?.running ? syncProgress.message : "Add every character you want Sage to track, then begin one complete sync."}</p>
+            <p>{syncProgress?.running ? syncProgress.message : "Add the EVE characters you want Sage to track, then begin one complete sync."}</p>
+            {!syncProgress?.running && !config.primaryCharacterId && (
+              <div className="sync-identity-note">
+                <strong>Choose your main character first</strong>
+                <span>The first character you add becomes your main New Eden Sage account identity. Sage keys that account to the character's permanent EVE Character ID. Every character you add afterwards is linked to that Sage account.</span>
+              </div>
+            )}
             {syncProgress?.running ? (
               <>
                 <div className="sync-overall-row"><span>Overall preparation</span><strong>{Math.round(syncProgress.percent)}%</strong></div>
@@ -274,6 +289,7 @@ export default function App() {
                     <strong>{snapshot.character.name}</strong>
                     <small>
                       {snapshot.character.corporation_name ?? "EVE character"}
+                      {config.primaryCharacterId === snapshot.characterId ? " · PRIMARY SAGE ID" : ""}
                     </small>
                   </div>
                 </button>
@@ -377,14 +393,6 @@ export default function App() {
         {view === "settings" && (
           <Settings config={config} onSaved={setConfig} />
         )}
-        {view === "data" && (
-          <DataVault
-            activeCharacterId={active?.characterId}
-            onImported={async () =>
-              setSnapshots(await window.sage.listSnapshots())
-            }
-          />
-        )}
         {mountedViews.current.has("skills") && (
           <div className="cached-view" hidden={view !== "skills"}>
             <RetainedSkillsWorkspace
@@ -433,6 +441,11 @@ export default function App() {
             <RetainedLoot />
           </div>
         )}
+        {mountedViews.current.has("navigation") && (
+          <div className="cached-view" hidden={view !== "navigation"}>
+            <RetainedNavigationCommand />
+          </div>
+        )}
         {mountedViews.current.has("industrial") && (
           <div className="cached-view" hidden={view !== "industrial"}>
             <RetainedIndustrialCommand
@@ -443,9 +456,6 @@ export default function App() {
           </div>
         )}
         {view === "corporation" && <CorporationManagement />}
-        {view === "alliance" && (
-          <UnderConstruction title={nav.find((item) => item.id === view)?.label ?? "New module"} />
-        )}
         <footer>
           <span className="pulse" />
           {message}
@@ -492,15 +502,6 @@ function MarketWorkspace({ snapshot, marketDataRevision, onMarketDataUpdated }: 
 }
 
 const RetainedMarketWorkspace = memo(MarketWorkspace, (a, b) => a.snapshot === b.snapshot && a.marketDataRevision === b.marketDataRevision);
-function UnderConstruction({ title }: { title: string }) {
-  return <section className="construction-page">
-    <div className="construction-banner">UNDER CONSTRUCTION</div>
-    <p className="eyebrow">NEW EDEN SAGE MODULE</p>
-    <h2>{title}</h2>
-    <p>This command workspace is reserved and will be activated in a future release.</p>
-  </section>;
-}
-
 function Augments({
   snapshot,
   resolvedTypeNames,
@@ -787,15 +788,21 @@ function Settings({
     setMcpMessage(`${label} copied.`);
   }
   async function repairClaude() {
-    setMcpMessage("Checking Claude integration...");
+    setMcpMessage("Preparing the New Eden Sage Claude Desktop extension...");
     try {
       const status = await window.sage.repairClaudeMcp();
       setClaudeStatus(status);
-      const desktop = status.desktop.detected ? (status.desktop.configured ? "Claude Desktop configured" : "Claude Desktop needs attention") : "Claude Desktop not detected";
+      const desktop = !status.desktop.detected
+        ? "Claude Desktop not detected"
+        : status.desktop.installPending
+          ? "Claude Desktop installer opened - approve New Eden Sage in Claude"
+          : status.desktop.configured
+            ? "Claude Desktop extension installed"
+            : status.desktop.error ?? "Claude Desktop extension is ready to install";
       const code = status.code.detected ? (status.code.configured ? "Claude Code configured" : "Claude Code needs attention") : "Claude Code not detected";
       setMcpMessage(`${desktop}. ${code}.`);
     } catch (error) {
-      setMcpMessage(error instanceof Error ? error.message : "Could not repair Claude integration.");
+      setMcpMessage(error instanceof Error ? error.message : "Could not install/repair Claude integration.");
     }
   }
   async function connectChatGpt() {
@@ -810,86 +817,73 @@ function Settings({
     }
   }
   return (
-    <section className="settings">
-      <div className="settings-copy">
-        <p className="eyebrow">EVE ONLINE CONNECTION</p>
-        <h2>Official EVE SSO</h2>
-        <p>
-          Use Add Character in the app header to sign in on EVE Online's official
-          authorization page. Sage never asks for your EVE password.
-        </p>
-      </div>
-      <div className="settings-connection-card">
-        <strong>Secure desktop authorization</strong>
-        <p>Character and ESI permissions are selected and approved on EVE Online. Refresh tokens are encrypted with Windows secure storage and remain on this PC.</p>
-        <small>Callback: {config.callbackUrl}</small>
-      </div>
-      <div className="settings-connection-card mcp-settings-card">
-        <strong>AI / MCP access</strong>
-        <p>Connect ChatGPT, Claude or Codex to Sage's complete local dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are always removed.</p>
-        <div className="mcp-tunnel-panel">
-          <strong>ChatGPT Secure MCP Tunnel</strong>
-          <small>Status: {tunnelReady ? "Ready" : "Not connected"}</small>
-          <input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" />
-          <input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" />
-          <div className="mcp-setup-actions">
-            <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
-            <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
-            <button onClick={() => void connectChatGpt()}>Save and start tunnel</button>
-            <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
-          </div>
-          <small>The runtime key is encrypted with Windows secure storage and remains only on this PC. Keep the tunnel running while ChatGPT uses Sage.</small>
+    <section className="settings settings-page">
+      <header className="settings-page-head">
+        <div>
+          <p className="eyebrow">SAGE CONFIGURATION</p>
+          <h2>Settings</h2>
+          <p>Connection, authorization and AI integration controls for this Sage installation.</p>
         </div>
-        <div className="mcp-claude-panel">
-          <strong>Claude compatibility</strong>
-          <p>Sage automatically registers the bundled local MCP server with Claude Desktop and Claude Code when either client is installed. Existing Claude MCP servers are preserved.</p>
-          <div className="mcp-client-status-grid">
-            <div>
-              <span>Claude Desktop</span>
-              <b className={claudeStatus?.desktop.configured ? "ready" : claudeStatus?.desktop.detected ? "attention" : "muted"}>
-                {claudeStatus?.desktop.configured ? "Configured" : claudeStatus?.desktop.detected ? "Needs repair" : "Not detected"}
-              </b>
-              {claudeStatus?.desktop.path && <small>{claudeStatus.desktop.path}</small>}
-              {claudeStatus?.desktop.restartRequired && <small>Fully quit and reopen Claude Desktop to load the updated MCP entry.</small>}
-              {claudeStatus?.desktop.error && <small className="mcp-client-error">{claudeStatus.desktop.error}</small>}
+      </header>
+
+      <div className="settings-layout">
+        <article className="settings-connection-card settings-sso-card">
+          <div className="settings-card-head">
+            <div><p className="eyebrow">EVE ONLINE</p><h3>Character authorization</h3></div>
+            <span className="settings-state ready">OFFICIAL SSO</span>
+          </div>
+          <p>Use Add Character in the app header to sign in on EVE Online's official authorization page. Sage never asks for your EVE password.</p>
+          <div className="settings-detail-row"><span>Authorization</span><strong>Secure desktop OAuth / ESI</strong></div>
+          <div className="settings-detail-row"><span>Token storage</span><strong>Windows secure storage · local only</strong></div>
+          <div className="settings-callback"><span>Callback URL</span><code>{config.callbackUrl}</code></div>
+        </article>
+
+        <article className="settings-connection-card mcp-settings-card settings-ai-card">
+          <div className="settings-card-head">
+            <div><p className="eyebrow">AI INTEGRATIONS</p><h3>AI / MCP access</h3></div>
+            <span className={`settings-state ${tunnelReady ? "ready" : "muted"}`}>{tunnelReady ? "CHATGPT READY" : "LOCAL MCP"}</span>
+          </div>
+          <p>Connect ChatGPT, Claude or Codex to Sage's local dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are removed.</p>
+
+          <div className="settings-integration-grid">
+            <section className="mcp-tunnel-panel settings-integration-card">
+              <div className="settings-integration-head"><div><span>CHATGPT</span><strong>Secure MCP Tunnel</strong></div><b className={tunnelReady ? "ready" : "muted"}>{tunnelReady ? "Ready" : "Not connected"}</b></div>
+              <label><span>Tunnel ID</span><input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" /></label>
+              <label><span>Runtime key</span><input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" /></label>
+              <div className="mcp-setup-actions">
+                <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
+                <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
+                <button className="primary" onClick={() => void connectChatGpt()}>Save and start</button>
+                <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
+              </div>
+              <small>The runtime key is encrypted with Windows secure storage and remains only on this PC.</small>
+            </section>
+
+            <section className="mcp-claude-panel settings-integration-card">
+              <div className="settings-integration-head"><div><span>CLAUDE</span><strong>Desktop & Code</strong></div><b className={claudeStatus?.desktop.configured || claudeStatus?.code.configured ? "ready" : "muted"}>{claudeStatus?.desktop.configured || claudeStatus?.code.configured ? "Configured" : "Detecting"}</b></div>
+              <p>Claude Desktop uses Sage's local MCP Bundle/Desktop Extension installer. Claude Code is registered separately at user scope. No Claude Desktop JSON editing is required.</p>
+              <div className="mcp-client-status-grid">
+                <div><span>Claude Desktop</span><b className={claudeStatus?.desktop.configured ? "ready" : claudeStatus?.desktop.installPending ? "attention" : claudeStatus?.desktop.detected ? "attention" : "muted"}>{claudeStatus?.desktop.configured ? "Extension installed" : claudeStatus?.desktop.installPending ? "Approve install in Claude" : claudeStatus?.desktop.detected ? "Ready to install" : "Not detected"}</b>{claudeStatus?.desktop.bundlePath && <small>MCPB: {claudeStatus.desktop.bundlePath}</small>}{claudeStatus?.desktop.installPending && <small>Claude Desktop should be showing the New Eden Sage extension install dialog. Approve it there.</small>}{claudeStatus?.desktop.error && <small className="mcp-client-error">{claudeStatus.desktop.error}</small>}</div>
+                <div><span>Claude Code</span><b className={claudeStatus?.code.configured ? "ready" : claudeStatus?.code.detected ? "attention" : "muted"}>{claudeStatus?.code.configured ? "Configured (user scope)" : claudeStatus?.code.detected ? "Needs repair" : "Not detected"}</b>{claudeStatus?.code.path && <small>{claudeStatus.code.path}</small>}{claudeStatus?.code.error && <small className="mcp-client-error">{claudeStatus.code.error}</small>}</div>
+              </div>
+              <div className="mcp-setup-actions">
+                <button className="primary" onClick={() => void repairClaude()}>Install / repair Claude</button>
+                {mcpSetup && <button onClick={() => void copyMcp(mcpSetup.claudeCode, "Claude Code command")}>Copy Code command</button>}
+              </div>
+            </section>
+          </div>
+
+          {mcpSetup && <details className="mcp-advanced-settings">
+            <summary><span>Advanced MCP configuration</span><small>Codex, generic stdio config and manual setup</small></summary>
+            <div className="mcp-advanced-body">
+              <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
+              <div className="mcp-setup-actions"><button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button><button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button></div>
+              <div className="mcp-instructions"><strong>Manual connection notes</strong><ol><li>Sync characters and refresh any market data the AI needs.</li><li>For ChatGPT, create a tunnel and runtime key above, then choose <b>Add in ChatGPT</b>.</li><li>For Claude Desktop, use <b>Install / repair Claude</b> and approve the New Eden Sage Desktop Extension in Claude.</li><li>For Codex, copy the Codex configuration into its <code>config.toml</code>.</li><li>Ask the AI to list Sage characters or available Sage data before detailed analysis.</li></ol><small>Sage can serve already-saved read data through the configured MCP transport; keep the desktop app available for workflows that require live Sage writes.</small></div>
+              <code className="mcp-command-preview">{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
             </div>
-            <div>
-              <span>Claude Code</span>
-              <b className={claudeStatus?.code.configured ? "ready" : claudeStatus?.code.detected ? "attention" : "muted"}>
-                {claudeStatus?.code.configured ? "Configured (user scope)" : claudeStatus?.code.detected ? "Needs repair" : "Not detected"}
-              </b>
-              {claudeStatus?.code.path && <small>{claudeStatus.code.path}</small>}
-              {claudeStatus?.code.error && <small className="mcp-client-error">{claudeStatus.code.error}</small>}
-            </div>
-          </div>
-          <div className="mcp-setup-actions">
-            <button onClick={() => void repairClaude()}>Repair Claude integration</button>
-            {mcpSetup && <button onClick={() => void copyMcp(mcpSetup.claudeDesktop, "Claude Desktop configuration")}>Copy Claude Desktop config</button>}
-            {mcpSetup && <button onClick={() => void copyMcp(mcpSetup.claudeCode, "Claude Code command")}>Copy Claude Code command</button>}
-          </div>
-          <small>If Claude Desktop was installed after Sage, launch Claude once, reopen Sage or use Repair, then fully restart Claude Desktop. Claude Code is registered at user scope so Sage is available in every project.</small>
-        </div>
-        {mcpSetup && <>
-          <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
-          <div className="mcp-setup-actions">
-            <button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button>
-            <button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button>
-          </div>
-          <div className="mcp-instructions">
-            <strong>How to connect</strong>
-            <ol>
-              <li>Sync your characters and refresh any market data you want the AI to inspect.</li>
-              <li>For ChatGPT, create an OpenAI tunnel and runtime key with the buttons above, then save and start the tunnel.</li>
-              <li>Choose <b>Add in ChatGPT</b>, create a developer-mode app using <b>Tunnel</b>, and select the New Eden Sage tunnel.</li>
-              <li>For Claude Desktop or Claude Code, Sage configures the local MCP automatically when the client is detected. If Claude was installed later, use <b>Repair Claude integration</b> above.</li>
-              <li>For Codex local access, choose <b>Copy Codex config</b> and add it to your Codex <code>config.toml</code>.</li>
-              <li>Ask the AI to list Sage characters or available Sage data points before requesting detailed analysis.</li>
-            </ol>
-            <small>Sage does not need to remain open while an AI reads already-saved data. Keep Sage open for MCP fitting writes or live EVE fitting actions. New character or market data becomes available after the relevant Sage sync completes.</small>
-          </div>
-          <code>{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
-        </>}
-        {mcpMessage && <small className="mcp-copy-status">{mcpMessage}</small>}
+          </details>}
+          {mcpMessage && <div className="mcp-copy-status settings-message">{mcpMessage}</div>}
+        </article>
       </div>
     </section>
   );
@@ -1062,103 +1056,6 @@ function Chat({
 }
 
 */
-function DataVault({
-  onImported,
-  activeCharacterId,
-}: {
-  onImported(): void;
-  activeCharacterId?: string;
-}) {
-  const [status, setStatus] = useState(
-    "Everything exported here excludes API keys and EVE tokens.",
-  );
-  async function exportAs(format: "json" | "chatgpt" | "chatgpt-radius") {
-    try {
-      const file = await window.sage.exportData(format, activeCharacterId);
-      if (file) setStatus(`Saved to ${file}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Export failed.");
-    }
-  }
-  async function importFiles() {
-    const result = await window.sage.importData();
-    if (result) {
-      setStatus(
-        `Imported ${result.files} file(s): ${result.snapshots} snapshots and ${result.information} information records.`,
-      );
-      onImported();
-    }
-  }
-  async function exportDebugLog() {
-    const file = await window.sage.exportDebugLog();
-    if (file) setStatus(`Diagnostic log saved to ${file}`);
-  }
-  return (
-    <section className="vault">
-      <div>
-        <p className="eyebrow">PORTABLE LOCAL DATA</p>
-        <h2>Own your information</h2>
-        <p>
-          Back up everything New Eden Sage currently knows, bring notes back in,
-          or create a strategy pack for ChatGPT Plus.
-        </p>
-      </div>
-      <div className="vault-grid">
-        <article>
-          <span>01</span>
-          <h3>Complete backup</h3>
-          <p>
-            Export all locally stored character snapshots and imported
-            information as JSON. Secrets are always excluded.
-          </p>
-          <button onClick={() => exportAs("json")}>Export all data</button>
-        </article>
-        <article>
-          <span>02</span>
-          <h3>Character pack</h3>
-          <p>
-            Create readable character Markdown that you can upload to ChatGPT
-            Plus.
-          </p>
-          <button onClick={() => exportAs("chatgpt")}>
-            Export character data
-          </button>
-        </article>
-        <article>
-          <span>03</span>
-          <h3>Trade pack</h3>
-          <p>
-            Export two ChatGPT-compatible Excel workbooks with one worksheet per
-            region: station orders and public contracts.
-          </p>
-          <button onClick={() => exportAs("chatgpt-radius")}>
-            Export full station + contract workbooks
-          </button>
-        </article>
-        <article>
-          <span>04</span>
-          <h3>Import information</h3>
-          <p>
-            Import a previous Sage backup, Markdown strategy notes, text
-            documents, or JSON reference data.
-          </p>
-          <button onClick={importFiles}>Import information</button>
-        </article>
-        <article>
-          <span>05</span>
-          <h3>Diagnostic log</h3>
-          <p>
-            Export the local activity and error log for debugging. Secrets and
-            authentication tokens are excluded.
-          </p>
-          <button onClick={exportDebugLog}>Export diagnostic log</button>
-        </article>
-      </div>
-      <div className="vault-status">{status}</div>
-    </section>
-  );
-}
-
 function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; marketDataRevision?: number; onMarketDataUpdated: () => void }) {
   const [regions, setRegions] = useState<
     Array<{ regionId: number; name: string }>

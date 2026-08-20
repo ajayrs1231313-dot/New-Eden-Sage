@@ -116,5 +116,6 @@ if (process.argv.includes("--mcp")) {
 } else {
   void import("./market-intelligence-ipc.js");
   void import("./system-intelligence-ipc.js");
+  void import("./navigation-command-ipc.js");
   void import("./main-task9.js");
 }

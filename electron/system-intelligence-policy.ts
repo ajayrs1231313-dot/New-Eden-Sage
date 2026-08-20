@@ -1,7 +1,13 @@
-export const SYSTEM_NEWS_ZKILL_COOLDOWN_MS = 5 * 60 * 1000;
-export const SYSTEM_NEWS_ZKILL_LOOKBACK_SECONDS = 60 * 60;
+export const SYSTEM_NEWS_ZKILL_REQUEST_SPACING_MS = 15 * 1000;
+export const SYSTEM_NEWS_ZKILL_CACHE_TTL_MS = 5 * 60 * 1000;
+// Backwards-compatible status field: this is now request spacing, not cache freshness.
+export const SYSTEM_NEWS_ZKILL_COOLDOWN_MS = SYSTEM_NEWS_ZKILL_REQUEST_SPACING_MS;
+export const SYSTEM_NEWS_ZKILL_LOOKBACK_SECONDS = 24 * 60 * 60;
 export const SYSTEM_NEWS_ZKILL_BACKFILL_DAYS = 30;
-export const SYSTEM_NEWS_ZKILL_MAX_ROWS = 1000;
+// zKillboard kill endpoints currently paginate at 200 rows. Treating a full
+// page as 1000 rows caused Sage to stop after page 1, leaving busy-system
+// 24-hour windows incomplete.
+export const SYSTEM_NEWS_ZKILL_PAGE_SIZE = 200;
 
 export type ZkillBackfillMonth = { year: number; month: number };
 
@@ -27,7 +33,7 @@ export function killmailBackfillMonths(now = Date.now()): ZkillBackfillMonth[] {
 }
 
 export function zkillBackfillNeedsNextPage(rowCount: number, oldestResolvedTime: number, cutoffTime: number) {
-  return rowCount >= SYSTEM_NEWS_ZKILL_MAX_ROWS && (!oldestResolvedTime || oldestResolvedTime >= cutoffTime);
+  return rowCount >= SYSTEM_NEWS_ZKILL_PAGE_SIZE && (!oldestResolvedTime || oldestResolvedTime >= cutoffTime);
 }
 
 export function parseIsoTime(value?: string | null) {
@@ -35,12 +41,28 @@ export function parseIsoTime(value?: string | null) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export type SystemIntelligenceCaller = "watch" | "route" | "single";
+
+export function killmailCallerPriority(caller?: SystemIntelligenceCaller) {
+  return caller === "watch" || caller === "single" ? 3 : caller === "route" ? 1 : 2;
+}
+
 export function killmailRefreshCycleAllowed(lastCycleRequestedAt?: string | null, now = Date.now()) {
   const previous = parseIsoTime(lastCycleRequestedAt);
-  return !previous || now - previous >= SYSTEM_NEWS_ZKILL_COOLDOWN_MS;
+  return !previous || now - previous >= SYSTEM_NEWS_ZKILL_REQUEST_SPACING_MS;
 }
 
 export function nextKillmailRequestTime(lastRequestAt?: string | null) {
   const previous = parseIsoTime(lastRequestAt);
-  return previous ? previous + SYSTEM_NEWS_ZKILL_COOLDOWN_MS : 0;
+  return previous ? previous + SYSTEM_NEWS_ZKILL_REQUEST_SPACING_MS : 0;
+}
+
+export function killmailCacheNeedsQueue(updatedAt?: string | null, alreadyQueued = false, now = Date.now()) {
+  const updated = parseIsoTime(updatedAt);
+  const fresh = updated > 0 && updated >= now - SYSTEM_NEWS_ZKILL_CACHE_TTL_MS;
+  return !fresh && !alreadyQueued;
+}
+
+export function deepKillmailBackfillForCaller(caller?: SystemIntelligenceCaller, explicit?: boolean) {
+  return explicit ?? caller !== "route";
 }

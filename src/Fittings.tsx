@@ -33,6 +33,19 @@ type ExternalEffectSelection = {
   state?: ModuleState;
   effectiveness?: number;
 };
+type FittingCharacter = { characterId: string; character: { name: string; corporation_id?: number; corporation_name?: string } };
+type DoctrineExportSlotOption = { slot: number; name: string; fitCount: number };
+type DoctrineExportDraft = { corporationId: number; corporationName: string; slot: number; doctrineName: string; slots: DoctrineExportSlotOption[] };
+const PENDING_DOCTRINE_FIT_KEY = "new-eden-sage-pending-doctrine-fit";
+function doctrineExportSlots(corporationId: number): DoctrineExportSlotOption[] {
+  let saved: any[] = [];
+  try { const parsed = JSON.parse(localStorage.getItem(`new-eden-sage-corp-doctrines-v1:${corporationId}`) ?? "[]"); saved = Array.isArray(parsed) ? parsed : []; } catch { saved = []; }
+  return Array.from({ length: 5 }, (_, index) => {
+    const slot = index + 1;
+    const item = saved.find((value) => Number(value?.slot) === slot);
+    return { slot, name: String(item?.name ?? ""), fitCount: Array.isArray(item?.fits) ? Math.min(10, item.fits.length) : 0 };
+  });
+}
 type FitModuleRack = "low" | "mid" | "high" | "rig" | "subsystem";
 type FittingPlacement = "ship" | FitModuleRack | "drone" | "fighter" | "implant" | "booster" | "charge" | "cargo";
 type FittingSearchResult = { id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: FitModuleRack; placement?: FittingPlacement };
@@ -432,9 +445,10 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   );
   const [typeNames, setTypeNames] = useState(new Map<string, number>());
   const [characters, setCharacters] = useState<
-    Array<{ characterId: string; character: { name: string } }>
+    FittingCharacter[]
   >([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState("");
+  const [doctrineExport, setDoctrineExport] = useState<DoctrineExportDraft | null>(null);
   const [routeOpen, setRouteOpen] = useState(false);
   const [sideMode, setSideMode] = useState<"build" | "import">("build");
   const [showInfoTarget, setShowInfoTarget] = useState<ShowInfoTarget | null>(null);
@@ -739,6 +753,45 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
     setLibraryMeta((current) => ({ ...current, [copy.id]: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), readiness: "unknown" } }));
     setStatus(`Duplicated ${active.name}.`);
   }
+  function openDoctrineExport() {
+    if (!active) return;
+    const character = characters.find((item) => item.characterId === selectedCharacterId) ?? characters[0];
+    const corporationId = Number(character?.character?.corporation_id ?? 0);
+    if (!corporationId) {
+      setStatus("Choose a connected corporation character before exporting to a doctrine.");
+      return;
+    }
+    const slots = doctrineExportSlots(corporationId);
+    const available = slots.find((slot) => slot.fitCount < 10);
+    if (!available) {
+      setStatus("All five doctrine slots are full for this corporation.");
+      return;
+    }
+    setDoctrineExport({
+      corporationId,
+      corporationName: String(character?.character?.corporation_name ?? `Corporation ${corporationId}`),
+      slot: available.slot,
+      doctrineName: available.name || active.name,
+      slots,
+    });
+  }
+  function commitDoctrineExport() {
+    if (!active || !doctrineExport) return;
+    const selected = doctrineExport.slots.find((slot) => slot.slot === doctrineExport.slot);
+    if (!selected || selected.fitCount >= 10) { setStatus("That doctrine slot is full. Choose another slot."); return; }
+    const doctrineName = doctrineExport.doctrineName.trim() || selected.name || active.name;
+    sessionStorage.setItem(PENDING_DOCTRINE_FIT_KEY, JSON.stringify({
+      corporationId: doctrineExport.corporationId,
+      targetSlot: doctrineExport.slot,
+      doctrineName,
+      exportedAt: new Date().toISOString(),
+      fit: JSON.parse(JSON.stringify(active)),
+    }));
+    setDoctrineExport(null);
+    setStatus(`${active.name} ready for ${doctrineExport.corporationName} · Doctrine ${doctrineExport.slot}.`);
+    window.dispatchEvent(new CustomEvent("sage:navigate-corp-doctrines"));
+  }
+
   async function exportActiveFit() {
     if (!active) return;
     const verified = await window.sage.copyText(exportFitJson(active));
@@ -775,8 +828,18 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
         )}
       </aside>
       <div className="fit-main">
-        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
+        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
       </div>
+      {doctrineExport && active && <div className="fit-doctrine-export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDoctrineExport(null); }}>
+        <section className="fit-doctrine-export-dialog" role="dialog" aria-modal="true" aria-label="Export fitting to doctrine">
+          <div className="fit-doctrine-export-head"><div><p className="eyebrow">CORPORATION · DOCTRINES</p><h3>Export to Doctrine</h3><p>{active.name} · {active.hull.name}</p></div><button className="fit-doctrine-export-close" onClick={() => setDoctrineExport(null)} aria-label="Close">×</button></div>
+          <div className="fit-doctrine-export-corp"><span>DESTINATION CORPORATION</span><strong>{doctrineExport.corporationName}</strong></div>
+          <label><span>Doctrine slot</span><select value={doctrineExport.slot} onChange={(event) => { const slot = Number(event.target.value); const target = doctrineExport.slots.find((item) => item.slot === slot); setDoctrineExport((current) => current ? { ...current, slot, doctrineName: target?.name || active.name } : current); }}>{doctrineExport.slots.map((slot) => <option key={slot.slot} value={slot.slot} disabled={slot.fitCount >= 10}>Slot {slot.slot} · {slot.name || "Empty"} ({slot.fitCount}/10)</option>)}</select></label>
+          <label><span>Doctrine name</span><input value={doctrineExport.doctrineName} onChange={(event) => setDoctrineExport((current) => current ? { ...current, doctrineName: event.target.value } : current)} placeholder={active.name} /></label>
+          <div className="fit-doctrine-export-actions"><button onClick={() => setDoctrineExport(null)}>Cancel</button><button className="primary" onClick={commitDoctrineExport}>Continue to doctrine</button></div>
+          <small>The fitter queues this exact fit into the existing corporation doctrine library; no duplicate doctrine store is created.</small>
+        </section>
+      </div>}
       <FittingShowInfo target={showInfoTarget} onClose={() => setShowInfoTarget(null)} />
     </section>
   );
@@ -1022,6 +1085,7 @@ function FitDisplay({
   onRename,
   onDuplicate,
   onExport,
+  onExportToDoctrine,
   onModuleStateChange,
   onBayActiveQuantityChange,
   onRemoveItem,
@@ -1032,7 +1096,7 @@ function FitDisplay({
   onShowInfo,
 }: {
   fit: Fit;
-  characters: Array<{ characterId: string; character: { name: string } }>;
+  characters: FittingCharacter[];
   characterId: string;
   onCharacterChange(id: string): void;
   onRemove(): void;
@@ -1040,6 +1104,7 @@ function FitDisplay({
   onRename(): void;
   onDuplicate(): void;
   onExport(): void;
+  onExportToDoctrine(): void;
   onModuleStateChange(rack: FitModuleRack, index: number, state: ModuleState): void;
   onBayActiveQuantityChange(target: "drones" | "fighters", index: number, quantity: number): void;
   onRemoveItem(target: BuilderTarget, index: number): void;
@@ -1217,6 +1282,7 @@ function FitDisplay({
             <button onClick={onRename}>Rename</button>
             <button onClick={onDuplicate}>Duplicate</button>
             <button onClick={onExport}>Copy JSON</button>
+            <button className="fit-export-corporation" onClick={onExportToDoctrine}>Export to Doctrine</button>
             <button onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>
               {eveExporting ? "Exporting..." : "Export to EVE"}
             </button>
@@ -1583,7 +1649,7 @@ function FitRouteScreen({
   onBack,
 }: {
   fit: Fit;
-  characters: Array<{ characterId: string; character: { name: string } }>;
+  characters: FittingCharacter[];
   onBack(): void;
 }) {
   const [characterId, setCharacterId] = useState(

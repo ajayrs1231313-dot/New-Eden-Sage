@@ -1,5 +1,5 @@
 import { loadRecentRawMarketManifests } from "./raw-market-storage";
-import { buildFullMarketAnalysisIndex, type FullMarketOrder } from "./raw-market-analysis";
+import { buildFullMarketAnalysisIndex, loadFullMarketMarginSnapshot, type FullMarketOrder } from "./raw-market-analysis";
 import { universeRoute } from "./universe-route-graph";
 import { itemCategoryIds } from "./type-volumes";
 import { availableParallelism } from "node:os";
@@ -74,11 +74,6 @@ export async function getHaulerProfiles(snapshots: any[] = []) {
   return profiles.filter((profile): profile is NonNullable<typeof profile> => Boolean(profile));
 }
 
-function marketMargin(item?: { buys: FullMarketOrder[]; sells: FullMarketOrder[] }) {
-  const buy = item?.buys[0];
-  const sell = item?.sells[0];
-  return buy && sell ? buy.price - sell.price : null;
-}
 
 function pairKey(sell: FullMarketOrder, buy: FullMarketOrder) {
   return `${sell.orderId}:${buy.orderId}`;
@@ -107,11 +102,9 @@ function securityBand(minimumSecurityStatus: number) {
   return "null" as const;
 }
 
-async function buildCandidatesInParallel(market: any, previousMarket: any, cargoCapacity: number, capitalLimit: number, runtime: FullTradeRuntime) {
+async function buildCandidatesInParallel(market: any, previousMargins: Record<string, number | null>, cargoCapacity: number, capitalLimit: number, runtime: FullTradeRuntime) {
   const entries = [...market.items] as Array<[number, any]>;
   const workers = Math.max(1, Math.min(6, availableParallelism(), entries.length));
-  const previousMargins: Record<string, number | null> = {};
-  if (previousMarket) for (const [typeId, item] of previousMarket.items) previousMargins[String(typeId)] = marketMargin(item);
   const chunkSize = Math.ceil(entries.length / workers);
   let completed = 0;
   const results = await Promise.all(Array.from({ length: workers }, (_, index) => new Promise<{ prelim: any[]; pairCount: number }>((resolve, reject) => {
@@ -157,8 +150,13 @@ export async function findFullMarketTrades(
   const currentManifest = recent[0] ?? null;
   if (!currentManifest)
     throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
+  // Historical widening only needs one margin number per type. Reduce the old
+  // snapshot first, allow its full graph to become collectible, then load the
+  // current full-market index. Never retain both full indexes in this worker.
+  const previousMargins = recent[1]
+    ? await loadFullMarketMarginSnapshot(recent[1], { shouldCancel: runtime.shouldCancel })
+    : null;
   const market = await buildFullMarketAnalysisIndex(currentManifest, runtime);
-  const previousMarket = recent[1] ? await buildFullMarketAnalysisIndex(recent[1], { shouldCancel: runtime.shouldCancel }) : null;
   const haulers = await getHaulerProfiles(runtime.snapshots ?? []);
   const maxHauler = [...haulers].sort((a, b) => b.capacityM3 - a.capacityM3)[0];
   const analysisHauler = maxHauler ?? {
@@ -180,7 +178,7 @@ export async function findFullMarketTrades(
   const maxJumps = constraints.maxJumps == null ? null : Math.max(0, Number(constraints.maxJumps));
   const maxMinutes = constraints.maxMinutes == null ? null : Math.max(0, Number(constraints.maxMinutes));
   runtime.progress?.({ stage: "candidates", message: "Building executable market candidates across all available cores…", completed: 0, total: Math.min(6, availableParallelism()), percent: 0 });
-  const { prelim, pairCount } = await buildCandidatesInParallel(market, previousMarket, cargoCapacity, capitalLimit, runtime);
+  const { prelim, pairCount } = await buildCandidatesInParallel(market, previousMargins?.margins ?? {}, cargoCapacity, capitalLimit, runtime);
 
   const routesToCheck = prelim
     .sort((a, b) => b.profit - a.profit)
@@ -275,7 +273,7 @@ export async function findFullMarketTrades(
   return {
     haulers,
     mode,
-    opportunities: rankTrades(valid, mode).slice(0, mode === "top1000" ? 1000 : 20),
+    opportunities: mode === "top1000" ? rankTrades(valid, mode) : rankTrades(valid, mode).slice(0, 20),
     diagnostics: {
       source: "complete raw all-region public order book",
       rawSnapshotId: market.snapshotId,
@@ -295,7 +293,7 @@ export async function findFullMarketTrades(
       datasetCreatedAt: market.createdAt,
     },
     message:
-      mode === "widened" && !previousMarket
+      mode === "widened" && !previousMargins
         ? "Margin widening needs two complete raw all-region market snapshots. Run another full refresh later, then scan again."
         : undefined,
   };

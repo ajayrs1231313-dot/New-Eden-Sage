@@ -7,10 +7,14 @@ import { refreshEveToken } from "./eve";
 import {
   SYSTEM_NEWS_ZKILL_BACKFILL_DAYS,
   SYSTEM_NEWS_ZKILL_COOLDOWN_MS,
+  SYSTEM_NEWS_ZKILL_CACHE_TTL_MS,
   SYSTEM_NEWS_ZKILL_LOOKBACK_SECONDS,
   killmailBackfillCutoffTime,
   killmailBackfillMonths,
   killmailRefreshCycleAllowed,
+  killmailCacheNeedsQueue,
+  deepKillmailBackfillForCaller,
+  killmailCallerPriority,
   nextKillmailRequestTime,
   parseIsoTime,
   zkillBackfillNeedsNextPage,
@@ -18,19 +22,21 @@ import {
 
 const ESI_HEADERS = {
   "X-Compatibility-Date": "2026-08-02",
-  "X-User-Agent": "NewEdenSage/1.1.4",
+  "X-User-Agent": "NewEdenSage/1.1.7",
 };
 const ZKILL_HEADERS = {
   "Accept-Encoding": "gzip",
-  "User-Agent": "NewEdenSage/1.1.4 https://github.com/ajayrs1231313-dot/New-Eden-Sage",
+  "User-Agent": "NewEdenSage/1.1.7 https://github.com/ajayrs1231313-dot/New-Eden-Sage",
 };
 
-// Deliberately much gentler than zKillboard's published limits. This is a
-// global gate for System News only: at most one zKillboard HTTP request every
-// five minutes from this Sage client/IP. ESI activity refreshes are not gated.
+// Shared zKillboard scheduler. Requests are spaced conservatively, while each
+// system's recent result remains cached for five minutes. System News/single
+// system work outranks Navigation background enrichment so route planning cannot
+// starve a watched system. ESI activity refreshes are independent of this gate.
 const ZKILL_COOLDOWN_MS = SYSTEM_NEWS_ZKILL_COOLDOWN_MS;
 const ZKILL_LOOKBACK_SECONDS = SYSTEM_NEWS_ZKILL_LOOKBACK_SECONDS;
 const ZKILL_BACKFILL_DAYS = SYSTEM_NEWS_ZKILL_BACKFILL_DAYS;
+const KILLMAIL_BACKFILL_SCHEMA_VERSION = 2;
 
 type ActivitySample = {
   capturedAt: string;
@@ -40,6 +46,15 @@ type ActivitySample = {
   jumps: number;
 };
 type HistoryFile = Record<string, ActivitySample[]>;
+
+type SharedActivityFeed = {
+  fetchedAt: string;
+  kills: Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>;
+  jumps: Array<{ system_id: number; ship_jumps: number }>;
+};
+const ACTIVITY_FEED_CACHE_MS = 2 * 60 * 1000;
+let sharedActivityFeed: SharedActivityFeed | null = null;
+let sharedActivityFeedPromise: Promise<SharedActivityFeed> | null = null;
 
 export type KillmailIntel = {
   killmailId: number;
@@ -89,12 +104,17 @@ type KillmailCacheEntry = {
   updatedAt?: string;
   backfillCompletedAt?: string;
   backfillCutoffAt?: string;
+  backfillSchemaVersion?: number;
   killmails: KillmailIntel[];
 };
 
+type KillmailQueueCaller = "watch" | "route" | "single";
 type QueuedRegion = {
   regionId: number;
   systemIds: number[];
+  priority?: number;
+  requestedAt?: string;
+  caller?: KillmailQueueCaller;
 };
 
 type QueuedBackfill = {
@@ -135,6 +155,7 @@ type StructureDiscoveryState = {
 
 export type KillmailRefreshStatus = {
   cooldownMs: number;
+  cacheTtlMs: number;
   lookbackSeconds: number;
   backfillDays: number;
   lastRequestAt: string | null;
@@ -292,6 +313,37 @@ async function saveHistory(value: HistoryFile) {
   await fs.writeFile(historyPath(), JSON.stringify(value), "utf8");
 }
 
+function normalizeQueuedRegions(value: any): QueuedRegion[] {
+  const bySystem = new Map<number, QueuedRegion>();
+  for (const raw of Array.isArray(value) ? value : []) {
+    const regionId = Number(raw?.regionId);
+    if (!Number.isInteger(regionId) || regionId <= 0) continue;
+    const priority = Math.max(0, Math.min(3, Number(raw?.priority ?? 0) || 0));
+    const caller: KillmailQueueCaller | undefined = raw?.caller === "watch" || raw?.caller === "single" || raw?.caller === "route" ? raw.caller : undefined;
+    const requestedAt = typeof raw?.requestedAt === "string" ? raw.requestedAt : undefined;
+    const ids = Array.isArray(raw?.systemIds) ? [...new Set<number>(raw.systemIds.map(Number).filter((id: number) => Number.isInteger(id) && id > 0))] : [];
+    for (const systemId of ids) {
+      const next: QueuedRegion = { regionId, systemIds: [systemId], priority, requestedAt, caller };
+      const current = bySystem.get(systemId);
+      if (!current || priority > Number(current.priority ?? 0) || (priority === Number(current.priority ?? 0) && parseIsoTime(requestedAt) > parseIsoTime(current.requestedAt))) bySystem.set(systemId, next);
+    }
+  }
+  return [...bySystem.values()].sort((a, b) => Number(b.priority ?? 0) - Number(a.priority ?? 0) || parseIsoTime(a.requestedAt) - parseIsoTime(b.requestedAt));
+}
+
+function upsertRecentKillmailJob(state: KillmailState, job: QueuedRegion) {
+  const systemId = job.systemIds[0];
+  const index = state.pendingRegions.findIndex((item) => item.systemIds.includes(systemId));
+  if (index >= 0) {
+    const existing = state.pendingRegions[index];
+    if (Number(existing.priority ?? 0) >= Number(job.priority ?? 0)) return false;
+    state.pendingRegions.splice(index, 1);
+  }
+  state.pendingRegions.push(job);
+  state.pendingRegions.sort((a, b) => Number(b.priority ?? 0) - Number(a.priority ?? 0) || parseIsoTime(a.requestedAt) - parseIsoTime(b.requestedAt));
+  return true;
+}
+
 function normalizeKillmailState(value: any): KillmailState {
   return {
     lastRequestAt: typeof value?.lastRequestAt === "string" ? value.lastRequestAt : undefined,
@@ -309,16 +361,7 @@ function normalizeKillmailState(value: any): KillmailState {
           }))
           .filter((item: QueuedBackfill) => Number.isInteger(item.systemId) && item.systemId > 0 && Number.isInteger(item.year) && item.year >= 2003 && Number.isInteger(item.month) && item.month >= 1 && item.month <= 12 && Number.isInteger(item.page) && item.page >= 1)
       : [],
-    pendingRegions: Array.isArray(value?.pendingRegions)
-      ? value.pendingRegions
-          .map((item: any) => ({
-            regionId: Number(item?.regionId),
-            systemIds: Array.isArray(item?.systemIds)
-              ? [...new Set(item.systemIds.map(Number).filter((id: number) => Number.isInteger(id) && id > 0))]
-              : [],
-          }))
-          .filter((item: QueuedRegion) => Number.isInteger(item.regionId) && item.regionId > 0 && item.systemIds.length)
-      : [],
+    pendingRegions: normalizeQueuedRegions(value?.pendingRegions),
     systems: value?.systems && typeof value.systems === "object" ? value.systems : {},
   };
 }
@@ -351,6 +394,21 @@ async function esi<T>(url: string): Promise<T> {
 
 function parseTime(value?: string) {
   return parseIsoTime(value);
+}
+
+async function getSharedActivityFeed(force = false): Promise<SharedActivityFeed> {
+  if (!force && sharedActivityFeed && parseTime(sharedActivityFeed.fetchedAt) >= Date.now() - ACTIVITY_FEED_CACHE_MS) return sharedActivityFeed;
+  if (!force && sharedActivityFeedPromise) return sharedActivityFeedPromise;
+  const work = Promise.all([
+    esi<Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>>("https://esi.evetech.net/universe/system_kills/"),
+    esi<Array<{ system_id: number; ship_jumps: number }>>("https://esi.evetech.net/universe/system_jumps/"),
+  ]).then(([kills, jumps]) => {
+    const value: SharedActivityFeed = { fetchedAt: new Date().toISOString(), kills, jumps };
+    sharedActivityFeed = value;
+    return value;
+  }).finally(() => { sharedActivityFeedPromise = null; });
+  sharedActivityFeedPromise = work;
+  return work;
 }
 
 
@@ -756,6 +814,7 @@ function makeKillmailStatus(state: KillmailState, cycleAccepted?: boolean): Kill
   ]);
   return {
     cooldownMs: ZKILL_COOLDOWN_MS,
+    cacheTtlMs: SYSTEM_NEWS_ZKILL_CACHE_TTL_MS,
     lookbackSeconds: ZKILL_LOOKBACK_SECONDS,
     backfillDays: ZKILL_BACKFILL_DAYS,
     lastRequestAt: state.lastRequestAt ?? null,
@@ -920,8 +979,14 @@ async function resolveZkillRows(
 }
 
 async function fetchRegionKillmails(regionId: number, systemIds: number[], existingById: Map<number, KillmailIntel>) {
+  // Recent discovery must be scoped to the requested system. A region-wide query
+  // can fill zKillboard's result page with unrelated kills and silently omit a
+  // quieter requested system, which made the 1h/24h cards appear empty even when
+  // that system had a current killmail.
+  const singleSystemId = systemIds.length === 1 ? systemIds[0] : undefined;
+  const scope = singleSystemId ? `systemID/${singleSystemId}` : `regionID/${regionId}`;
   const response = await fetch(
-    `https://zkillboard.com/api/kills/regionID/${regionId}/pastSeconds/${ZKILL_LOOKBACK_SECONDS}/`,
+    `https://zkillboard.com/api/kills/${scope}/pastSeconds/${ZKILL_LOOKBACK_SECONDS}/`,
     { headers: ZKILL_HEADERS },
   );
   if (!response.ok) throw new Error(`zKillboard returned ${response.status}`);
@@ -951,15 +1016,16 @@ function ensureKillmailBackfills(state: KillmailState, systemIds: number[], now 
   let changed = false;
   const systemsNeedingBackfill = systemIds.filter((systemId) => {
     const cache = state.systems[String(systemId)];
-    return !cache?.backfillCompletedAt && !state.pendingBackfills.some((item) => item.systemId === systemId);
+    const currentSchema = Number(cache?.backfillSchemaVersion ?? 0);
+    return (!cache?.backfillCompletedAt || currentSchema < KILLMAIL_BACKFILL_SCHEMA_VERSION)
+      && !state.pendingBackfills.some((item) => item.systemId === systemId);
   });
   for (const systemId of systemsNeedingBackfill) {
     const key = String(systemId);
     if (!state.systems[key]) state.systems[key] = { killmails: [] };
   }
-  // Recent month first across every watched system. With the deliberately slow
-  // five-minute global gate this populates all watched-system cards sooner than
-  // exhausting a full 30-day backfill for one system before starting the next.
+  // Recent month first across every requested system. Recent watched-system pulls
+  // are scheduled ahead of backfill work, so deep history cannot hide current kills.
   for (const value of months) {
     for (const systemId of systemsNeedingBackfill) {
       const job: QueuedBackfill = { systemId, year: value.year, month: value.month, page: 1 };
@@ -980,6 +1046,7 @@ function finishBackfillIfComplete(state: KillmailState, systemId: number, cutoff
     ...current,
     backfillCompletedAt: completedAt,
     backfillCutoffAt: new Date(cutoffTime).toISOString(),
+    backfillSchemaVersion: KILLMAIL_BACKFILL_SCHEMA_VERSION,
     killmails: current.killmails ?? [],
   };
 }
@@ -987,8 +1054,14 @@ function finishBackfillIfComplete(state: KillmailState, systemId: number, cutoff
 async function serviceKillmailQueue(): Promise<void> {
   if (killmailQueueRunning) return;
   const state = await getKillmailState();
-  const backfillJob = state.pendingBackfills[0];
-  const regionJob = backfillJob ? undefined : state.pendingRegions[0];
+  const urgentRecentIndex = state.pendingRegions.findIndex((item) => Number(item.priority ?? 0) >= 3);
+  const firstRecent = state.pendingRegions[0];
+  const backgroundWaitMs = firstRecent?.requestedAt ? Date.now() - parseIsoTime(firstRecent.requestedAt) : 0;
+  const recentIndex = urgentRecentIndex >= 0
+    ? urgentRecentIndex
+    : (!state.pendingBackfills.length || backgroundWaitMs >= 60_000 ? (firstRecent ? 0 : -1) : -1);
+  const regionJob = recentIndex >= 0 ? state.pendingRegions[recentIndex] : undefined;
+  const backfillJob = regionJob ? undefined : state.pendingBackfills[0];
   if (!backfillJob && !regionJob) return;
 
   const dueAt = nextKillmailRequestTime(state.lastRequestAt);
@@ -999,8 +1072,8 @@ async function serviceKillmailQueue(): Promise<void> {
   }
 
   killmailQueueRunning = true;
-  if (backfillJob) state.pendingBackfills.shift();
-  else state.pendingRegions.shift();
+  if (regionJob) state.pendingRegions.splice(recentIndex, 1);
+  else state.pendingBackfills.shift();
   // Count the attempt immediately. Even a failed request observes the courtesy
   // cooldown and cannot trigger an immediate retry against zKillboard.
   state.lastRequestAt = new Date().toISOString();
@@ -1029,7 +1102,14 @@ async function serviceKillmailQueue(): Promise<void> {
       }, 0);
       if (zkillBackfillNeedsNextPage(result.rowCount, oldestResolvedTime, cutoffTime)) {
         const nextJob: QueuedBackfill = { ...backfillJob, page: backfillJob.page + 1, attempts: undefined };
-        if (!state.pendingBackfills.some((item) => backfillJobKey(item) === backfillJobKey(nextJob))) state.pendingBackfills.push(nextJob);
+        if (!state.pendingBackfills.some((item) => backfillJobKey(item) === backfillJobKey(nextJob))) {
+          const recentCoverageCutoff = Date.now() - 24 * 60 * 60 * 1000;
+          // If this full page still has not crossed the 24-hour boundary, the
+          // next page is required to make the 24h card complete. Prioritise it
+          // ahead of deeper 30-day history work; otherwise append normally.
+          if (!oldestResolvedTime || oldestResolvedTime > recentCoverageCutoff) state.pendingBackfills.unshift(nextJob);
+          else state.pendingBackfills.push(nextJob);
+        }
       }
       finishBackfillIfComplete(state, backfillJob.systemId, cutoffTime, updatedAt);
     } else if (regionJob) {
@@ -1062,36 +1142,34 @@ async function serviceKillmailQueue(): Promise<void> {
     if (state.pendingBackfills.length || state.pendingRegions.length) scheduleKillmailQueue(ZKILL_COOLDOWN_MS);
   }
 }
-async function requestKillmailRefreshCycle(systemIds: number[]) {
+async function requestKillmailRefreshCycle(systemIds: number[], options: { deepBackfill?: boolean; caller?: KillmailQueueCaller } = {}) {
   const state = await getKillmailState();
   const index = await getPveStaticIndex();
   const now = Date.now();
   const cycleAccepted = killmailRefreshCycleAllowed(state.lastCycleRequestedAt, now);
-  let changed = ensureKillmailBackfills(state, systemIds, now);
+  let changed = options.deepBackfill === false ? false : ensureKillmailBackfills(state, systemIds, now);
+  const priority = killmailCallerPriority(options.caller);
+
+  for (const systemId of systemIds) {
+    const system = index.systems.get(systemId);
+    if (!system) continue;
+    const key = String(systemId);
+    if (!state.systems[key]) { state.systems[key] = { killmails: [] }; changed = true; }
+    const alreadyQueued = state.pendingRegions.some((item) => item.systemIds.includes(systemId));
+    const needsRecent = killmailCacheNeedsQueue(state.systems[key]?.updatedAt, false, now);
+    if (needsRecent) {
+      changed = upsertRecentKillmailJob(state, { regionId: system.regionId, systemIds: [systemId], priority, caller: options.caller, requestedAt: new Date(now).toISOString() }) || changed;
+    } else if (alreadyQueued) {
+      state.pendingRegions = state.pendingRegions.filter((item) => !item.systemIds.includes(systemId));
+      changed = true;
+    }
+  }
 
   if (cycleAccepted) {
-    const byRegion = new Map<number, Set<number>>();
-    for (const systemId of systemIds) {
-      const system = index.systems.get(systemId);
-      if (!system) continue;
-      const values = byRegion.get(system.regionId) ?? new Set<number>();
-      values.add(systemId);
-      byRegion.set(system.regionId, values);
-    }
-
-    for (const [regionId, ids] of byRegion) {
-      const existing = state.pendingRegions.find((item) => item.regionId === regionId);
-      if (existing) existing.systemIds = [...new Set([...existing.systemIds, ...ids])];
-      else state.pendingRegions.push({ regionId, systemIds: [...ids] });
-    }
     state.lastCycleRequestedAt = new Date(now).toISOString();
     changed = true;
   }
-
   if (changed) await saveKillmailState(state);
-  // zKillboard discovery is always background work. ESI activity returns to the
-  // renderer immediately while the single five-minute courtesy queue fills the
-  // 30-day archive and then resumes normal recent-region top-ups.
   void serviceKillmailQueue();
   return makeKillmailStatus(state, cycleAccepted);
 }
@@ -1102,8 +1180,8 @@ export async function resumeKillmailRefreshQueue() {
   return makeKillmailStatus(state);
 }
 
-function windowSummary(samples: ActivitySample[], milliseconds: number) {
-  const cutoff = Date.now() - milliseconds;
+function windowSummary(samples: ActivitySample[], milliseconds: number, now = Date.now()) {
+  const cutoff = now - milliseconds;
   const scoped = samples.filter((item) => Date.parse(item.capturedAt) >= cutoff);
   const first = scoped[0] ?? null;
   const last = scoped.at(-1) ?? null;
@@ -1120,6 +1198,15 @@ function windowSummary(samples: ActivitySample[], milliseconds: number) {
             jumps: last.jumps - first.jumps,
           }
         : null,
+  };
+}
+
+export function buildSystemActivityWindows(history: ActivitySample[], now = Date.now()) {
+  return {
+    "1h": windowSummary(history, 60 * 60 * 1000, now),
+    "24h": windowSummary(history, 24 * 60 * 60 * 1000, now),
+    "7d": windowSummary(history, 7 * 24 * 60 * 60 * 1000, now),
+    "30d": windowSummary(history, 30 * 24 * 60 * 60 * 1000, now),
   };
 }
 
@@ -1233,12 +1320,12 @@ async function composeSystemIntelligence(
   for (const structure of knownStructures) if (!structure.ownerName && structure.ownerId) structure.ownerName = ownerNames.get(structure.ownerId);
 
   const limitations = [
-    "Killmail data is cached locally without age-based pruning. zKillboard is globally throttled by Sage to one System News request every five minutes per client/IP; 30-day backfills and ongoing recent-region requests share that single courtesy queue.",
-    "A newly watched system is backfilled from zKillboard system/month pages covering the previous 30 days, then recent one-hour region discovery keeps extending the same persistent archive.",
+    "Killmail data is cached locally without age-based pruning. zKillboard requests share one conservative spaced scheduler; recent System News/single-system work is prioritised ahead of Navigation background enrichment, while recent results remain cached for five minutes.",
+    "A newly requested system is backfilled from zKillboard system/month pages covering the previous 30 days, then recent one-hour region discovery keeps extending the same persistent archive.",
     "ESI does not provide a public enumeration of all Upwell structures, corporation offices, or player corporations present in a system. Known structures and corporations are evidence-based from data Sage can legitimately see.",
     "Cosmic anomalies and signatures are not exposed by ESI. Sage will not invent them.",
     history.length < 2
-      ? "Historical activity comparisons begin accumulating after Sage observes this watched system more than once."
+      ? "Historical activity comparisons begin accumulating after Sage observes this requested system more than once."
       : "Historical activity is based on Sage's locally retained observations.",
   ];
   if (globalStatus.lastError) limitations.unshift(`Last public killmail refresh warning: ${globalStatus.lastError}.`);
@@ -1255,12 +1342,7 @@ async function composeSystemIntelligence(
     },
     current,
     history,
-    windows: {
-      "1h": windowSummary(history, 60 * 60 * 1000),
-      "24h": windowSummary(history, 24 * 60 * 60 * 1000),
-      "7d": windowSummary(history, 7 * 24 * 60 * 60 * 1000),
-      "30d": windowSummary(history, 30 * 24 * 60 * 60 * 1000),
-    },
+    windows: buildSystemActivityWindows(history),
     knownStructures,
     localCorporations,
     killmails,
@@ -1273,25 +1355,26 @@ async function composeSystemIntelligence(
   };
 }
 
-export async function refreshWatchedSystemIntelligence(systemIds: number[], snapshots: any[]) {
+export type SystemIntelligenceRefreshOptions = {
+  caller?: "watch" | "route" | "single";
+  discoverStructures?: boolean;
+  deepKillmailBackfill?: boolean;
+  forceActivity?: boolean;
+};
+
+export async function refreshSystemIntelligence(systemIds: number[], snapshots: any[], options: SystemIntelligenceRefreshOptions = {}) {
   const index = await getPveStaticIndex();
   const uniqueSystemIds = [
     ...new Set(systemIds.map(Number).filter((id) => Number.isInteger(id) && index.systems.has(id))),
   ];
-  if (!uniqueSystemIds.length) return { systems: [], killmailRefresh: makeKillmailStatus(await getKillmailState()) };
+  if (!uniqueSystemIds.length) return { systems: [], killmailRefresh: makeKillmailStatus(await getKillmailState()), activityFetchedAt: null };
 
-  const structureDiscoveryPromise = discoverStructuresForSystems(uniqueSystemIds, snapshots);
-  const [kills, jumps, allHistory] = await Promise.all([
-    esi<Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>>(
-      "https://esi.evetech.net/universe/system_kills/",
-    ),
-    esi<Array<{ system_id: number; ship_jumps: number }>>(
-      "https://esi.evetech.net/universe/system_jumps/",
-    ),
-    loadHistory(),
-  ]);
-  const killsBySystem = new Map(kills.map((item) => [item.system_id, item]));
-  const jumpsBySystem = new Map(jumps.map((item) => [item.system_id, item]));
+  const structureDiscoveryPromise = options.discoverStructures === false
+    ? Promise.resolve(new Map<number, SystemIntelligence["knownStructures"]>())
+    : discoverStructuresForSystems(uniqueSystemIds, snapshots);
+  const [activityFeed, allHistory] = await Promise.all([getSharedActivityFeed(Boolean(options.forceActivity)), loadHistory()]);
+  const killsBySystem = new Map(activityFeed.kills.map((item) => [item.system_id, item]));
+  const jumpsBySystem = new Map(activityFeed.jumps.map((item) => [item.system_id, item]));
   const activityBySystem = new Map<number, { current: ActivitySample; history: ActivitySample[] }>();
   const now = Date.now();
 
@@ -1299,7 +1382,7 @@ export async function refreshWatchedSystemIntelligence(systemIds: number[], snap
     const kill = killsBySystem.get(systemId);
     const jump = jumpsBySystem.get(systemId);
     const current: ActivitySample = {
-      capturedAt: new Date().toISOString(),
+      capturedAt: activityFeed.fetchedAt,
       shipKills: kill?.ship_kills ?? 0,
       podKills: kill?.pod_kills ?? 0,
       npcKills: kill?.npc_kills ?? 0,
@@ -1308,29 +1391,28 @@ export async function refreshWatchedSystemIntelligence(systemIds: number[], snap
     const prior = allHistory[String(systemId)] ?? [];
     const history = [...prior, current]
       .filter((item) => parseTime(item.capturedAt) >= now - 31 * 24 * 60 * 60 * 1000)
-      .filter(
-        (item, itemIndex, array) =>
-          itemIndex === array.length - 1 ||
-          Math.abs(parseTime(array[itemIndex + 1].capturedAt) - parseTime(item.capturedAt)) >= 5 * 60 * 1000,
-      );
+      .filter((item, itemIndex, array) => itemIndex === array.length - 1 || Math.abs(parseTime(array[itemIndex + 1].capturedAt) - parseTime(item.capturedAt)) >= 5 * 60 * 1000);
     allHistory[String(systemId)] = history;
     activityBySystem.set(systemId, { current, history });
   }
   await saveHistory(allHistory);
 
-  const killmailRefresh = await requestKillmailRefreshCycle(uniqueSystemIds);
+  const deepBackfill = deepKillmailBackfillForCaller(options.caller, options.deepKillmailBackfill);
+  const killmailRefresh = await requestKillmailRefreshCycle(uniqueSystemIds, { deepBackfill, caller: options.caller });
   const [state, discoveredBySystem] = await Promise.all([getKillmailState(), structureDiscoveryPromise]);
-  const systems = await Promise.all(
-    uniqueSystemIds.map((systemId) => {
-      const activity = activityBySystem.get(systemId)!;
-      return composeSystemIntelligence(systemId, snapshots, activity.current, activity.history, state, discoveredBySystem.get(systemId) ?? []);
-    }),
-  );
-  return { systems, killmailRefresh };
+  const systems = await Promise.all(uniqueSystemIds.map((systemId) => {
+    const activity = activityBySystem.get(systemId)!;
+    return composeSystemIntelligence(systemId, snapshots, activity.current, activity.history, state, discoveredBySystem.get(systemId) ?? []);
+  }));
+  return { systems, killmailRefresh, activityFetchedAt: activityFeed.fetchedAt };
+}
+
+export async function refreshWatchedSystemIntelligence(systemIds: number[], snapshots: any[]) {
+  return refreshSystemIntelligence(systemIds, snapshots, { caller: "watch", discoverStructures: true, deepKillmailBackfill: true });
 }
 
 export async function getSystemIntelligence(systemId: number, snapshots: any[]) {
-  const result = await refreshWatchedSystemIntelligence([systemId], snapshots);
+  const result = await refreshSystemIntelligence([systemId], snapshots, { caller: "single", discoverStructures: true, deepKillmailBackfill: true });
   const system = result.systems[0];
   if (!system) throw new Error("Unknown solar system.");
   return system;

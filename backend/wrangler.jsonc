@@ -1,0 +1,57 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "new-eden-sage-online",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-19",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "APP_VERSION": "0.1.0",
+    "ESI_COMPATIBILITY_DATE": "2026-08-19",
+    "EVE_CLIENT_ID": "0fd88c89991b420f89d6f8d85fccbae6"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "new-eden-sage-online",
+      "database_id": "1fc4dbd8-82a5-4b57-b609-46b780fce8ee",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WORKSPACE_HUB",
+        "class_name": "WorkspaceHub"
+      }
+    ]
+  },
+  "exports": {
+    "WorkspaceHub": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "queues": {
+    "producers": [
+      {
+        "queue": "new-eden-sage-events",
+        "binding": "EVENT_QUEUE"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "new-eden-sage-events",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
+}

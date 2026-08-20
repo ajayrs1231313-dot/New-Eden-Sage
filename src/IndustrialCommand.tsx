@@ -469,18 +469,13 @@ export function IndustrialCommand({
             </article>
           </div>
 
-          <div className="industrial-roadmap-grid">
-            <RoadmapCard title="Manufacturing" state="Foundation live" text="Character jobs, blueprint ownership and assets are connected. Material and cost expansion follows." />
-            <RoadmapCard title="Invention & research" state="Next pass" text="ME/TE, copying, invention inputs, datacores and probability intelligence." />
-            <RoadmapCard title="Build vs buy" state="Queued" text="Use Sage's full-market dataset for material sourcing and finished-product comparisons." />
-            <RoadmapCard title="Multi-character planning" state="Foundation live" text="Ownership is already separated per character; shared plans will reference owners explicitly." />
-          </div>
+          
         </>
       )}
 
       {tab === "opportunities" && (
         <div className="industrial-opportunity-workspace">
-          <article className="industrial-panel industrial-opportunity-intro">
+          <article className="industrial-panel industrial-opportunity-intro industrial-workbench-card">
             <div className="industrial-panel-head industrial-opportunity-head">
               <div><p className="eyebrow">OWNED BLUEPRINT × MARKET DEMAND</p><h3>What should I build, and where should I sell it?</h3><p>Sage matches products you can actually manufacture against retained demand, constrained to the security space and jump radius you choose.</p></div>
               <button type="button" className="industrial-opportunity-refresh" onClick={() => void analyseIndustrialOpportunities(true)} disabled={opportunityBusy}>{opportunityBusy ? 'Analysing…' : 'Refresh opportunities'}</button>
@@ -590,18 +585,18 @@ export function IndustrialCommand({
       )}
       {tab === "research" && (
         <div className="industrial-production-workspace">
-          <article className="industrial-panel industrial-production-control">
+          <article className="industrial-panel industrial-production-control industrial-research-control industrial-workbench-card">
             <div className="industrial-panel-head"><div><p className="eyebrow">RESEARCH & INVENTION</p><h3>Blueprint activity intelligence</h3><p>Inspect copying, ME/TE research, invention inputs, output options and skill requirements directly from CCP's local SDE.</p></div><span className="industrial-status live">OFFLINE SDE</span></div>
             {planningBlueprints.length ? <><div className="industrial-production-controls research-controls"><label><span>Research blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setBlueprintActivities(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label><label><span>Owned blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setBlueprintActivities(null); }}>
               {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}</option>)}
             </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
-          {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : <article className="industrial-panel industrial-planned"><p className="eyebrow">CCP ACTIVITY MAP</p><h3>Research and invention ready</h3><p>Choose an owned blueprint to reveal copying, research, invention and manufacturing definitions, including base activity time, required materials, possible outputs and trained skill readiness.</p></article>}
+          {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : null}
         </div>
       )}
       {tab === "production" && (
         <div className="industrial-production-workspace">
-          <article className="industrial-panel industrial-production-control">
+          <article className="industrial-panel industrial-production-control industrial-production-target-control industrial-workbench-card">
             <div className="industrial-panel-head">
               <div><p className="eyebrow">PRODUCTION CHAIN PLANNER</p><h3>Manufacturing target</h3><p>Uses the selected personal or corporation blueprint's real ME/TE and character-owned material stock.</p></div>
               <span className="industrial-status live">CCP SDE</span>
@@ -620,7 +615,7 @@ export function IndustrialCommand({
               <div className="industrial-notice">{manufacturingStatus}</div>
             </> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
-          {manufacturingPlan ? <ManufacturingPlanView plan={manufacturingPlan} /> : <article className="industrial-panel industrial-planned"><p className="eyebrow">MATERIAL REQUIREMENTS ENGINE</p><h3>Ready for a target</h3><p>Select an owned blueprint and Sage will expand its manufacturing bill of materials using CCP's local SDE, apply that exact blueprint's ME/TE, and subtract the selected owner's stock.</p><div className="industrial-production-steps"><span>1 · Choose owned blueprint</span><span>2 · Set output quantity</span><span>3 · Expand CCP materials</span><span>4 · Apply ME/TE</span><span>5 · Subtract stock</span><span>6 · Identify shortages</span></div></article>}
+          {manufacturingPlan ? <ManufacturingPlanView plan={manufacturingPlan} /> : null}
         </div>
       )}
     </section>
@@ -675,10 +670,6 @@ function JobList({ jobs, expanded = false, typeNames }: { jobs: IndustryJobRecor
       ))}
     </div>
   );
-}
-
-function RoadmapCard({ title, state, text }: { title: string; state: string; text: string }) {
-  return <article className="industrial-roadmap-card"><span>{state}</span><h3>{title}</h3><p>{text}</p></article>;
 }
 
 function duration(seconds: number) {

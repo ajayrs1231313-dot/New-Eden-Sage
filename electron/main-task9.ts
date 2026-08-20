@@ -11,10 +11,13 @@ import {
   publicConfig,
   readConfig,
   writeConfig,
+  CURRENT_IDENTITY_SCHEMA_VERSION,
 } from "./config";
 import { fetchCharacterSnapshot, loginWithEve, refreshEveToken } from "./eve";
+import { claimSageIdentity, linkSageCharacter } from "./sage-online";
 import {
   addImportedInformation,
+  clearCharacterSnapshots,
   deleteSnapshot,
   exportDatabaseData,
   getSnapshot,
@@ -84,8 +87,9 @@ import {
 } from "./industrial-preparation";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
-import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus } from "./claude-integration";
+import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility } from "./claude-integration";
 import { typeImageProtocolResponse } from "./eve-assets";
+import { exportNavigationWaypoints } from "./navigation-eve-export";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "sage-asset",
@@ -276,15 +280,26 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
   };
 
   const runTrack = async (id: PrepTrackId, work: (report: (percent: number, message: string) => void) => Promise<void>) => {
-    updateTrack(id, { percent: 1, status: "running", message: `Preparing ${prepTrack(tracks, id).label}.` });
-    try {
-      await work((percent, message) => updateTrack(id, { percent: clampPrepPercent(percent), status: "running", message }));
-      updateTrack(id, { percent: 100, status: "done", message: `${prepTrack(tracks, id).label} ready.` });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      preparationFailures.push({ track: id, error: message });
-      updateTrack(id, { percent: 100, status: "error", message: `${prepTrack(tracks, id).label} needs retrying.` });
-      await logEvent("error", "master_update.feature_prepare_failed", { track: id, error: message });
+    const label = prepTrack(tracks, id).label;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      updateTrack(id, { percent: 1, status: "running", message: attempt === 1 ? `Preparing ${label}.` : `Restarting ${label} (attempt 2/2).` });
+      try {
+        await work((percent, message) => updateTrack(id, { percent: clampPrepPercent(percent), status: "running", message }));
+        updateTrack(id, { percent: 100, status: "done", message: `${label} ready${attempt === 2 ? " after automatic retry" : ""}.` });
+        if (attempt === 2) await logEvent("info", "master_update.feature_prepare_retry_recovered", { track: id, attempts: 2 });
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (attempt === 1) {
+          await logEvent("warn", "master_update.feature_prepare_retrying", { track: id, error: message, attempt: 2, maxAttempts: 2 });
+          updateTrack(id, { percent: 1, status: "running", message: `${label} failed once; restarting it once.` });
+          continue;
+        }
+        preparationFailures.push({ track: id, error: message });
+        updateTrack(id, { percent: 100, status: "error", message: `${label} failed after automatic retry.` });
+        await logEvent("error", "master_update.feature_prepare_failed", { track: id, error: message, attempts: 2 });
+        return;
+      }
     }
   };
 
@@ -320,12 +335,12 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
     } else {
       updateTrack("market-scanner", { percent: 1, status: "running", message: "Preparing retained market scanner results." }, false);
       updateTrack("opportunities", { percent: 1, status: "running", message: "Preparing ranked opportunities." });
-      try {
+      const prepareMarketScanner = async () => {
         for (let index = 0; index < snapshots.length; index += 1) {
           const snapshot = snapshots[index];
           const input = {
             characterId: snapshot.characterId,
-            maxCapital: snapshot.wallet ? Math.round(Number(snapshot.wallet)) : null,
+            maxCapital: null,
             cargoCapacityM3: null,
             maxJumps: null,
             maxMinutes: null,
@@ -337,17 +352,36 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
             updateTrack("opportunities", { percent, status: "running", message });
           });
         }
-        updateTrack("market-scanner", { percent: 100, status: "done", message: "Market Scanner ready." }, false);
-        updateTrack("opportunities", { percent: 100, status: "done", message: "Opportunities ready." });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        preparationFailures.push({ track: "market-scanner", error: message });
-        updateTrack("market-scanner", { percent: 100, status: "error", message: "Market Scanner needs retrying." }, false);
-        updateTrack("opportunities", { percent: 100, status: "error", message: "Opportunities need retrying." });
-        await logEvent("error", "master_update.feature_prepare_failed", { track: "market-scanner", error: message });
-      } finally {
-        await releaseIdleMarketAnalysisWorker().catch(() => undefined);
+      };
+      let marketPrepared = false;
+      for (let attempt = 1; attempt <= 2 && !marketPrepared; attempt += 1) {
+        try {
+          if (attempt === 2) {
+            updateTrack("market-scanner", { percent: 1, status: "running", message: "Restarting Market Scanner preparation (attempt 2/2)." }, false);
+            updateTrack("opportunities", { percent: 1, status: "running", message: "Restarting Opportunities preparation (attempt 2/2)." });
+          }
+          await prepareMarketScanner();
+          marketPrepared = true;
+          updateTrack("market-scanner", { percent: 100, status: "done", message: attempt === 2 ? "Market Scanner ready after automatic retry." : "Market Scanner ready." }, false);
+          updateTrack("opportunities", { percent: 100, status: "done", message: attempt === 2 ? "Opportunities ready after automatic retry." : "Opportunities ready." });
+          if (attempt === 2) await logEvent("info", "master_update.feature_prepare_retry_recovered", { track: "market-scanner", attempts: 2 });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // A crashed/OOM market worker must be replaced before the retry.
+          await releaseIdleMarketAnalysisWorker().catch(() => undefined);
+          if (attempt === 1) {
+            await logEvent("warn", "master_update.feature_prepare_retrying", { track: "market-scanner", error: message, attempt: 2, maxAttempts: 2 });
+            updateTrack("market-scanner", { percent: 1, status: "running", message: "Market Scanner failed once; restarting it once." }, false);
+            updateTrack("opportunities", { percent: 1, status: "running", message: "Opportunities failed once; restarting them once." });
+            continue;
+          }
+          preparationFailures.push({ track: "market-scanner", error: message });
+          updateTrack("market-scanner", { percent: 100, status: "error", message: "Market Scanner failed after automatic retry." }, false);
+          updateTrack("opportunities", { percent: 100, status: "error", message: "Opportunities failed after automatic retry." });
+          await logEvent("error", "master_update.feature_prepare_failed", { track: "market-scanner", error: message, attempts: 2 });
+        }
       }
+      await releaseIdleMarketAnalysisWorker().catch(() => undefined);
     }
 
     const inventionPrep = runTrack("inventions", async (report) => {
@@ -442,14 +476,18 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
     await Promise.all([inventionPrep, pvePrep, progressionPrep, industrialPrep]);
 
     const coreFailuresAfter = Array.isArray(coreResult?.failures) ? coreResult.failures : [];
-    if (!coreFailuresAfter.length && !preparationFailures.length) await markVersionSynced();
+    // Core source/index success is durable. A local feature-preparation failure
+    // must never force CCP/static/market downloads again on the next launch.
+    if (!coreFailuresAfter.length) await markVersionSynced();
     const totalDurationMs = Date.now() - startedAtMs;
     const failures = [...coreFailuresAfter, ...preparationFailures];
-    const finalMessage = failures.length
-      ? `Update finished, but ${failures.length} preparation step(s) need retrying.`
-      : "Everything is synced and prepared. Sage is ready.";
+    const finalMessage = coreFailuresAfter.length
+      ? `Core data update still has ${coreFailuresAfter.length} failed job(s) after automatic retry.`
+      : preparationFailures.length
+        ? `Live data synced successfully. ${preparationFailures.length} feature preparation(s) still failed after automatic retry.`
+        : "Everything is synced and prepared. Sage is ready.";
     publish(finalMessage, {
-      stage: failures.length ? "complete-with-errors" : "complete",
+      stage: coreFailuresAfter.length ? "complete-with-core-errors" : preparationFailures.length ? "complete-with-preparation-errors" : "complete",
       totalDurationMs,
       downloadDurationMs: coreResult?.downloadDurationMs,
       completed: PREP_TRACK_LABELS.length,
@@ -561,6 +599,26 @@ function eveFittingPayload(fit: any) {
     items,
   };
 }
+async function ensurePrimaryIdentityMigration() {
+  if (!app.isPackaged) return;
+  const config = await readConfig();
+  if (config.identitySchemaVersion >= CURRENT_IDENTITY_SCHEMA_VERSION) return;
+
+  const disconnectedCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  config.encryptedRefreshTokens = {};
+  config.encryptedSageSessionToken = undefined;
+  config.sageAccountId = undefined;
+  config.primaryCharacterId = undefined;
+  config.identitySchemaVersion = CURRENT_IDENTITY_SCHEMA_VERSION;
+  config.identityMigratedAt = new Date().toISOString();
+  await writeConfig(config);
+  clearCharacterSnapshots();
+  await logEvent("info", "identity.migration.reset-characters", {
+    identitySchemaVersion: CURRENT_IDENTITY_SCHEMA_VERSION,
+    disconnectedCharacters: disconnectedCharacterIds.length,
+  });
+}
+
 function createWindow() {
   window = new BrowserWindow({
     width: 1360,
@@ -592,7 +650,8 @@ if (!hasSingleInstanceLock) {
     window.focus();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    await ensurePrimaryIdentityMigration();
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -615,7 +674,11 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("external:open-support", () =>
     shell.openExternal("https://www.paypal.com/donate/?hosted_button_id=5ZE4R48W6UWMC"),
   );
-  ipcMain.handle("external:open-zkillboard", () => shell.openExternal("https://zkillboard.com/"));
+  ipcMain.handle("external:open-zkillboard", (_event, killmailId?: number) => {
+    const id = Number(killmailId ?? 0);
+    const url = Number.isSafeInteger(id) && id > 0 ? `https://zkillboard.com/kill/${id}/` : "https://zkillboard.com/";
+    return shell.openExternal(url);
+  });
   ipcMain.handle("mcp:get-setup", () => {
     const command = app.getPath("exe");
     const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
@@ -632,7 +695,7 @@ if (!hasSingleInstanceLock) {
     };
   });
   ipcMain.handle("mcp:claude-status", () => getClaudeCompatibilityStatus());
-  ipcMain.handle("mcp:claude-repair", () => ensureClaudeCompatibility());
+  ipcMain.handle("mcp:claude-repair", () => installClaudeCompatibility());
   ipcMain.handle("mcp:tunnel-status", () => getMcpTunnelStatus());
   ipcMain.handle("mcp:tunnel-configure", (_event, input: { tunnelId: string; runtimeKey: string }) => configureAndStartMcpTunnel(input));
   ipcMain.handle("mcp:open-chatgpt", () => shell.openExternal("https://chatgpt.com/plugins"));
@@ -1029,6 +1092,32 @@ if (!hasSingleInstanceLock) {
     config.encryptedRefreshTokens[login.characterId] = encrypt(
       login.refreshToken,
     );
+    const becamePrimaryIdentity = !config.primaryCharacterId;
+    if (becamePrimaryIdentity) {
+      config.primaryCharacterId = login.characterId;
+      config.sageAccountId = login.characterId;
+      config.identitySchemaVersion = CURRENT_IDENTITY_SCHEMA_VERSION;
+    }
+
+    let onlineIdentitySynced = false;
+    let onlineIdentityError: string | undefined;
+    try {
+      if (login.characterId === config.primaryCharacterId) {
+        const claimed = await claimSageIdentity(login.accessToken);
+        if (claimed.account_id !== config.sageAccountId || String(claimed.primary_character_id) !== config.primaryCharacterId) {
+          throw new Error("Sage Online returned an identity that did not match the selected primary character.");
+        }
+        config.encryptedSageSessionToken = encrypt(claimed.session_token);
+        onlineIdentitySynced = true;
+      } else if (config.encryptedSageSessionToken) {
+        await linkSageCharacter(decrypt(config.encryptedSageSessionToken), login.accessToken);
+        onlineIdentitySynced = true;
+      } else {
+        onlineIdentityError = "Reconnect the primary Sage character to restore the online session before linking additional characters.";
+      }
+    } catch (error) {
+      onlineIdentityError = error instanceof Error ? error.message : "Sage Online identity sync failed.";
+    }
     await writeConfig(config);
     const snapshot = await fetchCharacterSnapshot(
       login.characterId,
@@ -1039,6 +1128,11 @@ if (!hasSingleInstanceLock) {
       characterId: login.characterId,
       characterName: login.characterName,
       snapshot,
+      becamePrimaryIdentity,
+      sageAccountId: config.sageAccountId ?? login.characterId,
+      primaryCharacterId: config.primaryCharacterId ?? login.characterId,
+      onlineIdentitySynced,
+      onlineIdentityError,
     };
   });
   ipcMain.handle("eve:refresh", async (_event, characterId: string) => {
@@ -1249,6 +1343,12 @@ if (!hasSingleInstanceLock) {
     }
     return { success: true, waypoints: exported };
   });
+  ipcMain.handle("eve:export-navigation-route", async (_event, input: { characterId: string; systemIds: number[]; clearOtherWaypoints?: boolean }) =>
+    exportNavigationWaypoints(input, {
+      getAccessToken: eveWriteAccessToken,
+      request: (characterId, url, accessToken) => eveWriteRequest(characterId, url, undefined, accessToken),
+    }),
+  );
   ipcMain.handle("eve:export-fit", async (_event, input: { characterId: string; fit: unknown }) => {
     const characterId = String(input?.characterId ?? "");
     if (!characterId) throw new Error("Choose a connected character before exporting the fit.");
@@ -1291,7 +1391,7 @@ if (!hasSingleInstanceLock) {
     const snapshots = listSnapshots() as any[];
     const marketInput = {
       characterId: String(snapshot.characterId),
-      maxCapital: snapshot.wallet ? Math.round(Number(snapshot.wallet)) : null,
+      maxCapital: null,
       cargoCapacityM3: null,
       maxJumps: null,
       maxMinutes: null,
@@ -1327,8 +1427,8 @@ if (!hasSingleInstanceLock) {
     );
     const exportStamp = new Date().toISOString().replace(/[:.]/g, "-");
     const result = await dialog.showSaveDialog(window, {
-      title: "Export Top 1,000 arbitrage opportunities",
-      defaultPath: `new-eden-sage-top-1000-arbitrage-${exportStamp}.csv`,
+      title: "Export market arbitrage opportunities",
+      defaultPath: `new-eden-sage-arbitrage-${exportStamp}.csv`,
       filters: [{ name: "ChatGPT-ready CSV", extensions: ["csv"] }],
     });
     if (result.canceled || !result.filePath) return null;
@@ -1360,7 +1460,7 @@ if (!hasSingleInstanceLock) {
       .map((row) => row.map(csvCell).join(","))
       .join("\r\n");
     await fs.writeFile(result.filePath, `${content}\r\n`, "utf8");
-    await logEvent("info", "arbitrage.top1000_exported", {
+    await logEvent("info", "arbitrage.exported", {
       filePath: result.filePath,
       rows: rows.length,
     });

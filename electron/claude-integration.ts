@@ -1,17 +1,22 @@
-import { app } from "electron";
+import { app, shell } from "electron";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { buildClaudeMcpbBuffer } from "./claude-mcpb";
 
 const SERVER_NAME = "new-eden-sage";
+const BUNDLE_NAME = "new-eden-sage.mcpb";
 
 export type ClaudeClientStatus = {
   detected: boolean;
   configured: boolean;
   changed?: boolean;
   restartRequired?: boolean;
+  installPending?: boolean;
   path?: string;
+  bundlePath?: string;
+  method?: "mcpb" | "claude-code";
   error?: string;
 };
 
@@ -46,121 +51,112 @@ function desktopConfigDirectory() {
   return path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "Claude");
 }
 
-function sameArray(a: unknown, b: string[]) {
-  return Array.isArray(a) && a.length === b.length && a.every((value, index) => value === b[index]);
+function desktopBundleDirectory() {
+  return path.join(app.getPath("userData"), "mcp", "claude");
 }
 
-function matchesDesktopEntry(entry: unknown, launch = sageMcpLaunch()) {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  const value = entry as Record<string, unknown>;
-  const env = value.env && typeof value.env === "object" && !Array.isArray(value.env)
-    ? value.env as Record<string, unknown>
-    : {};
-  return value.command === launch.command
-    && sameArray(value.args, launch.args)
-    && env.ELECTRON_RUN_AS_NODE === "1";
+function desktopBundlePath() {
+  return path.join(desktopBundleDirectory(), BUNDLE_NAME);
 }
 
-async function readJsonObject(file: string) {
-  const text = await fs.readFile(file, "utf8");
-  const parsed = JSON.parse(text) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Configuration root must be a JSON object.");
+async function prepareClaudeDesktopBundle() {
+  const launch = sageMcpLaunch();
+  const { buffer, manifest } = buildClaudeMcpbBuffer({
+    version: app.getVersion(),
+    platform: process.platform,
+    launch,
+  });
+  const directory = desktopBundleDirectory();
+  const target = desktopBundlePath();
+  const partial = `${target}.${process.pid}.tmp`;
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(partial, buffer);
+  await fs.rm(target, { force: true }).catch(() => undefined);
+  await fs.rename(partial, target);
+  return { path: target, manifest };
+}
+
+async function readManifestIfSage(file: string) {
+  try {
+    const value = JSON.parse(await fs.readFile(file, "utf8")) as { name?: string; display_name?: string };
+    return value?.name === SERVER_NAME || value?.display_name === "New Eden Sage";
+  } catch {
+    return false;
   }
-  return parsed as Record<string, unknown>;
+}
+
+async function findInstalledClaudeDesktopExtension() {
+  const base = desktopConfigDirectory();
+  const roots = [
+    path.join(base, "Claude Extensions"),
+    path.join(base, "extensions"),
+  ];
+  for (const root of roots) {
+    let entries: import("node:fs").Dirent[];
+    try { entries = await fs.readdir(root, { withFileTypes: true }); }
+    catch { continue; }
+    for (const entry of entries.slice(0, 500)) {
+      if (!entry.isDirectory()) continue;
+      const manifest = path.join(root, entry.name, "manifest.json");
+      if (await readManifestIfSage(manifest)) return manifest;
+      let nested: import("node:fs").Dirent[];
+      try { nested = await fs.readdir(path.join(root, entry.name), { withFileTypes: true }); }
+      catch { continue; }
+      for (const child of nested.slice(0, 100)) {
+        if (!child.isDirectory()) continue;
+        const nestedManifest = path.join(root, entry.name, child.name, "manifest.json");
+        if (await readManifestIfSage(nestedManifest)) return nestedManifest;
+      }
+    }
+  }
+  return "";
 }
 
 async function getClaudeDesktopStatus(): Promise<ClaudeClientStatus> {
   const directory = desktopConfigDirectory();
-  const configPath = path.join(directory, "claude_desktop_config.json");
-  try {
-    await fs.access(directory);
-  } catch {
-    return { detected: false, configured: false, path: configPath };
-  }
-  try {
-    const config = await readJsonObject(configPath);
-    const servers = config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers)
-      ? config.mcpServers as Record<string, unknown>
-      : {};
-    return {
-      detected: true,
-      configured: matchesDesktopEntry(servers[SERVER_NAME]),
-      path: configPath,
-    };
-  } catch (error) {
-    try {
-      await fs.access(configPath);
-    } catch {
-      return { detected: true, configured: false, path: configPath };
-    }
-    return {
-      detected: true,
-      configured: false,
-      path: configPath,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
+  let detected = true;
+  try { await fs.access(directory); }
+  catch { detected = false; }
+  const installedManifest = detected ? await findInstalledClaudeDesktopExtension() : "";
+  const prepared = await prepareClaudeDesktopBundle().catch(() => null);
+  return {
+    detected,
+    configured: Boolean(installedManifest),
+    path: installedManifest || directory,
+    bundlePath: prepared?.path ?? desktopBundlePath(),
+    method: "mcpb",
+  };
 }
 
-async function ensureClaudeDesktop(): Promise<ClaudeClientStatus> {
+export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatus> {
   const directory = desktopConfigDirectory();
-  const configPath = path.join(directory, "claude_desktop_config.json");
-  try {
-    await fs.access(directory);
-  } catch {
-    return { detected: false, configured: false, path: configPath };
+  const before = await findInstalledClaudeDesktopExtension();
+  const prepared = await prepareClaudeDesktopBundle();
+  // Let Windows/macOS file association be the source of truth here. Claude may
+  // be installed but not have created its config directory until first launch.
+  const openError = await shell.openPath(prepared.path);
+  if (openError) {
+    shell.showItemInFolder(prepared.path);
+    return {
+      detected: true,
+      configured: Boolean(before),
+      changed: false,
+      installPending: false,
+      method: "mcpb",
+      path: before || directory,
+      bundlePath: prepared.path,
+      error: `Claude did not accept the bundle automatically (${openError}). In Claude Desktop use Settings > Extensions > Advanced settings > Install Extension and select the highlighted ${BUNDLE_NAME} file.`,
+    };
   }
-
-  let config: Record<string, unknown> = {};
-  let existed = true;
-  try {
-    config = await readJsonObject(configPath);
-  } catch (error) {
-    try {
-      await fs.access(configPath);
-    } catch {
-      existed = false;
-    }
-    if (existed) {
-      return {
-        detected: true,
-        configured: false,
-        path: configPath,
-        error: `Claude Desktop configuration is not valid JSON. Sage left it unchanged: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-  }
-
-  const servers = config.mcpServers && typeof config.mcpServers === "object" && !Array.isArray(config.mcpServers)
-    ? { ...(config.mcpServers as Record<string, unknown>) }
-    : {};
-  const launch = sageMcpLaunch();
-  if (matchesDesktopEntry(servers[SERVER_NAME], launch)) {
-    return { detected: true, configured: true, changed: false, restartRequired: false, path: configPath };
-  }
-
-  servers[SERVER_NAME] = {
-    command: launch.command,
-    args: launch.args,
-    env: launch.env,
-  };
-  const next = { ...config, mcpServers: servers };
-  await fs.mkdir(directory, { recursive: true });
-
-  if (existed) {
-    await fs.copyFile(configPath, `${configPath}.sage-backup`).catch(() => undefined);
-  }
-  const temporary = `${configPath}.sage-${process.pid}.tmp`;
-  await fs.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-  await fs.rename(temporary, configPath);
-
   return {
     detected: true,
-    configured: true,
+    configured: Boolean(before),
     changed: true,
-    restartRequired: true,
-    path: configPath,
+    installPending: true,
+    restartRequired: false,
+    method: "mcpb",
+    path: before || directory,
+    bundlePath: prepared.path,
   };
 }
 
@@ -210,11 +206,12 @@ function claudeCodeServerJson() {
 
 async function getClaudeCodeStatus(): Promise<ClaudeClientStatus> {
   const executable = await findClaudeCode();
-  if (!executable) return { detected: false, configured: false };
+  if (!executable) return { detected: false, configured: false, method: "claude-code" };
   const result = await runCommand(executable, ["mcp", "get", SERVER_NAME], 5000);
   return {
     detected: true,
     configured: result.code === 0,
+    method: "claude-code",
     path: executable,
     error: result.code === 0 ? undefined : (result.stderr.trim() || undefined),
   };
@@ -222,7 +219,7 @@ async function getClaudeCodeStatus(): Promise<ClaudeClientStatus> {
 
 async function ensureClaudeCode(): Promise<ClaudeClientStatus> {
   const executable = await findClaudeCode();
-  if (!executable) return { detected: false, configured: false };
+  if (!executable) return { detected: false, configured: false, method: "claude-code" };
   const existing = await getClaudeCodeStatus();
   const result = await runCommand(
     executable,
@@ -233,6 +230,7 @@ async function ensureClaudeCode(): Promise<ClaudeClientStatus> {
     return {
       detected: true,
       configured: existing.configured,
+      method: "claude-code",
       path: executable,
       error: result.stderr.trim() || result.stdout.trim() || "Claude Code rejected the MCP configuration.",
     };
@@ -242,6 +240,7 @@ async function ensureClaudeCode(): Promise<ClaudeClientStatus> {
     configured: true,
     changed: !existing.configured,
     restartRequired: false,
+    method: "claude-code",
     path: executable,
   };
 }
@@ -254,26 +253,29 @@ export async function getClaudeCompatibilityStatus(): Promise<ClaudeCompatibilit
   return { desktop, code, launch: sageMcpLaunch() };
 }
 
+/** Prepare the Desktop MCP bundle without popping Claude, and keep Claude Code registered. */
 export async function ensureClaudeCompatibility(): Promise<ClaudeCompatibilityStatus> {
   const [desktop, code] = await Promise.all([
-    ensureClaudeDesktop(),
+    getClaudeDesktopStatus(),
+    ensureClaudeCode(),
+  ]);
+  return { desktop, code, launch: sageMcpLaunch() };
+}
+
+/** User-initiated install/repair: open the MCPB installer in Claude Desktop and repair Claude Code too. */
+export async function installClaudeCompatibility(): Promise<ClaudeCompatibilityStatus> {
+  const [desktop, code] = await Promise.all([
+    installClaudeDesktopExtension(),
     ensureClaudeCode(),
   ]);
   return { desktop, code, launch: sageMcpLaunch() };
 }
 
 export function claudeSetupText() {
-  const launch = sageMcpLaunch();
-  const desktopJson = JSON.stringify({
-    mcpServers: {
-      [SERVER_NAME]: {
-        command: launch.command,
-        args: launch.args,
-        env: launch.env,
-      },
-    },
-  }, null, 2);
   const codeJson = claudeCodeServerJson();
   const claudeCodeCommand = `claude mcp add-json --scope user ${SERVER_NAME} '${codeJson}'`;
-  return { desktopJson, claudeCodeCommand };
+  return {
+    desktopJson: "Claude Desktop now uses the New Eden Sage MCPB/Desktop Extension installer. Use Install / repair Claude in Sage Settings.",
+    claudeCodeCommand,
+  };
 }

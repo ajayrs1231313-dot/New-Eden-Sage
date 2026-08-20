@@ -22,7 +22,7 @@ export type MasterUpdateProgress = {
 };
 
 type ProgressCallback = (progress: MasterUpdateProgress) => void;
-type TimedResult = { name: string; durationMs: number; ok: boolean; detail?: unknown; error?: string };
+type TimedResult = { name: string; durationMs: number; ok: boolean; detail?: unknown; error?: string; attempts?: number; firstError?: string };
 
 const DERIVED_TASKS = [
   "market-static",
@@ -104,7 +104,7 @@ async function refreshConnectedCharacters(onProgress: (completed: number, total:
   return { refreshed, failed };
 }
 
-async function timed(name: string, work: () => Promise<unknown>): Promise<TimedResult> {
+async function timed(name: string, work: () => Promise<unknown>, logFailure = true): Promise<TimedResult> {
   const started = Date.now();
   try {
     const detail = await work();
@@ -112,13 +112,32 @@ async function timed(name: string, work: () => Promise<unknown>): Promise<TimedR
   } catch (error) {
     const durationMs = Date.now() - started;
     const normalizedError = error instanceof Error ? error : new Error(String(error));
-    await logEvent("error", "master_update.job_failed", {
+    if (logFailure) await logEvent("error", "master_update.job_failed", {
       job: name,
       durationMs,
       error: normalizedError,
     });
     return { name, durationMs, ok: false, error: normalizedError.message };
   }
+}
+
+async function timedWithRetry(
+  name: string,
+  work: () => Promise<unknown>,
+  onRetry?: (first: TimedResult) => void | Promise<void>,
+): Promise<TimedResult> {
+  const first = await timed(name, work, false);
+  if (first.ok) return { ...first, attempts: 1 };
+  await logEvent("warn", "master_update.job_retrying", { job: name, firstError: first.error, attempt: 2, maxAttempts: 2 });
+  await onRetry?.(first);
+  const second = await timed(name, work, false);
+  if (second.ok) {
+    await logEvent("info", "master_update.job_retry_recovered", { job: name, firstError: first.error, attempts: 2 });
+    return { ...second, durationMs: first.durationMs + second.durationMs, attempts: 2, firstError: first.error };
+  }
+  await logEvent("error", "master_update.job_retry_exhausted", { job: name, firstError: first.error, finalError: second.error, attempts: 2 });
+  await logEvent("error", "master_update.job_failed", { job: name, durationMs: first.durationMs + second.durationMs, error: second.error, attempts: 2 });
+  return { ...second, durationMs: first.durationMs + second.durationMs, attempts: 2, firstError: first.error };
 }
 
 export async function runMasterUpdate(onProgress: ProgressCallback) {
@@ -139,7 +158,7 @@ export async function runMasterUpdate(onProgress: ProgressCallback) {
   await logEvent("info", "master_update.started", { cpuWorkers });
 
   const sourceStartedAt = Date.now();
-  const staticJob = timed("CCP static data", async () => {
+  const staticJob = timedWithRetry("CCP static data", async () => {
     const result = await stageStaticDataRefreshLowImpact(true, true);
     staticPercent = 100;
     emitSource("static-data", "CCP static-data check/download complete.");
@@ -153,17 +172,24 @@ export async function runMasterUpdate(onProgress: ProgressCallback) {
     return result;
   });
 
-  const characterJob = timed("Connected characters", async () => refreshConnectedCharacters((completed, total, message) => {
-    characterPercent = total ? (completed / total) * 100 : 100;
-    emitSource("characters", message, completed, total);
-  })).then((result) => {
+  const characterJob = timedWithRetry("Connected characters", async () => {
+    const result = await refreshConnectedCharacters((completed, total, message) => {
+      characterPercent = total ? (completed / total) * 100 : 100;
+      emitSource("characters", message, completed, total);
+    });
+    if (result.failed.length) throw new Error(`${result.failed.length} connected character refresh${result.failed.length === 1 ? "" : "es"} failed: ${result.failed.map((item) => `${item.characterId}: ${item.error}`).join(" | ")}`);
+    return result;
+  }, () => {
+    characterPercent = 0;
+    emitSource("characters", "Character refresh failed once; restarting it once.");
+  }).then((result) => {
     characterPercent = 100;
     if (!result.ok) emitSource("characters", `Character refresh failed: ${result.error}`);
     timings.push(result);
     return result;
   });
 
-  const marketJob = timed("All-region market databases", async () => runWorker<any>("master-market-update-worker.js", { workerCount: MARKET_DOWNLOAD_WORKERS }, (message) => {
+  const marketJob = timedWithRetry("All-region market databases", async () => runWorker<any>("master-market-update-worker.js", { workerCount: MARKET_DOWNLOAD_WORKERS }, (message) => {
     if (message?.type === "market-start") {
       emitSource("market", `Downloading ${message.regionCount} market regions across ${message.workerCount} workers…`, 0, message.regionCount);
     } else if (message?.type === "region-complete") {
@@ -172,7 +198,10 @@ export async function runMasterUpdate(onProgress: ProgressCallback) {
     } else if (message?.type === "progress" && message.regionName) {
       emitSource("market", `${message.regionName}: page ${message.pagesDone}/${message.pagesTotal}`);
     }
-  })).then((result) => {
+  }), () => {
+    marketPercent = 0;
+    emitSource("market", "Market download failed once; restarting it once.");
+  }).then((result) => {
     marketPercent = 100;
     if (!result.ok) emitSource("market", `Market download failed: ${result.error}`);
     else emitSource("market", "All-region market databases downloaded and saved.");
@@ -183,7 +212,7 @@ export async function runMasterUpdate(onProgress: ProgressCallback) {
   let completedTasks = 0;
   const derivedResults: TimedResult[] = [];
   const runDerivedTask = async (task: DerivedTask, workerCount = 1) => {
-    const result = await timed(task, () => runWorker<any>("master-derived-worker.js", { task, workerCount }, (message) => {
+    const result = await timedWithRetry(task, () => runWorker<any>("master-derived-worker.js", { task, workerCount }, (message) => {
       if (message?.type === "progress" && message.message) {
         emit({
           running: true,
@@ -195,7 +224,17 @@ export async function runMasterUpdate(onProgress: ProgressCallback) {
           total: DERIVED_TASKS.length,
         });
       }
-    }));
+    }), () => {
+      emit({
+        running: true,
+        stage: `prepare:${task}`,
+        message: `${task} failed once; restarting that preparation once.`,
+        percent: 75 + Math.round((completedTasks / DERIVED_TASKS.length) * 25),
+        downloadDurationMs,
+        completed: completedTasks,
+        total: DERIVED_TASKS.length,
+      });
+    });
     derivedResults.push(result);
     timings.push(result);
     completedTasks += 1;

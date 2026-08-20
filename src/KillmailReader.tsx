@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { FittingShowInfo, type ShowInfoTarget } from "./FittingShowInfo";
 
 type Killmail = {
   killmailId: number;
@@ -127,6 +128,7 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
   const [names, setNames] = useState<Map<number, string>>(new Map());
   const [resolving, setResolving] = useState(false);
   const [profile, setProfile] = useState<HullProfile | null>(null);
+  const [showInfoTarget, setShowInfoTarget] = useState<ShowInfoTarget | null>(null);
   const sage = window.sage as any;
 
   const victim = killmail.victim ?? {};
@@ -213,7 +215,7 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
           <div className="killmail-badges">{badges.map((badge) => <span key={badge}>{badge}</span>)}</div>
         </div>
       </div>
-      <button className="killmail-close" onClick={onClose}>Close reader</button>
+      <div className="killmail-reader-actions"><button type="button" className="killmail-zkill-link" onClick={() => void sage.openZkillboard?.(killmail.killmailId)}>Open on zKillboard ↗</button><button className="killmail-close" onClick={onClose}>Close reader</button></div>
     </header>
 
     <div className="killmail-facts">
@@ -283,10 +285,10 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
             const damage = Number(attacker?.damage_done ?? 0);
             const percent = Math.min(100, Math.max(0, damage / totalDamage * 100));
             return <div className={`killmail-attacker${attacker?.final_blow ? " final-blow" : ""}`} key={`${attacker?.character_id ?? attacker?.corporation_id ?? "npc"}-${index}`}>
-              {shipId > 0 ? <img src={typeImage(shipId, "icon", 64)} alt="" /> : <div className="killmail-icon-placeholder" />}
+              {shipId > 0 ? <button type="button" className="killmail-attacker-type-button ship" onClick={() => setShowInfoTarget({ typeId: shipId, name: label(shipId, "Ship") })} title="View ship info"><img src={typeImage(shipId, "icon", 64)} alt="" /></button> : <div className="killmail-icon-placeholder" />}
               <div className="killmail-attacker-main">
                 <div><strong>{attackerName}</strong>{attacker?.final_blow && <span className="final-blow-badge">FINAL BLOW</span>}</div>
-                <span>{shipId ? label(shipId, "Ship") : "No ship recorded"}{attacker?.weapon_type_id ? ` · ${label(attacker.weapon_type_id, "Weapon")}` : ""}</span>
+                <span>{shipId ? <button type="button" className="killmail-attacker-type-button text" onClick={() => setShowInfoTarget({ typeId: shipId, name: label(shipId, "Ship") })}>{label(shipId, "Ship")}</button> : "No ship recorded"}{attacker?.weapon_type_id ? <><span> · </span><button type="button" className="killmail-attacker-type-button text weapon" onClick={() => setShowInfoTarget({ typeId: Number(attacker.weapon_type_id), name: label(attacker.weapon_type_id, "Weapon") })} title="View attacker weapon/module info">{label(attacker.weapon_type_id, "Weapon")}</button></> : null}</span>
                 <small>{attacker?.corporation_id && attacker?.character_id ? label(attacker.corporation_id, "Corporation") : ""}{attacker?.alliance_id ? ` · ${label(attacker.alliance_id, "Alliance")}` : ""}</small>
                 <div className="attacker-damage-bar"><i style={{ width: `${percent}%` }} /></div>
               </div>
@@ -297,5 +299,6 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
         </div>
       </article>
     </div>
+    <FittingShowInfo target={showInfoTarget} onClose={() => setShowInfoTarget(null)} />
   </section>;
 }

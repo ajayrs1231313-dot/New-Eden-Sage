@@ -1,12 +1,15 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { KillmailReader } from "./KillmailReader";
+import { CorporationDoctrines, PENDING_DOCTRINE_FIT_KEY } from "./CorporationDoctrines";
+import { buildSystemNewsKillmailWindows, mergeSystemNewsKillmails, type KillmailWindowKey } from "./system-news-killmail-windows";
 
 type SystemHit = { systemId: number; name: string; regionName: string; constellationName: string; securityStatus: number };
 type Intel = any;
 type Watched = { systemId: number; name: string };
-type CorpSection = "system-news" | "overview" | "members" | "structures";
+type CorpSection = "system-news" | "overview" | "members" | "doctrines" | "structures" | "alliance";
 type KillmailStatus = {
   cooldownMs?: number;
+  cacheTtlMs?: number;
   lookbackSeconds?: number;
   backfillDays?: number;
   lastRequestAt?: string | null;
@@ -24,6 +27,8 @@ type KillmailStatus = {
 };
 
 type CorpRecord = {
+  characterId: string;
+  characterName: string;
   corporationId: number;
   name: string;
   snapshot: any;
@@ -32,13 +37,6 @@ type CorpRecord = {
 };
 
 const STORAGE_KEY = "new-eden-sage-watched-systems";
-type KillmailWindowKey = "1h" | "24h" | "7d" | "30d";
-const KILLMAIL_WINDOW_MS: Record<KillmailWindowKey, number> = {
-  "1h": 60 * 60 * 1000,
-  "24h": 24 * 60 * 60 * 1000,
-  "7d": 7 * 24 * 60 * 60 * 1000,
-  "30d": 30 * 24 * 60 * 60 * 1000,
-};
 
 function loadWatched(): Watched[] {
   try {
@@ -112,10 +110,10 @@ function unavailable(value: any) {
   return Boolean(value && typeof value === "object" && value.unavailable);
 }
 
-function unavailableText(value: any, fallback: string) {
+function unavailableText(value: any, fallback: string, characterName = "this character") {
   if (!unavailable(value)) return fallback;
-  if (Number(value.status) === 403) return "This connected character does not currently have the required corporation role/scope. Reconnect a CEO/Director character to grant Sage the current corporation membership scopes.";
-  return `ESI did not return this corporation dataset${value.status ? ` (HTTP ${value.status})` : ""}.`;
+  if ([401, 403].includes(Number(value.status))) return `Not available to ${characterName} with that character's current EVE corporation permissions. Other corporation datasets remain available.`;
+  return `This dataset was unavailable during ${characterName}'s last sync${value.status ? ` (HTTP ${value.status})` : ""}. Other corporation datasets remain available.`;
 }
 
 function assetUrl(typeId: number, variation: "icon" | "render" = "icon", size = 64) {
@@ -126,9 +124,9 @@ function refreshMessage(status: KillmailStatus | undefined, systems: number) {
   if (!status) return `Refreshed ${systems} watched system${systems === 1 ? "" : "s"}.`;
   if (status.lastError) return `ESI refreshed. Killmail cache kept safely; last zKillboard request reported: ${status.lastError}`;
   const backfillSystems = status.backfillSystems ?? status.queuedSystems ?? 0;
-  if ((status.queuedBackfills ?? 0) > 0) return `ESI refreshed for ${systems} system${systems === 1 ? "" : "s"}. 30-day kill history is backfilling for ${backfillSystems} watched system${backfillSystems === 1 ? "" : "s"}; Sage still makes only one zKillboard request every five minutes.`;
-  if (status.cycleAccepted === false) return `ESI refreshed for ${systems} system${systems === 1 ? "" : "s"}. Killmails stayed cached - the five-minute zKillboard courtesy cooldown has ${duration(status.remainingMs)} remaining.`;
-  if ((status.queuedRegions ?? 0) > 0) return `ESI refreshed for ${systems} system${systems === 1 ? "" : "s"}. Recent killmail refresh queued across ${status.queuedRegions} remaining region${status.queuedRegions === 1 ? "" : "s"}; Sage will make only one zKillboard request every five minutes.`;
+  if ((status.queuedBackfills ?? 0) > 0) return `ESI refreshed for ${systems} system${systems === 1 ? "" : "s"}. Recent watched-system pulls are prioritised; 30-day kill history is backfilling for ${backfillSystems} system${backfillSystems === 1 ? "" : "s"}.`;
+  if (status.cycleAccepted === false && (status.remainingMs ?? 0) > 0) return `ESI refreshed for ${systems} system${systems === 1 ? "" : "s"}. Recent killmails are cached; next zKill request is available in ${duration(status.remainingMs)}.`;
+  if ((status.queuedRegions ?? 0) > 0) return `ESI refreshed for ${systems} system${systems === 1 ? "" : "s"}. ${status.queuedRegions} recent system request${status.queuedRegions === 1 ? "" : "s"} remain in the shared priority queue.`;
   return `ESI and killmail intelligence refreshed for ${systems} watched system${systems === 1 ? "" : "s"}.`;
 }
 
@@ -155,10 +153,20 @@ function useResolvedNames(ids: number[]) {
   return names;
 }
 
+
+function AllianceManagementReserved() {
+  return <div className="corp-data-view corp-alliance-reserved">
+    <div className="corp-alliance-reserved-mark">ALLIANCE</div>
+    <p className="eyebrow">CORPORATION MANAGEMENT · ALLIANCE</p>
+    <h3>Alliance Management</h3>
+    <p>This workspace is reserved for alliance-level tools. Corporation Management remains the single command area for corporation and alliance operations.</p>
+  </div>;
+}
+
 export function CorporationManagement() {
-  const [section, setSection] = useState<CorpSection>("system-news");
+  const [section, setSection] = useState<CorpSection>(() => sessionStorage.getItem(PENDING_DOCTRINE_FIT_KEY) ? "doctrines" : "system-news");
   const [snapshots, setSnapshots] = useState<any[]>([]);
-  const [corpId, setCorpId] = useState<number | null>(null);
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
 
   async function reloadSnapshots() {
     try {
@@ -171,52 +179,60 @@ export function CorporationManagement() {
 
   useEffect(() => { void reloadSnapshots(); }, []);
 
-  const corporations = useMemo<CorpRecord[]>(() => {
-    const newest = new Map<number, any>();
-    for (const snapshot of snapshots) {
-      const id = Number(snapshot?.character?.corporation_id ?? 0);
-      if (!id) continue;
-      const previous = newest.get(id);
-      if (!previous || Date.parse(snapshot?.updatedAt ?? "") > Date.parse(previous?.updatedAt ?? "")) newest.set(id, snapshot);
-    }
-    return [...newest.entries()].map(([corporationId, snapshot]) => {
-      const data = snapshot?.extended?.corporation ?? {};
-      const publicData = data.publicData ?? snapshot?.character?.corporation_data ?? {};
-      return {
-        corporationId,
-        name: String(publicData?.name ?? snapshot?.character?.corporation_name ?? `Corporation ${corporationId}`),
-        snapshot,
-        publicData,
-        data,
-      };
-    }).sort((a, b) => a.name.localeCompare(b.name));
-  }, [snapshots]);
+  const corporations = useMemo<CorpRecord[]>(() => snapshots.flatMap((snapshot) => {
+    const corporationId = Number(snapshot?.character?.corporation_id ?? 0);
+    const characterId = String(snapshot?.characterId ?? "");
+    if (!corporationId || !characterId) return [];
+    const data = snapshot?.extended?.corporation ?? {};
+    const publicData = data.publicData ?? snapshot?.character?.corporation_data ?? {};
+    return [{
+      characterId,
+      characterName: String(snapshot?.character?.name ?? `Character ${characterId}`),
+      corporationId,
+      name: String(publicData?.name ?? snapshot?.character?.corporation_name ?? `Corporation ${corporationId}`),
+      snapshot,
+      publicData,
+      data,
+    }];
+  }).sort((a, b) => a.characterName.localeCompare(b.characterName)), [snapshots]);
 
   useEffect(() => {
-    if (!corporations.length) { setCorpId(null); return; }
-    if (!corpId || !corporations.some((corp) => corp.corporationId === corpId)) setCorpId(corporations[0].corporationId);
-  }, [corporations, corpId]);
+    if (!corporations.length) { setSelectedCharacterId(null); return; }
+    if (!selectedCharacterId || !corporations.some((corp) => corp.characterId === selectedCharacterId)) setSelectedCharacterId(corporations[0].characterId);
+  }, [corporations, selectedCharacterId]);
 
-  const corporation = corporations.find((item) => item.corporationId === corpId) ?? corporations[0] ?? null;
+  useEffect(() => {
+    if (!corporations.length || !sessionStorage.getItem(PENDING_DOCTRINE_FIT_KEY)) return;
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(PENDING_DOCTRINE_FIT_KEY) ?? "null");
+      const targetCorporationId = Number(pending?.corporationId ?? 0);
+      const target = targetCorporationId ? corporations.find((corp) => corp.corporationId === targetCorporationId) : null;
+      if (target) setSelectedCharacterId(target.characterId);
+    } catch { /* Ignore malformed legacy pending data. */ }
+  }, [corporations]);
+
+  const corporation = corporations.find((item) => item.characterId === selectedCharacterId) ?? corporations[0] ?? null;
 
   return <section className="corp-command">
     <div className="corp-subtabs">
       <button className={section === "system-news" ? "active" : ""} onClick={() => setSection("system-news")}>System News</button>
       <button className={section === "overview" ? "active" : ""} onClick={() => setSection("overview")}>Overview</button>
       <button className={section === "members" ? "active" : ""} onClick={() => setSection("members")}>Members</button>
+      <button className={section === "doctrines" ? "active" : ""} onClick={() => setSection("doctrines")}>Doctrines</button>
       <button className={section === "structures" ? "active" : ""} onClick={() => setSection("structures")}>Structures</button>
+      <button className={section === "alliance" ? "active" : ""} onClick={() => setSection("alliance")}>Alliance Management</button>
     </div>
 
-    {section === "system-news" ? <SystemNews /> : <>
+    {section === "system-news" ? <SystemNews /> : section === "alliance" ? <AllianceManagementReserved /> : <>
       <div className="corp-data-head">
         <div>
           <p className="eyebrow">CORPORATION · MANAGEMENT</p>
           <h2>{corporation?.name ?? "Corporation data"}</h2>
-          <p>{corporation ? `Synced through ${corporation.snapshot?.character?.name ?? "connected character"} · ${formatDate(corporation.snapshot?.updatedAt)}` : "Connect and sync an EVE character to populate corporation management."}</p>
+          <p>{corporation ? `Selected character: ${corporation.characterName} · synced ${formatDate(corporation.snapshot?.updatedAt)}` : "Connect and sync an EVE character to populate corporation management."}</p>
         </div>
         <div className="corp-data-actions">
-          {corporations.length > 1 && <select value={corpId ?? ""} onChange={(event) => setCorpId(Number(event.target.value))}>
-            {corporations.map((corp) => <option key={corp.corporationId} value={corp.corporationId}>{corp.name}</option>)}
+          {corporations.length > 1 && <select value={selectedCharacterId ?? ""} onChange={(event) => setSelectedCharacterId(event.target.value)}>
+            {corporations.map((corp) => <option key={corp.characterId} value={corp.characterId}>{corp.characterName} · {corp.name}</option>)}
           </select>}
           <button onClick={() => void reloadSnapshots()}>Reload local data</button>
         </div>
@@ -225,7 +241,9 @@ export function CorporationManagement() {
         ? <CorporationOverview corporation={corporation} />
         : section === "members"
           ? <CorporationMembers corporation={corporation} snapshots={snapshots} />
-          : <CorporationStructures corporation={corporation} />}
+          : section === "doctrines"
+            ? <CorporationDoctrines corporation={corporation} snapshots={snapshots} />
+            : <CorporationStructures corporation={corporation} />}
     </>}
   </section>;
 }
@@ -254,13 +272,13 @@ function CorporationOverview({ corporation }: { corporation: CorpRecord }) {
 
     <div className="corp-overview-grid">
       <Metric label="Members" value={number(p.member_count ?? 0)} detail="Public corporation count" />
-      <Metric label="Structures" value={number(structures.length)} detail={`${starbases.length} legacy starbase${starbases.length === 1 ? "" : "s"}`} />
-      <Metric label="Assets" value={number(assets.length)} detail="Corporation asset stacks visible to this token" />
-      <Metric label="Blueprints" value={number(blueprints.length)} detail="Corporation blueprint records" />
-      <Metric label="Industry jobs" value={number(jobs.length)} detail={`${jobs.filter((job) => !job.completed_date && !["delivered", "cancelled", "reverted"].includes(String(job.status))).length} currently active`} />
-      <Metric label="Market orders" value={number(orders.length)} detail="Corporation orders currently captured" />
-      <Metric label="Contracts" value={number(contracts.length)} detail="Corporation contract records" />
-      <Metric label="Wallet divisions" value={number(wallets.length)} detail="Visible corporation wallet divisions" />
+      <Metric label="Structures" value={unavailable(d.structures) ? "—" : number(structures.length)} detail={unavailable(d.structures) ? unavailableText(d.structures, "", corporation.characterName) : `${starbases.length} legacy starbase${starbases.length === 1 ? "" : "s"}`} />
+      <Metric label="Assets" value={unavailable(d.assets) ? "—" : number(assets.length)} detail={unavailable(d.assets) ? unavailableText(d.assets, "", corporation.characterName) : "Corporation asset stacks returned for the selected character"} />
+      <Metric label="Blueprints" value={unavailable(d.blueprints) ? "—" : number(blueprints.length)} detail={unavailable(d.blueprints) ? unavailableText(d.blueprints, "", corporation.characterName) : "Corporation blueprint records"} />
+      <Metric label="Industry jobs" value={unavailable(d.industryJobs) ? "—" : number(jobs.length)} detail={unavailable(d.industryJobs) ? unavailableText(d.industryJobs, "", corporation.characterName) : `${jobs.filter((job) => !job.completed_date && !["delivered", "cancelled", "reverted"].includes(String(job.status))).length} currently active`} />
+      <Metric label="Market orders" value={unavailable(d.marketOrders) ? "—" : number(orders.length)} detail={unavailable(d.marketOrders) ? unavailableText(d.marketOrders, "", corporation.characterName) : "Corporation orders currently captured"} />
+      <Metric label="Contracts" value={unavailable(d.contracts) ? "—" : number(contracts.length)} detail={unavailable(d.contracts) ? unavailableText(d.contracts, "", corporation.characterName) : "Corporation contract records"} />
+      <Metric label="Wallet divisions" value={unavailable(d.wallets) ? "—" : number(wallets.length)} detail={unavailable(d.wallets) ? unavailableText(d.wallets, "", corporation.characterName) : "Visible corporation wallet divisions"} />
     </div>
 
     <div className="corp-detail-grid">
@@ -301,11 +319,9 @@ function CorporationMembers({ corporation, snapshots }: { corporation: CorpRecor
 
   return <div className="corp-data-view">
     <div className="corp-members-toolbar">
-      <div><p className="eyebrow">MEMBER ROSTER</p><h3>{members.length ? `${number(members.length)} ESI members` : `${number(rows.length)} visible members`}</h3><small>{tracking.length ? "Director member-tracking data is available." : unavailableText(d.memberTracking, "Member-tracking detail is not available for this token/role.")}</small></div>
+      <div><p className="eyebrow">MEMBER ROSTER</p><h3>{members.length ? `${number(members.length)} ESI members` : `${number(rows.length)} visible members`}</h3><small>{tracking.length ? "Member-tracking data is available to the selected character." : unavailableText(d.memberTracking, "Member-tracking detail is not available to the selected character.", corporation.characterName)}</small></div>
       <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search members or titles…" />
     </div>
-
-    {unavailable(rawMembers) && <div className="corp-data-warning">{unavailableText(rawMembers, "Member list unavailable.")}</div>}
     <div className="member-table">
       <div className="member-table-head"><span>Member</span><span>Titles / role</span><span>Last activity</span><span>Last known state</span></div>
       {rows.map((row) => {
@@ -320,7 +336,7 @@ function CorporationMembers({ corporation, snapshots }: { corporation: CorpRecor
           <div className="member-state">{shipId > 0 && <img src={assetUrl(shipId, "icon", 48)} alt="" />}<div><strong>{shipId > 0 ? row.connectedSnapshot?.ship?.ship_type_name ?? displayName(shipId, `Type ${shipId}`) : "Ship unavailable"}</strong><small>{locationId > 0 ? displayName(locationId, `Location ${locationId}`) : row.connectedSnapshot?.location?.solar_system_name ?? "Location unavailable"}</small></div></div>
         </div>;
       })}
-      {!rows.length && <div className="system-empty compact">No corporation members are currently visible in the local snapshot.</div>}
+      {!rows.length && <div className="system-empty compact">{unavailable(rawMembers) ? unavailableText(rawMembers, "Member list unavailable.", corporation.characterName) : "No corporation members are currently visible in the local snapshot."}</div>}
     </div>
   </div>;
 }
@@ -336,13 +352,11 @@ function CorporationStructures({ corporation }: { corporation: CorpRecord }) {
 
   return <div className="corp-data-view">
     <div className="structure-summary">
-      <Metric label="Upwell / corporation structures" value={number(structures.length)} detail={unavailable(d.structures) ? "Dataset unavailable" : "Corporation structures returned by ESI"} />
-      <Metric label="Legacy starbases" value={number(starbases.length)} detail={unavailable(d.starbases) ? "Dataset unavailable" : "POS/starbase records"} />
-      <Metric label="Industry facilities" value={number(facilities.length)} detail={unavailable(d.facilities) ? "Dataset unavailable" : "Corporation facilities"} />
+      <Metric label="Upwell / corporation structures" value={unavailable(d.structures) ? "—" : number(structures.length)} detail={unavailable(d.structures) ? unavailableText(d.structures, "", corporation.characterName) : "Corporation structures returned by ESI"} />
+      <Metric label="Legacy starbases" value={unavailable(d.starbases) ? "—" : number(starbases.length)} detail={unavailable(d.starbases) ? unavailableText(d.starbases, "", corporation.characterName) : "POS/starbase records"} />
+      <Metric label="Industry facilities" value={unavailable(d.facilities) ? "—" : number(facilities.length)} detail={unavailable(d.facilities) ? unavailableText(d.facilities, "", corporation.characterName) : "Corporation facilities"} />
       <Metric label="Services" value={number(structures.reduce((sum, item) => sum + asArray(item.services).length, 0))} detail="Structure service records" />
     </div>
-
-    {unavailable(d.structures) && <div className="corp-data-warning">{unavailableText(d.structures, "Corporation structure list unavailable.")}</div>}
     <div className="structure-card-grid">
       {structures.map((item, index) => {
         const typeId = Number(item.type_id ?? 0);
@@ -400,7 +414,7 @@ function SystemNews() {
           const key = String(systemId);
           next[systemId] = {
             ...next[systemId],
-            killmails: payload?.killmailsBySystem?.[key] ?? next[systemId].killmails,
+            killmails: mergeSystemNewsKillmails(next[systemId].killmails ?? [], payload?.killmailsBySystem?.[key] ?? []),
             killmailRefresh: { ...next[systemId].killmailRefresh, lastUpdatedAt: payload?.updatedAtBySystem?.[key] ?? next[systemId].killmailRefresh?.lastUpdatedAt ?? null, queued: Boolean(payload?.queuedBySystem?.[key]), global: status ?? next[systemId].killmailRefresh?.global },
           };
         }
@@ -408,7 +422,7 @@ function SystemNews() {
       });
       if (status?.lastError) setMessage(`Killmail refresh warning: ${status.lastError}. Cached killmails were preserved.`);
       else if ((status?.queuedBackfills ?? 0) > 0) setMessage(`Killmail cache updated. 30-day history backfill has ${status?.queuedBackfills ?? 0} request${status?.queuedBackfills === 1 ? "" : "s"} queued for ${status?.backfillSystems ?? 0} system${status?.backfillSystems === 1 ? "" : "s"}.`);
-      else if ((status?.queuedRegions ?? 0) > 0) setMessage(`Killmail cache updated. ${status?.queuedRegions ?? 0} recent region${status?.queuedRegions === 1 ? "" : "s"} remain in the five-minute courtesy queue.`);
+      else if ((status?.queuedRegions ?? 0) > 0) setMessage(`Killmail cache updated. ${status?.queuedRegions ?? 0} recent system request${status?.queuedRegions === 1 ? "" : "s"} remain in the shared priority queue.`);
       else setMessage("Killmail refresh queue complete. Watched-system kill history is up to date.");
     });
   }, []);
@@ -438,7 +452,17 @@ function SystemNews() {
     try {
       const result = await sage.refreshWatchedSystemIntelligence(unique);
       const systems = Array.isArray(result?.systems) ? result.systems : [];
-      setIntel((current) => { const next = { ...current }; for (const value of systems) next[Number(value.system.systemId)] = value; return next; });
+      setIntel((current) => {
+        const next = { ...current };
+        for (const value of systems) {
+          const systemId = Number(value.system.systemId);
+          const prior = next[systemId];
+          next[systemId] = prior
+            ? { ...value, killmails: mergeSystemNewsKillmails(prior.killmails ?? [], value.killmails ?? []) }
+            : value;
+        }
+        return next;
+      });
       const status = result?.killmailRefresh as KillmailStatus | undefined;
       if (status) setKillmailStatus(status);
       if (showStatus) setMessage(refreshMessage(status, unique.length));
@@ -463,7 +487,7 @@ function SystemNews() {
   return <>
     <div className="system-news-head">
       <div><p className="eyebrow">CORPORATION · SYSTEM INTELLIGENCE</p><h2>System News</h2><p>Watch as many solar systems as you need. Sage combines official static universe data, public ESI activity and evidence captured by your connected characters.</p></div>
-      <div className="system-refresh-control"><button className="system-refresh-button" onClick={() => void refreshAll()} disabled={busy || !watched.length}>{busy ? "Refreshing..." : "Refresh watched systems"}</button><div className="system-refresh-meta">{killmailStatus && <small><strong>zKillboard</strong><span>1 request / 5 min{(killmailStatus.queuedBackfills ?? 0) > 0 ? ` · 30d backfill ${killmailStatus.queuedBackfills} request${killmailStatus.queuedBackfills === 1 ? "" : "s"} / ${killmailStatus.backfillSystems ?? 0} system${killmailStatus.backfillSystems === 1 ? "" : "s"}` : (killmailStatus.queuedRegions ?? 0) > 0 ? ` · ${killmailStatus.queuedRegions} recent region${killmailStatus.queuedRegions === 1 ? "" : "s"} queued` : ""}{(killmailStatus.remainingMs ?? 0) > 0 ? ` · next in ${duration(killmailStatus.remainingMs)}` : ""}</span></small>}<button type="button" className="zkillboard-love-link" onClick={() => void (window.sage as any).openZkillboard()}>Visit zKillboard · show some love ↗</button></div></div>
+      <div className="system-refresh-control"><button className="system-refresh-button" onClick={() => void refreshAll()} disabled={busy || !watched.length}>{busy ? "Refreshing..." : "Refresh watched systems"}</button><div className="system-refresh-meta">{killmailStatus && <small><strong>zKillboard</strong><span>{`Requests spaced ${Math.max(1, Math.round((killmailStatus.cooldownMs ?? 15000) / 1000))}s · cache ${Math.max(1, Math.round((killmailStatus.cacheTtlMs ?? 300000) / 60000))}m`}{(killmailStatus.queuedBackfills ?? 0) > 0 ? ` · 30d backfill ${killmailStatus.queuedBackfills} request${killmailStatus.queuedBackfills === 1 ? "" : "s"} / ${killmailStatus.backfillSystems ?? 0} system${killmailStatus.backfillSystems === 1 ? "" : "s"}` : (killmailStatus.queuedRegions ?? 0) > 0 ? ` · ${killmailStatus.queuedRegions} recent system request${killmailStatus.queuedRegions === 1 ? "" : "s"} queued` : ""}{(killmailStatus.remainingMs ?? 0) > 0 ? ` · next in ${duration(killmailStatus.remainingMs)}` : ""}</span></small>}<button type="button" className="zkillboard-love-link" onClick={() => void (window.sage as any).openZkillboard()}>Visit zKillboard · show some love ↗</button></div></div>
     </div>
     <form className="system-watch-search" onSubmit={search}><input value={query} onChange={(event) => { setQuery(event.target.value); if (!event.target.value) setHits([]); }} placeholder="Add a solar system…" /><button>Search</button></form>
     {hits.length > 0 && <div className="system-search-results">{hits.map((hit) => <button key={hit.systemId} type="button" onClick={() => addSystem(hit)}><strong>{hit.name}</strong><span>{hit.regionName} · {hit.constellationName} · {hit.securityStatus.toFixed(2)}</span></button>)}</div>}
@@ -521,13 +545,9 @@ function SystemDetail({ intel }: { intel: Intel }) {
     return () => { cancelled = true; };
   }, [intel.killmails]);
 
-  const cachedKillmails = asArray(intel.killmails);
-  const filteredKillmails = killmailWindow === "all"
-    ? cachedKillmails
-    : cachedKillmails.filter((item) => {
-        const time = Date.parse(String(item?.killmailTime ?? ""));
-        return Number.isFinite(time) && time >= Date.now() - KILLMAIL_WINDOW_MS[killmailWindow];
-      });
+  const killmailWindows = buildSystemNewsKillmailWindows(asArray(intel.killmails));
+  const cachedKillmails = killmailWindows.all;
+  const filteredKillmails = killmailWindow === "all" ? cachedKillmails : killmailWindows[killmailWindow];
   function chooseKillmailWindow(key: KillmailWindowKey) {
     setKillmailWindow((current) => current === key ? "all" : key);
     setKillmail(null);
@@ -539,8 +559,7 @@ function SystemDetail({ intel }: { intel: Intel }) {
     <div className="intel-metrics"><Metric label="Ship kills" value={number(intel.current.shipKills)} detail="Last hour · Public ESI" /><Metric label="Pod kills" value={number(intel.current.podKills)} detail="Last hour · Public ESI" /><Metric label="NPC kills" value={number(intel.current.npcKills)} detail="Last hour · Public ESI" /><Metric label="Jumps" value={number(intel.current.jumps)} detail="Last hour · Public ESI" /></div>
     <div className="intel-window-grid">{(["1h", "24h", "7d", "30d"] as KillmailWindowKey[]).map((key) => {
       const value = intel.windows[key];
-      const cutoff = Date.now() - KILLMAIL_WINDOW_MS[key];
-      const killCount = cachedKillmails.filter((item) => Date.parse(String(item?.killmailTime ?? "")) >= cutoff).length;
+      const killCount = killmailWindows[key].length;
       const activity = [
         { label: "Ships", first: value.first?.shipKills, last: value.last?.shipKills, delta: value.delta?.shipKills },
         { label: "NPC", first: value.first?.npcKills, last: value.last?.npcKills, delta: value.delta?.npcKills },
@@ -564,7 +583,7 @@ function SystemDetail({ intel }: { intel: Intel }) {
       </button>;
     })}</div>
     <div className="intel-columns"><article><h4>Known Structures</h4><p className="structure-discovery-note">Sage combines corporation records, authenticated accessible-structure search and an incremental scan of CCP's public structure index. Coverage improves as watched systems are refreshed.</p>{intel.knownStructures.length ? intel.knownStructures.map((item: any, index: number) => <div className="intel-row" key={String(item.structureId) + "-" + index}><strong>{item.name}</strong><span>{item.ownerName ?? "Owner unresolved"}</span><small>{item.source}</small></div>) : <p>No structures in this system are currently visible to Sage's authorized datasets.</p>}</article><LocalCorporations corporations={intel.localCorporations} /></div>
-    <article className="killmail-panel" ref={killmailPanelRef}><div className="killmail-panel-title"><div><h4>{killmailWindow === "all" ? "Recent Killmails" : `${killmailWindow} Killmails`}</h4><p>zKillboard provides a 30-day per-system history backfill, then Sage keeps the same local archive topped up with recent discovery. Killmail IDs are enriched with full CCP ESI detail and retained without age-based pruning.{killmailWindow !== "all" ? " Click the active history card again to clear the time filter." : ""}</p></div><div><strong>{number(filteredKillmails.length)}</strong><small>{killmailWindow === "all" ? "All cached" : `Last ${killmailWindow}`} · Last refresh: {killmailUpdated}{intel.killmailRefresh?.queued ? " · queued" : ""}</small></div></div>{filteredKillmails.length ? filteredKillmails.map((item: any) => { const shipId = Number(item?.victim?.ship_type_id ?? 0); const victimId = Number(item?.victim?.character_id ?? 0); return <button key={item.killmailId} onClick={() => setKillmail(item)}><div className="killmail-list-identity">{shipId > 0 && <img src={assetUrl(shipId, "icon", 48)} alt="" />}<div><strong>{victimId > 0 ? killmailNames.get(victimId) ?? `Killmail ${item.killmailId}` : killmailNames.get(shipId) ?? `Killmail ${item.killmailId}`}</strong><small>{shipId > 0 ? killmailNames.get(shipId) ?? `Type ${shipId}` : `Killmail ${item.killmailId}`}</small></div></div><span>{item.killmailTime ? new Date(item.killmailTime).toLocaleString() : "Time unavailable"} · {item.totalValue ? `${new Intl.NumberFormat("en-GB", { notation: "compact", maximumFractionDigits: 1 }).format(item.totalValue)} ISK · ` : ""}{item.source}</span></button>; }) : <div className="system-empty compact">No cached killmails fall inside this time period.</div>}</article>
-    {killmail && <KillmailReader killmail={killmail} systemName={intel.system.name} onClose={() => setKillmail(null)} />}
+    <article className="killmail-panel" ref={killmailPanelRef}><div className="killmail-panel-title"><div><h4>{killmailWindow === "all" ? "Recent Killmails" : `${killmailWindow} Killmails`}</h4><p>zKillboard provides a 30-day per-system history backfill, then Sage keeps the same local archive topped up with recent discovery. Killmail IDs are enriched with full CCP ESI detail and retained without age-based pruning.{killmailWindow !== "all" ? " Click the active history card again to clear the time filter." : ""}</p></div><div><strong>{number(filteredKillmails.length)}</strong><small>{killmailWindow === "all" ? "All cached" : `Last ${killmailWindow}`} · Last refresh: {killmailUpdated}{intel.killmailRefresh?.queued ? " · queued" : ""}</small></div></div>{killmail && <div className="killmail-inline-reader"><KillmailReader killmail={killmail} systemName={intel.system.name} onClose={() => setKillmail(null)} /></div>}{filteredKillmails.length ? filteredKillmails.map((item: any) => { const shipId = Number(item?.victim?.ship_type_id ?? 0); const victimId = Number(item?.victim?.character_id ?? 0); return <button className={killmail?.killmailId === item.killmailId ? "selected" : ""} key={item.killmailId} onClick={() => setKillmail(item)}><div className="killmail-list-identity">{shipId > 0 && <img src={assetUrl(shipId, "icon", 48)} alt="" />}<div><strong>{victimId > 0 ? killmailNames.get(victimId) ?? `Killmail ${item.killmailId}` : killmailNames.get(shipId) ?? `Killmail ${item.killmailId}`}</strong><small>{shipId > 0 ? killmailNames.get(shipId) ?? `Type ${shipId}` : `Killmail ${item.killmailId}`}</small></div></div><span>{item.killmailTime ? new Date(item.killmailTime).toLocaleString() : "Time unavailable"} · {item.totalValue ? `${new Intl.NumberFormat("en-GB", { notation: "compact", maximumFractionDigits: 1 }).format(item.totalValue)} ISK · ` : ""}{item.source}</span></button>; }) : <div className="system-empty compact">No cached killmails fall inside this time period.</div>}</article>
+
   </div>;
 }
