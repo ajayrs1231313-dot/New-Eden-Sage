@@ -33,6 +33,19 @@ type ExternalEffectSelection = {
   state?: ModuleState;
   effectiveness?: number;
 };
+type FittingCharacter = { characterId: string; character: { name: string; corporation_id?: number; corporation_name?: string } };
+type DoctrineExportSlotOption = { slot: number; name: string; fitCount: number };
+type DoctrineExportDraft = { corporationId: number; corporationName: string; slot: number; doctrineName: string; slots: DoctrineExportSlotOption[] };
+const PENDING_DOCTRINE_FIT_KEY = "new-eden-sage-pending-doctrine-fit";
+function doctrineExportSlots(corporationId: number): DoctrineExportSlotOption[] {
+  let saved: any[] = [];
+  try { const parsed = JSON.parse(localStorage.getItem(`new-eden-sage-corp-doctrines-v1:${corporationId}`) ?? "[]"); saved = Array.isArray(parsed) ? parsed : []; } catch { saved = []; }
+  return Array.from({ length: 5 }, (_, index) => {
+    const slot = index + 1;
+    const item = saved.find((value) => Number(value?.slot) === slot);
+    return { slot, name: String(item?.name ?? ""), fitCount: Array.isArray(item?.fits) ? Math.min(10, item.fits.length) : 0 };
+  });
+}
 type FitModuleRack = "low" | "mid" | "high" | "rig" | "subsystem";
 type FittingPlacement = "ship" | FitModuleRack | "drone" | "fighter" | "implant" | "booster" | "charge" | "cargo";
 type FittingSearchResult = { id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: FitModuleRack; placement?: FittingPlacement };
@@ -174,6 +187,14 @@ function normalizeFit(value: any): Fit {
     instructions: Array.isArray(value?.instructions) ? value.instructions.map(String) : [],
     source: String(value?.source ?? ""),
   };
+}
+
+function takePendingFit(): Fit | null {
+  const pendingRaw = localStorage.getItem("new-eden-sage-pending-fit");
+  if (!pendingRaw) return null;
+  const pending = normalizeFit(JSON.parse(pendingRaw));
+  localStorage.removeItem("new-eden-sage-pending-fit");
+  return pending;
 }
 
 const emptyFit = (): Fit => ({
@@ -392,13 +413,27 @@ async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
     else cargo.push(item);
   };
   withIds.cargo.forEach(classifyCargo);
-  return { ...withIds, low: [...withIds.low, ...movedRacks.low], mid: [...withIds.mid, ...movedRacks.mid], high: [...withIds.high, ...movedRacks.high], rig: [...withIds.rig, ...movedRacks.rig], subsystem: [...withIds.subsystem, ...movedRacks.subsystem], drones, fighters, cargo, implants, boosters };
+  const expandRack = (items: FitItem[]) => items.flatMap((item) =>
+    Array.from({ length: Math.max(1, Math.floor(item.quantity || 1)) }, () => ({ ...item, quantity: 1 })),
+  );
+  return {
+    ...withIds,
+    low: expandRack([...withIds.low, ...movedRacks.low]),
+    mid: expandRack([...withIds.mid, ...movedRacks.mid]),
+    high: expandRack([...withIds.high, ...movedRacks.high]),
+    rig: expandRack([...withIds.rig, ...movedRacks.rig]),
+    subsystem: expandRack([...withIds.subsystem, ...movedRacks.subsystem]),
+    drones, fighters, cargo, implants, boosters,
+  };
 }
 
 export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (intent: FitResolutionIntent) => void }) {
   const [fits, setFits] = useState<Fit[]>(() => {
     try {
-      return (JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]") as any[]).map(normalizeFit);
+      const existing = (JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]") as any[]).map(normalizeFit);
+      const pending = takePendingFit();
+      if (!pending) return existing;
+      return [pending, ...existing.filter((fit) => fit.id !== pending.id)];
     } catch {
       return [];
     }
@@ -410,9 +445,10 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   );
   const [typeNames, setTypeNames] = useState(new Map<string, number>());
   const [characters, setCharacters] = useState<
-    Array<{ characterId: string; character: { name: string } }>
+    FittingCharacter[]
   >([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState("");
+  const [doctrineExport, setDoctrineExport] = useState<DoctrineExportDraft | null>(null);
   const [routeOpen, setRouteOpen] = useState(false);
   const [sideMode, setSideMode] = useState<"build" | "import">("build");
   const [showInfoTarget, setShowInfoTarget] = useState<ShowInfoTarget | null>(null);
@@ -422,6 +458,22 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   const [libraryMeta, setLibraryMeta] = useState<FitLibraryMetaMap>(() => {
     try { return JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") ?? "{}"); } catch { return {}; }
   });
+  useEffect(() => {
+    const importPendingFit = () => {
+      try {
+        const pending = takePendingFit();
+        if (!pending) return;
+        setFits((current) => [pending, ...current.filter((fit) => fit.id !== pending.id)]);
+        setActiveId(pending.id);
+        setSideMode("build");
+        setStatus(`${pending.name} imported from Progression.`);
+      } catch (caught) {
+        setStatus(caught instanceof Error ? caught.message : "Could not import the Progression fit.");
+      }
+    };
+    window.addEventListener("sage:navigate-fittings", importPendingFit);
+    return () => window.removeEventListener("sage:navigate-fittings", importPendingFit);
+  }, []);
   useEffect(() => {
     window.sage.listSnapshots().then((loaded) => {
       setCharacters(loaded);
@@ -470,10 +522,48 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   useEffect(() => {
     void window.sage.syncMcpRendererData({ savedFits: fits, fitLibraryMeta: libraryMeta });
   }, [fits, libraryMeta]);
-  useEffect(() => window.sage.onMcpFitDataUpdated((value) => {
-    if (Array.isArray(value.savedFits)) setFits(value.savedFits as Fit[]);
-    if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
-  }), []);
+  useEffect(() => {
+    let updateSequence = 0;
+    const applyMcpFitUpdate = async (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown>; selectedFitId?: string }) => {
+      const sequence = ++updateSequence;
+      if (Array.isArray(value.savedFits)) {
+        const normalized = value.savedFits
+          .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+          .map((candidate) => normalizeFit(candidate));
+        let resolved = normalized;
+        try {
+          resolved = await Promise.all(normalized.map((fit) => resolveFitFromEve(fit, new Map<string, number>())));
+        } catch (caught) {
+          if (sequence !== updateSequence) return;
+          setStatus(caught instanceof Error ? `MCP fit received, but local SDE resolution failed: ${caught.message}` : "MCP fit received, but local SDE resolution failed.");
+        }
+        if (sequence !== updateSequence) return;
+        setFits(resolved);
+        const selected = typeof value.selectedFitId === "string" && resolved.some((fit) => fit.id === value.selectedFitId)
+          ? value.selectedFitId
+          : undefined;
+        setActiveId((current) => selected ?? (resolved.some((fit) => fit.id === current) ? current : (resolved[0]?.id ?? "")));
+        if (selected) {
+          const fit = resolved.find((candidate) => candidate.id === selected);
+          if (fit) {
+            const unresolved = fitItems(fit).filter((item) => !item.typeId).length;
+            setSideMode("build");
+            setStatus(unresolved ? `${fit.name} received from MCP; ${unresolved} item name(s) could not be resolved.` : `${fit.name} received from MCP and resolved against the local SDE.`);
+          }
+        }
+      }
+      if (sequence !== updateSequence) return;
+      if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
+    };
+    const removeIpcListener = window.sage.onMcpFitDataUpdated((value) => { void applyMcpFitUpdate(value); });
+    const onDirectRendererUpdate = (event: Event) => { void applyMcpFitUpdate((event as CustomEvent).detail ?? {}); };
+    window.addEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
+    return () => {
+      updateSequence += 1;
+      removeIpcListener();
+      window.removeEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
+    };
+  }, []);
   // Saved fits render immediately. Resolving the complete CCP DOGMA index on
   // mount used to freeze the entire app the first time Fittings was opened.
   // Type resolution now happens only when a fit is imported or analyzed.
@@ -663,6 +753,45 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
     setLibraryMeta((current) => ({ ...current, [copy.id]: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), readiness: "unknown" } }));
     setStatus(`Duplicated ${active.name}.`);
   }
+  function openDoctrineExport() {
+    if (!active) return;
+    const character = characters.find((item) => item.characterId === selectedCharacterId) ?? characters[0];
+    const corporationId = Number(character?.character?.corporation_id ?? 0);
+    if (!corporationId) {
+      setStatus("Choose a connected corporation character before exporting to a doctrine.");
+      return;
+    }
+    const slots = doctrineExportSlots(corporationId);
+    const available = slots.find((slot) => slot.fitCount < 10);
+    if (!available) {
+      setStatus("All five doctrine slots are full for this corporation.");
+      return;
+    }
+    setDoctrineExport({
+      corporationId,
+      corporationName: String(character?.character?.corporation_name ?? `Corporation ${corporationId}`),
+      slot: available.slot,
+      doctrineName: available.name || active.name,
+      slots,
+    });
+  }
+  function commitDoctrineExport() {
+    if (!active || !doctrineExport) return;
+    const selected = doctrineExport.slots.find((slot) => slot.slot === doctrineExport.slot);
+    if (!selected || selected.fitCount >= 10) { setStatus("That doctrine slot is full. Choose another slot."); return; }
+    const doctrineName = doctrineExport.doctrineName.trim() || selected.name || active.name;
+    sessionStorage.setItem(PENDING_DOCTRINE_FIT_KEY, JSON.stringify({
+      corporationId: doctrineExport.corporationId,
+      targetSlot: doctrineExport.slot,
+      doctrineName,
+      exportedAt: new Date().toISOString(),
+      fit: JSON.parse(JSON.stringify(active)),
+    }));
+    setDoctrineExport(null);
+    setStatus(`${active.name} ready for ${doctrineExport.corporationName} · Doctrine ${doctrineExport.slot}.`);
+    window.dispatchEvent(new CustomEvent("sage:navigate-corp-doctrines"));
+  }
+
   async function exportActiveFit() {
     if (!active) return;
     const verified = await window.sage.copyText(exportFitJson(active));
@@ -699,8 +828,18 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
         )}
       </aside>
       <div className="fit-main">
-        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
+        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
       </div>
+      {doctrineExport && active && <div className="fit-doctrine-export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDoctrineExport(null); }}>
+        <section className="fit-doctrine-export-dialog" role="dialog" aria-modal="true" aria-label="Export fitting to doctrine">
+          <div className="fit-doctrine-export-head"><div><p className="eyebrow">CORPORATION · DOCTRINES</p><h3>Export to Doctrine</h3><p>{active.name} · {active.hull.name}</p></div><button className="fit-doctrine-export-close" onClick={() => setDoctrineExport(null)} aria-label="Close">×</button></div>
+          <div className="fit-doctrine-export-corp"><span>DESTINATION CORPORATION</span><strong>{doctrineExport.corporationName}</strong></div>
+          <label><span>Doctrine slot</span><select value={doctrineExport.slot} onChange={(event) => { const slot = Number(event.target.value); const target = doctrineExport.slots.find((item) => item.slot === slot); setDoctrineExport((current) => current ? { ...current, slot, doctrineName: target?.name || active.name } : current); }}>{doctrineExport.slots.map((slot) => <option key={slot.slot} value={slot.slot} disabled={slot.fitCount >= 10}>Slot {slot.slot} · {slot.name || "Empty"} ({slot.fitCount}/10)</option>)}</select></label>
+          <label><span>Doctrine name</span><input value={doctrineExport.doctrineName} onChange={(event) => setDoctrineExport((current) => current ? { ...current, doctrineName: event.target.value } : current)} placeholder={active.name} /></label>
+          <div className="fit-doctrine-export-actions"><button onClick={() => setDoctrineExport(null)}>Cancel</button><button className="primary" onClick={commitDoctrineExport}>Continue to doctrine</button></div>
+          <small>The fitter queues this exact fit into the existing corporation doctrine library; no duplicate doctrine store is created.</small>
+        </section>
+      </div>}
       <FittingShowInfo target={showInfoTarget} onClose={() => setShowInfoTarget(null)} />
     </section>
   );
@@ -946,6 +1085,7 @@ function FitDisplay({
   onRename,
   onDuplicate,
   onExport,
+  onExportToDoctrine,
   onModuleStateChange,
   onBayActiveQuantityChange,
   onRemoveItem,
@@ -956,7 +1096,7 @@ function FitDisplay({
   onShowInfo,
 }: {
   fit: Fit;
-  characters: Array<{ characterId: string; character: { name: string } }>;
+  characters: FittingCharacter[];
   characterId: string;
   onCharacterChange(id: string): void;
   onRemove(): void;
@@ -964,6 +1104,7 @@ function FitDisplay({
   onRename(): void;
   onDuplicate(): void;
   onExport(): void;
+  onExportToDoctrine(): void;
   onModuleStateChange(rack: FitModuleRack, index: number, state: ModuleState): void;
   onBayActiveQuantityChange(target: "drones" | "fighters", index: number, quantity: number): void;
   onRemoveItem(target: BuilderTarget, index: number): void;
@@ -976,6 +1117,8 @@ function FitDisplay({
   const [tab, setTab] = useState<"fitting" | "performance">("fitting");
   const [analysis, setAnalysis] = useState<any>(null);
   const [remedies, setRemedies] = useState<FitRemedyCandidate[]>([]);
+  const [eveExporting, setEveExporting] = useState(false);
+  const [eveExportStatus, setEveExportStatus] = useState("");
   const [hullProfile, setHullProfile] = useState<HullFittingProfile | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -1101,6 +1244,20 @@ function FitDisplay({
       resources: analysis?.resources ? { used: { ...analysis.resources.used }, capacity: { ...analysis.resources.capacity } } : undefined,
     });
   };
+  async function exportCurrentFitToEve() {
+    if (!characterId) return;
+    setEveExporting(true);
+    setEveExportStatus("Saving fit to EVE...");
+    try {
+      await window.sage.exportFitToEve({ characterId, fit });
+      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      setEveExportStatus(`Saved to ${characterName}'s EVE fitting library.`);
+    } catch (error) {
+      setEveExportStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
+    } finally {
+      setEveExporting(false);
+    }
+  }
   const fitSummary = summarizeFit(fit);
   return (
     <div className="fit-display fit-display-v3">
@@ -1125,6 +1282,10 @@ function FitDisplay({
             <button onClick={onRename}>Rename</button>
             <button onClick={onDuplicate}>Duplicate</button>
             <button onClick={onExport}>Copy JSON</button>
+            <button className="fit-export-corporation" onClick={onExportToDoctrine}>Export to Doctrine</button>
+            <button onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>
+              {eveExporting ? "Exporting..." : "Export to EVE"}
+            </button>
             <button className="route-fit" onClick={onRoute}>
               Find cheapest purchase route
             </button>
@@ -1134,6 +1295,7 @@ function FitDisplay({
         <div className="fit-library-summary">
           <span>{fitSummary.moduleCount} modules</span><span>{fitSummary.droneCount} drones</span><span>{fitSummary.resolvedItems} resolved</span><span>{fitSummary.unresolvedItems} unresolved</span>
         </div>
+        {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
         <div className="fit-tabs">
           <button
             className={tab === "fitting" ? "active" : ""}
@@ -1403,7 +1565,7 @@ function FitPerformance({
             <div className="base-stat-grid">
               <article><span>Capacitor demand</span><strong>{analysis.capacitor.demandGjPerSecond.toFixed(2)} GJ/s</strong></article>
               <article><span>Peak recharge</span><strong>{analysis.capacitor.peakRechargeGjPerSecond.toFixed(2)} GJ/s</strong></article>
-              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable Â· ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
+              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable · ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
             </div>
           )}
           {analysis.damage && (
@@ -1412,7 +1574,7 @@ function FitPerformance({
               <article><span>Weapon / drone DPS</span><strong>{analysis.damage.weaponDps.toFixed(1)} / {analysis.damage.droneDps.toFixed(1)}</strong></article>
               <article><span>Total volley</span><strong>{analysis.damage.totalVolley.toFixed(1)}</strong></article>
               <article><span>Active drones</span><strong>{analysis.damage.activeDrones.length}</strong><small>{analysis.damage.activeDrones.map((drone: any) => drone.name).join(", ") || "None selected"}</small></article>
-              {analysis.damage.weaponProfiles.map((weapon: any, index: number) => <article key={`${weapon.typeId}-${index}`}><span>{weapon.name}</span><strong>{weapon.kind === "turret" ? `${(weapon.optimalM / 1000).toFixed(1)} + ${(weapon.falloffM / 1000).toFixed(1)} km` : `${(weapon.maximumRangeM / 1000).toFixed(1)} km`}</strong><small>{weapon.kind === "turret" ? `${weapon.tracking.toFixed(3)} tracking` : `${weapon.explosionRadiusM.toFixed(0)} m explosion Â· ${weapon.explosionVelocity.toFixed(0)} m/s`}</small></article>)}
+              {analysis.damage.weaponProfiles.map((weapon: any, index: number) => <article key={`${weapon.typeId}-${index}`}><span>{weapon.name}</span><strong>{weapon.kind === "turret" ? `${(weapon.optimalM / 1000).toFixed(1)} + ${(weapon.falloffM / 1000).toFixed(1)} km` : `${(weapon.maximumRangeM / 1000).toFixed(1)} km`}</strong><small>{weapon.kind === "turret" ? `${weapon.tracking.toFixed(3)} tracking` : `${weapon.explosionRadiusM.toFixed(0)} m explosion · ${weapon.explosionVelocity.toFixed(0)} m/s`}</small></article>)}
             </div>
           )}
           {analysis.defence && (
@@ -1427,9 +1589,9 @@ function FitPerformance({
           {analysis.navigation && analysis.targeting && (
             <div className="base-stat-grid">
               <article><span>Align time</span><strong>{analysis.navigation.alignSeconds.toFixed(2)} s</strong></article>
-              <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s Â· {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
-              <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km Â· {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
-              <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m Â· {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
+              <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s · {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
+              <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km · {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
+              <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m · {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
             </div>
           )}
           {analysis.heat && (
@@ -1487,19 +1649,21 @@ function FitRouteScreen({
   onBack,
 }: {
   fit: Fit;
-  characters: Array<{ characterId: string; character: { name: string } }>;
+  characters: FittingCharacter[];
   onBack(): void;
 }) {
   const [characterId, setCharacterId] = useState(
     characters[0]?.characterId ?? "",
   );
   const [buyEntireFit, setBuyEntireFit] = useState(false);
+  const [highSecOnly, setHighSecOnly] = useState(true);
+  const [eveAction, setEveAction] = useState<"route" | "fit" | null>(null);
   const [result, setResult] = useState<any>(null);
   const [status, setStatus] = useState(
     "Choose a character whose current location will be the route origin.",
   );
   async function calculate() {
-    setStatus("Comparing owned assets, prices and secure routes...");
+    setStatus(`Comparing owned assets, prices and ${highSecOnly ? "high-sec-only" : "unrestricted"} routes...`);
     setResult(null);
     try {
       const items = [
@@ -1515,14 +1679,40 @@ function FitRouteScreen({
       const next = await window.sage.buildFitShoppingRoute({
         characterId,
         buyEntireFit,
+        highSecOnly,
         items,
       });
       setResult(next);
-      setStatus(`Route calculated from ${next.origin}.`);
+      setStatus(`Route calculated from ${next.origin}${highSecOnly ? " using high-sec-only travel" : " using unrestricted shortest routes"}.`);
     } catch (error) {
       setStatus(
         error instanceof Error ? error.message : "Route calculation failed.",
       );
+    }
+  }
+  async function exportRouteToEve() {
+    if (!result?.routeStops?.length || !characterId) return;
+    setEveAction("route");
+    try {
+      const exported = await window.sage.exportShoppingRouteToEve({ characterId, stops: result.routeStops });
+      setStatus(`Exported ${exported.waypoints} shopping waypoint${exported.waypoints === 1 ? "" : "s"} to ${result.character} in EVE.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export the shopping route to EVE.");
+    } finally {
+      setEveAction(null);
+    }
+  }
+  async function exportFitToEve() {
+    if (!characterId) return;
+    setEveAction("fit");
+    try {
+      await window.sage.exportFitToEve({ characterId, fit });
+      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      setStatus(`Saved ${fit.name} to ${characterName}'s EVE fitting library.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
+    } finally {
+      setEveAction(null);
     }
   }
   return (
@@ -1550,12 +1740,26 @@ function FitRouteScreen({
           <input
             type="checkbox"
             checked={buyEntireFit}
-            onChange={(event) => setBuyEntireFit(event.target.checked)}
+            onChange={(event) => { setBuyEntireFit(event.target.checked); setResult(null); setStatus("Purchase options changed. Recalculate the shopping route."); }}
           />
           Buy the entire fit; ignore owned assets
         </label>
+        <label title="Only choose sellers reachable without entering low-sec or null-sec.">
+          <input
+            type="checkbox"
+            checked={highSecOnly}
+            onChange={(event) => { setHighSecOnly(event.target.checked); setResult(null); setStatus("Route safety changed. Recalculate the shopping route."); }}
+          />
+          High-sec only shopping
+        </label>
         <button onClick={calculate} disabled={!characterId}>
           Calculate optimal route
+        </button>
+        <button onClick={exportRouteToEve} disabled={!characterId || !result?.routeStops?.length || eveAction !== null}>
+          {eveAction === "route" ? "Exporting route..." : "Export route to EVE"}
+        </button>
+        <button onClick={exportFitToEve} disabled={!characterId || eveAction !== null}>
+          {eveAction === "fit" ? "Exporting fit..." : "Export fit to EVE"}
         </button>
       </div>
       {result && (
@@ -1691,7 +1895,3 @@ function ItemBay({ title, items, activeDroneSelection = false, onActiveQuantityC
     </div>
   );
 }
-
-
-
-

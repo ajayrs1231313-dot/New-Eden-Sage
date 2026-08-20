@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
 
@@ -21,7 +21,27 @@ export async function loadPersistedResult<T>(kind: string, key: unknown): Promis
 export async function savePersistedResult(kind: string, key: unknown, value: unknown) {
   await fs.mkdir(root, { recursive: true });
   const target = file(kind, key);
-  const partial = `${target}.${process.pid}.partial`;
+  const partial = `${target}.${process.pid}.${randomUUID()}.partial`;
   await fs.writeFile(partial, await gzipAsync(Buffer.from(JSON.stringify(value), "utf8"), { level: 6 }));
-  await fs.rename(partial, target).catch(async () => { await fs.rm(target, { force: true }); await fs.rename(partial, target); });
+  try {
+    await fs.rename(partial, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
+    const backup = `${target}.${process.pid}.${randomUUID()}.backup`;
+    let backedUp = false;
+    try {
+      await fs.rename(target, backup);
+      backedUp = true;
+    } catch (targetError) {
+      if ((targetError as NodeJS.ErrnoException).code !== "ENOENT") throw targetError;
+    }
+    try {
+      await fs.rename(partial, target);
+    } catch (replaceError) {
+      if (backedUp) await fs.rename(backup, target).catch(() => undefined);
+      throw replaceError;
+    }
+    if (backedUp) await fs.rm(backup, { force: true }).catch(() => undefined);
+  }
 }

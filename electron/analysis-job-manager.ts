@@ -61,6 +61,13 @@ function workerPath() {
   return path.join(__dirname, "analysis-worker.js");
 }
 
+function workerHeapLimitMb(lane: AnalysisLane) {
+  // Market analysis can legitimately build large indexes, but an unbounded
+  // worker must never be allowed to consume the whole Electron process.
+  if (lane === "market" || lane === "raw-query" || lane === "regional-query") return 1024;
+  return 512;
+}
+
 function analysisError(message: string, code: string) {
   const error = new Error(message) as Error & { code?: string };
   error.code = code;
@@ -151,6 +158,10 @@ function ensureWorker(lane: AnalysisLane) {
       ...process.env,
       NEW_EDEN_SAGE_USER_DATA: app.getPath("userData"),
     },
+    resourceLimits: {
+      maxOldGenerationSizeMb: workerHeapLimitMb(lane),
+      maxYoungGenerationSizeMb: 64,
+    },
   });
   state.worker = next;
   state.lastActivityAt = Date.now();
@@ -197,10 +208,23 @@ export function analysisStatus() {
   }));
 }
 
-async function runJob(kind: AnalysisKind, payload: Record<string, unknown>, onProgress?: (progress: AnalysisProgress) => void) {
+type RunJobOptions = {
+  /** Read-only cache probes must never interrupt real analysis work. */
+  skipWhenBusy?: boolean;
+};
+
+async function runJob(
+  kind: AnalysisKind,
+  payload: Record<string, unknown>,
+  onProgress?: (progress: AnalysisProgress) => void,
+  options: RunJobOptions = {},
+) {
   const lane = laneFor(kind);
   const state = lanes[lane];
-  if (state.active) await cancelLane(lane, "Replaced by a newer analysis request.");
+  if (state.active) {
+    if (options.skipWhenBusy) return null;
+    await cancelLane(lane, "Replaced by a newer analysis request.");
+  }
   const jobId = randomUUID();
   const startedAt = new Date().toISOString();
   const target = ensureWorker(lane);
@@ -234,6 +258,18 @@ export function runRegionalMarketFilter(input: RegionalMarketFilterInput, onProg
 
 export function runPveLocationAnalysis(input: PveLocationQuery, snapshot: any, cloneState: CloneState, onProgress?: (progress: AnalysisProgress) => void) {
   return runJob("pve-location", { type: "run-pve-location", input, snapshot, cloneState }, onProgress);
+}
+
+export function loadPreparedOpportunityAnalysis(input: OpportunityQuery, snapshots: any[]) {
+  return runJob("opportunity", { type: "peek-opportunity", input, snapshots }, undefined, { skipWhenBusy: true });
+}
+
+export function loadPreparedCapabilityAnalysis(snapshot: any, cloneState: CloneState) {
+  return runJob("capability", { type: "peek-capability", snapshot, cloneState }, undefined, { skipWhenBusy: true });
+}
+
+export function loadPreparedPveLocationAnalysis(input: PveLocationQuery, snapshot: any, cloneState: CloneState) {
+  return runJob("pve-location", { type: "peek-pve-location", input, snapshot, cloneState }, undefined, { skipWhenBusy: true });
 }
 
 export async function disposeAnalysisWorker() {

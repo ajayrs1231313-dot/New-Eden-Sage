@@ -35,6 +35,7 @@ let cachePromise: Promise<CacheFile> | undefined;
 let shipsPromise: Promise<Array<{ typeId: number; name: string }>> | undefined;
 let processStaticPromise: Promise<ProcessStaticState> | undefined;
 let refreshPromise: Promise<unknown> | undefined;
+let volumeCacheLockDepth = 0;
 
 const CATEGORY_NAMES: Record<number, string> = {
   6: "Ships",
@@ -187,7 +188,7 @@ export async function stageStaticDataRefreshLowImpact(force = false, aggressive 
           staticRoot: STATIC_ROOT,
           activeArchive: SDE_ARCHIVE,
           stagedArchive: SDE_STAGED_ARCHIVE,
-          partialArchive: SDE_PARTIAL_ARCHIVE,
+          partialArchive: SDE_PARTIAL_ARCHIVE + "." + process.pid,
           statePath: SDE_UPDATE_STATE,
           force,
           aggressive,
@@ -278,13 +279,18 @@ export async function itemCategoryIds(typeIds: number[]) {
 }
 
 async function withVolumeCacheLock<T>(work: () => Promise<T>): Promise<T> {
+  // The initial cache build already holds this lock and calls saveCache().
+  // Re-enter in the same worker instead of waiting on our own lock file.
+  if (volumeCacheLockDepth > 0) return work();
   const deadline = Date.now() + 120_000;
   while (true) {
     try {
       const handle = await fs.open(VOLUME_CACHE_LOCK, "wx");
+      volumeCacheLockDepth += 1;
       try {
         return await work();
       } finally {
+        volumeCacheLockDepth = Math.max(0, volumeCacheLockDepth - 1);
         await handle.close().catch(() => undefined);
         await fs.rm(VOLUME_CACHE_LOCK, { force: true }).catch(() => undefined);
       }
@@ -398,11 +404,26 @@ export async function ensureStaticDataArchive() {
 }
 
 async function saveCache(cache: CacheFile) {
-  await fs.mkdir(STATIC_ROOT, { recursive: true });
-  const partial = `${VOLUME_CACHE}.${process.pid}.${threadId}.${Date.now()}.${Math.random().toString(16).slice(2)}.partial`;
-  await fs.writeFile(partial, JSON.stringify(cache), "utf8");
-  await fs.rm(VOLUME_CACHE, { force: true }).catch(() => undefined);
-  await fs.rename(partial, VOLUME_CACHE);
+  await withVolumeCacheLock(async () => {
+    await fs.mkdir(STATIC_ROOT, { recursive: true });
+    const partial = `${VOLUME_CACHE}.${process.pid}.${threadId}.${Date.now()}.${Math.random().toString(16).slice(2)}.partial`;
+    try {
+      await fs.writeFile(partial, JSON.stringify(cache), "utf8");
+      // Rename over the destination where supported; on Windows an existing target
+      // may reject the rename, so fall back to a short remove/rename sequence while
+      // still holding the shared cache lock.
+      try {
+        await fs.rename(partial, VOLUME_CACHE);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
+        await fs.rm(VOLUME_CACHE, { force: true });
+        await fs.rename(partial, VOLUME_CACHE);
+      }
+    } finally {
+      await fs.rm(partial, { force: true }).catch(() => undefined);
+    }
+  });
 }
 
 async function fetchJson<T>(url: string): Promise<T> {

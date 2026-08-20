@@ -11,6 +11,7 @@ const SAMPLE_LIMIT = 24;
 const MAX_COMMON_ITEMS = 22;
 const WINDOW_SECONDS = 7 * 24 * 60 * 60;
 const REQUEST_TIMEOUT_MS = 8_000;
+const FIT_SAMPLE_MODEL = "top-level-fitted-items-v2";
 
 const esiHeaders = {
   "X-Compatibility-Date": "2026-08-02",
@@ -36,14 +37,18 @@ type Killmail = {
   victim: { ship_type_id: number; items?: KillItem[] };
 };
 
+export type CommunityFitPayloadItem = { typeId: number; name: string; quantity: number };
+export type CommunityFitPayload = { low: CommunityFitPayloadItem[]; mid: CommunityFitPayloadItem[]; high: CommunityFitPayloadItem[]; rig: CommunityFitPayloadItem[]; subsystem: CommunityFitPayloadItem[]; drones: CommunityFitPayloadItem[]; fighters: CommunityFitPayloadItem[]; cargo: CommunityFitPayloadItem[] };
 export type CommunityFitSample = {
   id: string;
   observedAt: string;
   itemTypeIds: number[];
   items: Array<{ typeId: number; name: string }>;
+  fit: CommunityFitPayload;
 };
 
 export type CommunityFitSamples = {
+  model?: string;
   hullTypeId: number;
   hull: string;
   source: "zkillboard-recent-losses";
@@ -129,11 +134,32 @@ function isFittingFlag(flag: number) {
 function collectFittedTypeIds(items: KillItem[] | undefined, output = new Set<number>()) {
   for (const item of items ?? []) {
     if (isFittingFlag(item.flag)) output.add(item.item_type_id);
-    if (item.items?.length) collectFittedTypeIds(item.items, output);
   }
   return output;
 }
 
+function killItemRack(flag: number): keyof CommunityFitPayload | null {
+  if (flag >= 11 && flag <= 18) return "low";
+  if (flag >= 19 && flag <= 26) return "mid";
+  if (flag >= 27 && flag <= 34) return "high";
+  if (flag === 87) return "drones";
+  if (flag >= 92 && flag <= 99) return "rig";
+  if (flag >= 125 && flag <= 132) return "subsystem";
+  if (flag >= 158 && flag <= 163) return "fighters";
+  return null;
+}
+
+function buildObservedFit(items: KillItem[] | undefined, names: Map<number, string>): CommunityFitPayload {
+  const fit: CommunityFitPayload = { low: [], mid: [], high: [], rig: [], subsystem: [], drones: [], fighters: [], cargo: [] };
+  // Only top-level killmail items occupy ship slots. Nested items are loaded
+  // charges/scripts or container contents; treating their inherited flags as
+  // modules created hundreds of fake high-slot modules in exported fits.
+  for (const item of items ?? []) {
+    const rack = killItemRack(item.flag);
+    if (rack) fit[rack].push({ typeId: item.item_type_id, name: names.get(item.item_type_id) ?? `Type ${item.item_type_id}`, quantity: Math.max(1, Number(item.quantity_destroyed ?? 0) + Number(item.quantity_dropped ?? 0)) });
+  }
+  return fit;
+}
 async function fetchKillmail(reference: KillReference): Promise<Killmail | null> {
   const hash = reference.zkb?.hash;
   if (!hash) return null;
@@ -189,7 +215,7 @@ export async function getRecentHullFitSamples(
 ): Promise<CommunityFitSamples> {
   if (!force) {
     const cached = await readCache<CommunityFitSamples>(samplesCachePath(hullTypeId));
-    if (cached) return cached;
+    if (cached?.model === FIT_SAMPLE_MODEL && cached.samples.every((sample) => sample.fit)) return cached;
   }
 
   const hull = await fetchTypeDetail(hullTypeId);
@@ -233,8 +259,10 @@ export async function getRecentHullFitSamples(
         observedAt: killmail.killmail_time,
         itemTypeIds: typeIds,
         items: typeIds.map((typeId) => ({ typeId, name: names.get(typeId) ?? `Type ${typeId}` })),
+        fit: buildObservedFit(killmail.victim.items, names),
       }));
     const result: CommunityFitSamples = {
+      model: FIT_SAMPLE_MODEL,
       hullTypeId,
       hull: hull.name,
       source: "zkillboard-recent-losses",

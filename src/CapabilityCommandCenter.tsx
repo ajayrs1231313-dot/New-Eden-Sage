@@ -28,9 +28,9 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
   const [busy, setBusy] = useState(false);
   const requestSequence = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (showBusy = false) => {
     const requestId = ++requestSequence.current;
-    setBusy(true);
+    if (showBusy) setBusy(true);
     setError("");
     try {
       const result = await window.sage.getCapabilities({ characterId: snapshot.characterId, cloneState: cloneState ?? "omega" });
@@ -57,7 +57,7 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
   if (busy && !analysis) {
     return <div className="capability-loading">Building personalised capability intelligence from skills, assets, fittings, wallet and activity readiness…</div>;
   }
-  if (error && !analysis) return <div className="capability-loading error"><span>{error}</span><button onClick={() => void refresh()} disabled={busy}>Refresh analysis</button></div>;
+  if (error && !analysis) return <div className="capability-loading error"><span>{error}</span><button onClick={() => void refresh(true)} disabled={busy}>Refresh analysis</button></div>;
   if (!analysis || !selected) return null;
 
   return (
@@ -101,9 +101,9 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
             <p className="eyebrow">CAPABILITY RADAR</p>
             <h3>What can this character actually do now?</h3>
           </div>
-          <div className="capability-refresh-actions">{busy && <small>Refreshing…</small>}<button onClick={() => void refresh()} disabled={busy}>{busy ? "Refreshing…" : "Refresh analysis"}</button></div>
+          <div className="capability-refresh-actions">{busy && <small>Refreshing…</small>}<button onClick={() => void refresh(true)} disabled={busy}>{busy ? "Refreshing…" : "Refresh analysis"}</button></div>
         </div>
-        {error && <div className="capability-inline-error"><span>{error}</span><button onClick={() => void refresh()} disabled={busy}>Retry</button></div>}
+        {error && <div className="capability-inline-error"><span>{error}</span><button onClick={() => void refresh(true)} disabled={busy}>Retry</button></div>}
         <ol className="capability-bars">
           {analysis.capabilities.map((item) => (
             <li key={item.id} className={selected.id === item.id ? "active" : ""} onClick={() => setSelectedId(item.id)}>

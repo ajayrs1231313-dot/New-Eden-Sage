@@ -139,3 +139,13 @@
 .fit-ships-tab .hull-results::-webkit-scrollbar-track{background:#061319;border-left:1px solid #142f37}
 .fit-ships-tab .hull-results::-webkit-scrollbar-thumb{background:#244a51;border:2px solid #061319;border-radius:8px}
 .fit-ships-tab .hull-results::-webkit-scrollbar-thumb:hover{background:#356b6a}
+
+
+/* Doctrine export destination dialog */
+.fit-doctrine-export-backdrop{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:24px;background:rgba(2,9,13,.78);backdrop-filter:blur(5px)}
+.fit-doctrine-export-dialog{width:min(560px,calc(100vw - 36px));display:grid;gap:14px;padding:20px;border:1px solid rgba(87,190,229,.34);border-radius:12px;background:linear-gradient(145deg,#0b2029,#07151c);box-shadow:0 24px 80px rgba(0,0,0,.55)}
+.fit-doctrine-export-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;padding-bottom:12px;border-bottom:1px solid rgba(113,150,170,.14)}
+.fit-doctrine-export-head h3{margin:4px 0 3px;font-size:21px}.fit-doctrine-export-head p:last-child{margin:0;color:#7f949e;font-size:12px}.fit-doctrine-export-close{width:34px;height:34px;min-height:34px;padding:0;border-radius:8px;font-size:20px}
+.fit-doctrine-export-corp{display:flex;flex-direction:column;gap:4px;padding:11px 12px;border:1px solid rgba(113,150,170,.14);border-radius:8px;background:rgba(5,15,21,.5)}.fit-doctrine-export-corp span,.fit-doctrine-export-dialog label>span{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#7fa1b2}.fit-doctrine-export-corp strong{font-size:14px}
+.fit-doctrine-export-dialog label{display:grid;gap:6px}.fit-doctrine-export-dialog select,.fit-doctrine-export-dialog input{box-sizing:border-box;width:100%;height:40px;padding:0 11px;border:1px solid rgba(103,151,170,.28);border-radius:8px;background:#06141a;color:#dcebed;outline:none}.fit-doctrine-export-dialog select:focus,.fit-doctrine-export-dialog input:focus{border-color:rgba(87,190,229,.65);box-shadow:0 0 0 2px rgba(87,190,229,.08)}
+.fit-doctrine-export-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:2px}.fit-doctrine-export-actions button{min-height:38px;padding:0 14px;border-radius:8px}.fit-doctrine-export-actions .primary{border-color:rgba(87,190,229,.52);background:rgba(22,66,82,.85);color:#dff4f7}.fit-doctrine-export-dialog>small{color:#718690;line-height:1.45}

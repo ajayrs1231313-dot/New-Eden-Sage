@@ -5,6 +5,7 @@ import type {
   MarketSummary,
   PublicConfig,
   FitResolutionIntent,
+  ClaudeCompatibilityStatus,
 } from "./types";
 import { FittingsWorkspace } from "./Fittings";
 import { IskLab } from "./IskLab";
@@ -13,6 +14,8 @@ import { SkillsWorkspace } from "./SkillsWorkspace";
 import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
 import { IndustrialCommand } from "./IndustrialCommand";
 import { Loot } from "./Loot";
+import { CorporationManagement } from "./CorporationManagement";
+import { NavigationCommand } from "./NavigationCommand";
 
 type View =
   | "overview"
@@ -21,15 +24,15 @@ type View =
   | "isk"
   | "market"
   | "regional"
+  | "navigation"
   | "industrial"
   | "corporation"
-  | "alliance"
   | "fittings"
   | "loot"
-  | "data"
   | "settings";
 type CloneState = "alpha" | "omega";
-type SyncProgress = { running: boolean; message: string; percent: number; completed?: number; total?: number };
+type SyncTrack = { id: string; label: string; percent: number; status: "waiting" | "running" | "done" | "error"; message: string };
+type SyncProgress = { running: boolean; message: string; percent: number; completed?: number; total?: number; tracks?: SyncTrack[] };
 
 const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "overview", label: "Command", mark: "\u2726" },
@@ -37,12 +40,11 @@ const nav: Array<{ id: View; label: string; mark: string }> = [
   { id: "skills", label: "Progression", mark: "\u25B3" },
   { id: "isk", label: "ISK Lab", mark: "\u25C8" },
   { id: "market", label: "Market", mark: "\u25C6" },
+  { id: "navigation", label: "Navigation Command", mark: "⌖" },
   { id: "fittings", label: "Fittings", mark: "\u2318" },
-  { id: "loot", label: "Loot", mark: "⌖" },
+  { id: "loot", label: "Loot", mark: "\u2727" },
   { id: "industrial", label: "Industrial Command", mark: "\u2692" },
   { id: "corporation", label: "Corporation Management", mark: "\u25C9" },
-  { id: "alliance", label: "Alliance Management", mark: "\u2727" },
-  { id: "data", label: "Data Vault", mark: "\u25A3" },
   { id: "settings", label: "Settings", mark: "\u2699" },
 ];
 
@@ -54,9 +56,20 @@ const RetainedIskLab = memo(IskLab);
 const RetainedFittingsWorkspace = memo(FittingsWorkspace, () => true);
 const RetainedLoot = memo(Loot, () => true);
 const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
+const RetainedNavigationCommand = memo(NavigationCommand, () => true);
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
+  useEffect(() => {
+    const navigateToFittings = () => setView("fittings");
+    const navigateToCorpDoctrines = () => setView("corporation");
+    window.addEventListener("sage:navigate-fittings", navigateToFittings);
+    window.addEventListener("sage:navigate-corp-doctrines", navigateToCorpDoctrines);
+    return () => {
+      window.removeEventListener("sage:navigate-fittings", navigateToFittings);
+      window.removeEventListener("sage:navigate-corp-doctrines", navigateToCorpDoctrines);
+    };
+  }, []);
   const [marketDataRevision, setMarketDataRevision] = useState(0);
   const [plannerHullTypeId, setPlannerHullTypeId] = useState<number>();
   const [plannerFitIntent, setPlannerFitIntent] = useState<FitResolutionIntent>();
@@ -111,7 +124,7 @@ export default function App() {
 
   async function connect() {
     setBusy(true);
-    setMessage("Waiting for EVE authorization…");
+    setMessage("Waiting for EVE authorization\u2026");
     try {
       const result = await window.sage.loginWithEve();
       setSnapshots((current) => [
@@ -121,7 +134,11 @@ export default function App() {
       setActiveId(result.characterId);
       setConfig(await window.sage.getConfig());
       setView("overview");
-      setMessage(`${result.characterName} connected`);
+      setMessage(result.onlineIdentityError
+        ? `${result.characterName} connected locally · Sage Online: ${result.onlineIdentityError}`
+        : result.becamePrimaryIdentity
+          ? `${result.characterName} connected · Sage Account ID ${result.sageAccountId} created`
+          : `${result.characterName} connected · linked to Sage Account ${result.sageAccountId}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "EVE login failed");
     } finally {
@@ -130,18 +147,20 @@ export default function App() {
   }
 
   async function syncAll() {
-    setInitialSetupComplete(true);
     setBusy(true);
-    setMessage("Syncing all live Sage data…");
+    setMessage("Syncing and preparing all Sage intelligence\u2026");
     try {
-      const result = await window.sage.runMasterUpdate() as { alreadySynced?: boolean } | undefined;
+      const result = await window.sage.runMasterUpdate({ cloneStates }) as { alreadySynced?: boolean; preparationFailures?: unknown[] } | undefined;
       if (result?.alreadySynced) {
+        setInitialSetupComplete(true);
         setMessage("Sage is already current. Sync All will be available again in a few seconds.");
         return;
       }
-      setSnapshots(await window.sage.listSnapshots());
+      const nextSnapshots = await window.sage.listSnapshots();
+      setSnapshots(nextSnapshots);
+      setActiveId((current) => nextSnapshots.some((item) => item.characterId === current) ? current : nextSnapshots[0]?.characterId ?? "");
       setMarketDataRevision((value) => value + 1);
-      setMessage("All live Sage data synced. Fittings and Industry are preparing quietly.");
+      setMessage(result?.preparationFailures?.length ? "Update finished with preparation warnings. The affected bars show what needs retrying." : "Everything is synced and prepared.");
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Character sync failed",
@@ -158,6 +177,8 @@ export default function App() {
       setMessage(progress.message);
     } else {
       setBusy(false);
+      setMessage(progress.message);
+      setInitialSetupComplete(true);
       void window.sage.listSnapshots().then(setSnapshots);
       setMarketDataRevision((value) => value + 1);
     }
@@ -206,9 +227,27 @@ export default function App() {
             <span className="pulse" />
             <p className="eyebrow">SETTING UP NEW EDEN SAGE</p>
             <h2>{syncProgress?.running ? "Syncing your live intelligence" : "Add your EVE characters"}</h2>
-            <p>{syncProgress?.running ? syncProgress.message : "Add every character you want Sage to track, then begin one complete sync."}</p>
-            {syncProgress?.running ? <div className="sync-progress-track"><i style={{ width: `${Math.max(2, syncProgress.percent)}%` }} /></div> : <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void syncAll()} disabled={!snapshots.length}>Begin Sync{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>}
-            <small>{syncProgress?.running ? "Fittings and Industry will finish quietly after this first sync." : snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character’s data separate and refreshes them together."}</small>
+            <p>{syncProgress?.running ? syncProgress.message : "Add the EVE characters you want Sage to track, then begin one complete sync."}</p>
+            {!syncProgress?.running && !config.primaryCharacterId && (
+              <div className="sync-identity-note">
+                <strong>Choose your main character first</strong>
+                <span>The first character you add becomes your main New Eden Sage account identity. Sage keys that account to the character's permanent EVE Character ID. Every character you add afterwards is linked to that Sage account.</span>
+              </div>
+            )}
+            {syncProgress?.running ? (
+              <>
+                <div className="sync-overall-row"><span>Overall preparation</span><strong>{Math.round(syncProgress.percent)}%</strong></div>
+                <div className="sync-progress-track sync-progress-overall"><i style={{ width: `${Math.max(2, syncProgress.percent)}%` }} /></div>
+                {syncProgress.tracks?.length ? <div className="sync-track-grid">
+                  {syncProgress.tracks.map((track) => <div className={`sync-track-card ${track.status}`} key={track.id} title={track.message}>
+                    <div className="sync-track-head"><span>{track.label}</span><strong>{track.status === "done" ? "Ready" : track.status === "error" ? "Retry" : track.status === "waiting" ? "Waiting" : `${Math.round(track.percent)}%`}</strong></div>
+                    <div className="sync-track-bar"><i style={{ width: `${Math.max(track.status === "waiting" ? 0 : 2, track.percent)}%` }} /></div>
+                    <small>{track.message}</small>
+                  </div>)}
+                </div> : null}
+              </>
+            ) : <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void syncAll()} disabled={!snapshots.length}>Begin Sync{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>}
+            <small className="sync-footnote">{syncProgress?.running ? "This can take up to 5 minutes on some machines." : snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character’s data separate and refreshes them together."}</small>
           </div>
         </div>
       )}
@@ -250,6 +289,7 @@ export default function App() {
                     <strong>{snapshot.character.name}</strong>
                     <small>
                       {snapshot.character.corporation_name ?? "EVE character"}
+                      {config.primaryCharacterId === snapshot.characterId ? " · PRIMARY SAGE ID" : ""}
                     </small>
                   </div>
                 </button>
@@ -326,14 +366,14 @@ export default function App() {
               Support Developer
             </button>
             <button className="sync" onClick={() => void syncAll()} disabled={busy}>
-              ↻ {busy ? "Syncing all…" : "Sync All"}
+              {"\u21bb"} {busy ? "Syncing all\u2026" : "Sync All"}
             </button>
             <button
               className="connect"
               onClick={connect}
               disabled={busy}
             >
-              {busy ? "Connecting…" : "+ Add character"}
+              {busy ? "Connecting\u2026" : "+ Add character"}
             </button>
           </div>
         </header>
@@ -352,14 +392,6 @@ export default function App() {
         )}
         {view === "settings" && (
           <Settings config={config} onSaved={setConfig} />
-        )}
-        {view === "data" && (
-          <DataVault
-            activeCharacterId={active?.characterId}
-            onImported={async () =>
-              setSnapshots(await window.sage.listSnapshots())
-            }
-          />
         )}
         {mountedViews.current.has("skills") && (
           <div className="cached-view" hidden={view !== "skills"}>
@@ -409,6 +441,11 @@ export default function App() {
             <RetainedLoot />
           </div>
         )}
+        {mountedViews.current.has("navigation") && (
+          <div className="cached-view" hidden={view !== "navigation"}>
+            <RetainedNavigationCommand />
+          </div>
+        )}
         {mountedViews.current.has("industrial") && (
           <div className="cached-view" hidden={view !== "industrial"}>
             <RetainedIndustrialCommand
@@ -418,9 +455,7 @@ export default function App() {
             />
           </div>
         )}
-        {(view === "corporation" || view === "alliance") && (
-          <UnderConstruction title={nav.find((item) => item.id === view)?.label ?? "New module"} />
-        )}
+        {view === "corporation" && <CorporationManagement />}
         <footer>
           <span className="pulse" />
           {message}
@@ -456,7 +491,7 @@ function UpdateControl() {
       }
     }
   }
-  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Install & restart" : state.status === "checking" ? "Checking…" : state.status === "current" ? `Up to date · v${version}` : state.status === "error" ? "Update failed · retry" : `Check updates · v${version}`;
+  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Install & restart" : state.status === "checking" ? "Checking\u2026" : state.status === "current" ? `Up to date \u00b7 v${version}` : state.status === "error" ? "Update failed \u00b7 retry" : `Check updates \u00b7 v${version}`;
   return <button className="update-control" onClick={act} disabled={state.status === "checking" || state.status === "downloading"} title={state.status === "error" ? String(state.detail) : "Install the latest full Sage release from GitHub"}>{label}</button>;
 }
 
@@ -467,15 +502,6 @@ function MarketWorkspace({ snapshot, marketDataRevision, onMarketDataUpdated }: 
 }
 
 const RetainedMarketWorkspace = memo(MarketWorkspace, (a, b) => a.snapshot === b.snapshot && a.marketDataRevision === b.marketDataRevision);
-function UnderConstruction({ title }: { title: string }) {
-  return <section className="construction-page">
-    <div className="construction-banner">UNDER CONSTRUCTION</div>
-    <p className="eyebrow">NEW EDEN SAGE MODULE</p>
-    <h2>{title}</h2>
-    <p>This command workspace is reserved and will be activated in a future release.</p>
-  </section>;
-}
-
 function Augments({
   snapshot,
   resolvedTypeNames,
@@ -746,18 +772,38 @@ function Settings({
   config: PublicConfig;
   onSaved(config: PublicConfig): void;
 }) {
-  const [mcpSetup, setMcpSetup] = useState<{ command: string; args: string[]; json: string; codex: string; access: string } | null>(null);
+  const [mcpSetup, setMcpSetup] = useState<{ command: string; args: string[]; json: string; codex: string; access: string; claudeDesktop: string; claudeCode: string } | null>(null);
   const [mcpMessage, setMcpMessage] = useState("");
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
   const [tunnelReady, setTunnelReady] = useState(false);
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeCompatibilityStatus | null>(null);
   useEffect(() => {
     void window.sage.getMcpSetup().then(setMcpSetup);
     void window.sage.getMcpTunnelStatus().then((value) => { setTunnelId(value.tunnelId); setTunnelReady(value.ready); });
+    void window.sage.getClaudeMcpStatus().then(setClaudeStatus);
   }, []);
   async function copyMcp(value: string, label: string) {
     await window.sage.copyText(value);
     setMcpMessage(`${label} copied.`);
+  }
+  async function repairClaude() {
+    setMcpMessage("Preparing the New Eden Sage Claude Desktop extension...");
+    try {
+      const status = await window.sage.repairClaudeMcp();
+      setClaudeStatus(status);
+      const desktop = !status.desktop.detected
+        ? "Claude Desktop not detected"
+        : status.desktop.installPending
+          ? "Claude Desktop configured automatically"
+          : status.desktop.configured
+            ? "Claude Desktop configured"
+            : status.desktop.error ?? "Claude Desktop is ready to configure";
+      const code = status.code.detected ? (status.code.configured ? "Claude Code configured" : "Claude Code needs attention") : "Claude Code not detected";
+      setMcpMessage(`${desktop}. ${code}.`);
+    } catch (error) {
+      setMcpMessage(error instanceof Error ? error.message : "Could not install/repair Claude integration.");
+    }
   }
   async function connectChatGpt() {
     setMcpMessage("Starting secure ChatGPT tunnel...");
@@ -771,56 +817,73 @@ function Settings({
     }
   }
   return (
-    <section className="settings">
-      <div className="settings-copy">
-        <p className="eyebrow">EVE ONLINE CONNECTION</p>
-        <h2>Official EVE SSO</h2>
-        <p>
-          Use Add Character in the app header to sign in on EVE Online's official
-          authorization page. Sage never asks for your EVE password.
-        </p>
-      </div>
-      <div className="settings-connection-card">
-        <strong>Secure desktop authorization</strong>
-        <p>Character and ESI permissions are selected and approved on EVE Online. Refresh tokens are encrypted with Windows secure storage and remain on this PC.</p>
-        <small>Callback: {config.callbackUrl}</small>
-      </div>
-      <div className="settings-connection-card mcp-settings-card">
-        <strong>AI / MCP access</strong>
-        <p>Connect ChatGPT or Codex to Sage's complete local read-only dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are always removed.</p>
-        <div className="mcp-tunnel-panel">
-          <strong>ChatGPT Secure MCP Tunnel</strong>
-          <small>Status: {tunnelReady ? "Ready" : "Not connected"}</small>
-          <input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" />
-          <input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" />
-          <div className="mcp-setup-actions">
-            <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
-            <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
-            <button onClick={() => void connectChatGpt()}>Save and start tunnel</button>
-            <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
-          </div>
-          <small>The runtime key is encrypted with Windows secure storage and remains only on this PC. Keep the tunnel running while ChatGPT uses Sage.</small>
+    <section className="settings settings-page">
+      <header className="settings-page-head">
+        <div>
+          <p className="eyebrow">SAGE CONFIGURATION</p>
+          <h2>Settings</h2>
+          <p>Connection, authorization and AI integration controls for this Sage installation.</p>
         </div>
-        {mcpSetup && <>
-          <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
-          <div className="mcp-setup-actions">
-            <button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button>
-            <button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button>
+      </header>
+
+      <div className="settings-layout">
+        <article className="settings-connection-card settings-sso-card">
+          <div className="settings-card-head">
+            <div><p className="eyebrow">EVE ONLINE</p><h3>Character authorization</h3></div>
+            <span className="settings-state ready">OFFICIAL SSO</span>
           </div>
-          <div className="mcp-instructions">
-            <strong>How to connect</strong>
-            <ol>
-              <li>Sync your characters and refresh any market data you want the AI to inspect.</li>
-              <li>For ChatGPT, create an OpenAI tunnel and runtime key with the buttons above, then save and start the tunnel.</li>
-              <li>Choose <b>Add in ChatGPT</b>, create a developer-mode app using <b>Tunnel</b>, and select the New Eden Sage tunnel.</li>
-              <li>For Codex local access, choose <b>Copy Codex config</b> and add it to your Codex <code>config.toml</code>.</li>
-              <li>Ask the AI to list Sage characters or available Sage data points before requesting detailed analysis.</li>
-            </ol>
-            <small>Sage does not need to remain open while the AI reads already-saved data. Open Fittings once after changing saved fits so the MCP copy is refreshed. New character or market data becomes available after the relevant Sage sync completes.</small>
+          <p>Use Add Character in the app header to sign in on EVE Online's official authorization page. Sage never asks for your EVE password.</p>
+          <div className="settings-detail-row"><span>Authorization</span><strong>Secure desktop OAuth / ESI</strong></div>
+          <div className="settings-detail-row"><span>Token storage</span><strong>Windows secure storage · local only</strong></div>
+          <div className="settings-callback"><span>Callback URL</span><code>{config.callbackUrl}</code></div>
+        </article>
+
+        <article className="settings-connection-card mcp-settings-card settings-ai-card">
+          <div className="settings-card-head">
+            <div><p className="eyebrow">AI INTEGRATIONS</p><h3>AI / MCP access</h3></div>
+            <span className={`settings-state ${tunnelReady ? "ready" : "muted"}`}>{tunnelReady ? "CHATGPT READY" : "LOCAL MCP"}</span>
           </div>
-          <code>{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
-        </>}
-        {mcpMessage && <small className="mcp-copy-status">{mcpMessage}</small>}
+          <p>Connect ChatGPT, Claude or Codex to Sage's local dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are removed.</p>
+
+          <div className="settings-integration-grid">
+            <section className="mcp-tunnel-panel settings-integration-card">
+              <div className="settings-integration-head"><div><span>CHATGPT</span><strong>Secure MCP Tunnel</strong></div><b className={tunnelReady ? "ready" : "muted"}>{tunnelReady ? "Ready" : "Not connected"}</b></div>
+              <label><span>Tunnel ID</span><input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" /></label>
+              <label><span>Runtime key</span><input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" /></label>
+              <div className="mcp-setup-actions">
+                <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
+                <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
+                <button className="primary" onClick={() => void connectChatGpt()}>Save and start</button>
+                <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
+              </div>
+              <small>The runtime key is encrypted with Windows secure storage and remains only on this PC.</small>
+            </section>
+
+            <section className="mcp-claude-panel settings-integration-card">
+              <div className="settings-integration-head"><div><span>CLAUDE</span><strong>Desktop & Code</strong></div><b className={claudeStatus?.desktop.restartRequired ? "attention" : claudeStatus?.desktop.configured || claudeStatus?.code.configured ? "ready" : "muted"}>{claudeStatus?.desktop.restartRequired ? "Restart required" : claudeStatus?.desktop.configured || claudeStatus?.code.configured ? "Configured" : "Detecting"}</b></div>
+              <p>Sage configures Claude Desktop automatically on this PC and preserves your existing Claude settings and MCP servers. Claude Code is registered separately at user scope.</p>
+              <div className="mcp-client-status-grid">
+                <div><span>Claude Desktop</span><b className={claudeStatus?.desktop.restartRequired ? "attention" : claudeStatus?.desktop.configured ? "ready" : claudeStatus?.desktop.installPending ? "attention" : claudeStatus?.desktop.detected ? "attention" : "muted"}>{claudeStatus?.desktop.restartRequired ? "Restart required" : claudeStatus?.desktop.configured ? "Configured" : claudeStatus?.desktop.installPending ? "Install pending" : claudeStatus?.desktop.detected ? "Ready to configure" : "Not detected"}</b>{claudeStatus?.desktop.method === "direct-config" && claudeStatus?.desktop.path && <small>Direct MCP: {claudeStatus.desktop.path}</small>}{claudeStatus?.desktop.method === "mcpb" && claudeStatus?.desktop.bundlePath && <small>MCPB: {claudeStatus.desktop.bundlePath}</small>}{claudeStatus?.desktop.restartRequired && <small>Claude restart required — Repair will relaunch it automatically.</small>}{claudeStatus?.desktop.installPending && <small>Claude is waiting for extension installation.</small>}{claudeStatus?.desktop.error && <small className="mcp-client-error">{claudeStatus.desktop.error}</small>}</div>
+                <div><span>Claude Code</span><b className={claudeStatus?.code.configured ? "ready" : claudeStatus?.code.detected ? "attention" : "muted"}>{claudeStatus?.code.configured ? "Configured (user scope)" : claudeStatus?.code.detected ? "Needs repair" : "Not detected"}</b>{claudeStatus?.code.path && <small>{claudeStatus.code.path}</small>}{claudeStatus?.code.error && <small className="mcp-client-error">{claudeStatus.code.error}</small>}</div>
+              </div>
+              <div className="mcp-setup-actions">
+                <button className="primary" onClick={() => void repairClaude()}>Install / repair Claude</button>
+                {mcpSetup && <button onClick={() => void copyMcp(mcpSetup.claudeCode, "Claude Code command")}>Copy Code command</button>}
+              </div>
+            </section>
+          </div>
+
+          {mcpSetup && <details className="mcp-advanced-settings">
+            <summary><span>Advanced MCP configuration</span><small>Codex, generic stdio config and manual setup</small></summary>
+            <div className="mcp-advanced-body">
+              <small>Transport: local stdio · Server: new-eden-sage · {mcpSetup.access}</small>
+              <div className="mcp-setup-actions"><button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button><button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button></div>
+              <div className="mcp-instructions"><strong>Manual connection notes</strong><ol><li>Sync characters and refresh any market data the AI needs.</li><li>For ChatGPT, create a tunnel and runtime key above, then choose <b>Add in ChatGPT</b>.</li><li>For Claude Desktop, use <b>Install / repair Claude</b>. Sage detects the installed Claude app and configures New Eden Sage automatically.</li><li>For Codex, copy the Codex configuration into its <code>config.toml</code>.</li><li>Ask the AI to list Sage characters or available Sage data before detailed analysis.</li></ol><small>Sage can serve already-saved read data through the configured MCP transport; keep the desktop app available for workflows that require live Sage writes.</small></div>
+              <code className="mcp-command-preview">{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
+            </div>
+          </details>}
+          {mcpMessage && <div className="mcp-copy-status settings-message">{mcpMessage}</div>}
+        </article>
       </div>
     </section>
   );
@@ -993,103 +1056,6 @@ function Chat({
 }
 
 */
-function DataVault({
-  onImported,
-  activeCharacterId,
-}: {
-  onImported(): void;
-  activeCharacterId?: string;
-}) {
-  const [status, setStatus] = useState(
-    "Everything exported here excludes API keys and EVE tokens.",
-  );
-  async function exportAs(format: "json" | "chatgpt" | "chatgpt-radius") {
-    try {
-      const file = await window.sage.exportData(format, activeCharacterId);
-      if (file) setStatus(`Saved to ${file}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Export failed.");
-    }
-  }
-  async function importFiles() {
-    const result = await window.sage.importData();
-    if (result) {
-      setStatus(
-        `Imported ${result.files} file(s): ${result.snapshots} snapshots and ${result.information} information records.`,
-      );
-      onImported();
-    }
-  }
-  async function exportDebugLog() {
-    const file = await window.sage.exportDebugLog();
-    if (file) setStatus(`Diagnostic log saved to ${file}`);
-  }
-  return (
-    <section className="vault">
-      <div>
-        <p className="eyebrow">PORTABLE LOCAL DATA</p>
-        <h2>Own your information</h2>
-        <p>
-          Back up everything New Eden Sage currently knows, bring notes back in,
-          or create a strategy pack for ChatGPT Plus.
-        </p>
-      </div>
-      <div className="vault-grid">
-        <article>
-          <span>01</span>
-          <h3>Complete backup</h3>
-          <p>
-            Export all locally stored character snapshots and imported
-            information as JSON. Secrets are always excluded.
-          </p>
-          <button onClick={() => exportAs("json")}>Export all data</button>
-        </article>
-        <article>
-          <span>02</span>
-          <h3>Character pack</h3>
-          <p>
-            Create readable character Markdown that you can upload to ChatGPT
-            Plus.
-          </p>
-          <button onClick={() => exportAs("chatgpt")}>
-            Export character data
-          </button>
-        </article>
-        <article>
-          <span>03</span>
-          <h3>Trade pack</h3>
-          <p>
-            Export two ChatGPT-compatible Excel workbooks with one worksheet per
-            region: station orders and public contracts.
-          </p>
-          <button onClick={() => exportAs("chatgpt-radius")}>
-            Export full station + contract workbooks
-          </button>
-        </article>
-        <article>
-          <span>04</span>
-          <h3>Import information</h3>
-          <p>
-            Import a previous Sage backup, Markdown strategy notes, text
-            documents, or JSON reference data.
-          </p>
-          <button onClick={importFiles}>Import information</button>
-        </article>
-        <article>
-          <span>05</span>
-          <h3>Diagnostic log</h3>
-          <p>
-            Export the local activity and error log for debugging. Secrets and
-            authentication tokens are excluded.
-          </p>
-          <button onClick={exportDebugLog}>Export diagnostic log</button>
-        </article>
-      </div>
-      <div className="vault-status">{status}</div>
-    </section>
-  );
-}
-
 function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated }: { snapshot?: CharacterSnapshot; marketDataRevision?: number; onMarketDataUpdated: () => void }) {
   const [regions, setRegions] = useState<
     Array<{ regionId: number; name: string }>
@@ -1532,9 +1498,3 @@ function OrderDepth({
     </div>
   );
 }
-
-
-
-
-
-

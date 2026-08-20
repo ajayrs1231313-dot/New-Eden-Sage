@@ -231,6 +231,15 @@ async function loadLivePveData(force = false): Promise<LivePveData> {
   return data;
 }
 
+export async function getNavigationPveHazards(force = false) {
+  const live = await loadLivePveData(force);
+  const incursionSystemIds = [...new Set(live.incursions.flatMap((row) => [
+    ...(Array.isArray(row.infested_solar_systems) ? row.infested_solar_systems : []),
+    Number(row.staging_solar_system_id || 0),
+  ]).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
+  return { fetchedAt: live.fetchedAt, incursionSystemIds };
+}
+
 function directStanding(snapshot: any, corporationId: number, corporationName: string, factionId: number | null, factionName: string | null) {
   const standings = Array.isArray(snapshot?.extended?.standings) ? snapshot.extended.standings : [];
   const corp = standings.find((row: any) => row.from_type === "npc_corp" && Number(row.from_id) === corporationId);

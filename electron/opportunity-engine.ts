@@ -446,7 +446,7 @@ export async function analyzeOpportunities(
     : null;
   const wallet = Math.max(0, Number(snapshot?.wallet ?? 0));
   const maxCapital = input.maxCapital == null
-    ? (wallet > 0 ? wallet : null)
+    ? null
     : Math.max(0, Number(input.maxCapital));
   const maxJumps = input.maxJumps == null ? null : Math.max(0, Number(input.maxJumps));
   const maxMinutes = input.maxMinutes == null ? null : Math.max(0, Number(input.maxMinutes));
@@ -521,7 +521,7 @@ export async function analyzeOpportunities(
       maxJumps,
       maxMinutes,
       capitalBasis: input.maxCapital == null
-        ? (wallet > 0 ? `${snapshot.character?.name ?? "Character"} wallet` : "No wallet limit")
+        ? "No capital limit; use the Market Scanner maximum-capital filter when needed"
         : "Custom deployable capital",
       cargoBasis: input.cargoCapacityM3 == null
         ? (detectedCargo?.basis ?? "No owned ship cargo detected; using 1 m3 until a ship asset is synced")

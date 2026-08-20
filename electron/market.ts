@@ -54,7 +54,7 @@ let highSecSystemsPromise: Promise<Set<number>> | undefined;
 
 async function esiFetch(
   url: string,
-  attempts = 3,
+  attempts = 5,
   allowNotFound = false,
 ): Promise<Response> {
   let response: Response;
@@ -76,9 +76,14 @@ async function esiFetch(
     throw new Error("EVE market data timed out after several retries. Please try again shortly.");
   }
   if (response.status === 429 && attempts > 0) {
+    const retryAfter = Number(response.headers.get("retry-after") ?? 0);
+    const errorLimitReset = Number(response.headers.get("x-esi-error-limit-reset") ?? 0);
+    const exponentialBackoff = Math.min(30, 2 ** Math.max(1, 6 - attempts));
     const waitSeconds = Math.max(
-      1,
-      Number(response.headers.get("retry-after") ?? 2),
+      2,
+      Number.isFinite(retryAfter) ? retryAfter : 0,
+      Number.isFinite(errorLimitReset) ? errorLimitReset : 0,
+      exponentialBackoff,
     );
     void logEvent("warn", "esi.rate_limited", {
       url,
@@ -110,7 +115,7 @@ async function esiFetch(
 
 async function esiJson<T>(
   url: string,
-  attempts = 3,
+  attempts = 5,
   allowNotFound = false,
 ): Promise<{ response: Response; data: T | null }> {
   const response = await esiFetch(url, attempts, allowNotFound);
@@ -164,7 +169,7 @@ export async function pullRegionMarket(
     (_, index) => index + 2,
   );
   const chunks = await mapLimited(remainingPages, 4, async (page) => {
-    const { data } = await esiJson<MarketOrder[]>(`${base}&page=${page}`, 3, true);
+    const { data } = await esiJson<MarketOrder[]>(`${base}&page=${page}`, 5, true);
     const orders = data ?? [];
     completed += 1;
     progress?.(completed, totalPages);

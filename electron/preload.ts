@@ -14,6 +14,16 @@ function rendererErrorReport(kind: string, value: unknown) {
 globalThis.addEventListener("error", (event) => rendererErrorReport("error", event.error ?? event.message));
 globalThis.addEventListener("unhandledrejection", (event) => rendererErrorReport("unhandledrejection", event.reason));
 
+function rendererHeartbeat() {
+  ipcRenderer.send("diagnostics:renderer-heartbeat", {
+    timestamp: new Date().toISOString(),
+    href: globalThis.location?.href,
+    visibilityState: globalThis.document?.visibilityState,
+  });
+}
+rendererHeartbeat();
+setInterval(rendererHeartbeat, 2000);
+
 const transientAnalysisError = (error: unknown) => /ANALYSIS_(WATCHDOG|WORKER_CRASH|WORKER_EXIT)|stopped responding|worker crashed|worker exited unexpectedly/i.test(error instanceof Error ? error.message : String(error));
 
 async function invokeAnalysis(channel: string, ...args: unknown[]) {
@@ -33,7 +43,10 @@ contextBridge.exposeInMainWorld("sage", {
   downloadUpdate: () => ipcRenderer.invoke("update:download"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
   openSupportPage: () => ipcRenderer.invoke("external:open-support"),
+  openZkillboard: (killmailId?: number) => ipcRenderer.invoke("external:open-zkillboard", killmailId),
   getMcpSetup: () => ipcRenderer.invoke("mcp:get-setup"),
+  getClaudeMcpStatus: () => ipcRenderer.invoke("mcp:claude-status"),
+  repairClaudeMcp: () => ipcRenderer.invoke("mcp:claude-repair"),
   getMcpTunnelStatus: () => ipcRenderer.invoke("mcp:tunnel-status"),
   configureMcpTunnel: (input: unknown) => ipcRenderer.invoke("mcp:tunnel-configure", input),
   openChatGptPlugins: () => ipcRenderer.invoke("mcp:open-chatgpt"),
@@ -82,7 +95,10 @@ contextBridge.exposeInMainWorld("sage", {
   getBlueprintActivities: (input: unknown) => ipcRenderer.invoke("industrial:blueprint-activities", input),
   getInventionOpportunities: (input: unknown) => ipcRenderer.invoke("industrial:invention-opportunities", input),
   getIndustrySystemCostIndex: (input: unknown) => ipcRenderer.invoke("industrial:system-cost-index", input),
+  getIndustrialOpportunities: (input: unknown) => ipcRenderer.invoke("industrial:opportunities", input),
+  getPreparedIndustrialCommand: (input: unknown) => ipcRenderer.invoke("industrial:prepared-state", input),
   getIndustrialOpportunityRouteScope: (input: unknown) => ipcRenderer.invoke("industrial:opportunity-route-scope", input),
+  getPreparedIskLab: (input: unknown) => ipcRenderer.invoke("prepared:isk-lab", input),
   getShipReadiness: (input: unknown) =>
     ipcRenderer.invoke("skills:ship-readiness", input),
   getActivityReadiness: (input: unknown) =>
@@ -101,6 +117,36 @@ contextBridge.exposeInMainWorld("sage", {
   removeCharacter: (characterId: string) =>
     ipcRenderer.invoke("character:remove", characterId),
   getEveNews: (force = false) => ipcRenderer.invoke("news:list", force),
+  searchSolarSystems: (query: string, limit = 20) => ipcRenderer.invoke("system-intelligence:search", query, limit),
+  prepareNavigationGraph: () => ipcRenderer.invoke("navigation:prepare-graph"),
+  searchNavigationSystems: (query: string, limit = 20) => ipcRenderer.invoke("navigation:search-systems", query, limit),
+  getNavigationSystem: (systemId: number) => ipcRenderer.invoke("navigation:get-system", systemId),
+  getNavigationNeighbours: (systemId: number) => ipcRenderer.invoke("navigation:get-neighbours", systemId),
+  getNavigationMapData: (input: unknown) => ipcRenderer.invoke("navigation:map-data", input),
+  getNavigationCapitalContext: (characterId: string) => ipcRenderer.invoke("navigation:capital-context", characterId),
+  calculateNavigationCapitalPlan: (input: unknown) => ipcRenderer.invoke("navigation:capital-plan", input),
+  getNavigationEveWaypointChain: (route: unknown) => ipcRenderer.invoke("navigation:eve-waypoint-chain", route),
+  exportNavigationRouteJson: (route: unknown) => ipcRenderer.invoke("navigation:export-route-json", route),
+  importNavigationRouteJson: (text: string) => ipcRenderer.invoke("navigation:import-route-json", text),
+  getNavigationOnlineWorkspace: (characterId: string) => ipcRenderer.invoke("navigation:online-workspace", characterId),
+  listNavigationOnlineRoutes: (input: unknown) => ipcRenderer.invoke("navigation:online-routes", input),
+  getNavigationOnlineRoute: (input: unknown) => ipcRenderer.invoke("navigation:online-route-get", input),
+  publishNavigationOnlineRoute: (input: unknown) => ipcRenderer.invoke("navigation:online-route-publish", input),
+  updateNavigationOnlineRoute: (input: unknown) => ipcRenderer.invoke("navigation:online-route-update", input),
+  calculateNavigationRoute: (input: unknown) => ipcRenderer.invoke("navigation:calculate-route", input),
+  calculateNavigationPlan: (input: unknown) => ipcRenderer.invoke("navigation:calculate-plan", input),
+  exportNavigationRouteToEve: (input: unknown) => ipcRenderer.invoke("eve:export-navigation-route", input),
+  getNavigationHazards: (force = false) => ipcRenderer.invoke("navigation:hazards", force),
+  getNavigationCharacterLocation: (characterId: string, forceLive = true) => ipcRenderer.invoke("navigation:character-location", characterId, forceLive),
+  getNavigationRouteIntelligence: (input: unknown) => ipcRenderer.invoke("navigation:route-intelligence", input),
+  getSystemIntelligence: (systemId: number) => ipcRenderer.invoke("system-intelligence:get", systemId),
+  refreshWatchedSystemIntelligence: (systemIds: number[]) => ipcRenderer.invoke("system-intelligence:refresh-watched", systemIds),
+  refreshSystemIntelligence: (input: unknown) => ipcRenderer.invoke("system-intelligence:refresh", input),
+  onSystemKillmailsUpdated: (callback: (value: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
+    ipcRenderer.on("system-intelligence:killmails-updated", listener);
+    return () => ipcRenderer.removeListener("system-intelligence:killmails-updated", listener);
+  },
   exportData: (
     format: "json" | "chatgpt" | "chatgpt-radius",
     characterId?: string,
@@ -110,6 +156,10 @@ contextBridge.exposeInMainWorld("sage", {
   listMarketRegions: () => ipcRenderer.invoke("market:regions"),
   buildFitShoppingRoute: (input: unknown) =>
     ipcRenderer.invoke("fit:shopping-route", input),
+  exportShoppingRouteToEve: (input: unknown) =>
+    ipcRenderer.invoke("eve:export-shopping-route", input),
+  exportFitToEve: (input: unknown) =>
+    ipcRenderer.invoke("eve:export-fit", input),
   findRadiusTrades: (mode: string) =>
     ipcRenderer.invoke("trade:radius-opportunities", mode),
   getOpportunityAnalysis: (input: unknown) =>
@@ -118,7 +168,7 @@ contextBridge.exposeInMainWorld("sage", {
     invokeAnalysis("pve:locations", input),
   cancelAnalysis: (kind?: string) => ipcRenderer.invoke("analysis:cancel", kind),
   getAnalysisStatus: () => ipcRenderer.invoke("analysis:status"),
-  runMasterUpdate: () => ipcRenderer.invoke("master:update-all"),
+  runMasterUpdate: (input?: unknown) => ipcRenderer.invoke("master:update-all", input),
   onMasterUpdateProgress: (callback: (progress: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: unknown) => callback(progress);
     ipcRenderer.on("master:update-progress", listener);

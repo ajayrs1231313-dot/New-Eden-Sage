@@ -88,6 +88,10 @@ export function deleteSnapshot(characterId: string) {
     .run(characterId);
 }
 
+export function clearCharacterSnapshots() {
+  db().prepare("DELETE FROM character_snapshots").run();
+}
+
 export function addImportedInformation(sourceName: string, content: string) {
   db()
     .prepare(

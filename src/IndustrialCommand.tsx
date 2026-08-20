@@ -121,7 +121,7 @@ export function IndustrialCommand({
   const [systemCostStatus, setSystemCostStatus] = useState("Current-system cost index not loaded.");
   const [opportunities, setOpportunities] = useState<any[]>([]);
   const [opportunityBusy, setOpportunityBusy] = useState(false);
-  const [opportunityStatus, setOpportunityStatus] = useState("Scanning owned blueprints against retained regional demand…");
+  const [opportunityStatus, setOpportunityStatus] = useState("Prepared industrial opportunities load from Sync All.");
   const [opportunityPreparedFor, setOpportunityPreparedFor] = useState("");
   const [opportunitySystem, setOpportunitySystem] = useState("");
   const [opportunityJumpRadius, setOpportunityJumpRadius] = useState<5 | 10 | 20 | null>(null);
@@ -187,6 +187,7 @@ export function IndustrialCommand({
   }, [industrial, typeNames]);
 
   useEffect(() => {
+    let cancelled = false;
     setSelectedBlueprintIndex(0);
     setManufacturingPlan(null);
     setManufacturingStatus("Choose a blueprint and output quantity.");
@@ -195,7 +196,31 @@ export function IndustrialCommand({
     setOpportunitySystem("");
     setOpportunityJumpRadius(null);
     setOpportunityPreparedFor("");
-  }, [active?.characterId]);
+    setOpportunities([]);
+    setSystemCostIndex(null);
+    if (!active?.characterId) return () => { cancelled = true; };
+    void window.sage.getPreparedIndustrialCommand({ characterId: active.characterId }).then((prepared) => {
+      if (cancelled) return;
+      if (Array.isArray(prepared?.opportunities)) {
+        setOpportunities(prepared.opportunities);
+        setOpportunityStatus(prepared.opportunityStatus ?? ("Prepared " + prepared.opportunities.length + " industrial opportunities."));
+      } else {
+        setOpportunityStatus("No prepared Industrial Opportunities result is available. Run Sync All to prepare it.");
+      }
+      if (prepared?.typeNames) setTypeNames((current) => ({ ...current, ...prepared.typeNames }));
+      setSystemCostIndex(prepared?.systemCostIndex ?? null);
+      setSystemCostStatus(prepared?.systemCostIndex?.available
+        ? "Current-system industry indices are prepared."
+        : "No prepared current-system cost index is available.");
+      if (prepared?.preparedActivityCount === prepared?.blueprintActivityCount && prepared?.blueprintActivityCount > 0) {
+        setActivityStatus(prepared.blueprintActivityCount + " owned blueprint activity maps are prepared.");
+      }
+    }).catch((error) => {
+      if (cancelled) return;
+      setOpportunityStatus(error instanceof Error ? error.message : "Prepared Industrial Command data could not be read.");
+    });
+    return () => { cancelled = true; };
+  }, [active?.characterId, active?.updatedAt]);
 
   if (!active) {
     return (
@@ -298,11 +323,10 @@ export function IndustrialCommand({
       setActivityStatus(error instanceof Error ? error.message : "Blueprint activity analysis failed.");
     }
   }
-  async function analyseIndustrialOpportunities(force = false) {
+  async function analyseIndustrialOpportunities(force = true) {
     const selectedSecurity = (Object.entries(opportunitySecurity) as Array<["high" | "low" | "null", boolean]>)
       .filter(([, enabled]) => enabled)
       .map(([band]) => band);
-    const proximityEnabled = Boolean(opportunitySystem.trim() && opportunityJumpRadius);
     if ((opportunitySystem.trim() && !opportunityJumpRadius) || (!opportunitySystem.trim() && opportunityJumpRadius)) {
       setOpportunities([]);
       setOpportunityStatus("To use proximity filtering, choose both a system and a 5 / 10 / 20 jump radius. Clear both to search all selected security space.");
@@ -313,109 +337,27 @@ export function IndustrialCommand({
       setOpportunityStatus("Select at least one security band.");
       return;
     }
-    const revisionKey = [
-      active.characterId, active.updatedAt, activeData.blueprints.length, activeData.corpBlueprints.length,
-      proximityEnabled ? opportunitySystem.trim().toLowerCase() : "all-systems", proximityEnabled ? opportunityJumpRadius : "all-jumps", selectedSecurity.join(","),
-      assetSharing.enabled, assetSharing.characterIds.join(","),
-    ].join(":");
-    if (!force && opportunityPreparedFor === revisionKey) return;
-    const ownedBlueprints = [...activeData.blueprints, ...activeData.corpBlueprints]
-      .filter((blueprint, index, all) => blueprint.type_id && all.findIndex((item) => item.type_id === blueprint.type_id) === index)
-      .slice(0, 40);
-    if (!ownedBlueprints.length) {
-      setOpportunities([]);
-      setOpportunityStatus("No owned blueprints are available to analyse.");
-      setOpportunityPreparedFor(revisionKey);
-      return;
-    }
     setOpportunityBusy(true);
-    setOpportunityStatus("Resolving owned blueprints into manufactured products…");
+    setOpportunityStatus("Refreshing industrial opportunities from prepared Sage data...");
     try {
-      const output: any[] = [];
-      for (const blueprint of ownedBlueprints) {
-        if (!blueprint.type_id) continue;
-        try {
-          const activities = await (window.sage as any).getBlueprintActivities({ characterId: active.characterId, blueprintTypeId: blueprint.type_id });
-          const manufacturing = activities?.activities?.find((activity: any) => activity.id === "manufacturing");
-          const product = manufacturing?.products?.[0];
-          if (!product?.name || !product?.typeId) continue;
-          setOpportunityStatus(proximityEnabled ? ("Checking " + product.name + " within " + opportunityJumpRadius + " jumps of " + opportunitySystem + "…") : ("Checking " + product.name + " across selected security space…"));
-          const plan = await (window.sage as any).getManufacturingPlan({
-            characterId: active.characterId,
-            blueprintTypeId: blueprint.type_id,
-            materialEfficiency: blueprint.material_efficiency ?? 0,
-            timeEfficiency: blueprint.time_efficiency ?? 0,
-            targetQuantity: Math.max(1, Number(product.quantity ?? 1)),
-            availableRuns: (blueprint.runs ?? -1) >= 0 ? blueprint.runs : undefined,
-            includeConnectedStock: assetSharing.enabled,
-            sharedCharacterIds: assetSharing.enabled ? assetSharing.characterIds : [],
-          });
-          const marketRows: any[] = [];
-          for (const security of selectedSecurity) {
-            const market = await (window.sage as any).filterRegionalMarket({
-              query: product.name, categoryIds: [], groupIds: [], marketGroupIds: [], regionIds: [], security,
-              presence: "any", signal: "all", sort: "signal", offset: 0, limit: 80,
-            });
-            marketRows.push(...(market?.rows ?? []).filter((row: any) => row.item === product.name));
-          }
-          const candidateSystemIds = marketRows
-            .map((row: any) => Number(row.bestBuySystemId ?? row.bestSellSystemId ?? 0))
-            .filter((value: number) => value > 0);
-          const routeScope = proximityEnabled ? await (window.sage as any).getIndustrialOpportunityRouteScope({
-            systemQuery: opportunitySystem,
-            maxJumps: opportunityJumpRadius,
-            targetSystemIds: candidateSystemIds,
-          }) : null;
-          const routeBySystem = new Map<number, any>((routeScope?.routes ?? []).map((route: any) => [Number(route.systemId), route]));
-          const buildUnitCost = Number(plan?.market?.fullBomMarketCost ?? plan?.market?.shortageMarketCost ?? 0) / Math.max(1, Number(plan?.outputQuantity ?? product.quantity ?? 1));
-          for (const row of marketRows.slice(0, 60)) {
-            const demandSystemId = Number(row.bestBuySystemId ?? row.bestSellSystemId ?? 0);
-            const route = proximityEnabled ? routeBySystem.get(demandSystemId) : null;
-            if (proximityEnabled && !route?.withinRange) continue;
-            const immediateUnitRevenue = Number(row.bestBuy ?? 0);
-            const listUnitRevenue = Number(row.bestSell ?? row.bestBuy ?? 0);
-            const demandUnits = Math.max(0, Number(row.buyVolume ?? 0));
-            const supplyUnits = Math.max(0, Number(row.sellVolume ?? 0));
-            const demandGap = Math.max(0, demandUnits - supplyUnits);
-            const batch = Math.max(1, Math.min(100, Math.ceil(Math.max(demandGap * 0.25, Number(row.buyOrders ?? 0) * 2, 1))));
-            const unitRevenue = immediateUnitRevenue > 0 ? immediateUnitRevenue : listUnitRevenue;
-            const unitProfit = buildUnitCost > 0 && unitRevenue > 0 ? unitRevenue - buildUnitCost : null;
-            const batchProfit = unitProfit == null ? null : unitProfit * batch;
-            if (batchProfit == null || batchProfit <= 0) continue;
-            const confidence = row.supplyGap || (row.buyPressure && Number(row.demandSupplyRatio ?? 0) >= 2) ? "HIGH" : row.thinSupply || Number(row.signalScore ?? 0) >= 60 ? "MEDIUM" : "WATCH";
-            const score = Number(row.signalScore ?? 0) + (row.supplyGap ? 45 : 0) + (row.buyPressure ? 25 : 0) + (row.thinSupply ? 15 : 0) + Math.min(35, Math.max(0, Number(row.demandSupplyRatio ?? 0) * 5)) + Math.min(40, Math.log10(batchProfit + 1) * 5) + (proximityEnabled ? Math.max(0, 20 - Number(route?.jumps ?? 20)) : 0);
-            output.push({
-              blueprintTypeId: blueprint.type_id,
-              blueprintName: typeNames[blueprint.type_id] ?? activities?.blueprintName ?? "Owned blueprint",
-              productTypeId: product.typeId, productName: product.name, region: row.region, security: row.security,
-              system: route?.systemName ?? row.bestBuySystemName ?? row.bestSellSystemName ?? row.region, systemId: demandSystemId, jumps: proximityEnabled ? route?.jumps : null, originSystem: proximityEnabled ? (routeScope?.origin?.systemName ?? opportunitySystem) : null,
-              bestBuy: row.bestBuy, bestSell: row.bestSell, buyOrders: row.buyOrders, sellOrders: row.sellOrders,
-              buyVolume: demandUnits, sellVolume: supplyUnits, demandSupplyRatio: row.demandSupplyRatio, regionalPremiumPercent: row.regionalPremiumPercent,
-              supplyGap: row.supplyGap, thinSupply: row.thinSupply, buyPressure: row.buyPressure, signalScore: row.signalScore,
-              buildUnitCost, unitProfit, batch, batchProfit, confidence, score,
-              materialEfficiency: blueprint.material_efficiency ?? 0, timeEfficiency: blueprint.time_efficiency ?? 0,
-            });
-          }
-        } catch { /* Keep scanning the rest of the owned blueprint library. */ }
-      }
-      const deduped = [...new Map(output.sort((a,b) => b.score - a.score).map((item) => [item.productTypeId + ":" + item.region + ":" + item.system, item])).values()].slice(0, 40);
-      setOpportunities(deduped);
-      setOpportunityPreparedFor(revisionKey);
-      setOpportunityStatus(deduped.length
-        ? (proximityEnabled ? ("Ranked " + deduped.length + " profitable opportunities within " + opportunityJumpRadius + " jumps of " + (deduped[0]?.originSystem ?? opportunitySystem) + ".") : ("Ranked " + deduped.length + " profitable opportunities across the selected security space."))
-        : (proximityEnabled ? "No profitable retained-market opportunities matched those security and jump filters." : "No profitable retained-market opportunities matched the selected security filters."));
+      const result = await window.sage.getIndustrialOpportunities({
+        characterId: active.characterId,
+        systemQuery: opportunitySystem,
+        maxJumps: opportunityJumpRadius,
+        security: selectedSecurity,
+        includeConnectedStock: assetSharing.enabled,
+        sharedCharacterIds: assetSharing.enabled ? assetSharing.characterIds : [],
+        force,
+      });
+      setOpportunities(Array.isArray(result?.opportunities) ? result.opportunities : []);
+      setOpportunityStatus(result?.status ?? "Industrial opportunity refresh completed.");
+      setOpportunityPreparedFor(JSON.stringify(result?.scope ?? {}));
+    } catch (error) {
+      setOpportunityStatus(error instanceof Error ? error.message : "Industrial opportunity analysis failed.");
     } finally {
       setOpportunityBusy(false);
     }
   }
-
-  useEffect(() => {
-    if (!activeData.blueprints.length && !activeData.corpBlueprints.length) return;
-    const timer = setTimeout(() => void analyseIndustrialOpportunities(false), 1800);
-    return () => clearTimeout(timer);
-    // Background preparation is revision-driven; opening the tab is display-only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active.characterId, active.updatedAt, activeData.blueprints.length, activeData.corpBlueprints.length, opportunitySystem, opportunityJumpRadius, opportunitySecurity.high, opportunitySecurity.low, opportunitySecurity.null, assetSharing.enabled, assetSharing.characterIds.join(",")]);
 
   const blueprintAssetByItemId = new Map<number, EnrichedAsset>(
     activeData.assets
@@ -527,18 +469,13 @@ export function IndustrialCommand({
             </article>
           </div>
 
-          <div className="industrial-roadmap-grid">
-            <RoadmapCard title="Manufacturing" state="Foundation live" text="Character jobs, blueprint ownership and assets are connected. Material and cost expansion follows." />
-            <RoadmapCard title="Invention & research" state="Next pass" text="ME/TE, copying, invention inputs, datacores and probability intelligence." />
-            <RoadmapCard title="Build vs buy" state="Queued" text="Use Sage's full-market dataset for material sourcing and finished-product comparisons." />
-            <RoadmapCard title="Multi-character planning" state="Foundation live" text="Ownership is already separated per character; shared plans will reference owners explicitly." />
-          </div>
+          
         </>
       )}
 
       {tab === "opportunities" && (
         <div className="industrial-opportunity-workspace">
-          <article className="industrial-panel industrial-opportunity-intro">
+          <article className="industrial-panel industrial-opportunity-intro industrial-workbench-card">
             <div className="industrial-panel-head industrial-opportunity-head">
               <div><p className="eyebrow">OWNED BLUEPRINT × MARKET DEMAND</p><h3>What should I build, and where should I sell it?</h3><p>Sage matches products you can actually manufacture against retained demand, constrained to the security space and jump radius you choose.</p></div>
               <button type="button" className="industrial-opportunity-refresh" onClick={() => void analyseIndustrialOpportunities(true)} disabled={opportunityBusy}>{opportunityBusy ? 'Analysing…' : 'Refresh opportunities'}</button>
@@ -648,18 +585,18 @@ export function IndustrialCommand({
       )}
       {tab === "research" && (
         <div className="industrial-production-workspace">
-          <article className="industrial-panel industrial-production-control">
+          <article className="industrial-panel industrial-production-control industrial-research-control industrial-workbench-card">
             <div className="industrial-panel-head"><div><p className="eyebrow">RESEARCH & INVENTION</p><h3>Blueprint activity intelligence</h3><p>Inspect copying, ME/TE research, invention inputs, output options and skill requirements directly from CCP's local SDE.</p></div><span className="industrial-status live">OFFLINE SDE</span></div>
             {planningBlueprints.length ? <><div className="industrial-production-controls research-controls"><label><span>Research blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setBlueprintActivities(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label><label><span>Owned blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setBlueprintActivities(null); }}>
               {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}</option>)}
             </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
-          {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : <article className="industrial-panel industrial-planned"><p className="eyebrow">CCP ACTIVITY MAP</p><h3>Research and invention ready</h3><p>Choose an owned blueprint to reveal copying, research, invention and manufacturing definitions, including base activity time, required materials, possible outputs and trained skill readiness.</p></article>}
+          {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : null}
         </div>
       )}
       {tab === "production" && (
         <div className="industrial-production-workspace">
-          <article className="industrial-panel industrial-production-control">
+          <article className="industrial-panel industrial-production-control industrial-production-target-control industrial-workbench-card">
             <div className="industrial-panel-head">
               <div><p className="eyebrow">PRODUCTION CHAIN PLANNER</p><h3>Manufacturing target</h3><p>Uses the selected personal or corporation blueprint's real ME/TE and character-owned material stock.</p></div>
               <span className="industrial-status live">CCP SDE</span>
@@ -678,7 +615,7 @@ export function IndustrialCommand({
               <div className="industrial-notice">{manufacturingStatus}</div>
             </> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
-          {manufacturingPlan ? <ManufacturingPlanView plan={manufacturingPlan} /> : <article className="industrial-panel industrial-planned"><p className="eyebrow">MATERIAL REQUIREMENTS ENGINE</p><h3>Ready for a target</h3><p>Select an owned blueprint and Sage will expand its manufacturing bill of materials using CCP's local SDE, apply that exact blueprint's ME/TE, and subtract the selected owner's stock.</p><div className="industrial-production-steps"><span>1 · Choose owned blueprint</span><span>2 · Set output quantity</span><span>3 · Expand CCP materials</span><span>4 · Apply ME/TE</span><span>5 · Subtract stock</span><span>6 · Identify shortages</span></div></article>}
+          {manufacturingPlan ? <ManufacturingPlanView plan={manufacturingPlan} /> : null}
         </div>
       )}
     </section>
@@ -733,10 +670,6 @@ function JobList({ jobs, expanded = false, typeNames }: { jobs: IndustryJobRecor
       ))}
     </div>
   );
-}
-
-function RoadmapCard({ title, state, text }: { title: string; state: string; text: string }) {
-  return <article className="industrial-roadmap-card"><span>{state}</span><h3>{title}</h3><p>{text}</p></article>;
 }
 
 function duration(seconds: number) {

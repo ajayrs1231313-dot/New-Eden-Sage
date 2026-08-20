@@ -516,6 +516,15 @@ export async function analyzeShipReadiness(
 ): Promise<ShipReadinessResult> {
   const hull = await fetchTypeDetail(hullTypeId);
   const hullAccessPlan = await analyzeTrainingPlan(snapshot, [hullTypeId], [], cloneState);
+  // Hull usability is determined by the hull's DIRECT required skills. Recursive
+  // prerequisites are useful training guidance, but once the direct skill is trained
+  // they must not make an already-flyable hull appear inaccessible.
+  const hullAccessSkills = hullAccessPlan.relevantSkills.filter((skill) => skill.direct);
+  const missingHullAccessSkills = hullAccessSkills.filter((skill) => !skill.met);
+  const hullAccessReady = missingHullAccessSkills.length === 0;
+  // Access is binary: a character can either board the hull or cannot. Partial
+  // prerequisite progress belongs in the training guidance, not this metric.
+  const hullAccessPercent = hullAccessReady ? 100 : 0;
   const trained = new Map(snapshot.skills.skills.map((skill) => [skill.skill_id, skill.trained_skill_level]));
   const tiers = (await loadMasteries()).get(hullTypeId) ?? [];
   let masteryLevel = 0;
@@ -553,10 +562,10 @@ export async function analyzeShipReadiness(
     character: snapshot.character.name,
     ...plan,
     readinessPercent: competencyPercent,
-    hullAccessPercent: hullAccessPlan.readinessPercent,
-    hullAccessReady: hullAccessPlan.ready,
-    hullAccessSkills: hullAccessPlan.relevantSkills,
-    missingHullAccessSkills: hullAccessPlan.missingSkills,
+    hullAccessPercent,
+    hullAccessReady,
+    hullAccessSkills,
+    missingHullAccessSkills,
     targetMasteryLevel: selectedMasteryLevel,
     ready: masteryLevel >= selectedMasteryLevel,
     masteryLevel,
@@ -564,12 +573,12 @@ export async function analyzeShipReadiness(
     explanation: {
       ...plan.explanation,
       reasons: [
-        `${hullAccessPlan.metDirectRequirements} of ${hullAccessPlan.directRequirements} minimum hull-access requirements are currently met.`,
+        `${hullAccessSkills.length - missingHullAccessSkills.length} of ${hullAccessSkills.length} minimum hull-access requirements are currently met.`,
         `${plan.missingSkills.length} of ${plan.relevantSkills.length} Mastery ${MASTERY_LABELS[selectedMasteryLevel].replace("Mastery ", "")} skill targets remain below their official target level.`,
         ...plan.explanation.reasons.slice(1),
       ],
       formula:
-        `Practical competency is skill-point-weighted progress across the selected official ${MASTERY_LABELS[selectedMasteryLevel]} skill set; hull access is reported separately (${hullAccessPlan.readinessPercent}%). Higher skill levels carry their real exponentially larger training weight.`,
+        `Practical competency is skill-point-weighted progress across the selected official ${MASTERY_LABELS[selectedMasteryLevel]} skill set; hull access is reported separately (${hullAccessPercent}%). Higher skill levels carry their real exponentially larger training weight.`,
     },
   };
 }
