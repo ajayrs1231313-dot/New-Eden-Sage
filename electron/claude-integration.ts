@@ -114,27 +114,86 @@ async function findInstalledClaudeDesktopExtension() {
 
 async function getClaudeDesktopStatus(): Promise<ClaudeClientStatus> {
   const directory = desktopConfigDirectory();
-  let detected = true;
+  let configDirectoryExists = true;
   try { await fs.access(directory); }
-  catch { detected = false; }
-  const installedManifest = detected ? await findInstalledClaudeDesktopExtension() : "";
+  catch { configDirectoryExists = false; }
+  const executable = await findClaudeDesktopExecutable().catch(() => "");
+  const detected = Boolean(executable) || configDirectoryExists;
+  const installedManifest = configDirectoryExists ? await findInstalledClaudeDesktopExtension() : "";
   const prepared = await prepareClaudeDesktopBundle().catch(() => null);
   return {
     detected,
     configured: Boolean(installedManifest),
-    path: installedManifest || directory,
+    path: installedManifest || executable || directory,
     bundlePath: prepared?.path ?? desktopBundlePath(),
     method: "mcpb",
   };
+}
+
+async function findClaudeDesktopExecutable() {
+  if (process.platform === "win32") {
+    // Claude's Microsoft Store/MSIX package does not currently register .mcpb
+    // as a Windows file type. Resolve the installed package directly instead.
+    const script = [
+      "$p = Get-AppxPackage Claude | Select-Object -First 1",
+      "if ($p) {",
+      "  $candidate = Join-Path $p.InstallLocation 'app\\claude.exe'",
+      "  if (Test-Path -LiteralPath $candidate) { Write-Output $candidate; exit 0 }",
+      "}",
+      "exit 1",
+    ].join("; " );
+    const result = await runCommand(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      5000,
+    );
+    if (result.code === 0) {
+      const executable = result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
+      if (executable) return executable;
+    }
+    return "";
+  }
+
+  if (process.platform === "darwin") {
+    return "/Applications/Claude.app";
+  }
+
+  return "";
+}
+
+async function openClaudeDesktopBundle(bundlePath: string) {
+  if (process.platform === "win32") {
+    const executable = await findClaudeDesktopExecutable();
+    if (executable) {
+      try {
+        const child = spawn(executable, [bundlePath], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: false,
+          env: process.env,
+        });
+        child.unref();
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : "Claude Desktop could not be launched.";
+      }
+    }
+    return "Claude Desktop is installed but Sage could not resolve its Windows package executable.";
+  }
+
+  if (process.platform === "darwin") {
+    const result = await runCommand("open", ["-a", "Claude", bundlePath], 5000);
+    return result.code === 0 ? "" : (result.stderr.trim() || result.stdout.trim() || "Claude Desktop could not be launched.");
+  }
+
+  return shell.openPath(bundlePath);
 }
 
 export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatus> {
   const directory = desktopConfigDirectory();
   const before = await findInstalledClaudeDesktopExtension();
   const prepared = await prepareClaudeDesktopBundle();
-  // Let Windows/macOS file association be the source of truth here. Claude may
-  // be installed but not have created its config directory until first launch.
-  const openError = await shell.openPath(prepared.path);
+  const openError = await openClaudeDesktopBundle(prepared.path);
   if (openError) {
     shell.showItemInFolder(prepared.path);
     return {
@@ -145,7 +204,7 @@ export async function installClaudeDesktopExtension(): Promise<ClaudeClientStatu
       method: "mcpb",
       path: before || directory,
       bundlePath: prepared.path,
-      error: `Claude did not accept the bundle automatically (${openError}). In Claude Desktop use Settings > Extensions > Advanced settings > Install Extension and select the highlighted ${BUNDLE_NAME} file.`,
+      error: `Sage prepared the Claude extension but could not open Claude automatically (${openError}). In Claude Desktop use Settings > Extensions > Advanced settings > Install Extension and select the highlighted ${BUNDLE_NAME} file.`,
     };
   }
   return {
