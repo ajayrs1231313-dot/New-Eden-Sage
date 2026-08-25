@@ -99,5 +99,14 @@ module.exports = async function routeEngineTests() {
   assert.equal(reverseLocked.found, true);
   assert.deepEqual(reverseLocked.systems.map((s) => s.systemId), shortest.systems.map((s) => s.systemId).reverse());
 
+  const wormholeProfile = { mode:'shortest', minSecurity:null, avoids:{systemIds:[],constellationIds:[],regionIds:[]}, dynamicHazards:{providerIds:[],excludedSystemIds:[]}, specialConnections:{enabledTypes:['wormhole'],disabledNetworkIds:[],wormholePolicy:{avoidEol:true,avoidCritical:true,avoidFrigateOnly:true,shipMassKg:20_000_000,shipName:'Fixture cruiser'}} };
+  const baseWormhole = { connectionId:'fixture-wh-healthy', fromSystemId:Jita.systemId, toSystemId:Amarr.systemId, type:'wormhole', enabled:true, bidirectional:true, expiresAt:'2099-01-01T00:00:00.000Z', status:'active', maxJumpMassKg:300_000_000, remainingMassKg:500_000_000, metadata:{wormholeTransit:true,wormholeStatus:'active'} };
+  assert.equal(planner.activeNavigationCustomConnections([baseWormhole], wormholeProfile).length, 1, 'healthy wormhole should remain routable');
+  assert.equal(planner.activeNavigationCustomConnections([{...baseWormhole,connectionId:'fixture-wh-eol',metadata:{...baseWormhole.metadata,wormholeStatus:'eol'}}], wormholeProfile).length, 0, 'EOL wormhole should be rejected');
+  assert.equal(planner.activeNavigationCustomConnections([{...baseWormhole,connectionId:'fixture-wh-critical',metadata:{...baseWormhole.metadata,wormholeStatus:'critical'}}], wormholeProfile).length, 0, 'critical wormhole should be rejected');
+  assert.equal(planner.activeNavigationCustomConnections([{...baseWormhole,connectionId:'fixture-wh-frigate',maxJumpMassKg:5_000_000}], wormholeProfile).length, 0, 'frigate-only mass should be rejected');
+  assert.equal(planner.activeNavigationCustomConnections([{...baseWormhole,connectionId:'fixture-wh-oversize',maxJumpMassKg:10_000_000}], wormholeProfile).length, 0, 'ship above max-jump mass should be rejected');
+  assert.equal(planner.activeNavigationCustomConnections([{...baseWormhole,connectionId:'fixture-wh-remaining',remainingMassKg:10_000_000}], wormholeProfile).length, 0, 'ship above remaining mass should be rejected');
+
   return { direct: direct.jumps, shortest: shortest.jumps, highSec: high.jumps, avoided: avoided.jumps };
 };

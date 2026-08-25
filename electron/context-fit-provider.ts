@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ActivityContext, ContextRule } from "./activity-context";
 import { USER_DATA_ROOT } from "./data-paths";
+import { fitTankFamilyFromNames, selectDiverseFitClusters } from "./fit-cluster-selection";
 import {
   getRecentHullFitSamples,
   type CommunityFitSample,
@@ -17,7 +18,7 @@ const ABYSS_MAX_PAGES = 3;
 const MAX_PUBLIC_FIT_IDS = 18;
 const MAX_RUN_WEIGHT_PER_FIT = 6;
 const EXACT_EVIDENCE_TARGET = 6;
-const FIT_EVIDENCE_MODEL = "top-level-fitted-items-v2";
+const FIT_EVIDENCE_MODEL = "top-level-fitted-items-v3-tank-diversity";
 
 const headers = {
   Accept: "application/json",
@@ -418,7 +419,7 @@ function archetypeLabel(
   const parts: string[] = [];
   if (/shield booster|shield extender|shield hardener/.test(text))
     parts.push("Shield");
-  if (/armor repair|armor plate|energized/.test(text)) parts.push("Armor");
+  if (/armor repair|armour repair|armor plate|armour plate|energized|membrane|armor hardener|armour hardener|reactive armor|reactive armour/.test(text)) parts.push("Armor");
   if (/missile launcher|rocket launcher|torpedo launcher/.test(text))
     parts.push("Missile");
   if (/laser|pulse laser|beam laser/.test(text)) parts.push("Laser");
@@ -452,10 +453,13 @@ function clusterSamples(
     else clusters.push([sample]);
   }
 
-  return clusters
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 3)
-    .map((cluster, clusterIndex): ContextFitArchetype => {
+  return selectDiverseFitClusters(
+    clusters,
+    (cluster) => fitTankFamilyFromNames(
+      cluster.flatMap((sample) => [...sample.fit.low, ...sample.fit.mid, ...sample.fit.rig].map((item) => item.name)),
+    ),
+    4,
+  ).map((cluster, clusterIndex): ContextFitArchetype => {
       const presence = new Map<number, { count: number; name: string }>();
       for (const sample of cluster)
         for (const item of sample.items) {

@@ -168,8 +168,13 @@ export async function loadRecentRawMarketManifests(
   mode: RawMarketMode,
   limit = 2,
 ): Promise<RawMarketSnapshot[]> {
-  await fs.mkdir(RAW_MARKET_ROOT, { recursive: true });
-  const entries = await fs.readdir(RAW_MARKET_ROOT, { withFileTypes: true });
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(RAW_MARKET_ROOT, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
   const manifests: RawMarketSnapshot[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;

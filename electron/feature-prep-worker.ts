@@ -2,9 +2,13 @@ import { parentPort, workerData } from "node:worker_threads";
 import { analyzeInventionOpportunities, prepareIndustrialDataLocal } from "./industrial-engine";
 import { analyzeShipReadiness } from "./readiness";
 import { savePersistedResult } from "./persistent-result-cache";
+import { prepareIndustrialCommand } from "./industrial-preparation";
+import { prepareRefineryStaticDataLocal } from "./refinery-engine";
 
 type FeaturePrepInput =
   | { task: "industry" }
+  | { task: "refinery" }
+  | { task: "industrial-command"; characterId: string }
   | { task: "invention"; snapshot: any; decryptorTypeId?: number | null; cacheKey: unknown }
   | { task: "ship-readiness"; snapshot: any; hullTypeId: number; cloneState: "alpha" | "omega"; masteryLevel: number; cacheKey: unknown };
 
@@ -15,6 +19,22 @@ async function main() {
   if (input.task === "industry") {
     parentPort?.postMessage({ type: "progress", percent: 10, message: "Preparing industrial blueprint data." });
     const result = await prepareIndustrialDataLocal();
+    parentPort?.postMessage({ type: "complete", result });
+    return;
+  }
+
+  if (input.task === "refinery") {
+    parentPort?.postMessage({ type: "progress", percent: 5, message: "Preparing versioned refinery static cache." });
+    const result = await prepareRefineryStaticDataLocal();
+    parentPort?.postMessage({ type: "progress", percent: 100, message: `Refinery cache ready (${result.refinableTypes.toLocaleString()} refinable types).` });
+    parentPort?.postMessage({ type: "complete", result });
+    return;
+  }
+
+  if (input.task === "industrial-command") {
+    const result = await prepareIndustrialCommand(input.characterId, (percent, message) => {
+      parentPort?.postMessage({ type: "progress", percent, message });
+    });
     parentPort?.postMessage({ type: "complete", result });
     return;
   }

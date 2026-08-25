@@ -16,6 +16,7 @@ import {
 import { getMarketSystemIndex, getMarketTypeIndex, loadMarketWorkerLookups, prepareMarketWorkerLookups } from "./market-static-index";
 import type { MarketOrder } from "./market";
 import { logEvent } from "./logger";
+import { loadSharedFullMarketAnalysisIndex } from "./shared-market-data";
 
 export type FullMarketOrder = {
   orderId: number;
@@ -393,6 +394,13 @@ export async function buildFullMarketAnalysisIndex(
   snapshot?: RawMarketSnapshot,
   runtime: RawMarketAnalysisRuntime = {},
 ): Promise<FullMarketAnalysisIndex> {
+  if (!snapshot && process.env.NEW_EDEN_SAGE_DISABLE_SHARED_MARKET !== "1") {
+    const shared = await loadSharedFullMarketAnalysisIndex();
+    if (!shared) throw new Error("The shared server generation is unavailable. Desktop public-market reconstruction is disabled.");
+    currentCache = { snapshotId: shared.snapshotId, value: shared };
+    runtime.progress?.({ stage: "market-index", message: "Loaded the validated shared full-market generation.", completed: shared.regionCount, total: shared.regionCount, percent: 100, cached: true });
+    return shared;
+  }
   const manifest = snapshot ?? (await loadCurrentRawMarketManifest("all"));
   if (!manifest?.complete || manifest.mode !== "all")
     throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
@@ -574,6 +582,7 @@ export async function buildFullMarketAnalysisIndexParallel(
   workerCount: number,
   runtime: RawMarketAnalysisRuntime = {},
 ): Promise<FullMarketAnalysisIndex> {
+  if (process.env.NEW_EDEN_SAGE_DISABLE_SHARED_MARKET !== "1") throw new Error("Desktop full-market shard computation is disabled; use the shared server generation.");
   const manifest = await loadCurrentRawMarketManifest("all");
   if (!manifest?.complete) throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
   const saved = await loadPersistedAnalysisIndex(manifest);

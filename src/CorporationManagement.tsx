@@ -1,12 +1,15 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { KillmailReader } from "./KillmailReader";
-import { CorporationDoctrines, PENDING_DOCTRINE_FIT_KEY } from "./CorporationDoctrines";
+import { CorporationOpPlanner } from "./CorporationOpPlanner";
+import { CorporationRoles } from "./CorporationRoles";
+import { CorporationDiscordIntegration } from "./CorporationDiscordIntegration";
+import { CorporationFindHome } from "./CorporationFindHome";
 import { buildSystemNewsKillmailWindows, mergeSystemNewsKillmails, type KillmailWindowKey } from "./system-news-killmail-windows";
 
 type SystemHit = { systemId: number; name: string; regionName: string; constellationName: string; securityStatus: number };
 type Intel = any;
 type Watched = { systemId: number; name: string };
-type CorpSection = "system-news" | "overview" | "members" | "doctrines" | "structures" | "alliance";
+type CorpSection = "system-news" | "find-home" | "overview" | "members" | "ops" | "roles" | "structures" | "alliance" | "discord";
 type KillmailStatus = {
   cooldownMs?: number;
   cacheTtlMs?: number;
@@ -157,14 +160,14 @@ function useResolvedNames(ids: number[]) {
 function AllianceManagementReserved() {
   return <div className="corp-data-view corp-alliance-reserved">
     <div className="corp-alliance-reserved-mark">ALLIANCE</div>
-    <p className="eyebrow">CORPORATION MANAGEMENT · ALLIANCE</p>
+    <p className="eyebrow">CORPORATION COMMAND · ALLIANCE</p>
     <h3>Alliance Management</h3>
-    <p>This workspace is reserved for alliance-level tools. Corporation Management remains the single command area for corporation and alliance operations.</p>
+    <p>This workspace is reserved for alliance-level tools. Corporation Command remains the command area for corporation and alliance administration; fleet doctrine and tactical work lives in Fleet Command.</p>
   </div>;
 }
 
 export function CorporationManagement() {
-  const [section, setSection] = useState<CorpSection>(() => sessionStorage.getItem(PENDING_DOCTRINE_FIT_KEY) ? "doctrines" : "system-news");
+  const [section, setSection] = useState<CorpSection>("system-news");
   const [snapshots, setSnapshots] = useState<any[]>([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
 
@@ -201,34 +204,27 @@ export function CorporationManagement() {
     if (!selectedCharacterId || !corporations.some((corp) => corp.characterId === selectedCharacterId)) setSelectedCharacterId(corporations[0].characterId);
   }, [corporations, selectedCharacterId]);
 
-  useEffect(() => {
-    if (!corporations.length || !sessionStorage.getItem(PENDING_DOCTRINE_FIT_KEY)) return;
-    try {
-      const pending = JSON.parse(sessionStorage.getItem(PENDING_DOCTRINE_FIT_KEY) ?? "null");
-      const targetCorporationId = Number(pending?.corporationId ?? 0);
-      const target = targetCorporationId ? corporations.find((corp) => corp.corporationId === targetCorporationId) : null;
-      if (target) setSelectedCharacterId(target.characterId);
-    } catch { /* Ignore malformed legacy pending data. */ }
-  }, [corporations]);
-
   const corporation = corporations.find((item) => item.characterId === selectedCharacterId) ?? corporations[0] ?? null;
 
   return <section className="corp-command">
     <div className="corp-subtabs">
       <button className={section === "system-news" ? "active" : ""} onClick={() => setSection("system-news")}>System News</button>
+      <button className={section === "find-home" ? "active" : ""} onClick={() => setSection("find-home")}>Find a Home</button>
       <button className={section === "overview" ? "active" : ""} onClick={() => setSection("overview")}>Overview</button>
       <button className={section === "members" ? "active" : ""} onClick={() => setSection("members")}>Members</button>
-      <button className={section === "doctrines" ? "active" : ""} onClick={() => setSection("doctrines")}>Doctrines</button>
+      <button className={section === "ops" ? "active" : ""} onClick={() => setSection("ops")}>Op Planner</button>
+      <button className={section === "roles" ? "active" : ""} onClick={() => setSection("roles")}>Corp Roles</button>
       <button className={section === "structures" ? "active" : ""} onClick={() => setSection("structures")}>Structures</button>
       <button className={section === "alliance" ? "active" : ""} onClick={() => setSection("alliance")}>Alliance Management</button>
+      <button className={section === "discord" ? "active" : ""} onClick={() => setSection("discord")}>Discord Setup</button>
     </div>
 
-    {section === "system-news" ? <SystemNews /> : section === "alliance" ? <AllianceManagementReserved /> : <>
+    {section === "system-news" ? <SystemNews /> : section === "find-home" ? <CorporationFindHome corporation={corporation} /> : section === "alliance" ? <AllianceManagementReserved /> : <>
       <div className="corp-data-head">
         <div>
-          <p className="eyebrow">CORPORATION · MANAGEMENT</p>
+          <p className="eyebrow">CORPORATION · COMMAND</p>
           <h2>{corporation?.name ?? "Corporation data"}</h2>
-          <p>{corporation ? `Selected character: ${corporation.characterName} · synced ${formatDate(corporation.snapshot?.updatedAt)}` : "Connect and sync an EVE character to populate corporation management."}</p>
+          <p>{corporation ? `Selected character: ${corporation.characterName} · synced ${formatDate(corporation.snapshot?.updatedAt)}` : "Connect and sync an EVE character to populate Corporation Command."}</p>
         </div>
         <div className="corp-data-actions">
           {corporations.length > 1 && <select value={selectedCharacterId ?? ""} onChange={(event) => setSelectedCharacterId(event.target.value)}>
@@ -241,9 +237,13 @@ export function CorporationManagement() {
         ? <CorporationOverview corporation={corporation} />
         : section === "members"
           ? <CorporationMembers corporation={corporation} snapshots={snapshots} />
-          : section === "doctrines"
-            ? <CorporationDoctrines corporation={corporation} snapshots={snapshots} />
-            : <CorporationStructures corporation={corporation} />}
+          : section === "ops"
+              ? <CorporationOpPlanner corporation={corporation} snapshots={snapshots} />
+              : section === "roles"
+                ? <CorporationRoles corporation={corporation} />
+                : section === "discord"
+                ? <CorporationDiscordIntegration corporation={corporation} />
+                : <CorporationStructures corporation={corporation} />}
     </>}
   </section>;
 }

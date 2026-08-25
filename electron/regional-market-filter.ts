@@ -11,7 +11,7 @@ import {
   type MarketTaxonomy,
   type MarketTypeEntry,
 } from "./market-static-index";
-import { loadCurrentRawMarketManifest } from "./raw-market-storage";
+import { loadCurrentMarketRevision } from "./shared-market-data";
 
 export type RegionalMarketFilterSecurity = "all" | "high" | "low" | "null";
 export type RegionalMarketPresence = "any" | "buy" | "sell" | "both";
@@ -32,6 +32,7 @@ export type RegionalMarketSort =
 
 export type RegionalMarketFilterInput = {
   query?: string;
+  typeIds?: number[];
   categoryIds?: number[];
   groupIds?: number[];
   marketGroupIds?: number[];
@@ -103,6 +104,7 @@ export type RegionalMarketFilterResult = {
   snapshot: null | { id: string; createdAt: string; orderCount: number; regionCount: number };
   filters: Required<Pick<RegionalMarketFilterInput, "security" | "presence" | "signal" | "sort">> & {
     query: string;
+    typeIds: number[];
     categoryIds: number[];
     groupIds: number[];
     marketGroupIds: number[];
@@ -239,17 +241,15 @@ export async function filterRegionalMarket(
   input: RegionalMarketFilterInput = {},
   runtime: RegionalMarketFilterRuntime = {},
 ): Promise<RegionalMarketFilterResult> {
-  const manifest = await loadCurrentRawMarketManifest("all");
+  const manifest = await loadCurrentMarketRevision();
   const taxonomy = await getMarketTaxonomy();
-  const emptyBase = {
-    taxonomy,
-    regionOptions: manifest?.regions.map((region) => ({ regionId: region.regionId, regionName: region.regionName })) ?? [],
-  };
+  const emptyBase = { taxonomy, regionOptions: [] as Array<{ regionId: number; regionName: string }> };
   const security = input.security ?? "all";
   const presence = input.presence ?? "any";
   const signal = input.signal ?? "all";
   const sort = input.sort ?? "signal";
   const query = String(input.query ?? "").trim().toLowerCase();
+  const typeIds = numberSet(input.typeIds);
   const categoryIds = numberSet(input.categoryIds);
   const groupIds = numberSet(input.groupIds);
   const marketGroupIds = numberSet(input.marketGroupIds);
@@ -258,6 +258,7 @@ export async function filterRegionalMarket(
   const limit = Math.max(25, Math.min(1000, Math.floor(input.limit ?? 250)));
   const filters = {
     query,
+    typeIds: [...typeIds],
     categoryIds: [...categoryIds],
     groupIds: [...groupIds],
     marketGroupIds: [...marketGroupIds],
@@ -267,11 +268,11 @@ export async function filterRegionalMarket(
     signal,
     sort,
   };
-  if (!manifest?.complete) {
+  if (!manifest) {
     return {
       available: false,
-      message: "Run Refresh everything to build the complete all-region raw market order book first.",
-      snapshot: manifest ? { id: manifest.id, createdAt: manifest.createdAt, orderCount: manifest.orderCount, regionCount: manifest.regionCount } : null,
+      message: "Run Sync All to download the current shared public-market generation first.",
+      snapshot: null,
       filters,
       ...emptyBase,
       totalRows: 0,
@@ -290,6 +291,8 @@ export async function filterRegionalMarket(
     getMarketSystemIndex(),
   ]);
   runtime.progress?.({ stage: "regional-filter-scan", message: "Applying regional market filters…", percent: 82 });
+  const regionOptions = [...new Map(index.rows.map((row) => [row.regionId, { regionId: row.regionId, regionName: row.regionName }])).values()]
+    .sort((a, b) => a.regionName.localeCompare(b.regionName));
 
   const rows: RegionalMarketFilterRow[] = [];
   const itemIds = new Set<number>();
@@ -303,7 +306,10 @@ export async function filterRegionalMarket(
   let highestPremiumPercent = 0;
   let highestDemandSupplyRatio = 0;
 
-  for (const aggregate of index.rows) {
+  const candidateRows = typeIds.size
+    ? [...typeIds].flatMap((typeId) => index.rowsByType.get(typeId) ?? [])
+    : index.rows;
+  for (const aggregate of candidateRows) {
     if (regionIds.size && !regionIds.has(aggregate.regionId)) continue;
     const meta = typeIndex.get(aggregate.typeId);
     if (!meta) continue;
@@ -382,10 +388,10 @@ export async function filterRegionalMarket(
   runtime.progress?.({ stage: "regional-filter-rank", message: `Ranking ${rows.length.toLocaleString()} matching market rows…`, percent: 96 });
   return {
     available: true,
-    snapshot: { id: manifest.id, createdAt: manifest.createdAt, orderCount: manifest.orderCount, regionCount: manifest.regionCount },
+    snapshot: { id: index.snapshotId, createdAt: index.createdAt, orderCount: index.orderCount, regionCount: index.regionCount },
     filters,
     taxonomy,
-    regionOptions: manifest.regions.map((region) => ({ regionId: region.regionId, regionName: region.regionName })),
+    regionOptions,
     totalRows: rows.length,
     totalItems: itemIds.size,
     offset: Math.min(offset, rows.length),

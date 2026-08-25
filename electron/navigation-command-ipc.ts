@@ -1,4 +1,5 @@
 import { ipcMain } from "electron";
+import { getNavigationLiveMapMetrics } from "./pve-location-intelligence";
 import { navigationRouteEveWaypointChain } from "./navigation-eve-export";
 import { getNavigationCharacterLocation } from "./navigation-character-location";
 import { getNavigationHazardSnapshot } from "./navigation-hazards";
@@ -12,6 +13,12 @@ import {
   listSageSharedRoutes,
   publishSageSharedRoute,
   updateSageSharedRoute,
+  getSageSharedWormholeChain,
+  listSageSharedWormholeChains,
+  publishSageSharedWormholeChain,
+  updateSageSharedWormholeChain,
+  listSageWorkspaceEvents,
+  listSageWorkspaceAudit,
 } from "./sage-online";
 import { calculateNavigationPlan } from "./navigation-route-planner";
 import { exportNavigationRouteJson, importNavigationRouteJson } from "./navigation-route-serialization";
@@ -46,6 +53,7 @@ ipcMain.handle("navigation:search-systems", (_event, query: string, limit = 20) 
 );
 ipcMain.handle("navigation:get-system", (_event, systemId: number) => getNavigationSystem(Number(systemId)));
 ipcMain.handle("navigation:map-data", (_event, input: { scope?: "universe" | "region"; regionId?: number | null }) => getNavigationMapData(input ?? {}));
+ipcMain.handle("navigation:live-map-metrics", (_event, force = false) => getNavigationLiveMapMetrics(Boolean(force)));
 
 ipcMain.handle("navigation:get-neighbours", (_event, systemId: number) => getNavigationNeighbours(Number(systemId)));
 ipcMain.handle("navigation:calculate-route", (_event, input: unknown) =>
@@ -92,3 +100,12 @@ ipcMain.handle("navigation:online-route-update", async (_event, input: { charact
     expectedVersion: Number(input?.expectedVersion ?? 0),
   });
 });
+
+// Wormhole Command reuses the same verified Sage Online corporation auth path.
+ipcMain.handle("wormhole:online-workspace", async (_event, characterId:string)=>{ const auth=await navigationOnlineAuth(characterId); return ensureSageCorporationWorkspace(auth.sageSessionToken,auth.eveAccessToken); });
+ipcMain.handle("wormhole:online-chains", async (_event,input:{characterId:string;workspaceId:string})=>{ const auth=await navigationOnlineAuth(input?.characterId); return listSageSharedWormholeChains(auth.sageSessionToken,String(input?.workspaceId??"")); });
+ipcMain.handle("wormhole:online-chain-get", async (_event,input:{characterId:string;workspaceId:string;objectId:string})=>{ const auth=await navigationOnlineAuth(input?.characterId); return getSageSharedWormholeChain(auth.sageSessionToken,String(input?.workspaceId??""),String(input?.objectId??"")); });
+ipcMain.handle("wormhole:online-chain-publish", async (_event,input:{characterId:string;workspaceId:string;chain:Record<string,unknown>;visibility?:"workspace"|"restricted";recipientCharacterIds?:number[]})=>{ const auth=await navigationOnlineAuth(input?.characterId); return publishSageSharedWormholeChain(auth.sageSessionToken,String(input?.workspaceId??""),{chain:input?.chain??{},visibility:input?.visibility,recipientCharacterIds:input?.recipientCharacterIds}); });
+ipcMain.handle("wormhole:online-chain-update", async (_event,input:{characterId:string;workspaceId:string;objectId:string;chain:Record<string,unknown>;expectedVersion:number})=>{ const auth=await navigationOnlineAuth(input?.characterId); return updateSageSharedWormholeChain(auth.sageSessionToken,String(input?.workspaceId??""),String(input?.objectId??""),{chain:input?.chain??{},expectedVersion:Number(input?.expectedVersion??0)}); });
+ipcMain.handle("wormhole:online-events", async (_event,input:{characterId:string;workspaceId:string;after?:number})=>{ const auth=await navigationOnlineAuth(input?.characterId); return listSageWorkspaceEvents(auth.sageSessionToken,String(input?.workspaceId??""),Number(input?.after??0)); });
+ipcMain.handle("wormhole:online-audit", async (_event,input:{characterId:string;workspaceId:string})=>{ const auth=await navigationOnlineAuth(input?.characterId); return listSageWorkspaceAudit(auth.sageSessionToken,String(input?.workspaceId??""),"sage.wormhole-chain"); });

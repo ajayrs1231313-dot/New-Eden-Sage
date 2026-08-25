@@ -14,6 +14,8 @@ import "./pve-task8.css";
 import "./regional-filter-task9.css";
 import "./fittings-app-bounds.css";
 import "./corporation-system-news.css";
+import "./corporation-find-home.css";
+import "./killmails-command.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

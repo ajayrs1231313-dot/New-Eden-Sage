@@ -35,12 +35,27 @@ export interface PublicContract {
   startLocationName: string;
   systemId: number;
   systemName: string;
+  contractType: string;
+  availability: string;
+  dateIssued: string;
+  issuerId: number | null;
+  issuerName: string | null;
+  issuerCorporationId: number | null;
+  issuerCorporationName: string | null;
+  forCorporation: boolean;
+  buyout: number | null;
   items: Array<{
     typeId: number;
     typeName: string;
     itemVolumeM3: number;
     quantity: number;
     included: boolean;
+    isBlueprintCopy?: boolean;
+    runs?: number;
+    materialEfficiency?: number;
+    timeEfficiency?: number;
+    itemId?: number;
+    isSingleton?: boolean;
   }>;
 }
 
@@ -56,6 +71,7 @@ async function esiFetch(
   url: string,
   attempts = 5,
   allowNotFound = false,
+  allowUnavailable = false,
 ): Promise<Response> {
   let response: Response;
   try {
@@ -70,8 +86,8 @@ async function esiFetch(
         attemptsRemaining: attempts,
         error: error instanceof Error ? error.message : String(error),
       });
-      await new Promise((resolve) => setTimeout(resolve, (4 - attempts) * 1000));
-      return esiFetch(url, attempts - 1, allowNotFound);
+      await new Promise((resolve) => setTimeout(resolve, (6 - attempts) * 1000));
+      return esiFetch(url, attempts - 1, allowNotFound, allowUnavailable);
     }
     throw new Error("EVE market data timed out after several retries. Please try again shortly.");
   }
@@ -91,17 +107,18 @@ async function esiFetch(
       attemptsRemaining: attempts,
     });
     await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
-    return esiFetch(url, attempts - 1, allowNotFound);
+    return esiFetch(url, attempts - 1, allowNotFound, allowUnavailable);
   }
   if (response.status === 404 && allowNotFound) return response;
+  if (response.status === 403 && allowUnavailable) return response;
   if (response.status >= 500 && attempts > 0) {
     void logEvent("warn", "esi.server_retry", {
       url,
       status: response.status,
       attemptsRemaining: attempts,
     });
-    await new Promise((resolve) => setTimeout(resolve, (4 - attempts) * 1000));
-    return esiFetch(url, attempts - 1, allowNotFound);
+    await new Promise((resolve) => setTimeout(resolve, (6 - attempts) * 1000));
+    return esiFetch(url, attempts - 1, allowNotFound, allowUnavailable);
   }
   if (!response.ok) {
     void logEvent("error", "esi.request_failed", {
@@ -117,9 +134,13 @@ async function esiJson<T>(
   url: string,
   attempts = 5,
   allowNotFound = false,
+  allowUnavailable = false,
+  allowInvalidJsonAsUnavailable = false,
 ): Promise<{ response: Response; data: T | null }> {
-  const response = await esiFetch(url, attempts, allowNotFound);
-  if (response.status === 404 && allowNotFound) return { response, data: null };
+  const response = await esiFetch(url, attempts, allowNotFound, allowUnavailable);
+  if ((response.status === 404 && allowNotFound) || (response.status === 403 && allowUnavailable)) {
+    return { response, data: null };
+  }
   const body = await response.text();
   try {
     if (!body.trim()) throw new SyntaxError("Empty JSON response");
@@ -132,8 +153,13 @@ async function esiJson<T>(
         attemptsRemaining: attempts,
         error: error instanceof Error ? error.message : String(error),
       });
-      await new Promise((resolve) => setTimeout(resolve, (4 - attempts) * 500));
-      return esiJson<T>(url, attempts - 1, allowNotFound);
+      const retryDelayMs = allowInvalidJsonAsUnavailable ? 250 : (6 - attempts) * 500;
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      return esiJson<T>(url, attempts - 1, allowNotFound, allowUnavailable, allowInvalidJsonAsUnavailable);
+    }
+    if (allowInvalidJsonAsUnavailable) {
+      void logEvent("warn", "esi.invalid_json_unavailable", { url, bodyBytes: body.length, error: error instanceof Error ? error.message : String(error) });
+      return { response, data: null };
     }
     throw new Error("EVE market data was incomplete after several retries. Please try again shortly.");
   }
@@ -311,8 +337,7 @@ export async function pullRegionContracts(
   allowedSystemIds?: Set<number>,
 ): Promise<PublicContract[]> {
   const base = `https://esi.evetech.net/contracts/public/${region.regionId}/`;
-  const firstResponse = await esiFetch(`${base}?page=1`);
-  const first = (await firstResponse.json()) as Array<{
+  type ContractRow = {
     contract_id: number;
     type: string;
     availability: string;
@@ -321,7 +346,15 @@ export async function pullRegionContracts(
     title?: string;
     date_expired: string;
     start_location_id: number;
-  }>;
+    issuer_id?: number;
+    issuer_corporation_id?: number;
+    date_issued?: string;
+    for_corporation?: boolean;
+    buyout?: number;
+  };
+  const { response: firstResponse, data: firstData } = await esiJson<ContractRow[]>(`${base}?page=1`);
+  if (!firstData) throw new Error(`EVE returned no contract data for ${region.name}.`);
+  const first = firstData;
   const totalPages = Number(firstResponse.headers.get("x-pages") ?? 1);
   const pages = await mapLimited(
     Array.from(
@@ -330,16 +363,20 @@ export async function pullRegionContracts(
     ),
     4,
     async (page) => {
-      const response = await esiFetch(`${base}?page=${page}`, 3, true);
-      if (response.status === 404) return [];
-      return response.json() as Promise<typeof first>;
+      const { data } = await esiJson<ContractRow[]>(`${base}?page=${page}`, 3, true);
+      return data ?? [];
     },
   );
   const candidates = first
     .concat(...pages)
     .filter(
       (contract) =>
-        contract.type === "item_exchange" && (contract.price ?? 0) > 0,
+        (contract.type === "item_exchange" || contract.type === "auction") &&
+        (contract.type === "auction"
+          ? (contract.buyout ?? 0) > 0 || (contract.price ?? 0) > 0
+          : (contract.price ?? 0) > 0) &&
+        Number.isFinite(Date.parse(contract.date_expired)) &&
+        Date.parse(contract.date_expired) > Date.now(),
     );
   const stationIds = [
     ...new Set(
@@ -349,41 +386,46 @@ export async function pullRegionContracts(
     ),
   ];
   const stations = await mapLimited(stationIds, 10, async (stationId) => {
-    const response = await esiFetch(
+    const { data: station } = await esiJson<{ name: string; system_id: number }>(
       `https://esi.evetech.net/universe/stations/${stationId}/`,
     );
-    const station = (await response.json()) as {
-      name: string;
-      system_id: number;
-    };
+    if (!station) throw new Error(`EVE station ${stationId} was not found.`);
     return { stationId, ...station };
   });
   const stationById = new Map(
     stations.map((station) => [station.stationId, station]),
   );
   const filtered = candidates.filter((contract) => {
+    if (!allowedSystemIds) return true;
     const station = stationById.get(contract.start_location_id);
-    return (
-      station && (!allowedSystemIds || allowedSystemIds.has(station.system_id))
-    );
+    return Boolean(station && allowedSystemIds.has(station.system_id));
   });
+  type ContractItemRow = {
+    is_included: boolean;
+    quantity: number;
+    type_id: number;
+    is_blueprint_copy?: boolean;
+    runs?: number;
+    material_efficiency?: number;
+    time_efficiency?: number;
+    item_id?: number;
+    is_singleton?: boolean;
+  };
   const details = await mapLimited(filtered, 8, async (contract) => {
-    const response = await esiFetch(
+    const { data: items } = await esiJson<ContractItemRow[]>(
       `https://esi.evetech.net/contracts/public/items/${contract.contract_id}/`,
-      3,
+      1,
+      true,
+      true,
       true,
     );
-    if (response.status === 404) return { contract, items: [] };
-    const items = (await response.json()) as Array<{
-      is_included: boolean;
-      quantity: number;
-      type_id: number;
-    }>;
+    if (!items) return null;
     return { contract, items };
   });
+  const availableDetails = details.filter((detail): detail is NonNullable<typeof detail> => detail != null);
   const typeIds = [
     ...new Set(
-      details.flatMap((detail) => detail.items.map((item) => item.type_id)),
+      availableDetails.flatMap((detail) => detail.items.map((item) => item.type_id)),
     ),
   ];
   const names = (
@@ -399,19 +441,31 @@ export async function pullRegionContracts(
   const systemNameById = new Map(
     systemNames.map((item) => [item.id, item.name]),
   );
-  return details.map(({ contract, items }) => {
-    const station = stationById.get(contract.start_location_id)!;
+  const issuerIds = [...new Set(availableDetails.flatMap(({ contract }) => [contract.issuer_id, contract.issuer_corporation_id]).filter((id): id is number => Number.isFinite(id) && Number(id) > 0).map(Number))];
+  const issuerNames = (await mapLimited(chunk(issuerIds, 1000), 4, (ids) => resolveNames(ids))).flat();
+  const issuerNameById = new Map(issuerNames.map((item) => [item.id, item.name]));
+  return availableDetails.map(({ contract, items }) => {
+    const station = stationById.get(contract.start_location_id);
     return {
       contractId: contract.contract_id,
       title: contract.title ?? "Untitled contract",
-      price: contract.price ?? 0,
+      price: contract.type === "auction" && (contract.buyout ?? 0) > 0 ? Number(contract.buyout) : Number(contract.price ?? 0),
       volume: contract.volume ?? 0,
       expires: contract.date_expired,
+      contractType: contract.type,
+      availability: contract.availability,
+      dateIssued: contract.date_issued ?? "",
+      issuerId: Number.isFinite(contract.issuer_id) ? Number(contract.issuer_id) : null,
+      issuerName: Number.isFinite(contract.issuer_id) ? (issuerNameById.get(Number(contract.issuer_id)) ?? null) : null,
+      issuerCorporationId: Number.isFinite(contract.issuer_corporation_id) ? Number(contract.issuer_corporation_id) : null,
+      issuerCorporationName: Number.isFinite(contract.issuer_corporation_id) ? (issuerNameById.get(Number(contract.issuer_corporation_id)) ?? null) : null,
+      forCorporation: contract.for_corporation === true,
+      buyout: Number.isFinite(contract.buyout) ? Number(contract.buyout) : null,
       startLocationId: contract.start_location_id,
-      startLocationName: station.name,
-      systemId: station.system_id,
+      startLocationName: station?.name ?? `Public structure ${contract.start_location_id}`,
+      systemId: station?.system_id ?? 0,
       systemName:
-        systemNameById.get(station.system_id) ?? `System ${station.system_id}`,
+        station ? (systemNameById.get(station.system_id) ?? `System ${station.system_id}`) : "Unresolved public structure",
       items: items.map((item) => ({
         typeId: item.type_id,
         typeName: nameById.get(item.type_id) ?? `Type ${item.type_id}`,
@@ -420,6 +474,12 @@ export async function pullRegionContracts(
         estimatedValue: (priceByType.get(item.type_id) ?? 0) * item.quantity,
         quantity: item.quantity,
         included: item.is_included,
+        isBlueprintCopy: item.is_blueprint_copy,
+        runs: item.runs,
+        materialEfficiency: item.material_efficiency,
+        timeEfficiency: item.time_efficiency,
+        itemId: item.item_id,
+        isSingleton: item.is_singleton,
       })),
     };
   });
@@ -439,14 +499,14 @@ export async function discoverHighSecSystems(
 async function buildHighSecSystems(
   progress?: (completed: number, total: number) => void,
 ) {
-  const response = await esiFetch("https://esi.evetech.net/universe/systems/");
-  const systemIds = (await response.json()) as number[];
+  const { data: systemIdsData } = await esiJson<number[]>("https://esi.evetech.net/universe/systems/");
+  const systemIds = systemIdsData ?? [];
   let completed = 0;
   const systems = await mapLimited(systemIds, 20, async (systemId) => {
-    const detail = await esiFetch(
+    const { data: system } = await esiJson<{ security_status: number }>(
       `https://esi.evetech.net/universe/systems/${systemId}/`,
     );
-    const system = (await detail.json()) as { security_status: number };
+    if (!system) throw new Error(`EVE system ${systemId} was not found.`);
     completed += 1;
     if (completed % 50 === 0 || completed === systemIds.length)
       progress?.(completed, systemIds.length);
@@ -480,14 +540,12 @@ export async function discoverMarketRadius(
     if (!systemCache.has(id))
       systemCache.set(
         id,
-        esiFetch(`https://esi.evetech.net/universe/systems/${id}/`).then(
-          (response) =>
-            response.json() as Promise<{
-              security_status: number;
-              constellation_id: number;
-              stargates?: number[];
-            }>,
-        ),
+        esiJson<{ security_status: number; constellation_id: number; stargates?: number[] }>(
+          `https://esi.evetech.net/universe/systems/${id}/`,
+        ).then(({ data }) => {
+          if (!data) throw new Error(`EVE system ${id} was not found.`);
+          return data;
+        }),
       );
     return systemCache.get(id)!;
   };
@@ -495,10 +553,12 @@ export async function discoverMarketRadius(
     if (!gateCache.has(id))
       gateCache.set(
         id,
-        esiFetch(`https://esi.evetech.net/universe/stargates/${id}/`).then(
-          (response) =>
-            response.json() as Promise<{ destination: { system_id: number } }>,
-        ),
+        esiJson<{ destination: { system_id: number } }>(
+          `https://esi.evetech.net/universe/stargates/${id}/`,
+        ).then(({ data }) => {
+          if (!data) throw new Error(`EVE stargate ${id} was not found.`);
+          return data;
+        }),
       );
     return gateCache.get(id)!;
   };
@@ -506,9 +566,12 @@ export async function discoverMarketRadius(
     if (!constellationCache.has(id))
       constellationCache.set(
         id,
-        esiFetch(`https://esi.evetech.net/universe/constellations/${id}/`).then(
-          (response) => response.json() as Promise<{ region_id: number }>,
-        ),
+        esiJson<{ region_id: number }>(
+          `https://esi.evetech.net/universe/constellations/${id}/`,
+        ).then(({ data }) => {
+          if (!data) throw new Error(`EVE constellation ${id} was not found.`);
+          return data;
+        }),
       );
     return constellationCache.get(id)!;
   };
@@ -550,31 +613,55 @@ function chunk<T>(items: T[], size: number) {
   return chunks;
 }
 
-async function resolveNames(ids: number[]) {
+async function resolveNames(ids: number[], attempts = 5): Promise<Array<{ id: number; name: string }>> {
   if (!ids.length) return [];
-  const response = await fetch("https://esi.evetech.net/universe/names/", {
-    method: "POST",
-    headers: { ...HEADERS, "Content-Type": "application/json" },
-    body: JSON.stringify(ids),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!response.ok)
-    throw new Error(`Market type-name lookup failed (${response.status}).`);
-  return response.json() as Promise<Array<{ id: number; name: string }>>;
+  const url = "https://esi.evetech.net/universe/names/";
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { ...HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify(ids),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    if (attempts > 0) {
+      void logEvent("warn", "esi.names_network_retry", { attemptsRemaining: attempts, error: error instanceof Error ? error.message : String(error) });
+      await new Promise((resolve) => setTimeout(resolve, (6 - attempts) * 500));
+      return resolveNames(ids, attempts - 1);
+    }
+    throw error;
+  }
+  if ((response.status === 429 || response.status >= 500) && attempts > 0) {
+    void logEvent("warn", "esi.names_server_retry", { status: response.status, attemptsRemaining: attempts });
+    await new Promise((resolve) => setTimeout(resolve, (6 - attempts) * 1000));
+    return resolveNames(ids, attempts - 1);
+  }
+  if (!response.ok) throw new Error(`Market type-name lookup failed (${response.status}).`);
+  const body = await response.text();
+  try {
+    if (!body.trim()) throw new SyntaxError("Empty JSON response");
+    return JSON.parse(body) as Array<{ id: number; name: string }>;
+  } catch (error) {
+    if (attempts > 0) {
+      void logEvent("warn", "esi.names_invalid_json_retry", { bodyBytes: body.length, attemptsRemaining: attempts, error: error instanceof Error ? error.message : String(error) });
+      await new Promise((resolve) => setTimeout(resolve, (6 - attempts) * 500));
+      return resolveNames(ids, attempts - 1);
+    }
+    throw new Error("EVE name data was incomplete after several retries. Please try again shortly.");
+  }
 }
 
 async function marketPriceMap() {
   if (!marketPricesPromise)
     marketPricesPromise = (async () => {
       try {
-        const response = await esiFetch(
-          "https://esi.evetech.net/markets/prices/",
-        );
-        const prices = (await response.json()) as Array<{
+        const { data: pricesData } = await esiJson<Array<{
           type_id: number;
           average_price?: number;
           adjusted_price?: number;
-        }>;
+        }>>("https://esi.evetech.net/markets/prices/");
+        const prices = pricesData ?? [];
         return new Map(
           prices.map((price) => [
             price.type_id,

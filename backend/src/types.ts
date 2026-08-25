@@ -1,4 +1,4 @@
-export interface EventEnvelope {
+﻿export interface EventEnvelope {
   sequence: number;
   workspace_id: string;
   event_type: string;
@@ -16,6 +16,10 @@ export interface SageEnv {
   EVE_CLIENT_ID?: string;
   EVE_CLIENT_SECRET?: string;
   EVE_REDIRECT_URI?: string;
+  DISCORD_BOT_TOKEN?: string;
+  DISCORD_CLIENT_ID?: string;
+  DISCORD_CLIENT_SECRET?: string;
+  DISCORD_REDIRECT_URI?: string;
 }
 
 export interface Principal {

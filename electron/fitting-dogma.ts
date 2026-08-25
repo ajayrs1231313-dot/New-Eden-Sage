@@ -634,6 +634,121 @@ export async function getFittingTypeInfoLocal(typeId:number){
   return {typeId:id,name:type.name,description:type.description,group:{id:type.groupId,name:groupName},category:{id:categoryId,name:categoryName},marketGroup:type.marketGroupId==null?null:{id:type.marketGroupId,name:meta.marketGroups.get(type.marketGroupId)?.name ?? "Unknown",path:marketPath},placement,rack,metaLevel:type.metaLevel,techLevel:type.techLevel,published:type.published,iconId:type.iconId,physical:{volumeM3:type.volumeM3,massKg:type.massKg,capacityM3:type.capacityM3,radiusM:type.radiusM,portionSize:type.portionSize,basePrice:type.basePrice},fitting:fittingValues,requirements,attributes,effects:dogmaEffects};
 }
 
+export async function getBoosterSideEffectsLocal(boosterTypeIds:number[]) {
+  const ids=[...new Set((boosterTypeIds??[]).map(Number).filter(id=>Number.isInteger(id)&&id>0))];
+  if(!ids.length)return [];
+  const [base,meta]=await Promise.all([index(),fittingTypeInfoIndex()]);
+  return ids.flatMap((typeId)=>{
+    const source=base.dogma.get(typeId);
+    if(!source)return [];
+    const boosterName=base.names.get(typeId)??`Type ${typeId}`;
+    return [...source.effects].flatMap((effectId)=>{
+      const effect=base.modifiers.get(effectId);
+      const chanceAttributeId=Number(effect?.fittingUsageChanceAttributeID??0);
+      if(!effect||!chanceAttributeId)return [];
+      const chance=attr(source,chanceAttributeId);
+      return [{ boosterTypeId:typeId, boosterName, effectId, effectName:meta.effects.get(effectId)?.name??effect.name??`Effect ${effectId}`, chanceAttributeId, chance }];
+    });
+  }).sort((a,b)=>a.boosterName.localeCompare(b.boosterName)||a.effectName.localeCompare(b.effectName));
+}
+
+export type AugmentGoal = "damage"|"tank"|"capacitor"|"fitting"|"navigation"|"targeting"|"mining"|"exploration"|"training"|"industry";
+export type AugmentEffectGuide = {
+  targetAttributeId:number; target:string; sourceAttributeId:number; sourceAttribute:string; operation:number; sourceValue:number;
+  deltaPercent:number|null; flatDelta:number|null; highIsGood:boolean|null; helpful:boolean|null; appliesTo?:string; effectName:string; summary:string; goals:AugmentGoal[];
+};
+export type AugmentGuideItem = { typeId:number; name:string; slot:number|null; metaLevel:number; description:string; requirements:Array<{skillId:number;name:string;level:number}>; effects:AugmentEffectGuide[]; goals:AugmentGoal[]; score:number };
+let augmentGuideCache:Promise<AugmentGuideItem[]>|undefined;
+
+function augmentGoals(text:string):AugmentGoal[]{
+  const value=text.replace(/([a-z0-9])([A-Z])/g,"$1 $2").toLowerCase(); const goals=new Set<AugmentGoal>();
+  if(/damage|rate of fire|turret|missile|launcher|weapon|drone/.test(value)) goals.add("damage");
+  if(/shield|armor|armour|resonan|resist|hitpoint|repair|booster amount|remote repair/.test(value)) goals.add("tank");
+  if(/capacitor|cap need|capacitance|recharge/.test(value)) goals.add("capacitor");
+  if(/\bcpu\b|powergrid|power grid|calibration/.test(value)) goals.add("fitting");
+  if(/velocity|speed|warp|inertia|agility|afterburner|microwarp|mwd|acceleration/.test(value)) goals.add("navigation");
+  if(/target|sensor|scan resolution|signature radius|lock range|tracking/.test(value)) goals.add("targeting");
+  if(/\b(?:mining|harvest(?:er|ing)?|ice|gas|ore)\b/.test(value)) goals.add("mining");
+  if(/probe|scanner|scan strength|virus|relic|hacking|archaeology|exploration/.test(value)) goals.add("exploration");
+  if(/charisma|intelligence|memory|perception|willpower|attribute bonus/.test(value)) goals.add("training");
+  if(/manufactur|invention|research|industry|material efficiency|time efficiency/.test(value)) goals.add("industry");
+  return [...goals];
+}
+function augmentDelta(value:number, operation:number){
+  if(operation===6) return value;
+  if(operation===0||operation===4) return (value-1)*100;
+  if(operation===5) return value===0?null:(1/value-1)*100;
+  return null;
+}
+function augmentFlat(value:number, operation:number){ return operation===2?value:operation===3?-value:null; }
+function augmentSummary(target:string,value:number,operation:number,unit:string|undefined){
+  const percent=augmentDelta(value,operation); const flat=augmentFlat(value,operation);
+  if(percent!=null){const sign=percent>0?"+":"";return `${sign}${percent.toFixed(Math.abs(percent)>=10?1:2)}% ${target}`;}
+  if(flat!=null){const sign=flat>0?"+":"";return `${sign}${Number(flat.toFixed(3))}${unit?` ${unit}`:""} ${target}`;}
+  if(operation===-1||operation===7) return `Sets ${target} to ${Number(value.toFixed(3))}${unit?` ${unit}`:""}`;
+  return `${target}: modifier ${Number(value.toFixed(3))}`;
+}
+
+export async function getAugmentGuideLocal(installedTypeIds:number[]=[]):Promise<{generatedAt:string;installed:AugmentGuideItem[];items:AugmentGuideItem[];goals:Array<{id:AugmentGoal;label:string;description:string}>}> {
+  const items = await (augmentGuideCache ??= Promise.resolve().then(async()=>{
+    const [base, meta, catalogue] = await Promise.all([index(), fittingTypeInfoIndex(), getFittingCatalogueLocal()]);
+    const output:AugmentGuideItem[]=[];
+    for(const item of (catalogue.items as Array<any>).filter(row=>row.placement==="implant")){
+      const typeId=Number(item.id); const source=base.dogma.get(typeId); if(!source) continue;
+      const effects:AugmentEffectGuide[]=[];
+      for(const effectId of source.effects){
+        const definition=base.modifiers.get(effectId); if(!definition) continue;
+        const effectMeta=meta.effects.get(effectId); const effectName=effectMeta?.name ?? definition.name ?? `Effect ${effectId}`;
+        for(const modifier of definition.modifiers){
+          if(modifier.modifiedAttributeID==null||modifier.modifyingAttributeID==null) continue;
+          const targetId=Number(modifier.modifiedAttributeID); const sourceId=Number(modifier.modifyingAttributeID); const operation=Number(modifier.operation ?? 0);
+          const targetMeta=meta.attributeMeta.get(targetId); const sourceMeta=meta.attributeMeta.get(sourceId); const sourceValue=attr(source,sourceId);
+          if(!Number.isFinite(sourceValue) || definition.category !== 0) continue;
+          const target=targetMeta?.displayName ?? targetMeta?.name ?? `Attribute ${targetId}`;
+          const sourceName=sourceMeta?.displayName ?? sourceMeta?.name ?? `Attribute ${sourceId}`;
+          const noOp = ((operation===2||operation===3||operation===6) && Math.abs(sourceValue) < 1e-12) || ((operation===0||operation===4||operation===5) && Math.abs(sourceValue-1) < 1e-12);
+          if(noOp) continue;
+          // Set implants expose internal multiplier attributes used to amplify other
+          // implant effects. Presenting those as direct ship bonuses is misleading
+          // (for example an internal 1.5 multiplier is not a direct +50% shield bonus).
+          // CCP's item description remains visible for set-synergy details; only
+          // directly attributable modifiers are listed here.
+          if(/set bonus/i.test(sourceName) || /(?:^|\b)(?:implantSet|setBonus)/i.test(effectName)) continue;
+          const deltaPercent=augmentDelta(sourceValue,operation); const flatDelta=augmentFlat(sourceValue,operation);
+          let helpful:boolean|null=null;
+          if(targetMeta?.highIsGood!=null && (deltaPercent!=null||flatDelta!=null)){const delta=deltaPercent??flatDelta??0;helpful=targetMeta.highIsGood?delta>0:delta<0;}
+          const appliesTo=modifier.skillTypeID?base.names.get(Number(modifier.skillTypeID)) ?? `Skill ${modifier.skillTypeID}`:undefined;
+          const summary=augmentSummary(target,sourceValue,operation,targetMeta?.unitId==null?undefined:meta.units.get(targetMeta.unitId));
+          const goals=augmentGoals([target,sourceName,effectName,effectMeta?.description??"",appliesTo??""].join(" "));
+          if(!goals.length && targetId===280) continue;
+          effects.push({targetAttributeId:targetId,target,sourceAttributeId:sourceId,sourceAttribute:sourceName,operation,sourceValue,deltaPercent,flatDelta,highIsGood:targetMeta?.highIsGood ?? null,helpful,appliesTo,effectName,summary,goals});
+        }
+      }
+      const info=await getFittingTypeInfoLocal(typeId);
+      const directGoals=effects.flatMap(e=>e.goals);
+      const fallbackGoals=directGoals.length ? [] : augmentGoals([info.name,...info.effects.map(e=>`${e.name} ${e.description??""}`)].join(" "));
+      const goals=[...new Set(directGoals.concat(fallbackGoals))];
+      const slotRaw=source.attributes.get(331); const slot=slotRaw==null?null:Number(slotRaw);
+      const score=effects.reduce((sum,e)=>sum+Math.abs(e.deltaPercent??e.flatDelta??0),0)+(Number(item.metaLevel)||0);
+      output.push({typeId,name:String(item.name),slot:Number.isFinite(slot as number)?slot:null,metaLevel:Number(item.metaLevel??0),description:info.description,requirements:info.requirements,effects,goals,score});
+    }
+    return output.sort((a,b)=>(a.slot??99)-(b.slot??99)||b.score-a.score||a.name.localeCompare(b.name));
+  }));
+  const installedSet=new Set(installedTypeIds.map(Number));
+  return {generatedAt:new Date().toISOString(),installed:items.filter(item=>installedSet.has(item.typeId)),items,goals:[
+    {id:"damage",label:"Damage / DPS",description:"Weapon, missile, turret and drone output."},
+    {id:"tank",label:"Tank",description:"Shield, armour, resistance, repair and hit points."},
+    {id:"capacitor",label:"Capacitor",description:"Cap amount, recharge and activation cost."},
+    {id:"fitting",label:"Fitting",description:"CPU, powergrid and fitting headroom."},
+    {id:"navigation",label:"Navigation",description:"Speed, agility, warp and propulsion."},
+    {id:"targeting",label:"Targeting",description:"Sensors, lock range, scan resolution and tracking."},
+    {id:"mining",label:"Mining",description:"Ore, ice, gas and harvesting performance."},
+    {id:"exploration",label:"Exploration",description:"Probe scanning, hacking, archaeology and virus strength."},
+    {id:"training",label:"Training attributes",description:"Intelligence, memory, perception, willpower and charisma."},
+    {id:"industry",label:"Industry",description:"Manufacturing, research or invention modifiers where CCP DOGMA exposes them."},
+  ]};
+}
+
 export async function getFittingRemediesLocal(input: { hullTypeId:number; issueCodes?:string[]; itemTypeIds?:number[]; trainedSkills?:Array<{ skillId:number; level:number }> }) {
   const issueCodes = new Set((input.issueCodes ?? []).map(String));
   const wantsCpu = issueCodes.has("cpu-exceeded");
@@ -795,10 +910,25 @@ export async function checkFittingItemCompatibilityLocal(input: { hullTypeId:num
   const allowedTypes=[1302,1303,1304,1305,1380,1944,2103,2463,2486,2487,2488,2758,5948].map(id=>attr(item,id)).filter(Boolean);
   if((allowedGroups.length||allowedTypes.length)&&!allowedGroups.includes(hullGroup)&&!allowedTypes.includes(hullTypeId))return {compatible:false,code:'ship-restriction',reason:`${itemName} cannot be fitted to ${hullName}.`};
   if(placement==='rig'&&attr(item,1547)&&attr(hull,1547)&&attr(item,1547)!==attr(hull,1547))return {compatible:false,code:'rig-size',reason:`${itemName} has the wrong rig size for ${hullName}.`};
-  if(placement==='subsystem'){const requiredHull=attr(item,1380);if(requiredHull&&requiredHull!==hullTypeId)return {compatible:false,code:'subsystem-hull',reason:`${itemName} belongs to ${names.get(requiredHull) ?? requiredHull}, not ${hullName}.`};}
+  const fitted=(input?.fitted ?? []).filter(entry=>Number(entry?.typeId)>0);
+  if(placement==='subsystem'){
+    const requiredHull=attr(item,1380);
+    if(requiredHull&&requiredHull!==hullTypeId)return {compatible:false,code:'subsystem-hull',reason:`${itemName} belongs to ${names.get(requiredHull) ?? requiredHull}, not ${hullName}.`};
+    const subsystemSlot=attr(item,1366);
+    if(subsystemSlot&&fitted.some(entry=>entry.rack==='subsystem'&&attr(dogma.get(Number(entry.typeId)),1366)===subsystemSlot))return {compatible:false,code:'subsystem-slot-occupied',reason:`${hullName} already has a subsystem fitted in subsystem slot ${subsystemSlot}.`};
+  }
+  if(placement==='implant'){
+    const implantSlot=attr(item,331);
+    if(implantSlot&&fitted.some(entry=>entry.rack==='implant'&&attr(dogma.get(Number(entry.typeId)),331)===implantSlot))return {compatible:false,code:'implant-slot-occupied',reason:`Implant slot ${implantSlot} is already occupied. Remove the existing implant before adding ${itemName}.`};
+  }
+  if(placement==='booster'){
+    const boosterSlot=attr(item,1087);
+    if(boosterSlot&&fitted.some(entry=>entry.rack==='booster'&&attr(dogma.get(Number(entry.typeId)),1087)===boosterSlot))return {compatible:false,code:'booster-slot-occupied',reason:`Booster slot ${boosterSlot} is already occupied. Remove the existing booster before adding ${itemName}.`};
+  }
+
   if(placement==='fighter'&&attr(hull,2055)<=0)return {compatible:false,code:'fighter-bay-unavailable',reason:`${hullName} has no fighter hangar and cannot carry fitting fighters.`};
   if(placement==='drone'&&attr(hull,283)<=0)return {compatible:false,code:'drone-bay-unavailable',reason:`${hullName} has no drone bay.`};
-  const fitted=(input?.fitted ?? []).filter(entry=>Number(entry?.typeId)>0);
+
   if(rack==='high'&&item.effects.has(42)){const count=fitted.filter(entry=>entry.rack==='high'&&dogma.get(Number(entry.typeId))?.effects.has(42)).length;if(count>=attr(hull,102))return {compatible:false,code:'turret-hardpoints',reason:`${hullName} has no free turret hardpoints for ${itemName}.`};}
   if(rack==='high'&&item.effects.has(40)){const count=fitted.filter(entry=>entry.rack==='high'&&dogma.get(Number(entry.typeId))?.effects.has(40)).length;if(count>=attr(hull,101))return {compatible:false,code:'launcher-hardpoints',reason:`${hullName} has no free launcher hardpoints for ${itemName}.`};}
   const itemGroup=groups.get(itemTypeId) ?? 0; const maxFitted=attr(item,1544); if(maxFitted>0){const count=fitted.filter(entry=>(groups.get(Number(entry.typeId)) ?? 0)===itemGroup).length;if(count>=maxFitted)return {compatible:false,code:'max-group-fitted',reason:`Only ${maxFitted} module(s) from ${itemName}'s fitting group may be fitted.`};}
@@ -859,6 +989,18 @@ export async function resolveFittingTypeNamesLocal(requestedNames: string[]) {
     return match ? [match] : [];
   });
 }
+export async function resolveFittingTypeIdsLocal(requestedTypeIds: number[]) {
+  const { dogma, names, groups, groupCategories, categoryNames } = await index();
+  const unique = [...new Set(requestedTypeIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  return unique.flatMap((id) => {
+    const name = names.get(id);
+    if (!name) return [];
+    const groupId = groups.get(id) ?? 0;
+    const categoryId = groupCategories.get(groupId) ?? 0;
+    return [{ id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Unknown", rack: fittingRack(dogma, id) }];
+  });
+}
+
 export async function analyzeFittingDogma(input: {
   hullTypeId: number;
   items: FittingItem[];
@@ -868,6 +1010,7 @@ export async function analyzeFittingDogma(input: {
   implantTypeIds?: number[];
   boosterTypeIds?: number[];
   boosterSideEffectIds?: number[];
+  boosterSideEffectSelections?: Array<{ boosterTypeId:number; effectId:number }>;
   projectedItems?: Array<FittingItem & { effectiveness?: number }>;
   commandBurstItems?: Array<FittingItem & { effectiveness?: number }>;
   environmentTypeIds?: number[];
@@ -905,16 +1048,46 @@ export async function analyzeFittingDogma(input: {
         return Number.isInteger(typeId) && typeId > 0 ? [typeId] : [];
       })
     : [];
-  const plannedImplantTypeIds = (input.implantTypeIds ?? []).filter((typeId) => Number.isInteger(typeId) && typeId > 0);
-  const implantTypeIds = [...new Set([...snapshotImplantTypeIds, ...plannedImplantTypeIds])];
-  const boosterTypeIds = (input.boosterTypeIds ?? []).filter((typeId) => Number.isInteger(typeId) && typeId > 0);
+  const rawPlannedImplantTypeIds = (input.implantTypeIds ?? []).filter((typeId) => Number.isInteger(typeId) && typeId > 0);
+  const implantSlotConflicts: Array<{ slot:number; firstTypeId:number; secondTypeId:number }> = [];
+  const snapshotImplantsBySlot = new Map<number,number>();
+  const snapshotUnslottedImplants:number[] = [];
+  for (const typeId of snapshotImplantTypeIds) {
+    const slot=Math.trunc(attr(dogma.get(typeId),331));
+    if(slot>0)snapshotImplantsBySlot.set(slot,typeId);else snapshotUnslottedImplants.push(typeId);
+  }
+  const plannedImplantsBySlot = new Map<number,number>();
+  const plannedUnslottedImplants:number[] = [];
+  for (const typeId of rawPlannedImplantTypeIds) {
+    const slot=Math.trunc(attr(dogma.get(typeId),331));
+    if(slot>0){const existing=plannedImplantsBySlot.get(slot);if(existing)implantSlotConflicts.push({slot,firstTypeId:existing,secondTypeId:typeId});else plannedImplantsBySlot.set(slot,typeId);}
+    else plannedUnslottedImplants.push(typeId);
+  }
+  // Planned implants are a theory-fit replacement for whatever the selected pilot
+  // currently has in the same implant slot; they must never stack with it.
+  const effectiveImplantsBySlot = new Map(snapshotImplantsBySlot);
+  for (const [slot,typeId] of plannedImplantsBySlot) effectiveImplantsBySlot.set(slot,typeId);
+  const implantTypeIds = [...new Set([...snapshotUnslottedImplants,...plannedUnslottedImplants,...effectiveImplantsBySlot.values()])];
+
+  const rawBoosterTypeIds = (input.boosterTypeIds ?? []).filter((typeId) => Number.isInteger(typeId) && typeId > 0);
+  const boosterSlotConflicts: Array<{ slot:number; firstTypeId:number; secondTypeId:number }> = [];
+  const boostersBySlot = new Map<number,number>();
+  const unslottedBoosters:number[] = [];
+  for (const typeId of rawBoosterTypeIds) {
+    const slot=Math.trunc(attr(dogma.get(typeId),1087));
+    if(slot>0){const existing=boostersBySlot.get(slot);if(existing)boosterSlotConflicts.push({slot,firstTypeId:existing,secondTypeId:typeId});else boostersBySlot.set(slot,typeId);}
+    else unslottedBoosters.push(typeId);
+  }
+  const boosterTypeIds = [...new Set([...unslottedBoosters,...boostersBySlot.values()])];
+  const implantTypeIdSet = new Set(implantTypeIds);
   const enhancementTypeIds = [...new Set([...implantTypeIds, ...boosterTypeIds])];
   const enhancementSources = enhancementTypeIds.flatMap((typeId) => {
     const source = dogma.get(typeId);
-    return source ? [{ typeId, source, kind: implantTypeIds.includes(typeId) ? "implant" as const : "booster" as const }] : [];
+    return source ? [{ typeId, source, kind: implantTypeIdSet.has(typeId) ? "implant" as const : "booster" as const }] : [];
   });
   const selectedBoosterSideEffects = new Set((input.boosterSideEffectIds ?? []).filter((effectId) => Number.isInteger(effectId) && effectId > 0));
-  const enhancementEffectAllowed = (enhancement: typeof enhancementSources[number], effectId: number, effect: EffectDefinition) => enhancement.kind !== "booster" || effect.fittingUsageChanceAttributeID == null || selectedBoosterSideEffects.has(effectId);
+  const selectedBoosterSideEffectSelections = new Set((input.boosterSideEffectSelections ?? []).flatMap((selection) => Number.isInteger(selection?.boosterTypeId) && selection.boosterTypeId > 0 && Number.isInteger(selection?.effectId) && selection.effectId > 0 ? [`${selection.boosterTypeId}:${selection.effectId}`] : []));
+  const enhancementEffectAllowed = (enhancement: typeof enhancementSources[number], effectId: number, effect: EffectDefinition) => enhancement.kind !== "booster" || effect.fittingUsageChanceAttributeID == null || selectedBoosterSideEffects.has(effectId) || selectedBoosterSideEffectSelections.has(`${enhancement.typeId}:${effectId}`);
 
   const moduleDogmaFor = (item: FittingItem): Dogma | undefined => {
     const raw = dogma.get(item.typeId);
@@ -992,6 +1165,14 @@ export async function analyzeFittingDogma(input: {
   const online = fitted.filter((item) => item.state !== "offline");
   const used = { cpu: 0, powergrid: 0, calibration: 0 };
   const shipAttributes = new Map(hull.attributes);
+  // CCP stores a ship's base cargo hold in the type physical capacity field,
+  // not reliably as dogma attribute 38 in the SDE bundle. Seed attribute 38
+  // before skill/module modifiers so fitted cargo expanders and rigs apply to
+  // the authoritative base hold instead of multiplying zero.
+  const baseCargoCapacityM3 = Number(capacities.get(input.hullTypeId) ?? 0);
+  if (baseCargoCapacityM3 > 0 && !(Number(shipAttributes.get(38) ?? 0) > 0)) {
+    shipAttributes.set(38, baseCargoCapacityM3);
+  }
 
   // Skills can modify the ship directly. This covers generic support skills such
   // as Power Grid Management and also scales hull bonus attributes. Example:
@@ -1357,6 +1538,12 @@ export async function analyzeFittingDogma(input: {
     message: string;
     item?: string;
   }> = [];
+  for (const conflict of implantSlotConflicts) {
+    issues.push({ level: "error", code: "implant-slot-conflict", item: names.get(conflict.secondTypeId), message: `Implant slot ${conflict.slot} contains both ${names.get(conflict.firstTypeId) ?? conflict.firstTypeId} and ${names.get(conflict.secondTypeId) ?? conflict.secondTypeId}; only one implant can occupy a slot.` });
+  }
+  for (const conflict of boosterSlotConflicts) {
+    issues.push({ level: "error", code: "booster-slot-conflict", item: names.get(conflict.secondTypeId), message: `Booster slot ${conflict.slot} contains both ${names.get(conflict.firstTypeId) ?? conflict.firstTypeId} and ${names.get(conflict.secondTypeId) ?? conflict.secondTypeId}; only one booster can occupy a slot.` });
+  }
   for (const key of Object.keys(used) as Array<keyof typeof used>) {
     if (used[key] > capacity[key]) {
       issues.push({
@@ -1558,19 +1745,7 @@ export async function analyzeFittingDogma(input: {
   const fighterSystem = { capacityM3: fighterCapacityM3, usedM3: fighterBayUsedM3, tubes: fighterTubes, lightSlots: fighterLightSlots, supportSlots: fighterSupportSlots, heavySlots: fighterHeavySlots, inventory: fighterInventory, activeSquadrons: activeCount, activeByClass };
 
   const cargoVolume = input.items.filter((item) => item.rack === "cargo").reduce((total, item) => total + (volumes.get(item.typeId) ?? 0) * (item.quantity ?? 1), 0);
-  const droneBandwidth = input.items
-    .filter((item) => item.rack === "drone")
-    .reduce(
-      (total, item) => total + attr(dogma.get(item.typeId), 1272) * (item.quantity ?? 1),
-      0,
-    );
-  if (droneBandwidth > attr(hull, 1271)) {
-    issues.push({
-      level: "warning",
-      code: "drone-bandwidth",
-      message: `All imported drones require ${droneBandwidth} Mbit/s; the hull can operate ${attr(hull, 1271)} Mbit/s at once.`,
-    });
-  }
+  if (cargoVolume > shipAttr(38)) issues.push({ level: "error", code: "cargo-capacity", message: `Cargo loadout ${cargoVolume.toFixed(1)} m³ exceeds the hull's ${shipAttr(38).toFixed(1)} m³ cargo capacity.` });
   const droneVolume = input.items
     .filter((item) => item.rack === "drone")
     .reduce(
@@ -2043,7 +2218,7 @@ export async function analyzeFittingDogma(input: {
         .map((skill) => ({ item: requirement.item, ...skill })),
     ),
     resources: { used, capacity },
-    storage: { cargoCapacityM3: shipAttr(38), cargoUsedM3: cargoVolume, droneBayCapacityM3: shipAttr(283), droneBayUsedM3: droneVolume, droneBandwidthCapacity: shipAttr(1271), droneBandwidthUsed: droneBandwidth },
+    storage: { cargoCapacityM3: shipAttr(38), cargoUsedM3: cargoVolume, droneBayCapacityM3: shipAttr(283), droneBayUsedM3: droneVolume, droneBandwidthCapacity: shipAttr(1271), droneBandwidthUsed: activeDrones.reduce((sum, drone) => sum + drone.bandwidth, 0) },
     capacitor: {
       capacityGj: capacitorCapacity,
       rechargeSeconds,

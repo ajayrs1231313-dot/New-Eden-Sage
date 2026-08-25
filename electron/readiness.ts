@@ -116,9 +116,11 @@ export type ShipReadinessResult = TrainingPlanResult & {
   characterId: string;
   character: string;
   hullAccessPercent: number;
+  hullTrainingPercent: number;
   hullAccessReady: boolean;
   hullAccessSkills: ShipReadinessSkill[];
   missingHullAccessSkills: ShipReadinessSkill[];
+  hullAccessTrainingSkills: ShipReadinessSkill[];
   targetMasteryLevel: number;
   masteryLevel: number;
   masteryLabel: string;
@@ -127,6 +129,122 @@ export type ShipReadinessResult = TrainingPlanResult & {
 const MASTERY_LABELS = ["No mastery", "Mastery I", "Mastery II", "Mastery III", "Mastery IV", "Mastery V"];
 const MASTERY_KEYS = ["basic", "standard", "improved", "advanced", "elite"] as const;
 let masteryPromise: Promise<Map<number, Array<Map<number, number>>>> | undefined;
+
+export type HullAccessPreview = {
+  hullTypeId: number;
+  hullTrainingPercent: number;
+  hullAccessReady: boolean;
+  directRequirements: number;
+  missingDirectRequirements: number;
+};
+
+type LocalRequirementEntry = {
+  rank: number;
+  primaryAttributeId?: number;
+  secondaryAttributeId?: number;
+  requirements: Array<{ skillId: number; level: number }>;
+};
+type LocalTypeEntry = { name: string; groupId?: number };
+let localRequirementIndexPromise: Promise<Map<number, LocalRequirementEntry>> | undefined;
+let localTypeIndexPromise: Promise<Map<number, LocalTypeEntry>> | undefined;
+
+async function loadLocalRequirementIndex() {
+  if (localRequirementIndexPromise) return localRequirementIndexPromise;
+  localRequirementIndexPromise = Promise.resolve().then(async () => {
+    await ensureStaticDataArchive();
+    const zip = new AdmZip(path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip"));
+    const entry = zip.getEntry("typeDogma.jsonl");
+    if (!entry) throw new Error("Official EVE type DOGMA data is unavailable.");
+    const index = new Map<number, LocalRequirementEntry>();
+    for (const line of entry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue;
+      const row = JSON.parse(line) as { _key: number; dogmaAttributes?: Array<{ attributeID: number; value: number }> };
+      const attributes = new Map((row.dogmaAttributes ?? []).map((attribute) => [attribute.attributeID, attribute.value]));
+      const requirements = REQUIREMENT_PAIRS.flatMap(([skillAttribute, levelAttribute]) => {
+        const skillId = Number(attributes.get(skillAttribute) ?? 0);
+        if (!Number.isSafeInteger(skillId) || skillId <= 0) return [];
+        return [{ skillId, level: Math.max(1, Math.min(5, Math.round(Number(attributes.get(levelAttribute) ?? 1)))) }];
+      });
+      const rank = Math.max(1, Number(attributes.get(RANK_ATTRIBUTE) ?? 1));
+      if (requirements.length || attributes.has(RANK_ATTRIBUTE)) index.set(row._key, {
+        rank,
+        primaryAttributeId: attributes.get(PRIMARY_ATTRIBUTE),
+        secondaryAttributeId: attributes.get(SECONDARY_ATTRIBUTE),
+        requirements,
+      });
+    }
+    return index;
+  });
+  return localRequirementIndexPromise;
+}
+
+async function loadLocalTypeIndex() {
+  if (localTypeIndexPromise) return localTypeIndexPromise;
+  localTypeIndexPromise = Promise.resolve().then(async () => {
+    await ensureStaticDataArchive();
+    const zip = new AdmZip(path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip"));
+    const entry = zip.getEntry("types.jsonl");
+    if (!entry) throw new Error("Official EVE type data is unavailable.");
+    const index = new Map<number, LocalTypeEntry>();
+    for (const line of entry.getData().toString("utf8").split(/\r?\n/)) {
+      if (!line) continue;
+      const row = JSON.parse(line) as { _key: number; name?: string | Record<string, string>; groupID?: number };
+      const rawName = row.name;
+      const name = typeof rawName === "string" ? rawName : rawName?.en;
+      if (name) index.set(row._key, { name, groupId: row.groupID });
+    }
+    return index;
+  });
+  return localTypeIndexPromise;
+}
+
+export async function analyzeHullAccessPreviews(snapshot: SnapshotLike, hullTypeIds: number[]): Promise<HullAccessPreview[]> {
+  const [index, masteries] = await Promise.all([loadLocalRequirementIndex(), loadMasteries()]);
+  const trained = new Map(snapshot.skills.skills.map((skill) => [skill.skill_id, skill.trained_skill_level]));
+  const trainedDetails = new Map(snapshot.skills.skills.map((skill) => [skill.skill_id, skill]));
+  const unique = [...new Set(hullTypeIds.filter((id) => Number.isSafeInteger(id) && id > 0))];
+  return unique.map((hullTypeId) => {
+    const direct = index.get(hullTypeId)?.requirements ?? [];
+    const targets = new Map<number, number>();
+    const visiting = new Set<number>();
+    const collect = (skillId: number, level: number) => {
+      targets.set(skillId, Math.max(targets.get(skillId) ?? 0, level));
+      if (visiting.has(skillId)) return;
+      visiting.add(skillId);
+      for (const requirement of index.get(skillId)?.requirements ?? []) collect(requirement.skillId, requirement.level);
+      visiting.delete(skillId);
+    };
+    for (const requirement of direct) collect(requirement.skillId, requirement.level);
+    let totalWeight = 0;
+    let earnedWeight = 0;
+    for (const [skillId, targetLevel] of targets) {
+      const rank = index.get(skillId)?.rank ?? 1;
+      totalWeight += rank * targetLevel;
+      earnedWeight += rank * Math.min(trained.get(skillId) ?? 0, targetLevel);
+    }
+    const hullTrainingPercent = totalWeight ? Math.round((earnedWeight / totalWeight) * 100) : 100;
+    const masteryTarget = masteries.get(hullTypeId)?.[2] ?? new Map<number, number>();
+    let masteryTargetSp = 0;
+    let masteryEarnedSp = 0;
+    for (const [skillId, level] of masteryTarget) {
+      const rank = index.get(skillId)?.rank ?? trainedDetails.get(skillId)?.rank ?? 1;
+      const targetSp = Math.ceil(250 * rank * Math.pow(2, 2.5 * (level - 1)));
+      masteryTargetSp += targetSp;
+      masteryEarnedSp += Math.min(trainedDetails.get(skillId)?.skillpoints_in_skill ?? 0, targetSp);
+    }
+    const competencyPercent = masteryTargetSp ? Math.round((masteryEarnedSp / masteryTargetSp) * 100) : hullTrainingPercent;
+    const missingDirectRequirements = direct.filter((requirement) => (trained.get(requirement.skillId) ?? 0) < requirement.level).length;
+    return {
+      hullTypeId,
+      hullTrainingPercent,
+      competencyPercent,
+      hullAccessReady: missingDirectRequirements === 0,
+      directRequirements: direct.length,
+      missingDirectRequirements,
+    };
+  });
+}
+
 
 async function loadMasteries() {
   if (masteryPromise) return masteryPromise;
@@ -163,8 +281,12 @@ async function loadMasteries() {
 }
 
 export async function prepareReadinessStaticData() {
-  const masteries = await loadMasteries();
-  return { masteryHulls: masteries.size, masteryTiers: [...masteries.values()].reduce((sum, tiers) => sum + tiers.length, 0) };
+  const [masteries, requirementIndex] = await Promise.all([loadMasteries(), loadLocalRequirementIndex()]);
+  return {
+    masteryHulls: masteries.size,
+    masteryTiers: [...masteries.values()].reduce((sum, tiers) => sum + tiers.length, 0),
+    requirementTypes: requirementIndex.size,
+  };
 }
 
 const headers = {
@@ -237,43 +359,26 @@ function metadata(detail: TypeDetail) {
   };
 }
 
-async function resolveSkillTargets(targets: ExplicitSkillTarget[]) {
-  const uniqueNames = [...new Set(targets.map((target) => target.skill.trim()).filter(Boolean))];
-  if (!uniqueNames.length) return [] as Array<{ skillId: number; name: string; level: number; reason?: string }>;
-
-  const resolved = new Map<string, { id: number; name: string }>();
-  for (let index = 0; index < uniqueNames.length; index += 500) {
-    const names = uniqueNames.slice(index, index + 500);
-    const response = await fetch(`${ESI}/universe/ids/`, {
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      method: "POST",
-      headers: {
-        ...headers,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(names),
-    });
-    if (!response.ok)
-      throw new Error(`EVE skill-name lookup failed (${response.status}).`);
-    const data = (await response.json()) as {
-      inventory_types?: Array<{ id: number; name: string }>;
+async function resolveSkillTargets(
+  targets: ExplicitSkillTarget[],
+  typeIndex: Map<number, LocalTypeEntry>,
+) {
+  if (!targets.length) return [] as Array<{ skillId: number; name: string; level: number; reason?: string }>;
+  const byName = new Map(
+    [...typeIndex.entries()].map(([id, item]) => [item.name.toLowerCase(), { id, name: item.name }]),
+  );
+  const unresolved = [...new Set(targets.map((target) => target.skill.trim()).filter(Boolean))]
+    .filter((name) => !byName.has(name.toLowerCase()));
+  if (unresolved.length)
+    throw new Error(`Progression contains invalid current EVE skill target${unresolved.length === 1 ? "" : "s"}: ${unresolved.join(",  ")}.`);
+  return targets.map((target) => {
+    const item = byName.get(target.skill.toLowerCase())!;
+    return {
+      skillId: item.id,
+      name: item.name,
+      level: Math.max(1, Math.min(5, Math.round(target.level))),
+      reason: target.reason,
     };
-    for (const item of data.inventory_types ?? [])
-      resolved.set(item.name.toLowerCase(), item);
-  }
-
-  return targets.flatMap((target) => {
-    const item = resolved.get(target.skill.toLowerCase());
-    return item
-      ? [
-          {
-            skillId: item.id,
-            name: item.name,
-            level: Math.max(1, Math.min(5, Math.round(target.level))),
-            reason: target.reason,
-          },
-        ]
-      : [];
   });
 }
 
@@ -288,6 +393,8 @@ export async function analyzeTrainingPlan(
       "Sync this character again so Sage has training attributes for readiness estimates.",
     );
 
+  const [localRequirements, localTypes] = await Promise.all([loadLocalRequirementIndex(), loadLocalTypeIndex()]);
+  const trained = new Map(snapshot.skills.skills.map((skill) => [skill.skill_id, skill]));
   const nodes = new Map<number, RequirementNode>();
   const roots = new Set<number>();
 
@@ -308,22 +415,45 @@ export async function analyzeTrainingPlan(
       if (reason) existing.reasons.add(reason);
       if (requiredBy) existing.requiredBy.add(requiredBy);
       if (isDirect) roots.add(skillId);
+      // Do not walk backwards through prerequisites of a skill that is already
+      // trained to the level this path needs. This matters for grandfathered
+      // or changed prerequisite trees (for example an already-trained
+      // Freighter skill). If another path raises the target above the trained
+      // level, expand it exactly once at that point.
+      const existingLevel = trained.get(skillId)?.trained_skill_level ?? 0;
+      if (existingLevel >= existing.targetLevel || existing.prerequisites.size > 0) return;
+      const nextStack = new Set(stack);
+      nextStack.add(skillId);
+      const requirement = localRequirements.get(skillId);
+      for (const prerequisite of requirement?.requirements ?? []) {
+        existing.prerequisites.set(prerequisite.skillId, prerequisite.level);
+        await ensureNode(
+          prerequisite.skillId,
+          prerequisite.level,
+          false,
+          source,
+          skillId,
+          `Prerequisite for ${existing.name}`,
+          nextStack,
+        );
+      }
       return;
     }
     if (stack.has(skillId)) return;
     const nextStack = new Set(stack);
     nextStack.add(skillId);
 
-    const detail = await fetchTypeDetail(skillId);
-    const meta = metadata(detail);
+    const requirement = localRequirements.get(skillId);
+    const type = localTypes.get(skillId);
+    if (!type) throw new Error(`Official EVE type data is missing skill ${skillId}.`);
     const node: RequirementNode = {
       skillId,
-      name: detail.name,
+      name: type.name,
       targetLevel,
       direct: isDirect,
-      rank: meta.rank,
-      primaryAttributeId: meta.primaryAttributeId,
-      secondaryAttributeId: meta.secondaryAttributeId,
+      rank: requirement?.rank ?? 1,
+      primaryAttributeId: requirement?.primaryAttributeId,
+      secondaryAttributeId: requirement?.secondaryAttributeId,
       prerequisites: new Map(),
       requiredBy: new Set(requiredBy ? [requiredBy] : []),
       sources: new Set([source]),
@@ -332,7 +462,10 @@ export async function analyzeTrainingPlan(
     nodes.set(skillId, node);
     if (isDirect) roots.add(skillId);
 
-    for (const prerequisite of requirements(detail)) {
+    const currentLevel = trained.get(skillId)?.trained_skill_level ?? 0;
+    if (currentLevel >= targetLevel) return;
+
+    for (const prerequisite of requirement?.requirements ?? []) {
       node.prerequisites.set(prerequisite.skillId, prerequisite.level);
       await ensureNode(
         prerequisite.skillId,
@@ -340,19 +473,16 @@ export async function analyzeTrainingPlan(
         false,
         source,
         skillId,
-        `Prerequisite for ${detail.name}`,
+        `Prerequisite for ${type.name}`,
         nextStack,
       );
     }
   }
 
-  const itemDetails = await Promise.all(
-    [...new Set(itemTypeIds.filter((id) => Number.isInteger(id) && id > 0))].map((id) =>
-      fetchTypeDetail(id),
-    ),
-  );
-  for (const item of itemDetails) {
-    for (const requirement of requirements(item))
+  for (const itemTypeId of [...new Set(itemTypeIds.filter((id) => Number.isInteger(id) && id > 0))]) {
+    const item = localTypes.get(itemTypeId);
+    if (!item) throw new Error(`Official EVE type data is missing item ${itemTypeId}.`);
+    for (const requirement of localRequirements.get(itemTypeId)?.requirements ?? [])
       await ensureNode(
         requirement.skillId,
         requirement.level,
@@ -363,7 +493,7 @@ export async function analyzeTrainingPlan(
       );
   }
 
-  const resolvedTargets = await resolveSkillTargets(explicitSkillTargets);
+  const resolvedTargets = await resolveSkillTargets(explicitSkillTargets, localTypes);
   for (const target of resolvedTargets)
     await ensureNode(
       target.skillId,
@@ -374,7 +504,6 @@ export async function analyzeTrainingPlan(
       target.reason ?? "Selected activity/context target",
     );
 
-  const trained = new Map(snapshot.skills.skills.map((skill) => [skill.skill_id, skill]));
   const queueBySkill = new Map<number, number>();
   for (const item of snapshot.queue) {
     queueBySkill.set(
@@ -430,10 +559,17 @@ export async function analyzeTrainingPlan(
     if (visited.has(skillId) || visiting.has(skillId)) return;
     visiting.add(skillId);
     const node = nodes.get(skillId);
-    const prerequisites = [...(node?.prerequisites.keys() ?? [])].sort((a, b) =>
-      (nodes.get(a)?.name ?? "").localeCompare(nodes.get(b)?.name ?? ""),
-    );
-    for (const prerequisiteId of prerequisites) visit(prerequisiteId);
+    // A requirement that is already trained is a satisfied boundary. Do not
+    // retroactively require its historical prerequisites: EVE permits the
+    // already-trained skill to satisfy the item/hull requirement even when
+    // prerequisite trees later change. Only recurse while the target itself
+    // still needs training.
+    if (!mapped.get(skillId)?.met) {
+      const prerequisites = [...(node?.prerequisites.keys() ?? [])].sort((a, b) =>
+        (nodes.get(a)?.name ?? "").localeCompare(nodes.get(b)?.name ?? ""),
+      );
+      for (const prerequisiteId of prerequisites) visit(prerequisiteId);
+    }
     visiting.delete(skillId);
     visited.add(skillId);
     orderedIds.push(skillId);
@@ -444,7 +580,9 @@ export async function analyzeTrainingPlan(
     visit(root);
 
   const dependencyOrder = orderedIds.map((id) => mapped.get(id)!).filter(Boolean);
-  const relevantSkills = [...mapped.values()].sort((a, b) => {
+  // Only score requirements that are on an active path to an unmet target.
+  // Nodes beneath an already-satisfied skill are intentionally excluded.
+  const relevantSkills = [...dependencyOrder].sort((a, b) => {
     if (a.direct !== b.direct) return a.direct ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
@@ -514,7 +652,9 @@ export async function analyzeShipReadiness(
   cloneState: CloneState = "omega",
   targetMasteryLevel = 5,
 ): Promise<ShipReadinessResult> {
-  const hull = await fetchTypeDetail(hullTypeId);
+  const localTypes = await loadLocalTypeIndex();
+  const hull = localTypes.get(hullTypeId);
+  if (!hull) throw new Error(`Official EVE type data is missing hull ${hullTypeId}.`);
   const hullAccessPlan = await analyzeTrainingPlan(snapshot, [hullTypeId], [], cloneState);
   // Hull usability is determined by the hull's DIRECT required skills. Recursive
   // prerequisites are useful training guidance, but once the direct skill is trained
@@ -522,9 +662,10 @@ export async function analyzeShipReadiness(
   const hullAccessSkills = hullAccessPlan.relevantSkills.filter((skill) => skill.direct);
   const missingHullAccessSkills = hullAccessSkills.filter((skill) => !skill.met);
   const hullAccessReady = missingHullAccessSkills.length === 0;
-  // Access is binary: a character can either board the hull or cannot. Partial
-  // prerequisite progress belongs in the training guidance, not this metric.
+  // Boardability is binary, while training progress is continuous. Keeping both
+  // prevents an almost-trained hull from looking identical to an untouched route.
   const hullAccessPercent = hullAccessReady ? 100 : 0;
+  const hullTrainingPercent = hullAccessPlan.readinessPercent;
   const trained = new Map(snapshot.skills.skills.map((skill) => [skill.skill_id, skill.trained_skill_level]));
   const tiers = (await loadMasteries()).get(hullTypeId) ?? [];
   let masteryLevel = 0;
@@ -535,7 +676,7 @@ export async function analyzeShipReadiness(
   const selectedMasteryLevel = Math.max(1, Math.min(5, Math.round(targetMasteryLevel)));
   const masteryTarget = tiers[selectedMasteryLevel - 1] ?? new Map<number, number>();
   const masteryTargets = await Promise.all([...masteryTarget.entries()].map(async ([skillId, level]) => ({
-    skill: (await fetchTypeDetail(skillId)).name,
+    skill: localTypes.get(skillId)?.name ?? `Skill ${skillId}`,
     level,
     reason: `Official CCP Mastery ${MASTERY_LABELS[selectedMasteryLevel].replace("Mastery ", "")} requirement for ${hull.name}`,
   })));
@@ -563,9 +704,11 @@ export async function analyzeShipReadiness(
     ...plan,
     readinessPercent: competencyPercent,
     hullAccessPercent,
+    hullTrainingPercent,
     hullAccessReady,
     hullAccessSkills,
     missingHullAccessSkills,
+    hullAccessTrainingSkills: hullAccessPlan.missingSkills,
     targetMasteryLevel: selectedMasteryLevel,
     ready: masteryLevel >= selectedMasteryLevel,
     masteryLevel,
@@ -578,7 +721,7 @@ export async function analyzeShipReadiness(
         ...plan.explanation.reasons.slice(1),
       ],
       formula:
-        `Practical competency is skill-point-weighted progress across the selected official ${MASTERY_LABELS[selectedMasteryLevel]} skill set; hull access is reported separately (${hullAccessPercent}%). Higher skill levels carry their real exponentially larger training weight.`,
+        `Practical competency is skill-point-weighted progress across the selected official ${MASTERY_LABELS[selectedMasteryLevel]} skill set. Hull boardability is ${hullAccessReady ? "READY" : "BLOCKED"}; the dependency-correct hull-access training route is ${hullTrainingPercent}% complete. Higher skill levels carry their real exponentially larger training weight.`,
     },
   };
 }

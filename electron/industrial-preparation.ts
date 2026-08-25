@@ -8,7 +8,7 @@ import {
 import { filterRegionalMarket } from "./regional-market-filter";
 import { getMarketSystemIndex } from "./market-static-index";
 import { universeRoute } from "./universe-route-graph";
-import { loadCurrentRawMarketManifest } from "./raw-market-storage";
+import { loadCurrentMarketRevision } from "./shared-market-data";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 
 type SecurityBand = "high" | "low" | "null";
@@ -177,7 +177,7 @@ async function systemCostKey(characterId: string, snapshot: any) {
     characterId: String(characterId),
     system: solarSystemId,
     snapshot: String(snapshot.updatedAt ?? ""),
-    market: (await loadCurrentRawMarketManifest("all"))?.id ?? "none",
+    market: (await loadCurrentMarketRevision())?.id ?? "none",
   };
 }
 
@@ -253,7 +253,7 @@ function normalizeOpportunityInput(input: IndustrialOpportunityInput) {
 async function industrialOpportunityKey(input: IndustrialOpportunityInput) {
   const normalized = normalizeOpportunityInput(input);
   const snapshots = scopedSnapshots(normalized);
-  const manifest = await loadCurrentRawMarketManifest("all");
+  const manifest = await loadCurrentMarketRevision();
   return {
     schema: 2,
     input: normalized,
@@ -335,7 +335,8 @@ export async function getIndustrialOpportunitiesPrepared(
 
       const marketResults = await Promise.all(normalized.security.map((security) =>
         filterRegionalMarket({
-          query: product.name,
+          query: "",
+          typeIds: [Number(product.typeId)],
           categoryIds: [],
           groupIds: [],
           marketGroupIds: [],

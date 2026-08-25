@@ -5,6 +5,8 @@ import {
   getHullFittingProfileLocal,
   getMutationOptionsLocal,
   getFittingRemediesLocal,
+  getAugmentGuideLocal,
+  getBoosterSideEffectsLocal,
   getFittingTypeInfoLocal,
   prepareFittingDataLocal,
   filterFittingItemsForHullLocal,
@@ -12,6 +14,7 @@ import {
   checkFittingChargeCompatibilityLocal,
   checkFittingItemCompatibilityLocal,
   resolveFittingTypeNamesLocal,
+  resolveFittingTypeIdsLocal,
   searchFittingTypesLocal,
 } from "./fitting-dogma";
 
@@ -25,8 +28,11 @@ type FittingWorkerOperation =
   | "charge-compatibility"
   | "item-compatibility"
   | "remedies"
+  | "augment-guide"
+  | "booster-side-effects"
   | "type-info"
   | "resolve-types"
+  | "resolve-type-ids"
   | "search-types"
   | "analyze";
 
@@ -70,11 +76,20 @@ parentPort.on("message", async (message: FittingWorkerMessage) => {
       case "remedies":
         result = await getFittingRemediesLocal(message.input ?? {});
         break;
+      case "augment-guide":
+        result = await getAugmentGuideLocal(Array.isArray(message.input?.installedTypeIds) ? message.input.installedTypeIds : []);
+        break;
+      case "booster-side-effects":
+        result = await getBoosterSideEffectsLocal(Array.isArray(message.input?.boosterTypeIds) ? message.input.boosterTypeIds : []);
+        break;
       case "type-info":
         result = await getFittingTypeInfoLocal(Number(message.input?.typeId));
         break;
       case "resolve-types":
         result = await resolveFittingTypeNamesLocal(Array.isArray(message.input?.names) ? message.input.names : []);
+        break;
+      case "resolve-type-ids":
+        result = await resolveFittingTypeIdsLocal(Array.isArray(message.input?.typeIds) ? message.input.typeIds : []);
         break;
       case "search-types":
         result = await searchFittingTypesLocal(String(message.input?.query ?? ""), Number(message.input?.limit ?? 60));

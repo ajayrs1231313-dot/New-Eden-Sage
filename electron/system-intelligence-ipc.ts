@@ -1,6 +1,9 @@
 import { app, ipcMain } from "electron";
 import { listSnapshots } from "./database";
+import { findCorporationHomes, scanCorporationHomeCandidate } from "./corporation-home-finder";
 import { getNavigationRouteIntelligence } from "./navigation-route-intelligence";
+import { getNavigationPublicWormholes } from "./eve-scout-public";
+import { getWormholeSiteReference } from "./wormhole-site-reference";
 import {
   getSystemIntelligence,
   refreshSystemIntelligence,
@@ -12,6 +15,9 @@ import {
 ipcMain.handle("system-intelligence:search", (_event, query: string, limit = 20) =>
   searchSolarSystems(String(query ?? ""), Number(limit ?? 20)),
 );
+
+ipcMain.handle("corp:find-home", (_event, input: unknown) => findCorporationHomes((input ?? {}) as any));
+ipcMain.handle("corp:find-home-scan", (_event, input: { systemIds?: number[] }) => scanCorporationHomeCandidate(input ?? {}, listSnapshots() as any[]));
 
 ipcMain.handle("system-intelligence:get", (_event, systemId: number) =>
   getSystemIntelligence(Number(systemId), listSnapshots() as any[]),
@@ -31,6 +37,9 @@ ipcMain.handle("system-intelligence:refresh", (_event, input: { systemIds?: numb
     { caller: input?.caller, discoverStructures: input?.discoverStructures, deepKillmailBackfill: input?.deepKillmailBackfill, forceActivity: input?.forceActivity },
   ),
 );
+
+ipcMain.handle("navigation:public-wormholes", (_event, force?: boolean) => getNavigationPublicWormholes(Boolean(force)));
+ipcMain.handle("wormhole:site-reference", (_event, force?: boolean) => getWormholeSiteReference(Boolean(force)));
 
 ipcMain.handle("navigation:route-intelligence", (_event, input: { systemIds?: number[]; legs?: any[] }) =>
   getNavigationRouteIntelligence(

@@ -18,6 +18,7 @@ export const FITTING_PREPARED_CACHE = path.join(STATIC_ROOT, "fitting-dogma-prep
 export const FITTING_CATALOGUE_CACHE = path.join(STATIC_ROOT, "fitting-catalogue-prepared-v1.json.gz");
 export const MARKET_STATIC_PREPARED_CACHE = path.join(STATIC_ROOT, "market-static-prepared-v1.json.gz");
 export const INDUSTRIAL_PREPARED_CACHE = path.join(STATIC_ROOT, "industrial-blueprint-index-v1.json.gz");
+export const WORMHOLE_STATIC_PREPARED_CACHE = path.join(STATIC_ROOT, "wormhole-static-v1.json.gz");
 const SDE_URL =
   "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
 const REPACKAGED_URL =
@@ -32,7 +33,17 @@ type CacheFile = {
 type ProcessStaticState = { promoted: boolean; hasArchive: boolean };
 
 let cachePromise: Promise<CacheFile> | undefined;
-let shipsPromise: Promise<Array<{ typeId: number; name: string }>> | undefined;
+export type PublishedShip = {
+  typeId: number;
+  name: string;
+  groupId: number;
+  groupName: string;
+  metaGroupId?: number;
+  metaGroupName?: string;
+  factionId?: number;
+  factionName?: string;
+};
+let shipsPromise: Promise<PublishedShip[]> | undefined;
 let processStaticPromise: Promise<ProcessStaticState> | undefined;
 let refreshPromise: Promise<unknown> | undefined;
 let volumeCacheLockDepth = 0;
@@ -97,6 +108,7 @@ async function invalidateStaticDerivedCaches() {
     fs.rm(FITTING_CATALOGUE_CACHE, { force: true }).catch(() => undefined),
     fs.rm(MARKET_STATIC_PREPARED_CACHE, { force: true }).catch(() => undefined),
     fs.rm(INDUSTRIAL_PREPARED_CACHE, { force: true }).catch(() => undefined),
+    fs.rm(WORMHOLE_STATIC_PREPARED_CACHE, { force: true }).catch(() => undefined),
   ]);
 }
 
@@ -219,11 +231,11 @@ export async function stageStaticDataRefreshLowImpact(force = false, aggressive 
 
 export async function listPublishedShips() {
   if (!shipsPromise)
-    shipsPromise = ensureStaticDataArchive().then(() => new Promise<Array<{ typeId: number; name: string }>>((resolve, reject) => {
+    shipsPromise = ensureStaticDataArchive().then(() => new Promise<PublishedShip[]>((resolve, reject) => {
       const worker = new Worker(path.join(__dirname, "ship-index-worker.js"), {
         workerData: { archive: SDE_ARCHIVE },
       });
-      worker.once("message", (message: { ships?: Array<{ typeId: number; name: string }>; error?: string }) => {
+      worker.once("message", (message: { ships?: PublishedShip[]; error?: string }) => {
         if (message.error) reject(new Error(message.error));
         else resolve(message.ships ?? []);
       });

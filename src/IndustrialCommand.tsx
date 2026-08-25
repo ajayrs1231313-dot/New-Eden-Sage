@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CharacterSnapshot } from "./types";
+import { IndustrialProjectFoundry } from "./IndustrialProjectFoundry";
 import "./industrial-command.css";
 
-type IndustrialTab = "overview" | "opportunities" | "blueprints" | "jobs" | "materials" | "research" | "production";
+type IndustrialTab = "overview" | "foundry" | "opportunities" | "jobs" | "refinery" | "moon-goo" | "production";
+type MoonGooTab = "materials" | "reactions";
+type FoundryTab = "projects" | "blueprints" | "materials" | "research";
 
 type BlueprintRecord = {
   item_id?: number;
@@ -13,6 +16,7 @@ type BlueprintRecord = {
   material_efficiency?: number;
   time_efficiency?: number;
   runs?: number;
+  lpStoreTarget?: boolean;
 };
 
 type IndustryJobRecord = {
@@ -45,13 +49,20 @@ type EnrichedAsset = {
 };
 
 const tabs: Array<{ id: IndustrialTab; label: string }> = [
-  { id: "overview", label: "Command Overview" },
+  { id: "overview", label: "Industrial Overview" },
+  { id: "foundry", label: "Project Foundry" },
   { id: "opportunities", label: "Industrial Opportunities" },
-  { id: "blueprints", label: "Blueprint Library" },
   { id: "jobs", label: "Industry Jobs" },
+  { id: "refinery", label: "Refinery" },
+  { id: "moon-goo", label: "Moon Goo" },
+  { id: "production", label: "Production Planner" },
+];
+
+const foundryTabs: Array<{ id: FoundryTab; label: string }> = [
+  { id: "projects", label: "Projects" },
+  { id: "blueprints", label: "Blueprint Library" },
   { id: "materials", label: "Materials" },
   { id: "research", label: "Research & Invention" },
-  { id: "production", label: "Production Planner" },
 ];
 
 const activityNames: Record<number, string> = {
@@ -83,6 +94,7 @@ function sourceUnavailable(value: unknown) {
 
 type AssetSharingPreferences = { enabled: boolean; characterIds: string[] };
 const ASSET_SHARING_STORAGE_KEY = "new-eden-sage-industrial-asset-sharing-v1";
+const LP_STORE_INDUSTRY_HANDOFF_KEY = "new-eden-sage-lp-industry-handoff-v1";
 
 function loadAssetSharingPreferences(): AssetSharingPreferences {
   try {
@@ -106,12 +118,15 @@ export function IndustrialCommand({
   onSelectCharacter(characterId: string): void;
 }) {
   const [tab, setTab] = useState<IndustrialTab>("overview");
+  const [foundryTab, setFoundryTab] = useState<FoundryTab>("projects");
+  const [moonGooTab, setMoonGooTab] = useState<MoonGooTab>("materials");
   const [blueprintFilter, setBlueprintFilter] = useState("");
   const [blueprintLibraryScope, setBlueprintLibraryScope] = useState<"personal" | "corporation">("personal");
   const [materialFilter, setMaterialFilter] = useState("");
   const [assetSharing, setAssetSharing] = useState<AssetSharingPreferences>(loadAssetSharingPreferences);
   const [typeNames, setTypeNames] = useState<Record<number, string>>({});
   const [selectedBlueprintIndex, setSelectedBlueprintIndex] = useState(0);
+  const [lpStoreBlueprintTarget, setLpStoreBlueprintTarget] = useState<BlueprintRecord | null>(null);
   const [targetQuantity, setTargetQuantity] = useState(1);
   const [manufacturingPlan, setManufacturingPlan] = useState<any>(null);
   const [manufacturingStatus, setManufacturingStatus] = useState("Choose a blueprint and output quantity.");
@@ -126,6 +141,26 @@ export function IndustrialCommand({
   const [opportunitySystem, setOpportunitySystem] = useState("");
   const [opportunityJumpRadius, setOpportunityJumpRadius] = useState<5 | 10 | 20 | null>(null);
   const [opportunitySecurity, setOpportunitySecurity] = useState({ high: true, low: true, null: true });
+  const [refineryFacility, setRefineryFacility] = useState<"npc" | "athanor" | "tatara">("athanor");
+  const [refineryRig, setRefineryRig] = useState<"none" | "t1" | "t2">("t2");
+  const [refinerySecurity, setRefinerySecurity] = useState<"high" | "low" | "null">("high");
+  const [refineryImplant, setRefineryImplant] = useState<"none" | "rx801" | "rx802" | "rx804">("none");
+  const [refineryResult, setRefineryResult] = useState<any>(null);
+  const [refineryBusy, setRefineryBusy] = useState(false);
+  const [refineryStatus, setRefineryStatus] = useState("Choose a facility profile, then analyse the selected ore stock pool.");
+  const [refineryFilter, setRefineryFilter] = useState("");
+  const [refineryCatalogue, setRefineryCatalogue] = useState<any[]>([]);
+  const [refineryInputMode, setRefineryInputMode] = useState<"stock" | "manual">("stock");
+  const [manualRefineryTypeId, setManualRefineryTypeId] = useState(0);
+  const [manualRefineryQuantity, setManualRefineryQuantity] = useState(100);
+  const [manualRefineryStock, setManualRefineryStock] = useState<Array<{ typeId: number; quantity: number }>>([]);
+  const [reactionCatalogue, setReactionCatalogue] = useState<any>(null);
+  const [reactionBlueprintTypeId, setReactionBlueprintTypeId] = useState(0);
+  const [reactionRuns, setReactionRuns] = useState(1);
+  const [reactionPlan, setReactionPlan] = useState<any>(null);
+  const [reactionBusy, setReactionBusy] = useState(false);
+  const [reactionStatus, setReactionStatus] = useState("Choose a reaction formula and run count.");
+  const [moonFoundryProjects, setMoonFoundryProjects] = useState<any[]>([]);
   const active = snapshots.find((item) => item.characterId === activeCharacterId) ?? snapshots[0];
 
   useEffect(() => {
@@ -138,7 +173,48 @@ export function IndustrialCommand({
   useEffect(() => {
     localStorage.setItem(ASSET_SHARING_STORAGE_KEY, JSON.stringify(assetSharing));
     setManufacturingPlan(null);
+    setRefineryResult(null);
+    setReactionPlan(null);
   }, [assetSharing]);
+  useEffect(() => {
+    setRefineryResult(null);
+    setRefineryStatus("Facility profile changed. Analyse the stock pool to refresh refinery values.");
+  }, [active?.characterId, refineryFacility, refineryRig, refinerySecurity, refineryImplant]);
+  useEffect(() => {
+    const needsRefineryCatalogue = tab === "refinery" || (tab === "moon-goo" && moonGooTab === "materials");
+    if (!needsRefineryCatalogue || refineryCatalogue.length) return;
+    let cancelled = false;
+    setRefineryStatus("Loading CCP refinery resource catalogue...");
+    void window.sage.getRefineryCatalogue().then((catalogue) => {
+      if (cancelled) return;
+      const items = Array.isArray(catalogue) ? catalogue : [];
+      setRefineryCatalogue(items);
+      if (items.length) setManualRefineryTypeId((current) => current || Number(items[0].typeId));
+      setRefineryStatus(items.length ? "Choose synced stock or build a manual ore selection, then analyse." : "No CCP refinery resource catalogue is available.");
+    }).catch((error) => { if (!cancelled) setRefineryStatus(error instanceof Error ? error.message : "Refinery catalogue could not be loaded."); });
+    return () => { cancelled = true; };
+  }, [tab, moonGooTab, refineryCatalogue.length]);
+  useEffect(() => {
+    if (tab !== "moon-goo" || moonGooTab !== "reactions" || reactionCatalogue?.formulas?.length) return;
+    let cancelled = false;
+    setReactionStatus("Loading CCP reaction formulas and moon-material catalogue...");
+    void window.sage.getReactionCatalogue().then((catalogue) => {
+      if (cancelled) return;
+      setReactionCatalogue(catalogue);
+      const first = Array.isArray(catalogue?.formulas) ? catalogue.formulas[0] : null;
+      if (first) setReactionBlueprintTypeId((current) => current || Number(first.blueprintTypeId));
+      setReactionStatus(first ? "Choose a reaction formula and run count." : "No reaction formulas are available in the current CCP SDE.");
+    }).catch((error) => { if (!cancelled) setReactionStatus(error instanceof Error ? error.message : "Reaction catalogue could not be loaded."); });
+    return () => { cancelled = true; };
+  }, [tab, moonGooTab, reactionCatalogue?.formulas?.length]);
+  useEffect(() => {
+    if (tab !== "moon-goo" || !active?.characterId) return;
+    let cancelled = false;
+    void window.sage.getFoundryProjects({ characterId: active.characterId }).then((projects: any[]) => {
+      if (!cancelled) setMoonFoundryProjects(Array.isArray(projects) ? projects : []);
+    }).catch(() => { if (!cancelled) setMoonFoundryProjects([]); });
+    return () => { cancelled = true; };
+  }, [tab, active?.characterId, active?.updatedAt]);
 
   const industrial = useMemo(() => {
     const characters = snapshots.map((snapshot) => {
@@ -174,7 +250,9 @@ export function IndustrialCommand({
     const typeIds = [...new Set(
       industrial.flatMap((item) => [
         ...item.blueprints.map((blueprint) => blueprint.type_id),
+        ...item.corpBlueprints.map((blueprint) => blueprint.type_id),
         ...item.jobs.flatMap((job) => [job.blueprint_type_id, job.product_type_id]),
+        ...item.corpJobs.flatMap((job) => [job.blueprint_type_id, job.product_type_id]),
       ]).filter((typeId): typeId is number => typeof typeId === "number" && typeId > 0 && !typeNames[typeId]),
     )];
     if (!typeIds.length) return;
@@ -222,10 +300,31 @@ export function IndustrialCommand({
     return () => { cancelled = true; };
   }, [active?.characterId, active?.updatedAt]);
 
+  useEffect(() => {
+    if (!active?.characterId) return;
+    const raw = sessionStorage.getItem(LP_STORE_INDUSTRY_HANDOFF_KEY);
+    if (!raw) return;
+    try {
+      const pending = JSON.parse(raw) as { characterId?: string; blueprintTypeId?: number; targetQuantity?: number };
+      if (String(pending.characterId ?? "") !== String(active.characterId)) return;
+      const blueprintTypeId = Number(pending.blueprintTypeId ?? 0);
+      if (!(blueprintTypeId > 0)) return;
+      setLpStoreBlueprintTarget({ type_id: blueprintTypeId, material_efficiency: 0, time_efficiency: 0, lpStoreTarget: true });
+      setBlueprintLibraryScope("personal");
+      setSelectedBlueprintIndex(0);
+      setTargetQuantity(Math.max(1, Math.floor(Number(pending.targetQuantity ?? 1) || 1)));
+      setManufacturingPlan(null);
+      setManufacturingStatus("LP Store BPC target loaded. If the redeemed copy is not in assets yet, Sage plans it at ME 0 / TE 0 without inventing copy-run metadata.");
+      setTab("production");
+      sessionStorage.removeItem(LP_STORE_INDUSTRY_HANDOFF_KEY);
+    } catch {
+      sessionStorage.removeItem(LP_STORE_INDUSTRY_HANDOFF_KEY);
+    }
+  }, [active?.characterId]);
+
   if (!active) {
     return (
       <section className="industrial-command industrial-empty">
-        <div className="industrial-construction-ribbon">UNDER CONSTRUCTION</div>
         <p className="eyebrow">INDUSTRIAL COMMAND</p>
         <h2>Connect a character to initialise industry intelligence</h2>
         <p>Sage will keep each character&apos;s blueprints, jobs and assets separately identified.</p>
@@ -273,8 +372,104 @@ export function IndustrialCommand({
     .filter((item) => item.quantity > 0 && item.name.toLowerCase().includes(materialFilter.trim().toLowerCase()))
     .sort((a, b) => b.estimatedValue - a.estimatedValue || b.quantity - a.quantity || a.name.localeCompare(b.name));
 
-  const planningBlueprints = blueprintLibraryScope === "corporation" ? activeData.corpBlueprints : activeData.blueprints;
+  const personalPlanningBlueprints = lpStoreBlueprintTarget?.type_id
+    ? (() => {
+        const matchingOwned = activeData.blueprints.filter((blueprint) => Number(blueprint.type_id) === Number(lpStoreBlueprintTarget.type_id));
+        if (matchingOwned.length) return [...matchingOwned, ...activeData.blueprints.filter((blueprint) => Number(blueprint.type_id) !== Number(lpStoreBlueprintTarget.type_id))];
+        return [lpStoreBlueprintTarget, ...activeData.blueprints];
+      })()
+    : activeData.blueprints;
+  const planningBlueprints = blueprintLibraryScope === "corporation" ? activeData.corpBlueprints : personalPlanningBlueprints;
   const selectedBlueprint = planningBlueprints[selectedBlueprintIndex] ?? planningBlueprints[0];
+  const selectedReactionFormula = (reactionCatalogue?.formulas ?? []).find((formula: any) => Number(formula.blueprintTypeId) === Number(reactionBlueprintTypeId)) ?? reactionCatalogue?.formulas?.[0] ?? null;
+  const moonMaterialTypeIds = new Set<number>((reactionCatalogue?.moonMaterialTypeIds ?? []).map(Number));
+  const moonGooMap = new Map<number, { typeId: number; name: string; quantity: number; owners: Map<string, { characterName: string; quantity: number }> }>();
+  for (const owner of materialOwners) {
+    for (const asset of owner.assets) {
+      const typeId = Number(asset.type_id ?? 0);
+      const quantity = Math.max(0, Math.floor(Number(asset.quantity ?? 0)));
+      if (!moonMaterialTypeIds.has(typeId) || quantity <= 0) continue;
+      const current = moonGooMap.get(typeId) ?? { typeId, name: asset.item ?? typeNames[typeId] ?? `Type ${typeId}`, quantity: 0, owners: new Map() };
+      current.quantity += quantity;
+      const held = current.owners.get(String(owner.snapshot.characterId)) ?? { characterName: owner.snapshot.character.name, quantity: 0 };
+      held.quantity += quantity;
+      current.owners.set(String(owner.snapshot.characterId), held);
+      moonGooMap.set(typeId, current);
+    }
+  }
+  const moonGooInventory = [...moonGooMap.values()].sort((a, b) => b.quantity - a.quantity || a.name.localeCompare(b.name));
+  const moonInventoryByType = new Map(materialInventory.map((item) => [Number(item.typeId), item] as const));
+  const moonProjectDemand = new Map<number, { quantity: number; projects: Set<string> }>();
+  for (const project of moonFoundryProjects) {
+    if (String(project?.status ?? "") === "archived") continue;
+    for (const requirement of Array.isArray(project?.requirements) ? project.requirements : []) {
+      const typeId = Number(requirement?.typeId ?? 0);
+      const quantity = Math.max(0, Number(requirement?.required ?? 0));
+      if (!(typeId > 0) || quantity <= 0) continue;
+      const entry = moonProjectDemand.get(typeId) ?? { quantity: 0, projects: new Set<string>() };
+      entry.quantity += quantity;
+      entry.projects.add(String(project?.name ?? "Foundry project"));
+      moonProjectDemand.set(typeId, entry);
+    }
+  }
+  const rawMoonOres = refineryCatalogue.filter((item: any) => item?.kind === "moon");
+  const rawMoonOreIds = new Set<number>(rawMoonOres.map((item: any) => Number(item.typeId)));
+  const reprocessedMoonIds = new Set<number>(rawMoonOres.flatMap((item: any) => (item.outputs ?? []).map((output: any) => Number(output.typeId))));
+  const moonNames = new Map<number, string>();
+  for (const ore of rawMoonOres) {
+    moonNames.set(Number(ore.typeId), String(ore.name));
+    for (const output of ore.outputs ?? []) moonNames.set(Number(output.typeId), String(output.name));
+  }
+  const reactionUses = new Map<number, Set<string>>();
+  const reactionProducts = new Set<number>();
+  for (const formula of reactionCatalogue?.formulas ?? []) {
+    for (const material of formula.materials ?? []) {
+      const typeId = Number(material.typeId);
+      moonNames.set(typeId, String(material.name));
+      const uses = reactionUses.get(typeId) ?? new Set<string>();
+      uses.add(String(formula.productName ?? formula.formulaName ?? "Reaction"));
+      reactionUses.set(typeId, uses);
+    }
+    for (const product of formula.products ?? []) {
+      reactionProducts.add(Number(product.typeId));
+      moonNames.set(Number(product.typeId), String(product.name));
+    }
+  }
+  const moonIntelTypeIds = new Set<number>([
+    ...rawMoonOreIds,
+    ...reprocessedMoonIds,
+    ...moonMaterialTypeIds,
+    ...reactionProducts,
+    ...moonProjectDemand.keys(),
+  ]);
+  const moonIntelRows = [...moonIntelTypeIds].map((typeId) => {
+    const inventory = moonInventoryByType.get(typeId);
+    const stock = Math.max(0, Number(inventory?.quantity ?? 0));
+    const demand = moonProjectDemand.get(typeId);
+    const projectDemand = Math.max(0, Number(demand?.quantity ?? 0));
+    const rawOre = rawMoonOres.find((item: any) => Number(item.typeId) === typeId);
+    const category = rawMoonOreIds.has(typeId)
+      ? "Raw moon ore"
+      : reprocessedMoonIds.has(typeId)
+        ? "Reprocessed moon material"
+        : reactionProducts.has(typeId)
+          ? "Reaction intermediate"
+          : "Moon material";
+    return {
+      typeId,
+      name: moonNames.get(typeId) ?? inventory?.name ?? typeNames[typeId] ?? `Type ${typeId}`,
+      category,
+      stock,
+      estimatedValue: Math.max(0, Number(inventory?.estimatedValue ?? 0)),
+      projectDemand,
+      deficit: Math.max(0, projectDemand - stock),
+      surplus: Math.max(0, stock - projectDemand),
+      projects: [...(demand?.projects ?? [])],
+      destinations: [...(reactionUses.get(typeId) ?? [])],
+      outputs: (rawOre?.outputs ?? []).map((output: any) => `${output.name} × ${number(output.quantity)}`),
+    };
+  }).filter((row) => row.stock > 0 || row.projectDemand > 0 || row.category === "Raw moon ore" || row.destinations.length > 0)
+    .sort((a, b) => b.deficit - a.deficit || b.estimatedValue - a.estimatedValue || a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   async function buildManufacturingPlan() {
     if (!selectedBlueprint?.type_id) {
       setManufacturingStatus("Choose a manufacturing blueprint first.");
@@ -299,6 +494,83 @@ export function IndustrialCommand({
       setManufacturingStatus(error instanceof Error ? error.message : "Manufacturing analysis failed.");
     }
   }
+  function addManualRefineryResource() {
+    const typeId = Number(manualRefineryTypeId);
+    const quantity = Math.max(1, Math.floor(Number(manualRefineryQuantity) || 1));
+    if (!(typeId > 0)) {
+      setRefineryStatus("Choose an ore, ice or moon-ore type first.");
+      return;
+    }
+    setManualRefineryStock((current) => {
+      const existing = current.find((item) => item.typeId === typeId);
+      return existing
+        ? current.map((item) => item.typeId === typeId ? { ...item, quantity: item.quantity + quantity } : item)
+        : [...current, { typeId, quantity }];
+    });
+    const item = refineryCatalogue.find((entry) => Number(entry.typeId) === typeId);
+    setRefineryStatus(`Added ${quantity.toLocaleString()} ${item?.name ?? "resource"} to the manual refinery selection.`);
+  }
+
+  async function analyzeRefineryStock() {
+    if (refineryInputMode === "manual" && !manualRefineryStock.length) {
+      setRefineryStatus("Add at least one ore, ice or moon-ore stack to the manual selection first.");
+      return;
+    }
+    setRefineryBusy(true);
+    setRefineryStatus(refineryInputMode === "manual"
+      ? "Analysing the manual refinery selection with the active character's skills and retained market prices..."
+      : "Reading exact SDE reprocessing outputs, character skills and retained market prices...");
+    try {
+      const result = await window.sage.getRefineryAnalysis({
+        characterId: active.characterId,
+        includeConnectedStock: assetSharing.enabled,
+        sharedCharacterIds: assetSharing.enabled ? assetSharing.characterIds : [],
+        stockMode: refineryInputMode,
+        manualStock: refineryInputMode === "manual" ? manualRefineryStock : [],
+        facility: refineryFacility,
+        rig: refineryRig,
+        security: refinerySecurity,
+        implant: refineryImplant,
+      });
+      setRefineryResult(result);
+      setRefineryStatus(result?.stacks?.length
+        ? `${result.stacks.length} refinable resource type(s) analysed from ${refineryInputMode === "manual" ? "the manual selection" : "the selected stock pool"}.`
+        : refineryInputMode === "manual" ? "No valid refinable resources are in the manual selection." : "No refinable ore, ice or moon ore is present in the selected stock pool.");
+    } catch (error) {
+      setRefineryResult(null);
+      setRefineryStatus(error instanceof Error ? error.message : "Refinery analysis failed.");
+    } finally {
+      setRefineryBusy(false);
+    }
+  }
+
+  async function buildReactionPlan() {
+    if (!(reactionBlueprintTypeId > 0)) {
+      setReactionStatus("Choose a reaction formula first.");
+      return;
+    }
+    setReactionBusy(true);
+    setReactionStatus("Expanding the exact CCP reaction formula, checking stock, skills and retained market prices...");
+    try {
+      const result = await window.sage.getReactionPlan({
+        characterId: active.characterId,
+        blueprintTypeId: reactionBlueprintTypeId,
+        runs: Math.max(1, Math.floor(Number(reactionRuns) || 1)),
+        includeConnectedStock: assetSharing.enabled,
+        sharedCharacterIds: assetSharing.enabled ? assetSharing.characterIds : [],
+      });
+      setReactionPlan(result);
+      setReactionStatus(result?.totals?.missingMaterialTypes
+        ? `${result.totals.missingMaterialTypes} reaction input type(s) still need sourcing.`
+        : "Selected stock covers every reaction input for these runs.");
+    } catch (error) {
+      setReactionPlan(null);
+      setReactionStatus(error instanceof Error ? error.message : "Reaction analysis failed.");
+    } finally {
+      setReactionBusy(false);
+    }
+  }
+
   async function loadSystemCostIndex() {
     setSystemCostStatus("Loading current-system ESI industry indices…");
     try {
@@ -377,7 +649,6 @@ export function IndustrialCommand({
 
   return (
     <section className="industrial-command">
-      <div className="industrial-construction-ribbon">UNDER CONSTRUCTION</div>
       <div className="industrial-hero">
         <div>
           <p className="eyebrow">CAPSULEER PRODUCTION CONTROL</p>
@@ -428,6 +699,22 @@ export function IndustrialCommand({
           </button>
         ))}
       </div>
+
+      {tab === "foundry" && (
+        <div className="industrial-foundry-subtabs" role="tablist" aria-label="Project Foundry sections">
+          {foundryTabs.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              className={foundryTab === item.id ? "active" : ""}
+              aria-selected={foundryTab === item.id}
+              onClick={() => setFoundryTab(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {tab === "overview" && (
         <>
@@ -502,7 +789,7 @@ export function IndustrialCommand({
         </div>
       )}
 
-      {tab === "blueprints" && (
+      {tab === "foundry" && foundryTab === "blueprints" && (
         <div className="industrial-panel industrial-full-panel">
           <div className="industrial-panel-head blueprint-head">
             <div>
@@ -564,7 +851,7 @@ export function IndustrialCommand({
         </div>
       )}
 
-      {tab === "materials" && (
+      {tab === "foundry" && foundryTab === "materials" && (
         <div className="industrial-production-workspace">
           <article className="industrial-panel industrial-full-panel">
             <div className="industrial-panel-head blueprint-head">
@@ -583,12 +870,109 @@ export function IndustrialCommand({
           </div>
         </div>
       )}
-      {tab === "research" && (
+      {tab === "foundry" && foundryTab === "projects" && (
+        <IndustrialProjectFoundry
+          characterId={String(active.characterId)}
+          corporationName={String(active.character.corporation_name ?? "Corporation")}
+          snapshotUpdatedAt={active.updatedAt}
+          typeNames={typeNames}
+          blueprints={[
+            ...activeData.blueprints.map((blueprint) => ({ ...blueprint, scope: "personal" as const })),
+            ...activeData.corpBlueprints.map((blueprint) => ({ ...blueprint, scope: "corporation" as const })),
+          ]}
+        />
+      )}
+      {tab === "refinery" && (
+        <div className="industrial-production-workspace">
+          <article className="industrial-panel industrial-production-control industrial-refinery-control industrial-workbench-card">
+            <div className="industrial-panel-head">
+              <div><p className="eyebrow">REFINERY</p><h3>Ore, ice & moon-ore reprocessing</h3><p>Analyse synced holdings or override them with any ore quantity you want to model. Sage keeps the active character's real processing skills and exact CCP SDE outputs either way.</p></div>
+              <span className="industrial-status live">CCP SDE + MARKET</span>
+            </div>
+            <div className="industrial-refinery-source-row">
+              <span><strong>INPUT SOURCE</strong><small>{refineryInputMode === "manual" ? "Manual selection ignores synced holdings." : "Uses the selected ESI stock pool."}</small></span>
+              <div className="industrial-refinery-source-toggle">
+                <button type="button" className={refineryInputMode === "stock" ? "active" : ""} onClick={() => { setRefineryInputMode("stock"); setRefineryResult(null); setRefineryStatus("Synced-stock mode selected. Analyse the selected stock pool when ready."); }}>Synced stock</button>
+                <button type="button" className={refineryInputMode === "manual" ? "active" : ""} onClick={() => { setRefineryInputMode("manual"); setRefineryResult(null); setRefineryStatus("Manual override selected. Add any ore, ice or moon ore you want to model."); }}>Manual override</button>
+              </div>
+            </div>
+            {refineryInputMode === "manual" && <div className="industrial-manual-refinery">
+              <label><span>Resource</span><select value={manualRefineryTypeId || ""} onChange={(event) => setManualRefineryTypeId(Number(event.target.value))}>
+                {!refineryCatalogue.length && <option value="">Loading resources...</option>}
+                {refineryCatalogue.map((item: any) => <option key={item.typeId} value={item.typeId}>{item.name} — {item.groupName}</option>)}
+              </select></label>
+              <label><span>Quantity</span><input type="number" min="1" step="1" value={manualRefineryQuantity} onChange={(event) => setManualRefineryQuantity(Math.max(1, Math.floor(Number(event.target.value) || 1)))} /></label>
+              <button type="button" onClick={addManualRefineryResource} disabled={!refineryCatalogue.length}>Add resource</button>
+            </div>}
+            {refineryInputMode === "manual" && <div className="industrial-manual-refinery-list">
+              {manualRefineryStock.length ? manualRefineryStock.map((stack) => { const item = refineryCatalogue.find((entry: any) => Number(entry.typeId) === stack.typeId); return <span key={stack.typeId}><b>{item?.name ?? `Type ${stack.typeId}`}</b><small>{number(stack.quantity)} units</small><button type="button" aria-label={`Remove ${item?.name ?? "resource"}`} onClick={() => { setManualRefineryStock((current) => current.filter((entry) => entry.typeId !== stack.typeId)); setRefineryResult(null); }}>×</button></span>; }) : <small>No manual resources added yet.</small>}
+            </div>}
+            <div className="industrial-production-controls industrial-refinery-controls">
+              <label><span>Facility</span><select value={refineryFacility} onChange={(event) => setRefineryFacility(event.target.value as typeof refineryFacility)}><option value="npc">NPC station</option><option value="athanor">Athanor</option><option value="tatara">Tatara</option></select></label>
+              <label><span>Reprocessing rig</span><select value={refineryFacility === "npc" ? "none" : refineryRig} disabled={refineryFacility === "npc"} onChange={(event) => setRefineryRig(event.target.value as typeof refineryRig)}><option value="none">No rig</option><option value="t1">T1 rig</option><option value="t2">T2 rig</option></select></label>
+              <label><span>Structure security</span><select value={refineryFacility === "npc" ? "high" : refinerySecurity} disabled={refineryFacility === "npc"} onChange={(event) => setRefinerySecurity(event.target.value as typeof refinerySecurity)}><option value="high">High-sec</option><option value="low">Low-sec</option><option value="null">Null / wormhole</option></select></label>
+              <label><span>Reprocessing implant</span><select value={refineryImplant} onChange={(event) => setRefineryImplant(event.target.value as typeof refineryImplant)}><option value="none">No implant</option><option value="rx801">RX-801 — +1%</option><option value="rx802">RX-802 — +2%</option><option value="rx804">RX-804 — +4%</option></select></label>
+              <button type="button" onClick={analyzeRefineryStock} disabled={refineryBusy}>{refineryBusy ? "Analysing..." : refineryInputMode === "manual" ? "Analyse manual selection" : "Analyse refinery stock"}</button>
+            </div>
+            <div className="industrial-notice">{refineryStatus}</div>
+          </article>
+          {refineryResult ? <RefineryView data={refineryResult} filter={refineryFilter} onFilter={setRefineryFilter} /> : null}
+        </div>
+      )}
+
+      {tab === "moon-goo" && (
+        <div className="industrial-foundry-subtabs" role="tablist" aria-label="Moon Goo sections">
+          <button type="button" className={moonGooTab === "materials" ? "active" : ""} onClick={() => setMoonGooTab("materials")}>Moon Materials</button>
+          <button type="button" className={moonGooTab === "reactions" ? "active" : ""} onClick={() => setMoonGooTab("reactions")}>Reactions</button>
+        </div>
+      )}
+
+      {tab === "moon-goo" && moonGooTab === "materials" && (
+        <MoonGooWorkspace
+          rows={moonIntelRows}
+          ownerLabel={assetSharing.enabled ? "Selected shared stock pool" : active.character.name}
+          rawOreCount={rawMoonOres.length}
+          projectCount={moonFoundryProjects.filter((project) => String(project?.status ?? "") !== "archived").length}
+        />
+      )}
+
+      {tab === "moon-goo" && moonGooTab === "reactions" && (
+        <div className="industrial-production-workspace industrial-reaction-workspace">
+          <article className="industrial-panel industrial-production-control industrial-reaction-control industrial-workbench-card">
+            <div className="industrial-panel-head">
+              <div><p className="eyebrow">REACTIONS</p><h3>Reaction formula planner</h3><p>Pick any current CCP reaction formula, choose runs, then compare exact SDE inputs against the selected stock pool and retained market prices.</p></div>
+              <span className="industrial-status live">CCP SDE + MARKET</span>
+            </div>
+            <div className="industrial-production-controls industrial-reaction-controls">
+              <label><span>Reaction formula</span><select value={reactionBlueprintTypeId || ""} onChange={(event) => { setReactionBlueprintTypeId(Number(event.target.value)); setReactionPlan(null); }}>
+                {!reactionCatalogue?.formulas?.length && <option value="">Loading formulas...</option>}
+                {(reactionCatalogue?.formulas ?? []).map((formula: any) => <option key={formula.blueprintTypeId} value={formula.blueprintTypeId}>{formula.productName} — {formula.formulaName}</option>)}
+              </select></label>
+              <label><span>Runs</span><input type="number" min="1" step="1" value={reactionRuns} onChange={(event) => { setReactionRuns(Math.max(1, Math.floor(Number(event.target.value) || 1))); setReactionPlan(null); }} /></label>
+              <button type="button" onClick={buildReactionPlan} disabled={reactionBusy || !reactionCatalogue?.formulas?.length}>{reactionBusy ? "Analysing..." : "Analyse reaction"}</button>
+            </div>
+            <div className="industrial-notice">{reactionStatus}</div>
+          </article>
+
+          <div className="industrial-grid industrial-reaction-summary-grid">
+            <article className="industrial-panel industrial-reaction-formula-card">
+              <div className="industrial-panel-head"><div><p className="eyebrow">SELECTED FORMULA</p><h3>{selectedReactionFormula?.productName ?? "Choose a reaction"}</h3></div><span className="industrial-status">{selectedReactionFormula ? duration(selectedReactionFormula.baseTimeSeconds) + " / run" : "--"}</span></div>
+              {selectedReactionFormula ? <>
+                <div className="industrial-reaction-flow"><div><strong>Inputs / run</strong>{(selectedReactionFormula.materials ?? []).map((item: any) => <span key={item.typeId}>{item.name}<b>{number(item.quantity)}</b></span>)}</div><div><strong>Outputs / run</strong>{(selectedReactionFormula.products ?? []).map((item: any) => <span key={item.typeId}>{item.name}<b>{number(item.quantity)}</b></span>)}</div></div>
+                <small className="industrial-plan-scope">{selectedReactionFormula.formulaName}</small>
+              </> : <div className="industrial-notice">Reaction catalogue is loading.</div>}
+            </article>
+          </div>
+          {reactionPlan ? <ReactionPlanView data={reactionPlan} /> : null}
+        </div>
+      )}
+
+      {tab === "foundry" && foundryTab === "research" && (
         <div className="industrial-production-workspace">
           <article className="industrial-panel industrial-production-control industrial-research-control industrial-workbench-card">
             <div className="industrial-panel-head"><div><p className="eyebrow">RESEARCH & INVENTION</p><h3>Blueprint activity intelligence</h3><p>Inspect copying, ME/TE research, invention inputs, output options and skill requirements directly from CCP's local SDE.</p></div><span className="industrial-status live">OFFLINE SDE</span></div>
             {planningBlueprints.length ? <><div className="industrial-production-controls research-controls"><label><span>Research blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setBlueprintActivities(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label><label><span>Owned blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setBlueprintActivities(null); }}>
-              {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}</option>)}
+              {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.lpStoreTarget ? "LP Store target - " : ""}{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} - ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{blueprint.lpStoreTarget ? " - copy runs unknown" : (blueprint.runs ?? -1) >= 0 ? ` - ${blueprint.runs} runs` : " - BPO"}</option>)}
             </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
           {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : null}
@@ -605,7 +989,7 @@ export function IndustrialCommand({
               <div className="industrial-production-controls">
                 <label><span>Production blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setManufacturingPlan(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label>
                   <label><span>Blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setManufacturingPlan(null); }}>
-                  {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} · ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{(blueprint.runs ?? -1) >= 0 ? ` · ${blueprint.runs} runs` : " · BPO"}</option>)}
+                  {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.lpStoreTarget ? "LP Store target - " : ""}{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} - ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{blueprint.lpStoreTarget ? " - copy runs unknown" : (blueprint.runs ?? -1) >= 0 ? ` - ${blueprint.runs} runs` : " - BPO"}</option>)}
                 </select></label>
                 <label><span>Target output</span><input type="number" min="1" step="1" value={targetQuantity} onChange={(event) => setTargetQuantity(Math.max(1, Number(event.target.value) || 1))} /></label>
                 <label className="industrial-stock-toggle"><input type="checkbox" checked={assetSharing.enabled} onChange={(event) => setAssetSharing((current) => ({ ...current, enabled: event.target.checked }))} /><span>Use selected shared asset pool ({materialOwners.length} character{materialOwners.length === 1 ? "" : "s"})</span></label>
@@ -620,6 +1004,84 @@ export function IndustrialCommand({
       )}
     </section>
   );
+}
+
+function RefineryView({ data, filter, onFilter }: { data: any; filter: string; onFilter(value: string): void }) {
+  const stacks = (Array.isArray(data?.stacks) ? data.stacks : []).filter((stack: any) => {
+    const query = filter.trim().toLowerCase();
+    if (!query) return true;
+    return [stack.name, stack.groupName, stack.processingSkill?.name, ...(stack.outputs ?? []).map((output: any) => output.name)]
+      .filter(Boolean).some((value) => String(value).toLowerCase().includes(query));
+  });
+  const totals = data?.totals ?? {};
+  const yieldLabel = Number(totals.minYieldPercent ?? 0).toFixed(2) === Number(totals.maxYieldPercent ?? 0).toFixed(2)
+    ? `${Number(totals.maxYieldPercent ?? 0).toFixed(2)}%`
+    : `${Number(totals.minYieldPercent ?? 0).toFixed(2)}-${Number(totals.maxYieldPercent ?? 0).toFixed(2)}%`;
+  return <div className="industrial-production-results industrial-refinery-results">
+    <div className="industrial-metrics">
+      <IndustrialMetric label="Refinable stock" value={number(totals.stackCount ?? 0)} detail={`${Number(totals.inputVolumeM3 ?? 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} m³ across ${data.stockSources?.length ?? 0} character(s)`} />
+      <IndustrialMetric label="Effective yield" value={yieldLabel} detail={`Reprocessing ${data.skills?.reprocessing?.trainedLevel ?? 0} · Efficiency ${data.skills?.efficiency?.trainedLevel ?? 0} · ore skill varies by row`} />
+      <IndustrialMetric label="Sell raw now" value={totals.rawValue == null ? "PRICE GAPS" : isk(totals.rawValue)} detail="Best retained all-region public buy orders" />
+      <IndustrialMetric label="Refine then sell" value={totals.refinedStrategyValue == null ? "PRICE GAPS" : isk(totals.refinedStrategyValue)} detail="Refined outputs plus any unprocessable leftovers" />
+    </div>
+    <article className="industrial-build-buy-strip industrial-refinery-value-strip">
+      <span><small>Refining advantage</small><strong className={Number(totals.valueDelta ?? 0) > 0 ? "positive" : ""}>{totals.valueDelta == null ? "--" : `${totals.valueDelta > 0 ? "+" : ""}${isk(totals.valueDelta)}`}</strong></span>
+      <span><small>Recommendations</small><strong>{number(totals.refineRecommendations ?? 0)} refine · {number(totals.sellRecommendations ?? 0)} sell raw</strong></span>
+      <small>{totals.valuationComplete ? "All rows have retained buy-order pricing." : "One or more rows have a market-price gap; Sage keeps physical refinery quantities exact and does not invent missing ISK values."} Facility tax and hauling are not included.</small>
+    </article>
+    <article className="industrial-panel industrial-full-panel industrial-refinery-ledger">
+      <div className="industrial-panel-head blueprint-head"><div><p className="eyebrow">REFINERY LEDGER</p><h3>{data.facility?.label ?? "Refinery"} · {data.facility?.rig?.toUpperCase?.() ?? "NO RIG"} · {data.facility?.security ?? "high"}</h3><p>Whole SDE processing batches only. Leftover units remain raw and are included in the comparison.</p></div><input value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Filter ore, ice or output..." /></div>
+      {stacks.length ? <div className="industrial-table industrial-refinery-table">
+        <div className="industrial-table-row heading"><span>Resource</span><span>Stock / batches</span><span>Yield / skill</span><span>Refined output</span><span>Sell raw</span><span>Refine value</span><span>Delta</span><span>Decision</span></div>
+        {stacks.map((stack: any) => <div className="industrial-table-row" key={stack.typeId}>
+          <span className="industrial-refinery-resource"><strong>{stack.name}</strong><small>{stack.groupName} · {(stack.owners ?? []).map((owner: any) => owner.characterName).join(" · ") || "Unknown owner"}</small></span>
+          <span><strong>{number(stack.quantity)}</strong><small>{number(stack.fullBatches)} × {number(stack.portionSize)}{stack.leftoverUnits ? ` · ${number(stack.leftoverUnits)} left` : ""}</small></span>
+          <span><strong>{Number(stack.yieldPercent ?? 0).toFixed(2)}%</strong><small>{stack.processingSkill ? `${stack.processingSkill.name} ${stack.processingSkill.trainedLevel}` : "No specific skill"}</small></span>
+          <span className="industrial-refinery-output-list">{(stack.outputs ?? []).map((output: any) => <small key={output.typeId}><span>{output.name}</span><b>{number(output.refinedUnits)}</b></small>)}</span>
+          <span><strong>{stack.rawValue == null ? "--" : isk(stack.rawValue)}</strong><small>{stack.rawBestBuy == null ? "No retained buy quote" : `${stack.rawBestBuy.toLocaleString(undefined, { maximumFractionDigits: 2 })} / unit`}</small></span>
+          <span><strong>{stack.refinedStrategyValue == null ? "--" : isk(stack.refinedStrategyValue)}</strong><small>{stack.completeValuation ? "Outputs + leftovers" : "Price gap"}</small></span>
+          <span><strong className={Number(stack.valueDelta ?? 0) > 0 ? "positive" : ""}>{stack.valueDelta == null ? "--" : `${stack.valueDelta > 0 ? "+" : ""}${isk(stack.valueDelta)}`}</strong><small>{stack.valueDeltaPercent == null ? "" : `${stack.valueDeltaPercent > 0 ? "+" : ""}${stack.valueDeltaPercent.toFixed(1)}%`}</small></span>
+          <span className={`industrial-refinery-decision ${stack.recommendation}`}>{stack.recommendation === "refine" ? "REFINE" : stack.recommendation === "sell" ? "SELL RAW" : stack.recommendation === "insufficient-batch" ? "HOLD" : "PRICE GAP"}</span>
+        </div>)}
+      </div> : <div className="industrial-notice">No refinery rows match this filter.</div>}
+      <small className="industrial-plan-scope">{data.source} · Market snapshot {data.marketCreatedAt ? new Date(data.marketCreatedAt).toLocaleString() : "not available"}. Facility tax and hauling cost are excluded.</small>
+    </article>
+  </div>;
+}
+
+function ReactionPlanView({ data }: { data: any }) {
+  const totals = data?.totals ?? {};
+  return <div className="industrial-production-results industrial-reaction-results">
+    <div className="industrial-metrics">
+      <IndustrialMetric label="Reaction runs" value={number(data.runs ?? 0)} detail={`${duration(data.baseTimeSeconds ?? 0)} base time per run`} />
+      <IndustrialMetric label="Missing inputs" value={number(totals.missingMaterialTypes ?? 0)} detail="Material types not covered by selected stock" />
+      <IndustrialMetric label="Cash to complete" value={totals.missingMarketCost == null ? "PRICE GAPS" : isk(totals.missingMarketCost)} detail="Best retained sell quotes for missing inputs" />
+      <IndustrialMetric label="Immediate output value" value={totals.immediateSaleValue == null ? "PRICE GAPS" : isk(totals.immediateSaleValue)} detail="Best retained public buy orders" />
+    </div>
+    <article className="industrial-build-buy-strip industrial-reaction-value-strip">
+      <span><small>Immediate gross spread</small><strong className={Number(totals.immediateGrossSpread ?? 0) > 0 ? "positive" : ""}>{totals.immediateGrossSpread == null ? "--" : `${totals.immediateGrossSpread > 0 ? "+" : ""}${isk(totals.immediateGrossSpread)}`}</strong></span>
+      <span><small>Sell-order gross spread</small><strong className={Number(totals.sellOrderGrossSpread ?? 0) > 0 ? "positive" : ""}>{totals.sellOrderGrossSpread == null ? "--" : `${totals.sellOrderGrossSpread > 0 ? "+" : ""}${isk(totals.sellOrderGrossSpread)}`}</strong></span>
+      <small>Gross spread compares all formula inputs at retained sell prices with outputs. Reaction job installation cost, structure bonuses, taxes and hauling are excluded.</small>
+    </article>
+    <article className="industrial-panel industrial-full-panel industrial-reaction-ledger">
+      <div className="industrial-panel-head"><div><p className="eyebrow">REACTION INPUTS</p><h3>{data.formulaName}</h3><p>{number(data.runs ?? 0)} run(s) · {duration(data.totalTimeSeconds ?? 0)} base reaction time</p></div><span className={`industrial-status ${data.skillsReady ? "live" : ""}`}>{data.skillsReady ? "SKILLS READY" : "CHECK SKILLS"}</span></div>
+      <div className="industrial-table industrial-reaction-input-table">
+        <div className="industrial-table-row heading"><span>Material</span><span>Per run</span><span>Required</span><span>Owned</span><span>Missing</span><span>Cash to source</span></div>
+        {(data.materials ?? []).map((item: any) => <div className={`industrial-table-row ${item.missing > 0 ? "shortage" : "covered"}`} key={item.typeId}>
+          <span><strong>{item.name}</strong><small>{item.groupName}</small></span><span>{number(item.perRun)}</span><span>{number(item.required)}</span><span><strong>{number(item.owned)}</strong><small>{(item.owners ?? []).map((owner: any) => `${owner.characterName}: ${number(owner.quantity)}`).join(" · ") || "No selected stock"}</small></span><span>{number(item.missing)}</span><span>{item.missingMarketCost == null ? "--" : isk(item.missingMarketCost)}</span>
+        </div>)}
+      </div>
+      {(data.skills ?? []).length > 0 && <div className="industrial-skill-strip">{data.skills.map((skill: any) => <span className={skill.met ? "ready" : "missing"} key={skill.typeId}>{skill.name} {skill.requiredLevel} · trained {skill.trainedLevel}</span>)}</div>}
+    </article>
+    <article className="industrial-panel industrial-full-panel industrial-reaction-ledger">
+      <div className="industrial-panel-head"><div><p className="eyebrow">REACTION OUTPUTS</p><h3>Formula yield</h3><p>Exact CCP SDE output quantities for the requested runs.</p></div></div>
+      <div className="industrial-table industrial-reaction-output-table">
+        <div className="industrial-table-row heading"><span>Product</span><span>Per run</span><span>Total output</span><span>Best buy</span><span>Immediate value</span><span>Sell-order value</span></div>
+        {(data.products ?? []).map((item: any) => <div className="industrial-table-row" key={item.typeId}><span><strong>{item.name}</strong><small>{item.groupName}</small></span><span>{number(item.perRun)}</span><span>{number(item.quantity)}</span><span>{item.bestBuy == null ? "--" : item.bestBuy.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " ISK"}</span><span>{item.immediateSaleValue == null ? "--" : isk(item.immediateSaleValue)}</span><span>{item.sellOrderValue == null ? "--" : isk(item.sellOrderValue)}</span></div>)}
+      </div>
+      <small className="industrial-plan-scope">{data.source} · Market snapshot {data.marketCreatedAt ? new Date(data.marketCreatedAt).toLocaleString() : "not available"}.</small>
+    </article>
+  </div>;
 }
 
 function AssetSharingControl({ snapshots, activeCharacterId, enabled, selectedIds, onToggle, onSelect }: { snapshots: CharacterSnapshot[]; activeCharacterId: string; enabled: boolean; selectedIds: string[]; onToggle(enabled: boolean): void; onSelect(characterId: string, selected: boolean): void }) {
@@ -739,5 +1201,39 @@ function BlueprintActivityView({ data }: { data: any }) {
       {activity.skills.length > 0 && <div className="industrial-skill-strip">{activity.skills.map((skill: any) => <span className={skill.met ? "ready" : "missing"} key={skill.typeId}>{skill.name} {skill.requiredLevel} · trained {skill.trainedLevel}</span>)}</div>}
       {!activity.materials.length && !activity.products.length && <div className="industrial-notice">No consumable material/output record is defined for this activity in the current CCP SDE.</div>}
     </article>) : <article className="industrial-panel"><div className="industrial-notice">This blueprint has no copying, research or invention activities in the current CCP SDE.</div></article>}
+  </div>;
+}
+
+function MoonGooWorkspace({ rows, ownerLabel, rawOreCount, projectCount }: { rows: any[]; ownerLabel: string; rawOreCount: number; projectCount: number }) {
+  const held = rows.filter((row) => row.stock > 0);
+  const deficits = rows.filter((row) => row.deficit > 0);
+  const visibleValue = held.reduce((sum, row) => sum + Number(row.estimatedValue ?? 0), 0);
+  return <div className="industrial-production-workspace industrial-moon-goo-workspace">
+    <article className="industrial-panel industrial-workbench-card">
+      <div className="industrial-panel-head">
+        <div><p className="eyebrow">MOON GOO</p><h3>Moon material intelligence</h3><p>Raw moon ore, its authoritative reprocessing outputs, reaction uses and Foundry demand in one workspace. Recipes come from the local CCP SDE.</p></div>
+        <span className="industrial-status live">CCP SDE + SYNCED STOCK</span>
+      </div>
+      <div className="industrial-metrics">
+        <IndustrialMetric label="Moon ore catalogue" value={number(rawOreCount)} detail="Current refinable moon-asteroid types from CCP static data" />
+        <IndustrialMetric label="Held moon types" value={number(held.length)} detail={ownerLabel} />
+        <IndustrialMetric label="Visible stock value" value={visibleValue > 0 ? isk(visibleValue) : "--"} detail="Latest retained asset valuation where available" />
+        <IndustrialMetric label="Project deficits" value={number(deficits.length)} detail={`${number(projectCount)} active Foundry project${projectCount === 1 ? "" : "s"} checked`} />
+      </div>
+    </article>
+    <article className="industrial-panel industrial-full-panel industrial-moon-goo-ledger">
+      <div className="industrial-panel-head"><div><p className="eyebrow">CHAIN INTELLIGENCE</p><h3>Stock · demand · destinations</h3><p>Deficit and surplus are calculated against current Foundry material demand; reaction destinations are derived from CCP formulas.</p></div><span className="industrial-status">{number(rows.length)} chain entries</span></div>
+      {rows.length ? <div className="industrial-table industrial-moon-goo-table">
+        <div className="industrial-table-row heading"><span>Material</span><span>Stock</span><span>Project demand</span><span>Deficit / surplus</span><span>Est. value</span><span>Destinations / outputs</span></div>
+        {rows.map((row) => <div className={`industrial-table-row ${row.deficit > 0 ? "shortage" : ""}`} key={row.typeId}>
+          <strong>{row.name}<small>{row.category}</small></strong>
+          <span>{number(row.stock)}</span>
+          <span>{number(row.projectDemand)}{row.projects.length ? <small>{row.projects.slice(0, 2).join(" · ")}{row.projects.length > 2 ? ` +${row.projects.length - 2}` : ""}</small> : null}</span>
+          <span>{row.deficit > 0 ? <><b>{number(row.deficit)} short</b><small>needs sourcing</small></> : <><b>{number(row.surplus)} surplus</b><small>{row.projectDemand > 0 ? "after project demand" : "uncommitted"}</small></>}</span>
+          <span>{row.estimatedValue > 0 ? isk(row.estimatedValue) : "--"}</span>
+          <span><small>{[...row.destinations.slice(0, 3), ...row.outputs.slice(0, 3)].join(" · ") || "No downstream formula in current catalogue"}</small></span>
+        </div>)}
+      </div> : <div className="industrial-notice">No moon-chain entries are available from the current SDE and stock/project scope.</div>}
+    </article>
   </div>;
 }

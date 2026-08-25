@@ -9,7 +9,7 @@ import { ensureStaticDataArchive, itemCategoryName, MARKET_STATIC_PREPARED_CACHE
 const SDE_ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const WORKER_LOOKUP_FILE = path.join(STATIC_DATA_ROOT, "market-worker-lookups-v1.json.gz");
 const MARKET_STATIC_PREPARED_NAME = "market-static-prepared-v1.json.gz";
-const MARKET_STATIC_PREPARED_SCHEMA = 1;
+const MARKET_STATIC_PREPARED_SCHEMA = 2;
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
@@ -26,6 +26,7 @@ export type MarketTypeEntry = {
   marketGroupPath: string[];
   marketGroupPathLabel: string;
   volumeM3: number;
+  packagedVolumeM3: number;
 };
 
 export type MarketSystemEntry = {
@@ -207,6 +208,7 @@ async function loadMarketStaticIndex(): Promise<MarketStaticIndex> {
         published?: boolean;
         name?: { en?: string };
         volume?: number;
+        packagedVolume?: number;
       };
       if (!type.published || !type.name?.en) continue;
       const group = groupById.get(type.groupID);
@@ -227,6 +229,7 @@ async function loadMarketStaticIndex(): Promise<MarketStaticIndex> {
         marketGroupPath: marketPath.names,
         marketGroupPathLabel: marketPath.names.join(" › ") || "Unclassified",
         volumeM3: Number(type.volume ?? 0),
+        packagedVolumeM3: Number(type.packagedVolume ?? type.volume ?? 0),
       };
       types.push(value);
       typeById.set(value.typeId, value);

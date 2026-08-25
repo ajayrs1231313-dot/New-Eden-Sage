@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { AnalysisProgress, CharacterSnapshot, OpportunityAnalysis, PveLocationAnalysis } from "./types";
 import { MarketOpportunityScanner } from "./MarketOpportunityScanner";
+import { MarketDayTrader } from "./MarketDayTrader";
+import { MarketContracts } from "./MarketContracts";
 import { OpportunityExplorer } from "./OpportunityExplorer";
+import { OrderDesk } from "./OrderDesk";
 import { PveLocationIntel } from "./PveLocationIntel";
+import { PlanetaryRevenue } from "./PlanetaryRevenue";
 import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
 import "./invention-lab.css";
 
@@ -17,7 +21,7 @@ function ageLabel(minutes: number | null) {
 }
 
 
-type LabTab = "market" | "opportunities" | "invention" | "pve";
+type LabTab = "market" | "market-opportunities" | "orders" | "contracts" | "opportunities" | "invention" | "planetary" | "pve";
 type InventionSort = "route" | "chance" | "attempt" | "build" | "success" | "expected";
 type InventionCategory = "all" | "t1" | "ship" | "module" | "rig" | "drone" | "charge" | "subsystem" | "other";
 type CloneState = "alpha" | "omega";
@@ -32,7 +36,7 @@ function matchesInventionCategory(item: any, category: InventionCategory) {
   return item.productCategory === category;
 }
 
-export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; marketDataRevision?: number }) {
+export function IskLab({ snapshot, cloneState, marketDataRevision = 0, onMarketDataUpdated = () => undefined }: { snapshot?: CharacterSnapshot; cloneState?: CloneState; marketDataRevision?: number; onMarketDataUpdated?: () => void }) {
   const [tab, setTab] = useState<LabTab>("market");
   const [analysis, setAnalysis] = useState<OpportunityAnalysis | null>(null);
   const [pveAnalysis, setPveAnalysis] = useState<PveLocationAnalysis | null>(null);
@@ -51,6 +55,8 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
   const [marketStatus, setMarketStatus] = useState("Use the newest full public market snapshot to compare candidate trade routes.");
   const [pveStatus, setPveStatus] = useState("Connect and sync a character to rank PvE locations from your current system.");
   const pveRequestSequence = useRef(0);
+  const marketRequestSequence = useRef(0);
+  const [preparedDataRevision, setPreparedDataRevision] = useState(0);
 
   useEffect(() => {
     setAnalysis(null);
@@ -58,10 +64,46 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
     setInventionAnalysis(null);
   }, [snapshot?.characterId]);
 
+  useEffect(() => window.sage.onPreparedDataUpdated((value) => {
+    if (!snapshot?.characterId || value.characterIds.includes(snapshot.characterId)) {
+      setPreparedDataRevision((revision) => revision + 1);
+    }
+  }), [snapshot?.characterId]);
+
   useEffect(() => window.sage.onAnalysisProgress((progress) => {
     if (progress.kind === "opportunity") setMarketProgress(progress);
     if (progress.kind === "pve-location") setPveProgress(progress);
   }), []);
+
+  async function scanMarketWithCargo(cargoCapacityM3: number | null, cargoProfileId: string | null = null) {
+    const requestId = ++marketRequestSequence.current;
+    setMarketBusy(true);
+    setMarketProgress(null);
+    const selectedProfile = cargoProfileId ? analysis?.constraints.cargoProfiles.find((profile) => profile.id === cargoProfileId) : null;
+    setMarketStatus(selectedProfile ? `Rebuilding market routes for ${selectedProfile.characterName}'s ${selectedProfile.shipName}...` : cargoCapacityM3 == null ? "Rebuilding market routes with current fitted ship cargo capacity..." : `Rebuilding market routes for ${Math.round(cargoCapacityM3).toLocaleString()} m3 cargo...`);
+    try {
+      const next = await window.sage.getOpportunityAnalysis({
+        characterId: snapshot?.characterId,
+        maxCapital: analysis?.constraints.maxCapital ?? null,
+        cargoCapacityM3,
+        cargoProfileId,
+        maxJumps: analysis?.constraints.maxJumps ?? null,
+        maxMinutes: analysis?.constraints.maxMinutes ?? null,
+      });
+      if (requestId !== marketRequestSequence.current) return;
+      setAnalysis(next);
+      setMarketStatus(`${next.market.opportunities.length.toLocaleString()} candidate routes ready with ${Math.round(next.constraints.cargoCapacityM3).toLocaleString()} m3 cargo capacity.`);
+    } catch (error) {
+      if (requestId !== marketRequestSequence.current) return;
+      if (isExpectedAnalysisCancellation(error)) return;
+      setMarketStatus(friendlyAnalysisError(error, "Could not rebuild market routes for that cargo capacity."));
+    } finally {
+      if (requestId === marketRequestSequence.current) {
+        setMarketBusy(false);
+        setMarketProgress(null);
+      }
+    }
+  }
 
   async function scanPve(forceLive = false) {
     if (!snapshot) {
@@ -126,11 +168,12 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       setInventionAnalysis(null);
       return () => { cancelled = true; };
     }
-    void window.sage.getPreparedIskLab({ characterId: snapshot.characterId, cloneState }).then((prepared) => {
+    const timer = setTimeout(() => {
+      void window.sage.getPreparedIskLab({ characterId: snapshot.characterId, cloneState }).then((prepared) => {
       if (cancelled) return;
-      setAnalysis(prepared.market);
-      setPveAnalysis(prepared.pve);
-      setInventionAnalysis(prepared.invention);
+      setAnalysis((current: OpportunityAnalysis | null) => prepared.market ?? current);
+      setPveAnalysis((current: PveLocationAnalysis | null) => prepared.pve ?? current);
+      setInventionAnalysis((current: any) => prepared.invention ?? current);
       if (prepared.market) {
         setMarketStatus(
           `${prepared.market.market.opportunities.length.toLocaleString()} candidate routes ready from ${prepared.market.signals.marketOrdersInspected.toLocaleString()} retained public orders across ${prepared.market.signals.marketRegionsInspected.toLocaleString()} regions.`,
@@ -150,17 +193,18 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
           `${prepared.invention.candidateCount.toLocaleString()} invention outcomes ready · ${prepared.invention.ownedSourceCount.toLocaleString()} use an owned source BPO.`,
         );
       } else {
-        setInventionStatus("No prepared invention result is available. Run Sync All to prepare it.");
+        setInventionStatus("Invention is prepared on demand. Open the Invention tab to build it.");
       }
     }).catch((error) => {
       if (cancelled) return;
-      const message = error instanceof Error ? error.message : "Prepared ISK Lab data could not be read.";
+      const message = error instanceof Error ? error.message : "Prepared ISK Command data could not be read.";
       setMarketStatus(message);
       setPveStatus(message);
       setInventionStatus(message);
-    });
-    return () => { cancelled = true; };
-  }, [snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, cloneState]);
+      });
+    }, 100);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, cloneState, preparedDataRevision]);
 
   function openPveTab() {
     setTab("pve");
@@ -178,7 +222,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
     }
   }
 
-  const status = tab === "pve" ? pveStatus : tab === "invention" ? inventionStatus : marketStatus;
+  const status = tab === "orders" ? "Track the selected character's active personal buy and sell orders from the latest synced ESI snapshot." : tab === "contracts" ? "Search EVE-wide public buy/sell contracts and rank immediate or haul-required profit against retained market orders." : tab === "pve" ? pveStatus : tab === "planetary" ? "Model exact PI factory chains against retained market prices and synced colonies." : tab === "invention" ? inventionStatus : marketStatus;
   const changeInventionSort = (next: InventionSort) => {
     if (next === inventionSort) setInventionSortDirection((direction) => direction === "asc" ? "desc" : "asc");
     else {
@@ -210,7 +254,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       <div className="isk-head">
         <div>
           <p className="eyebrow">ISK LAB</p>
-          <h2>Market, PvE and location intelligence</h2>
+          <h2>Market, industry, PvE and revenue intelligence</h2>
           <p>{status}</p>
         </div>
         {analysis?.character && (
@@ -225,7 +269,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       {analysis?.signals.marketDatasetStale && tab !== "pve" && (
         <div className="market-freshness-warning">
           <strong>Market snapshot is {ageLabel(analysis.signals.marketDatasetAgeMinutes)}</strong>
-          <span>Refresh the full public market dataset in Regional Market before committing ISK; prices and orders may have changed.</span>
+          <span>Refresh the public market dataset in Asset Command → Market before committing ISK; prices and orders may have changed.</span>
         </div>
       )}
 
@@ -247,10 +291,14 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
         </div>
       )}
 
-      <div className="isk-lab-tabs" role="tablist" aria-label="ISK Lab sections">
+      <div className="isk-lab-tabs" role="tablist" aria-label="ISK Command sections">
         <button className={tab === "market" ? "active" : ""} onClick={() => setTab("market")}>Market Scanner</button>
-        <button className={tab === "opportunities" ? "active" : ""} onClick={() => setTab("opportunities")}>Opportunities</button>
-        <button className={tab === "invention" ? "active" : ""} onClick={() => setTab("invention")}>Invention</button>
+        <button className={tab === "market-opportunities" ? "active" : ""} onClick={() => setTab("market-opportunities")}>Market Opportunities</button>
+        <button className={tab === "orders" ? "active" : ""} onClick={() => setTab("orders")}>Order Desk</button>
+        <button className={tab === "contracts" ? "active" : ""} onClick={() => setTab("contracts")}>Contracts</button>
+        <button className={tab === "opportunities" ? "active" : ""} onClick={() => setTab("opportunities")}>All Opportunities</button>
+        <button className={tab === "invention" ? "active" : ""} onClick={() => { setTab("invention"); if (!inventionAnalysis && !inventionBusy) void scanInvention(); }}>Invention</button>
+        <button className={tab === "planetary" ? "active" : ""} onClick={() => setTab("planetary")}>Planetary Revenue</button>
         <button className={tab === "pve" ? "active" : ""} onClick={openPveTab}>PvE & Locations</button>
       </div>
 
@@ -258,7 +306,14 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
       {tab === "market" && !analysis && !marketBusy && <div className="market-no-results">No prepared Market Scanner result is available. Run Sync All to prepare it.</div>}
       {analysis && tab === "market" && <MarketOpportunityScanner analysis={analysis} onExport={exportMarketCsv} />}
 
-      {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} />}
+      {tab === "market-opportunities" && analysis && <MarketDayTrader analysis={analysis} snapshot={snapshot} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
+      {tab === "market-opportunities" && !analysis && <div className="market-no-results">No prepared Market Opportunities result is available. Run Sync All to prepare it.</div>}
+
+      {tab === "orders" && <OrderDesk snapshot={snapshot} />}
+
+      {tab === "contracts" && <MarketContracts characterId={snapshot?.characterId} marketDataRevision={marketDataRevision} onMarketDataUpdated={onMarketDataUpdated} />}
+
+      {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
       {tab === "opportunities" && !analysis && <div className="market-no-results">No prepared Opportunities result is available. Run Sync All to prepare it.</div>}
 
       {tab === "invention" && !snapshot && <div className="market-no-results">Connect and sync a character to include owned blueprint originals.</div>}
@@ -309,6 +364,9 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0 }: { snaps
           </div>
         </section>
       )}
+
+      {tab === "planetary" && !snapshot && <div className="market-no-results">Connect and sync a character to audit planetary colonies and PI skills.</div>}
+      {tab === "planetary" && snapshot && <PlanetaryRevenue snapshot={snapshot} marketDataRevision={marketDataRevision} />}
 
       {tab === "pve" && snapshot && (
         <div className="isk-analysis-actions">

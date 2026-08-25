@@ -31,6 +31,17 @@ type CapabilitySkillProfile = {
 
 type CapabilityProfile = CapabilityActivityProfile | CapabilitySkillProfile;
 
+export type CurrentShipUseProfileId =
+  | "pve-combat"
+  | "pvp-combat"
+  | "mining"
+  | "exploration"
+  | "logistics"
+  | "hauling"
+  | "salvage"
+  | "support"
+  | "general";
+
 type OwnedAsset = {
   type_id?: number;
   item?: string;
@@ -330,7 +341,92 @@ const profiles: CapabilityProfile[] = [
   },
 ];
 
+const currentShipUseProfiles: Array<CapabilityActivityProfile & { id: CurrentShipUseProfileId }> = [
+  {
+    id: "pve-combat",
+    label: "PvE Combat",
+    description: "Current-hull combat readiness for entry-level mission and general PvE work.",
+    kind: "activity", candidates: [],
+    coreSkills: [...fitting, ...navigation],
+    supportSkills: [{ skill: "Target Management", level: 3 }, { skill: "Mechanics", level: 4 }, { skill: "Capacitor Management", level: 4 }],
+    context: { activityId: "pve", subcategoryId: "missions", contentId: "missions-l1-l2" },
+  },
+  {
+    id: "pvp-combat",
+    label: "PvP Combat",
+    description: "Current-hull solo and small-gang combat readiness using Sage PvP fitting and piloting targets.",
+    kind: "activity", candidates: [],
+    coreSkills: [...fitting, ...navigation],
+    supportSkills: [{ skill: "Thermodynamics", level: 4 }, { skill: "Propulsion Jamming", level: 4 }, { skill: "Signature Analysis", level: 4 }],
+    context: { activityId: "pvp", subcategoryId: "solo-smallgang", contentId: "pvp-roaming", selectorValues: { engagement: "Solo", role: "Damage / combat", style: "Brawl" } },
+  },
+  {
+    id: "mining",
+    label: "Mining",
+    description: "Current-hull ore-mining readiness. Select this only when the active hull is actually being used to mine.",
+    kind: "activity", candidates: [],
+    coreSkills: [{ skill: "Mining", level: 5 }, { skill: "Astrogeology", level: 4 }, ...fitting.slice(0, 2)],
+    supportSkills: [{ skill: "Mining Upgrades", level: 4 }, { skill: "Drones", level: 4 }, { skill: "Shield Management", level: 4 }],
+    context: { activityId: "mining", subcategoryId: "resource-harvesting", contentId: "ore-mining", selectorValues: { space: "High-sec", operation: "Solo", priority: "Balanced" } },
+  },
+  {
+    id: "exploration",
+    label: "Exploration",
+    description: "Current-hull scanning, relic/data and travel readiness.",
+    kind: "activity", candidates: [],
+    coreSkills: [{ skill: "Astrometrics", level: 4 }, { skill: "Hacking", level: 4 }, { skill: "Archaeology", level: 4 }],
+    supportSkills: [{ skill: "Astrometric Rangefinding", level: 3 }, { skill: "Astrometric Pinpointing", level: 3 }, { skill: "Cloaking", level: 4 }],
+    context: { activityId: "exploration", subcategoryId: "scanning-sites", contentId: "relic-data", selectorValues: { space: "Low-sec", priority: "Travel safety" } },
+  },
+  {
+    id: "logistics",
+    label: "Logistics",
+    description: "Current-hull fleet logistics readiness for remote repair and capacitor support work.",
+    kind: "activity", candidates: [],
+    coreSkills: [...fitting, ...capacitor, ...navigation],
+    supportSkills: [{ skill: "Long Range Targeting", level: 4 }, { skill: "Signature Analysis", level: 4 }, { skill: "Capacitor Emission Systems", level: 4 }],
+    context: { activityId: "pvp", subcategoryId: "fleet", contentId: "fleet-roles", selectorValues: { role: "Logistics", style: "Mid-range" } },
+  },
+  {
+    id: "hauling",
+    label: "Hauling",
+    description: "Current-hull high-sec transport readiness with travel, tank and cargo-risk fundamentals.",
+    kind: "activity", candidates: [],
+    coreSkills: [...navigation, { skill: "Hull Upgrades", level: 4 }],
+    supportSkills: [{ skill: "Evasive Maneuvering", level: 4 }, { skill: "Mechanics", level: 4 }],
+    context: { activityId: "hauling", subcategoryId: "transport", contentId: "basic-hauling", selectorValues: { route: "High-sec", cargo: "Normal value" } },
+  },
+  {
+    id: "salvage",
+    label: "Salvage",
+    description: "Current-hull salvage readiness for post-combat recovery and site cleanup.",
+    kind: "activity", candidates: [],
+    coreSkills: [{ skill: "Salvaging", level: 4 }, { skill: "Mechanics", level: 4 }, ...fitting.slice(0, 2)],
+    supportSkills: [{ skill: "Survey", level: 3 }, { skill: "Navigation", level: 4 }, { skill: "Target Management", level: 3 }],
+    context: { activityId: "pve", subcategoryId: "missions", contentId: "missions-l1-l2" },
+  },
+  {
+    id: "support",
+    label: "Support",
+    description: "Current-hull fleet utility readiness for non-primary-DPS support work.",
+    kind: "activity", candidates: [],
+    coreSkills: [...fitting, ...capacitor, ...navigation],
+    supportSkills: [{ skill: "Thermodynamics", level: 3 }, { skill: "Long Range Targeting", level: 4 }, { skill: "Signature Analysis", level: 4 }],
+    context: { activityId: "pvp", subcategoryId: "solo-smallgang", contentId: "pvp-roaming", selectorValues: { engagement: "Small gang", role: "Support / utility", style: "Brawl" } },
+  },
+  {
+    id: "general",
+    label: "Other / General",
+    description: "Baseline current-hull operation when the ship is not being judged for a specialist role.",
+    kind: "activity", candidates: [],
+    coreSkills: [...fitting, ...navigation, ...capacitor],
+    supportSkills: [{ skill: "Target Management", level: 3 }, { skill: "Mechanics", level: 3 }, { skill: "Signature Analysis", level: 3 }],
+    context: { activityId: "pve", subcategoryId: "missions", contentId: "missions-l1-l2" },
+  },
+];
+
 const resultCache = new Map<string, CapabilityAnalysis>();
+const currentShipResultCache = new Map<string, CapabilityResult>();
 let marketPriceCache: { expiresAt: number; values: Map<number, number> } | null = null;
 
 function asArray(value: unknown): any[] {
@@ -395,10 +491,22 @@ function skillReason(skill: ShipReadinessSkill) {
   return "Prerequisite for another required skill.";
 }
 
-async function evaluateActivity(snapshot: any, profile: CapabilityActivityProfile, cloneState: CloneState) {
+async function evaluateActivity(snapshot: any, profile: CapabilityActivityProfile, cloneState: CloneState, forcedShipTypeId?: number) {
   const ships = await listPublishedShips();
   const byName = new Map(ships.map((ship) => [ship.name, ship]));
   const owned = ownedShipNames(snapshot);
+  if (forcedShipTypeId) {
+    const ship = ships.find((item) => item.typeId === forcedShipTypeId);
+    if (!ship) return null;
+    const analysis = await analyzeActivityReadiness(snapshot as SnapshotLike, {
+      hullTypeId: ship.typeId,
+      coreSkills: profile.coreSkills,
+      supportSkills: profile.supportSkills,
+      context: profile.context,
+      cloneState,
+    });
+    return { ship, owned: true, analysis };
+  }
   const candidates = profile.candidates.flatMap((name) => {
     const ship = byName.get(name);
     return ship ? [{ ship, owned: owned.has(name) }] : [];
@@ -421,9 +529,9 @@ async function evaluateActivity(snapshot: any, profile: CapabilityActivityProfil
     }),
   );
   results.sort((a, b) =>
-    Number(b.owned) - Number(a.owned) ||
     b.analysis.overallPercent - a.analysis.overallPercent ||
-    b.analysis.masteryPercent - a.analysis.masteryPercent,
+    b.analysis.masteryPercent - a.analysis.masteryPercent ||
+    Number(b.owned) - Number(a.owned),
   );
   return results[0] ?? null;
 }
@@ -481,7 +589,7 @@ function topSkillUpgrades(skills: ShipReadinessSkill[], analysis: ActivityReadin
     .filter((skill) => !skill.met)
     .map((skill) => ({
       type: "skill" as const,
-      label: `${skill.name} → L${skill.targetLevel}`,
+      label: `${skill.name} -> L${skill.targetLevel}`,
       why: skillReason(skill),
       estimatedGain: estimateSkillGain(skill, analysis),
       estimatedSeconds: skill.estimatedSeconds,
@@ -490,8 +598,8 @@ function topSkillUpgrades(skills: ShipReadinessSkill[], analysis: ActivityReadin
     .slice(0, 5);
 }
 
-async function analyzeActivityCapability(snapshot: any, profile: CapabilityActivityProfile, cloneState: CloneState): Promise<CapabilityResult> {
-  const best = await evaluateActivity(snapshot, profile, cloneState);
+async function analyzeActivityCapability(snapshot: any, profile: CapabilityActivityProfile, cloneState: CloneState, forcedShipTypeId?: number): Promise<CapabilityResult> {
+  const best = await evaluateActivity(snapshot, profile, cloneState, forcedShipTypeId);
   if (!best) {
     return {
       id: profile.id,
@@ -544,7 +652,7 @@ async function analyzeActivityCapability(snapshot: any, profile: CapabilityActiv
     assetPercent: assets.assetPercent,
     resourcePercent: assets.resourcePercent,
     tier: tier(overallPercent),
-    bestRoute: `${best.ship.name}${best.analysis.selectedArchetype?.contextSpecific ? ` · ${best.analysis.selectedArchetype.label}` : best.analysis.selectedArchetype ? " · public hull-fit fallback" : ""}`,
+    bestRoute: `${best.ship.name}${best.analysis.selectedArchetype?.contextSpecific ? ` / ${best.analysis.selectedArchetype.label}` : best.analysis.selectedArchetype ? " / public hull-fit fallback" : ""}`,
     bestHull: best.ship.name,
     ownedHull: best.owned,
     missingAssetCost: assets.missingAssetCost,
@@ -628,6 +736,71 @@ async function analyzeSkillCapability(snapshot: any, profile: CapabilitySkillPro
       profile.signal === "industry" ? `Operational signal is ${operationalSignal}% from blueprint access and ${industryJobs} captured industry job records.` : `Operational signal is ${operationalSignal}% from ${marketOrders} captured market-order records.`,
     ],
   };
+}
+
+function isCapsuleShip(snapshot: any) {
+  const typeId = Number(snapshot?.ship?.ship_type_id ?? 0);
+  const typeName = String(snapshot?.ship?.ship_type_name ?? "").trim().toLowerCase();
+  return typeId === 670 || typeName === "capsule" || typeName.includes("capsule");
+}
+
+function capsuleCapabilityResult(snapshot: any, profile: CapabilityActivityProfile): CapabilityResult {
+  const capsuleName = snapshot?.ship?.ship_type_name || snapshot?.ship?.ship_name || "Capsule";
+  return {
+    id: profile.id,
+    label: profile.label,
+    description: "Capsules are always fully operable and do not require ship-role readiness scoring.",
+    overallPercent: 100,
+    readinessPercent: 100,
+    assetPercent: 100,
+    resourcePercent: 100,
+    tier: "Strong",
+    bestRoute: capsuleName,
+    bestHull: capsuleName,
+    ownedHull: true,
+    missingAssetCost: 0,
+    missingAssetCount: 0,
+    queuedRelevantSkills: 0,
+    blueprintCount: asArray(snapshot.extended?.blueprints).length,
+    savedFitCount: 0,
+    strengths: ["Capsule operation is universally available to the active character."],
+    weaknesses: [],
+    upgrades: [],
+    showWork: ["Capsule readiness is fixed at 100% for Overall, Practical, Assets and Resources regardless of the selected use profile."],
+  };
+}
+export function listCurrentShipUseProfiles() {
+  return currentShipUseProfiles.map(({ id, label, description }) => ({ id, label, description }));
+}
+
+export async function analyzeCurrentShipUse(
+  snapshot: any,
+  profileId: CurrentShipUseProfileId,
+  cloneState: CloneState = "omega",
+): Promise<CapabilityResult> {
+  const shipTypeId = Number(snapshot?.ship?.ship_type_id ?? 0);
+  if (!shipTypeId) throw new Error("Sync the current ship before calculating ship-use readiness.");
+  const profile = currentShipUseProfiles.find((item) => item.id === profileId);
+  if (!profile) throw new Error(`Unknown current-ship use profile: ${profileId}.`);
+  const key = `${snapshot.characterId}:${shipTypeId}:${profile.id}:${cloneState}:${snapshot.updatedAt ?? "unknown"}`;
+  const cached = currentShipResultCache.get(key);
+  if (cached) return cached;
+  if (isCapsuleShip(snapshot)) {
+    const capsuleResult = capsuleCapabilityResult(snapshot, profile);
+    currentShipResultCache.set(key, capsuleResult);
+    return capsuleResult;
+  }
+  const result = await analyzeActivityCapability(snapshot, profile, cloneState, shipTypeId);
+  result.bestRoute = snapshot.ship?.ship_type_name || snapshot.ship?.ship_name || result.bestRoute;
+  result.showWork = [
+    `This score evaluates the active hull only (${result.bestRoute}) for the selected ${profile.label} use profile.`,
+    ...result.showWork,
+  ];
+  for (const cachedKey of currentShipResultCache.keys()) {
+    if (cachedKey !== key && cachedKey.startsWith(`${snapshot.characterId}:${shipTypeId}:`)) currentShipResultCache.delete(cachedKey);
+  }
+  currentShipResultCache.set(key, result);
+  return result;
 }
 
 export async function analyzeCapabilities(snapshot: any, cloneState: CloneState = "omega"): Promise<CapabilityAnalysis> {

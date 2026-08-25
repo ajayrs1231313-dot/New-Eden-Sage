@@ -527,6 +527,155 @@ export async function getIndustrialTypeNames(typeIds: number[]) {
   return Object.fromEntries([...new Set(typeIds.map(Number).filter((typeId) => Number.isInteger(typeId) && typeId > 0))].map((typeId) => [typeId, value.names.get(typeId) ?? `Type ${typeId}`]));
 }
 
+export async function searchIndustrialBlueprints(query: string, limit = 40) {
+  const { blueprints, names } = await index();
+  const needle = String(query ?? "").trim().toLowerCase();
+  if (needle.length < 2) return [];
+  const rows = [...blueprints.values()].flatMap((blueprint) => {
+    const activity = blueprint.activities?.manufacturing;
+    const product = activity?.products?.[0];
+    if (!product) return [];
+    const blueprintTypeId = Number(blueprint.blueprintTypeID ?? blueprint._key);
+    const blueprintName = names.get(blueprintTypeId) ?? `Blueprint ${blueprintTypeId}`;
+    const productName = names.get(product.typeID) ?? `Type ${product.typeID}`;
+    const bp = blueprintName.toLowerCase();
+    const item = productName.toLowerCase();
+    if (!bp.includes(needle) && !item.includes(needle)) return [];
+    const score =
+      item === needle ? 0 :
+      bp === needle ? 1 :
+      item.startsWith(needle) ? 2 :
+      bp.startsWith(needle) ? 3 :
+      4;
+    return [{
+      blueprintTypeId,
+      blueprintName,
+      productTypeId: Number(product.typeID),
+      productName,
+      productPerRun: Math.max(1, Number(product.quantity ?? 1)),
+      maxProductionLimit: blueprint.maxProductionLimit ?? null,
+      score,
+    }];
+  });
+  return rows
+    .sort((a, b) => a.score - b.score || a.productName.localeCompare(b.productName) || a.blueprintName.localeCompare(b.blueprintName))
+    .slice(0, Math.max(1, Math.min(100, Math.floor(Number(limit) || 40))))
+    .map(({ score: _score, ...row }) => row);
+}
+
+export async function getIndustrialProductionTree(input: {
+  blueprintTypeId: number;
+  runs: number;
+  materialEfficiency?: number;
+  maxDepth?: number;
+}) {
+  const { blueprints, names, productBlueprints } = await index();
+  const blueprint = blueprints.get(Number(input.blueprintTypeId));
+  const activity = blueprint?.activities?.manufacturing;
+  const rootProduct = activity?.products?.[0];
+  if (!blueprint || !activity || !rootProduct) {
+    throw new Error(`${names.get(Number(input.blueprintTypeId)) ?? `Blueprint ${input.blueprintTypeId}`} has no manufacturing activity in the CCP SDE.`);
+  }
+
+  const rootRuns = Math.max(1, Math.floor(Number(input.runs) || 1));
+  const rootMe = Math.max(0, Math.min(10, Number(input.materialEfficiency ?? 0)));
+  const maxDepth = Math.max(1, Math.min(8, Math.floor(Number(input.maxDepth ?? 6))));
+  const nodes: Array<{
+    id: string;
+    parentId: string | null;
+    typeId: number;
+    name: string;
+    required: number;
+    depth: number;
+    kind: "product" | "component" | "material";
+    direct: boolean;
+    blueprintTypeId?: number;
+    blueprintName?: string;
+    runs?: number;
+    outputPerRun?: number;
+  }> = [];
+
+  const rootTypeId = Number(rootProduct.typeID);
+  const rootId = `root:${rootTypeId}`;
+  nodes.push({
+    id: rootId,
+    parentId: null,
+    typeId: rootTypeId,
+    name: names.get(rootTypeId) ?? `Type ${rootTypeId}`,
+    required: rootRuns * Math.max(1, Number(rootProduct.quantity ?? 1)),
+    depth: 0,
+    kind: "product",
+    direct: false,
+    blueprintTypeId: Number(input.blueprintTypeId),
+    blueprintName: names.get(Number(input.blueprintTypeId)) ?? `Blueprint ${input.blueprintTypeId}`,
+    runs: rootRuns,
+    outputPerRun: Math.max(1, Number(rootProduct.quantity ?? 1)),
+  });
+
+  function manufacturingChoice(productTypeId: number) {
+    return (productBlueprints.get(productTypeId) ?? [])
+      .flatMap((candidate) => {
+        const candidateActivity = candidate.activities?.manufacturing;
+        const product = candidateActivity?.products?.find((row) => Number(row.typeID) === productTypeId);
+        if (!candidateActivity || !product || !(candidateActivity.materials?.length)) return [];
+        return [{ candidate, candidateActivity, product }];
+      })
+      .sort((a, b) => Number(a.candidate.blueprintTypeID ?? a.candidate._key) - Number(b.candidate.blueprintTypeID ?? b.candidate._key))[0];
+  }
+
+  function expand(
+    materialTypeId: number,
+    required: number,
+    parentId: string,
+    depth: number,
+    direct: boolean,
+    path: string,
+    ancestry: Set<number>,
+  ) {
+    const choice = depth < maxDepth && !ancestry.has(materialTypeId) ? manufacturingChoice(materialTypeId) : undefined;
+    const id = `${path}:${materialTypeId}`;
+    const blueprintTypeId = choice ? Number(choice.candidate.blueprintTypeID ?? choice.candidate._key) : undefined;
+    const perRun = choice ? Math.max(1, Number(choice.product.quantity ?? 1)) : undefined;
+    const runs = choice && perRun ? Math.max(1, Math.ceil(required / perRun)) : undefined;
+    nodes.push({
+      id,
+      parentId,
+      typeId: materialTypeId,
+      name: names.get(materialTypeId) ?? `Type ${materialTypeId}`,
+      required,
+      depth,
+      kind: choice ? "component" : "material",
+      direct,
+      blueprintTypeId,
+      blueprintName: blueprintTypeId ? names.get(blueprintTypeId) ?? `Blueprint ${blueprintTypeId}` : undefined,
+      runs,
+      outputPerRun: perRun,
+    });
+    if (!choice || !runs) return;
+    const nextAncestry = new Set(ancestry);
+    nextAncestry.add(materialTypeId);
+    for (const [index, material] of (choice.candidateActivity.materials ?? []).entries()) {
+      const childRequired = Math.max(1, Math.ceil(Number(material.quantity) * runs - 1e-12));
+      expand(Number(material.typeID), childRequired, id, depth + 1, false, `${id}/${index}`, nextAncestry);
+    }
+  }
+
+  for (const [index, material] of (activity.materials ?? []).entries()) {
+    const baseRequired = Number(material.quantity) * rootRuns;
+    const required = Math.max(1, Math.ceil(baseRequired * (1 - rootMe / 100) - 1e-12));
+    expand(Number(material.typeID), required, rootId, 1, true, `${rootId}/${index}`, new Set([rootTypeId]));
+  }
+
+  return {
+    blueprintTypeId: Number(input.blueprintTypeId),
+    productTypeId: rootTypeId,
+    runs: rootRuns,
+    materialEfficiency: rootMe,
+    nodes,
+    source: "CCP EVE static data (offline)",
+  };
+}
+
 const INVENTION_DECRYPTORS = [
   { typeId: 34201, name: "Accelerant Decryptor", probabilityMultiplier: 1.2, runModifier: 1, meModifier: 2, teModifier: 10 },
   { typeId: 34202, name: "Attainment Decryptor", probabilityMultiplier: 1.8, runModifier: 4, meModifier: -1, teModifier: 4 },
@@ -718,8 +867,11 @@ export async function analyzeInventionOpportunities(input: { snapshot?: any; dec
   });
   priced.sort((a, b) => (b.expectedProfitPerAttempt ?? Number.NEGATIVE_INFINITY) - (a.expectedProfitPerAttempt ?? Number.NEGATIVE_INFINITY));
   return {
-    schema: 9,
+    schema: 10,
     generatedAt: new Date().toISOString(),
+    characterId: input.snapshot?.characterId == null ? null : String(input.snapshot.characterId),
+    characterName: input.snapshot?.character?.name ?? null,
+    snapshotUpdatedAt: input.snapshot?.updatedAt ?? null,
     marketCreatedAt: market.createdAt,
     candidateCount: priced.length,
     ownedSourceCount: priced.filter((item) => item.ownsSourceOriginal).length,
@@ -755,5 +907,121 @@ export async function getIndustrySystemCostIndices(solarSystemId: number) {
     indices: Object.fromEntries((row?.cost_indices ?? []).map((item) => [item.activity, item.cost_index])),
     fetchedAt: new Date().toISOString(),
     source: "EVE ESI /industry/systems",
+  };
+}
+
+
+export async function getReactionCatalogue() {
+  const { blueprints, names, typeMeta } = await index();
+  const formulas = [...blueprints.values()].flatMap((blueprint) => {
+    const activity = blueprint.activities?.reaction;
+    if (!activity?.products?.length) return [];
+    const formulaName = names.get(blueprint.blueprintTypeID) ?? `Formula ${blueprint.blueprintTypeID}`;
+    if (formulaName === "Test Reaction Blueprint") return [];
+    const products = activity.products.map((product) => ({
+      typeId: product.typeID,
+      name: names.get(product.typeID) ?? `Type ${product.typeID}`,
+      quantity: Math.max(0, Number(product.quantity ?? 0)),
+      groupName: typeMeta.get(product.typeID)?.groupName ?? "Unknown group",
+    }));
+    return [{
+      blueprintTypeId: blueprint.blueprintTypeID,
+      formulaName,
+      productTypeId: products[0].typeId,
+      productName: products[0].name,
+      productQuantity: products[0].quantity,
+      productGroupName: products[0].groupName,
+      baseTimeSeconds: Math.max(0, Number(activity.time ?? 0)),
+      materials: (activity.materials ?? []).map((material) => ({ typeId: material.typeID, name: names.get(material.typeID) ?? `Type ${material.typeID}`, quantity: Math.max(0, Number(material.quantity ?? 0)), groupName: typeMeta.get(material.typeID)?.groupName ?? "Unknown group" })),
+      products,
+    }];
+  }).sort((a, b) => a.productGroupName.localeCompare(b.productGroupName) || a.productName.localeCompare(b.productName));
+  const moonMaterialTypeIds = [...typeMeta.entries()].filter(([, meta]) => meta.groupName === "Moon Materials").map(([typeId]) => typeId).sort((a, b) => a - b);
+  return { formulas, moonMaterialTypeIds, source: "CCP EVE static data (offline)" };
+}
+
+export async function analyzeReactionPlan(input: {
+  blueprintTypeId: number;
+  runs?: number;
+  snapshot?: any;
+  stockSources?: Array<{ characterId: string; characterName: string; assets: OwnedAssetStack[] }>;
+}) {
+  const { blueprints, names, typeMeta } = await index();
+  const blueprint = blueprints.get(Number(input.blueprintTypeId));
+  const activity = blueprint?.activities?.reaction;
+  if (!blueprint || !activity?.products?.length) throw new Error(`${names.get(Number(input.blueprintTypeId)) ?? `Formula ${input.blueprintTypeId}`} has no reaction activity in the CCP SDE.`);
+  const formulaName = names.get(blueprint.blueprintTypeID) ?? `Formula ${blueprint.blueprintTypeID}`;
+  if (formulaName === "Test Reaction Blueprint") throw new Error("The CCP test reaction blueprint is not a player reaction formula.");
+  const runs = Math.max(1, Math.min(1_000_000, Math.floor(Number(input.runs ?? 1) || 1)));
+  const stockSources = input.stockSources ?? [];
+  const stockByType = new Map<number, { quantity: number; owners: Map<string, { characterId: string; characterName: string; quantity: number }> }>();
+  for (const source of stockSources) {
+    for (const asset of source.assets ?? []) {
+      const typeId = Number(asset.type_id ?? 0);
+      const quantity = Math.max(0, Math.floor(Number(asset.quantity ?? 0)));
+      if (!(typeId > 0) || quantity <= 0) continue;
+      const current = stockByType.get(typeId) ?? { quantity: 0, owners: new Map() };
+      current.quantity += quantity;
+      const owner = current.owners.get(source.characterId) ?? { characterId: source.characterId, characterName: source.characterName, quantity: 0 };
+      owner.quantity += quantity;
+      current.owners.set(source.characterId, owner);
+      stockByType.set(typeId, current);
+    }
+  }
+  const priceTypeIds = [...new Set([...(activity.materials ?? []).map((item) => item.typeID), ...activity.products.map((item) => item.typeID)])];
+  const market = await marketPrices(priceTypeIds);
+  const materials = (activity.materials ?? []).map((material) => {
+    const required = Math.max(0, Number(material.quantity ?? 0)) * runs;
+    const held = stockByType.get(material.typeID);
+    const owned = held?.quantity ?? 0;
+    const usedFromStock = Math.min(required, owned);
+    const missing = Math.max(0, required - usedFromStock);
+    const quote = market.quotes.get(material.typeID);
+    return {
+      typeId: material.typeID,
+      name: names.get(material.typeID) ?? `Type ${material.typeID}`,
+      groupName: typeMeta.get(material.typeID)?.groupName ?? "Unknown group",
+      perRun: Number(material.quantity ?? 0),
+      required, owned, usedFromStock, missing,
+      owners: [...(held?.owners.values() ?? [])],
+      bestSell: quote?.bestSell ?? null,
+      bestSellRegion: quote?.sellRegion ?? null,
+      missingMarketCost: missing === 0 ? 0 : quote?.bestSell == null ? null : missing * quote.bestSell,
+      fullMarketCost: quote?.bestSell == null ? null : required * quote.bestSell,
+    };
+  });
+  const products = activity.products.map((product) => {
+    const quantity = Math.max(0, Number(product.quantity ?? 0)) * runs;
+    const quote = market.quotes.get(product.typeID);
+    return {
+      typeId: product.typeID,
+      name: names.get(product.typeID) ?? `Type ${product.typeID}`,
+      groupName: typeMeta.get(product.typeID)?.groupName ?? "Unknown group",
+      perRun: Number(product.quantity ?? 0), quantity,
+      bestBuy: quote?.bestBuy ?? null,
+      bestBuyRegion: quote?.buyRegion ?? null,
+      bestSell: quote?.bestSell ?? null,
+      immediateSaleValue: quote?.bestBuy == null ? null : quantity * quote.bestBuy,
+      sellOrderValue: quote?.bestSell == null ? null : quantity * quote.bestSell,
+    };
+  });
+  const trained = trainedSkillMap(input.snapshot);
+  const skills = (activity.skills ?? []).map((skill) => { const trainedLevel = trained.get(skill.typeID) ?? 0; return { typeId: skill.typeID, name: names.get(skill.typeID) ?? `Skill ${skill.typeID}`, requiredLevel: skill.level, trainedLevel, met: trainedLevel >= skill.level }; });
+  const missingCostComplete = materials.every((item) => item.missingMarketCost != null);
+  const fullInputCostComplete = materials.every((item) => item.fullMarketCost != null);
+  const immediateSaleComplete = products.every((item) => item.immediateSaleValue != null);
+  const sellOrderComplete = products.every((item) => item.sellOrderValue != null);
+  const missingMarketCost = missingCostComplete ? materials.reduce((sum, item) => sum + Number(item.missingMarketCost ?? 0), 0) : null;
+  const fullInputMarketCost = fullInputCostComplete ? materials.reduce((sum, item) => sum + Number(item.fullMarketCost ?? 0), 0) : null;
+  const immediateSaleValue = immediateSaleComplete ? products.reduce((sum, item) => sum + Number(item.immediateSaleValue ?? 0), 0) : null;
+  const sellOrderValue = sellOrderComplete ? products.reduce((sum, item) => sum + Number(item.sellOrderValue ?? 0), 0) : null;
+  return {
+    blueprintTypeId: blueprint.blueprintTypeID, formulaName, runs, baseTimeSeconds: Math.max(0, Number(activity.time ?? 0)), totalTimeSeconds: Math.max(0, Number(activity.time ?? 0)) * runs,
+    materials, products, skills, skillsReady: skills.every((skill) => skill.met),
+    stockSources: stockSources.map((source) => ({ characterId: source.characterId, characterName: source.characterName, assetStackCount: source.assets?.length ?? 0 })),
+    marketCreatedAt: market.createdAt,
+    totals: { missingMaterialTypes: materials.filter((item) => item.missing > 0).length, missingMarketCost, fullInputMarketCost, immediateSaleValue, sellOrderValue, immediateGrossSpread: immediateSaleValue == null || fullInputMarketCost == null ? null : immediateSaleValue - fullInputMarketCost, sellOrderGrossSpread: sellOrderValue == null || fullInputMarketCost == null ? null : sellOrderValue - fullInputMarketCost },
+    source: "CCP EVE static data (offline) + retained all-region market snapshot",
+    notes: ["Reaction quantities use the exact CCP SDE formula and requested run count.", "Structure reaction bonuses, job installation cost, taxes and hauling are not included."],
   };
 }

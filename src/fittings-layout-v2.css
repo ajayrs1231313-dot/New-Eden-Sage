@@ -149,3 +149,32 @@
 .fit-doctrine-export-corp{display:flex;flex-direction:column;gap:4px;padding:11px 12px;border:1px solid rgba(113,150,170,.14);border-radius:8px;background:rgba(5,15,21,.5)}.fit-doctrine-export-corp span,.fit-doctrine-export-dialog label>span{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#7fa1b2}.fit-doctrine-export-corp strong{font-size:14px}
 .fit-doctrine-export-dialog label{display:grid;gap:6px}.fit-doctrine-export-dialog select,.fit-doctrine-export-dialog input{box-sizing:border-box;width:100%;height:40px;padding:0 11px;border:1px solid rgba(103,151,170,.28);border-radius:8px;background:#06141a;color:#dcebed;outline:none}.fit-doctrine-export-dialog select:focus,.fit-doctrine-export-dialog input:focus{border-color:rgba(87,190,229,.65);box-shadow:0 0 0 2px rgba(87,190,229,.08)}
 .fit-doctrine-export-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:2px}.fit-doctrine-export-actions button{min-height:38px;padding:0 14px;border-radius:8px}.fit-doctrine-export-actions .primary{border-color:rgba(87,190,229,.52);background:rgba(22,66,82,.85);color:#dff4f7}.fit-doctrine-export-dialog>small{color:#718690;line-height:1.45}
+
+
+/* compact damage profile drawer */
+.pyfa-damage-profiles{flex:0 0 auto;margin:0;border:0;border-bottom:1px solid #17343c;border-radius:0;background:transparent;padding:3px 0 6px;overflow:visible}
+.pyfa-damage-profiles>summary{list-style:none;display:grid;grid-template-columns:auto minmax(0,1fr) 12px;align-items:center;gap:6px;min-height:25px;padding:0;cursor:pointer;user-select:none}
+.pyfa-damage-profiles>summary::-webkit-details-marker{display:none}
+.pyfa-damage-profile-title{display:flex;align-items:center;gap:5px;white-space:nowrap}
+.pyfa-damage-profile-title>i{width:7px;height:7px;border:1px solid #63cfc2;transform:rotate(45deg);box-sizing:border-box;opacity:.9}
+.pyfa-damage-profile-title>strong{color:#8ca7ad;font-size:9px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+.pyfa-damage-profile-summary{display:flex;justify-content:flex-end;gap:3px;min-width:0;overflow:hidden}
+.pyfa-damage-profile-summary small{display:flex;align-items:center;min-width:0;gap:3px;padding:2px 4px;border:1px solid #142f37;background:#081820;color:#7b969c;font-size:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pyfa-damage-profile-summary small b{color:#64c7bc;font-size:5px;letter-spacing:.05em;font-weight:600}
+.pyfa-damage-profile-chevron{width:6px;height:6px;border-right:1px solid #69878e;border-bottom:1px solid #69878e;transform:rotate(45deg) translateY(-2px);justify-self:center;transition:transform .14s ease,border-color .14s ease}
+.pyfa-damage-profiles[open] .pyfa-damage-profile-chevron{transform:rotate(225deg) translate(-1px,-1px);border-color:#65e1d2}
+.pyfa-damage-profile-body{display:grid;gap:4px;padding:4px 0 0}
+.pyfa-damage-profile-field{display:grid!important;grid-template-columns:1fr!important;gap:3px!important;padding:5px;border:1px solid #142f37;background:#081820;text-transform:none!important}
+.pyfa-damage-profile-field>span{display:flex;align-items:baseline;justify-content:space-between;gap:6px;min-width:0}
+.pyfa-damage-profile-field>span strong{color:#91aab0;font-size:6px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+.pyfa-damage-profile-field>span small{color:#55747b;font-size:6px;text-transform:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pyfa-damage-profile-field select{width:100%;height:26px;min-height:26px!important;padding:2px 5px!important;border:1px solid #294951!important;background:#051016!important;color:#d0dfe1!important;font-size:8px!important}
+.pyfa-damage-profile-field>em{color:#58767d;font-size:6px;font-style:normal;text-transform:none;letter-spacing:0}
+.pyfa-damage-application{padding:5px;border:1px solid #142f37;background:#081820}
+.pyfa-damage-application-head{display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-bottom:4px}
+.pyfa-damage-application-head strong{color:#91aab0;font-size:6px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+.pyfa-damage-application-head small{color:#55747b;font-size:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pyfa-damage-application .fit-v2-target-grid{grid-template-columns:1fr 1fr;gap:3px}
+.pyfa-damage-application .fit-v2-target-grid label{display:grid!important;grid-template-columns:minmax(0,1fr) 58px;align-items:center;gap:3px!important;color:#66838a!important;font-size:6px!important;text-transform:none!important}
+.pyfa-damage-application .fit-v2-target-grid input{width:58px!important;height:23px;min-height:23px!important;padding:1px 4px!important;border:1px solid #294951!important;background:#051016!important;color:#d0dfe1!important;font-size:8px!important}
+@media(max-width:1080px){.pyfa-damage-profile-summary{display:none}.pyfa-damage-profiles>summary{grid-template-columns:minmax(0,1fr) 12px}.pyfa-damage-application .fit-v2-target-grid{grid-template-columns:1fr}.pyfa-damage-profile-field>span small,.pyfa-damage-application-head small{display:none}}

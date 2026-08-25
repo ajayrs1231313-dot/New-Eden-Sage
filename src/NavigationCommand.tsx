@@ -16,13 +16,17 @@ import type {
   NavigationOnlineWorkspace,
   NavigationOnlineRouteSummary,
   NavigationWaypointAnnotation,
+  NavigationPublicWormholeSnapshot,
   NavigationSystem,
+  WormholeCommandStore,
+  WormholeReferenceEntry,
+  WormholeRollingShipMass,
 } from "./types";
 import { NavigationUniverseMap } from "./NavigationUniverseMap";
 import { NavigationRouteList } from "./NavigationRouteList";
 import "./navigation-command.css";
 
-type NavigationSection = "route" | "map" | "saved" | "intelligence" | "capital";
+type NavigationSection = "route" | "advanced-map" | "saved" | "intelligence" | "capital";
 type FloorPreset = "any" | "high" | "low" | "custom";
 type AvoidScope = "system" | "constellation" | "region";
 
@@ -36,7 +40,7 @@ type AvoidEntry = {
 };
 
 type SavedRouteEntry = { id: string; name: string; route: NavigationRoutePlan; avoids: AvoidEntry[]; notes?: string; savedAt: string };
-type ConnectedCharacter = { characterId: string; name: string; systemId?: number; systemName?: string; updatedAt?: string };
+type ConnectedCharacter = { characterId: string; name: string; systemId?: number; systemName?: string; updatedAt?: string; shipItemId?:number; shipTypeId?:number; shipName?:string; fittedItems?:Array<{ item_id:number; type_id:number; location_id:number; location_flag:string; quantity:number; item?:string; category_id?:number }> };
 
 const GLOBAL_AVOIDS_KEY = "new-eden-sage-navigation-global-avoids-v1";
 const SAVED_ROUTES_KEY = "new-eden-sage-navigation-saved-routes-v1";
@@ -54,7 +58,7 @@ const routePresets = [
 
 const sections: Array<{ id: NavigationSection; label: string; eyebrow: string }> = [
   { id: "route", label: "Route Planner", eyebrow: "BUILD" },
-  { id: "map", label: "Map", eyebrow: "EXPLORE" },
+  { id: "advanced-map", label: "Advanced Map", eyebrow: "ROUTE MAP" },
   { id: "saved", label: "Saved Routes", eyebrow: "LIBRARY" },
   { id: "intelligence", label: "Route Intelligence", eyebrow: "INTEL" },
   { id: "capital", label: "Capital / Jump Planner", eyebrow: "CAPITAL" },
@@ -103,8 +107,18 @@ export function NavigationCommand() {
   const [route, setRoute] = useState<NavigationRoutePlan | null>(null);
   const [lockedSegments, setLockedSegments] = useState<NavigationLockedSegment[]>([]);
   const [customConnections, setCustomConnections] = useState<NavigationCustomConnection[]>(loadCustomConnections);
+  const [wormholeStore, setWormholeStore] = useState<WormholeCommandStore | null>(null);
+  const [wormholeReference, setWormholeReference] = useState<WormholeReferenceEntry[]>([]);
+  const [publicWormholes, setPublicWormholes] = useState<NavigationPublicWormholeSnapshot | null>(null);
+  const [publicWormholeBusy, setPublicWormholeBusy] = useState(false);
   const [enabledSpecialTypes, setEnabledSpecialTypes] = useState<NavigationEdgeType[]>(SPECIAL_EDGE_TYPES);
   const [disabledSpecialNetworkIds, setDisabledSpecialNetworkIds] = useState<string[]>([]);
+  const [avoidWormholeEol, setAvoidWormholeEol] = useState(true);
+  const [avoidWormholeCritical, setAvoidWormholeCritical] = useState(true);
+  const [avoidFrigateOnlyWormholes, setAvoidFrigateOnlyWormholes] = useState(true);
+  const [useCurrentShipWormholeMass, setUseCurrentShipWormholeMass] = useState(true);
+  const [wormholeShipMass, setWormholeShipMass] = useState<WormholeRollingShipMass | null>(null);
+  const [wormholeShipMassMessage, setWormholeShipMassMessage] = useState("Choose a character to enforce wormhole mass limits.");
   const [savedRoutes, setSavedRoutes] = useState<SavedRouteEntry[]>(loadSavedRoutes);
   const [favourites, setFavourites] = useState<NavigationSystem[]>(loadFavourites);
   const [recentDestinations, setRecentDestinations] = useState<NavigationSystem[]>(loadRecentDestinations);
@@ -145,7 +159,7 @@ export function NavigationCommand() {
       .catch((error) => { if (!cancelled) setHazardError(error instanceof Error ? error.message : "Dynamic hazard data is unavailable."); });
     window.sage.listSnapshots().then((rows) => {
       if (cancelled) return;
-      const next = (rows ?? []).map((row: any) => ({ characterId: String(row.characterId ?? row.character?.character_id ?? ""), name: String(row.character?.name ?? row.characterName ?? row.characterId ?? "Character"), systemId: Number(row.location?.solar_system_id ?? 0) || undefined, systemName: row.location?.solar_system_name ? String(row.location.solar_system_name) : undefined, updatedAt: row.updatedAt ? String(row.updatedAt) : undefined })).filter((row) => row.characterId);
+      const next = (rows ?? []).map((row: any) => ({ characterId: String(row.characterId ?? row.character?.character_id ?? ""), name: String(row.character?.name ?? row.characterName ?? row.characterId ?? "Character"), systemId: Number(row.location?.solar_system_id ?? 0) || undefined, systemName: row.location?.solar_system_name ? String(row.location.solar_system_name) : undefined, updatedAt: row.updatedAt ? String(row.updatedAt) : undefined, shipItemId:Number(row.ship?.ship_item_id ?? 0)||undefined, shipTypeId:Number(row.ship?.ship_type_id ?? 0)||undefined, shipName:row.ship?.ship_type_name?String(row.ship.ship_type_name):undefined, fittedItems:Array.isArray(row.extended?.currentShipFit)?row.extended.currentShipFit:[] })).filter((row) => row.characterId);
       setCharacters(next);
       setSelectedCharacterId((current) => current || next[0]?.characterId || "");
     }).catch(() => undefined);
@@ -159,6 +173,43 @@ export function NavigationCommand() {
   useEffect(() => { try { localStorage.setItem(FAVOURITES_KEY, JSON.stringify(favourites)); } catch {} }, [favourites]);
   useEffect(() => { try { localStorage.setItem(RECENT_DESTINATIONS_KEY, JSON.stringify(recentDestinations)); } catch {} }, [recentDestinations]);
   useEffect(() => { try { localStorage.setItem(CUSTOM_CONNECTIONS_KEY, JSON.stringify(customConnections)); } catch {} }, [customConnections]);
+
+  const refreshPublicWormholes = useCallback(async (force=false) => {
+    setPublicWormholeBusy(true);
+    try { const snapshot=await window.sage.getNavigationPublicWormholes(force); setPublicWormholes(snapshot); return snapshot; }
+    finally { setPublicWormholeBusy(false); }
+  }, []);
+
+  useEffect(() => {
+    let cancelled=false;
+    void window.sage.getNavigationPublicWormholes(false).then((snapshot)=>{if(!cancelled)setPublicWormholes(snapshot);}).catch(()=>undefined);
+    const timer=window.setInterval(()=>void window.sage.getNavigationPublicWormholes(false).then((snapshot)=>{if(!cancelled)setPublicWormholes(snapshot);}).catch(()=>undefined),120_000);
+    return()=>{cancelled=true;window.clearInterval(timer);};
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([window.sage.getWormholeCommandStore(), window.sage.getWormholeReference()]).then(([nextStore, nextReference]) => {
+      if (cancelled) return;
+      setWormholeStore(nextStore);
+      setWormholeReference(nextReference);
+    }).catch(() => undefined);
+    const unsubscribe = window.sage.onWormholeCommandUpdated((nextStore) => { if (!cancelled) setWormholeStore(nextStore); });
+    return () => { cancelled = true; unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    let cancelled=false;
+    const selected=characters.find((row)=>row.characterId===selectedCharacterId);
+    if (!selected?.shipTypeId) { setWormholeShipMass(null); setWormholeShipMassMessage(selectedCharacterId ? "Current ship is unavailable in the synced snapshot." : "Choose a character to enforce wormhole mass limits."); return; }
+    setWormholeShipMassMessage("Resolving conservative wormhole transit mass from CCP DOGMA + current fit…");
+    void window.sage.getWormholeRollingShipMass({ shipTypeId:selected.shipTypeId, shipName:selected.shipName, fittedItems:selected.fittedItems ?? [] }).then((context)=>{
+      if(cancelled)return; setWormholeShipMass(context);
+      const conservative=Math.max(context.coldMassKg,...context.propulsion.map((row)=>row.propOnMassKg));
+      setWormholeShipMassMessage(`${context.shipName}: ${Math.round(conservative).toLocaleString()} kg conservative transit mass${context.propulsion.length ? " (largest fitted prop-on scenario)" : ""}.`);
+    }).catch((error)=>{if(!cancelled){setWormholeShipMass(null);setWormholeShipMassMessage(error instanceof Error?error.message:String(error));}});
+    return()=>{cancelled=true;};
+  }, [selectedCharacterId, characters]);
 
   useEffect(() => {
     const selected = characters.find((row) => row.characterId === selectedCharacterId);
@@ -226,10 +277,49 @@ export function NavigationCommand() {
       excludedSystemIds: dynamicExcludedSystemIds,
       snapshotAt: hazards?.fetchedAt,
     },
-    specialConnections: { enabledTypes: enabledSpecialTypes, disabledNetworkIds: disabledSpecialNetworkIds },
-  }), [mode, minSecurity, avoidIds, enabledHazards, dynamicExcludedSystemIds, hazards?.fetchedAt, enabledSpecialTypes, disabledSpecialNetworkIds]);
+    specialConnections: { enabledTypes: enabledSpecialTypes, disabledNetworkIds: disabledSpecialNetworkIds, wormholePolicy: {
+      avoidEol: avoidWormholeEol, avoidCritical: avoidWormholeCritical, avoidFrigateOnly: avoidFrigateOnlyWormholes,
+      shipMassKg: useCurrentShipWormholeMass && wormholeShipMass ? Math.max(wormholeShipMass.coldMassKg, ...wormholeShipMass.propulsion.map((row)=>row.propOnMassKg)) : null,
+      shipName: useCurrentShipWormholeMass ? wormholeShipMass?.shipName : undefined,
+    } },
+  }), [mode, minSecurity, avoidIds, enabledHazards, dynamicExcludedSystemIds, hazards?.fetchedAt, enabledSpecialTypes, disabledSpecialNetworkIds, avoidWormholeEol, avoidWormholeCritical, avoidFrigateOnlyWormholes, useCurrentShipWormholeMass, wormholeShipMass]);
 
-  const signature = useMemo(() => JSON.stringify({ waypoints: waypoints.map((system) => system.systemId), profile, lockedSegments, customConnections }), [waypoints, profile, lockedSegments, customConnections]);
+  const wormholeRouteConnections = useMemo<NavigationCustomConnection[]>(() => {
+    if (!wormholeStore) return [];
+    const referenceByCode = new Map(wormholeReference.map((entry) => [entry.code, entry]));
+    return Object.values(wormholeStore.connections).flatMap((connection) => {
+      if (!["active","eol","critical"].includes(connection.status) || !connection.toSystemId) return [];
+      if (wormholeStore.systems[String(connection.fromSystemId)]?.archivedAt || wormholeStore.systems[String(connection.toSystemId)]?.archivedAt) return [];
+      const reference = connection.wormholeType ? referenceByCode.get(connection.wormholeType) : undefined;
+      return [{
+        connectionId: "wormhole-command:" + connection.connectionId,
+        fromSystemId: connection.fromSystemId,
+        toSystemId: connection.toSystemId,
+        type: "wormhole",
+        enabled: true,
+        bidirectional: true,
+        label: connection.label || (connection.wormholeType ? "WH " + connection.wormholeType : "Wormhole Command"),
+        networkId: "wormhole-command",
+        networkName: "Wormhole Command",
+        discoveredAt: connection.discoveredAt,
+        expiresAt: connection.expiresAt ?? (reference?.lifetimeMinutes != null ? new Date(Date.parse(connection.discoveredAt) + reference.lifetimeMinutes * 60_000).toISOString() : undefined),
+        connectionClass: connection.wormholeType || reference?.destinationLabel,
+        status: connection.status === "eol" ? "expiring" : "active",
+        maxJumpMassKg: reference?.maxJumpMassKg ?? undefined,
+        metadata: {
+          source: "wormhole-command",
+          wormholeStatus: connection.status,
+          signatureId: connection.fromSignatureId ?? null,
+          destinationLabel: reference?.destinationLabel ?? null,
+          frigateOnly: reference?.maxJumpMassKg != null && reference.maxJumpMassKg <= 5_000_000,
+        },
+      } satisfies NavigationCustomConnection];
+    });
+  }, [wormholeStore, wormholeReference]);
+
+  const effectiveCustomConnections = useMemo(() => [...customConnections, ...(publicWormholes?.connections ?? []), ...wormholeRouteConnections], [customConnections, publicWormholes, wormholeRouteConnections]);
+
+  const signature = useMemo(() => JSON.stringify({ waypoints: waypoints.map((system) => system.systemId), profile, lockedSegments, effectiveCustomConnections }), [waypoints, profile, lockedSegments, effectiveCustomConnections]);
 
   const calculatePlan = useCallback(async (explicitWaypoints?: NavigationSystem[]) => {
     const stops = explicitWaypoints ?? waypoints;
@@ -238,7 +328,7 @@ export function NavigationCommand() {
       setMessage("Add at least an origin and destination.");
       return;
     }
-    const calculationSignature = JSON.stringify({ waypoints: stops.map((system) => system.systemId), profile, lockedSegments, customConnections });
+    const calculationSignature = JSON.stringify({ waypoints: stops.map((system) => system.systemId), profile, lockedSegments, customConnections: effectiveCustomConnections });
     lastCalculatedSignature.current = calculationSignature;
     setBusy(true);
     setMessage(stops.length > 2 ? `Calculating ${stops.length - 1} route segments locally…` : "Calculating locally…");
@@ -252,7 +342,7 @@ export function NavigationCommand() {
         waypointAnnotations,
         waypointSystemIds: stops.map((system) => system.systemId),
         lockedSegments,
-        customConnections,
+        customConnections: effectiveCustomConnections,
         profile,
       });
       setRoute(result);
@@ -265,7 +355,7 @@ export function NavigationCommand() {
     } finally {
       setBusy(false);
     }
-  }, [waypoints, graph, profile, route?.routeId, route?.name, route?.createdAt, route?.version, routeNotes, waypointAnnotations, lockedSegments, customConnections]);
+  }, [waypoints, graph, profile, route?.routeId, route?.name, route?.createdAt, route?.version, routeNotes, waypointAnnotations, lockedSegments, effectiveCustomConnections]);
 
   useEffect(() => {
     if (!route || busy || waypoints.length < 2 || signature === lastCalculatedSignature.current) return;
@@ -400,6 +490,10 @@ export function NavigationCommand() {
     setEnabledHazards(value.routingProfile.dynamicHazards.providerIds ?? []);
     setEnabledSpecialTypes(value.routingProfile.specialConnections?.enabledTypes ?? SPECIAL_EDGE_TYPES);
     setDisabledSpecialNetworkIds(value.routingProfile.specialConnections?.disabledNetworkIds ?? []);
+    setAvoidWormholeEol(value.routingProfile.specialConnections?.wormholePolicy?.avoidEol !== false);
+    setAvoidWormholeCritical(value.routingProfile.specialConnections?.wormholePolicy?.avoidCritical !== false);
+    setAvoidFrigateOnlyWormholes(value.routingProfile.specialConnections?.wormholePolicy?.avoidFrigateOnly !== false);
+    setUseCurrentShipWormholeMass(value.routingProfile.specialConnections?.wormholePolicy?.shipMassKg != null);
     setTemporaryAvoids((entry.avoids ?? []).map((row) => ({ ...row, persistent: false })).filter((row) => !globalAvoids.some((g) => g.key === row.key)));
     lastCalculatedSignature.current = JSON.stringify({ waypoints: value.waypoints.map((system) => system.systemId), profile: value.routingProfile, lockedSegments: value.lockedSegments ?? [], customConnections: value.customConnections ?? [] });
     setSection("route"); setMessage("Loaded saved route " + entry.name + ".");
@@ -731,7 +825,7 @@ export function NavigationCommand() {
     waypoints, origin, destination, setOrigin, setDestination, addWaypoint, insertWaypoint, removeWaypoint,
     commitWaypoints, reverseRoute, clearRoute, mode, setMode, floorPreset, setFloorPreset, customFloor, setCustomFloor,
     minSecurity, activeAvoids, addAvoid, removeAvoid, route, busy, message, calculatePlan, lockedSegments, toggleSegmentLock,
-    customConnections, addCustomConnection, toggleCustomConnection, removeCustomConnection, enabledSpecialTypes, disabledSpecialNetworkIds, toggleSpecialType, toggleSpecialNetwork, favourites, recentDestinations, toggleFavourite, applyPreset,
+    customConnections, publicWormholes, publicWormholeBusy, refreshPublicWormholes, addCustomConnection, toggleCustomConnection, removeCustomConnection, enabledSpecialTypes, disabledSpecialNetworkIds, toggleSpecialType, toggleSpecialNetwork, avoidWormholeEol, setAvoidWormholeEol, avoidWormholeCritical, setAvoidWormholeCritical, avoidFrigateOnlyWormholes, setAvoidFrigateOnlyWormholes, useCurrentShipWormholeMass, setUseCurrentShipWormholeMass, wormholeShipMass, wormholeShipMassMessage, favourites, recentDestinations, toggleFavourite, applyPreset,
     routeNotes, waypointAnnotations, updateRouteNotes, updateWaypointAnnotation, duplicateWorkingRoute, setSelectedAsOrigin, setSelectedAsDestination, removeSelectedStop, lockSelectedLeg, copyOrderedSystems, copyCompactSummary,
     savedRoutes, saveCurrentRoute, loadSavedRoute, renameSavedRoute, duplicateSavedRoute, deleteSavedRoute, routePacketMessage, copyRouteJson, downloadRouteJson, importRouteJson, characters, selectedCharacterId, setSelectedCharacterId, exportAppend, setExportAppend, exportMessage, exportRouteToEve,
     onlineWorkspace, onlineRoutes, onlineBusy, onlineMessage, onlineVisibility, setOnlineVisibility, onlineRecipientIds, setOnlineRecipientIds, loadedOnlineObject, ensureOnlineWorkspace, refreshOnlineRoutes, publishOnlineRoute, updateOnlineRoute, loadOnlineRoute,
@@ -765,7 +859,7 @@ export function NavigationCommand() {
 
       <div className="navigation-command-stage">
         {section === "route" && <RoutePlanner {...shared} />}
-        {section === "map" && <ManualMapBuilder {...shared} />}
+        {section === "advanced-map" && <ManualMapBuilder {...shared} />}
         {section === "saved" && <SavedRoutesPanel {...shared} />}
         {section === "intelligence" && <RouteIntelligencePanel {...shared} />}
         {section === "capital" && <CapitalJumpPlanner {...shared} />}
@@ -809,6 +903,7 @@ type SharedProps = {
   lockedSegments: NavigationLockedSegment[];
   toggleSegmentLock(segmentIndex: number): void;
   customConnections: NavigationCustomConnection[];
+  publicWormholes:NavigationPublicWormholeSnapshot|null; publicWormholeBusy:boolean; refreshPublicWormholes(force?:boolean):Promise<NavigationPublicWormholeSnapshot>;
   addCustomConnection(connection: Omit<NavigationCustomConnection, "connectionId">): void;
   toggleCustomConnection(id: string): void;
   removeCustomConnection(id: string): void;
@@ -816,6 +911,11 @@ type SharedProps = {
   disabledSpecialNetworkIds: string[];
   toggleSpecialType(type: NavigationEdgeType): void;
   toggleSpecialNetwork(networkId: string): void;
+  avoidWormholeEol:boolean; setAvoidWormholeEol(value:boolean):void;
+  avoidWormholeCritical:boolean; setAvoidWormholeCritical(value:boolean):void;
+  avoidFrigateOnlyWormholes:boolean; setAvoidFrigateOnlyWormholes(value:boolean):void;
+  useCurrentShipWormholeMass:boolean; setUseCurrentShipWormholeMass(value:boolean):void;
+  wormholeShipMass:WormholeRollingShipMass|null; wormholeShipMassMessage:string;
   favourites: NavigationSystem[];
   recentDestinations: NavigationSystem[];
   toggleFavourite(system: NavigationSystem): void;
@@ -1313,12 +1413,15 @@ function ExportRoutePanel({ props }: { props: SharedProps }) {
 
 
 function SpecialConnectionPolicy({ props }: { props: SharedProps }) {
-  const networks = Array.from(new Map(props.customConnections.filter((row) => row.networkId).map((row) => [row.networkId!, row.networkName || row.networkId!])).entries());
+  const publicConnections=props.publicWormholes?.connections ?? [];
+  const networks = Array.from(new Map([...props.customConnections,...publicConnections].filter((row) => row.networkId).map((row) => [row.networkId!, row.networkName || row.networkId!])).entries());
   const labels: Partial<Record<NavigationEdgeType, string>> = { ansiblex: "Ansiblex", wormhole: "Wormholes", thera: "Thera", turnur: "Turnur", zarzakh: "Zarzakh", manual: "Manual links" };
   return <div className="navigation-special-policy">
     <div className="navigation-panel-title"><div><span>Special routing networks</span><small>Explicit route-profile controls decide which non-gate edges Sage may use. Expired, denied or inaccessible links are rejected even when their type is enabled.</small></div><b>{props.enabledSpecialTypes.length}/{SPECIAL_EDGE_TYPES.length}</b></div>
+    <div className={`navigation-public-wormholes ${props.publicWormholes?.stale ? "stale" : "live"}`}><div><strong>EVE-Scout Thera / Turnur</strong><small>{props.publicWormholes ? `${props.publicWormholes.connections.length} live public links · ${props.publicWormholes.stale ? "STALE CACHE" : "LIVE"} · ${new Date(props.publicWormholes.fetchedAt).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}` : "Public feed not loaded yet."}</small>{props.publicWormholes?.error && <em>{props.publicWormholes.error}</em>}</div><button type="button" disabled={props.publicWormholeBusy} onClick={()=>void props.refreshPublicWormholes(true)}>{props.publicWormholeBusy ? "Refreshing…" : "Refresh public links"}</button></div>
     <div className="navigation-special-type-grid">{SPECIAL_EDGE_TYPES.map((type) => <button type="button" key={type} className={props.enabledSpecialTypes.includes(type) ? "active" : ""} onClick={() => props.toggleSpecialType(type)}><strong>{labels[type] ?? type}</strong><small>{props.enabledSpecialTypes.includes(type) ? "Allowed" : "Excluded"}</small></button>)}</div>
     {networks.length > 0 && <div className="navigation-special-networks"><span>Known networks</span>{networks.map(([id,name]) => <button type="button" key={id} className={!props.disabledSpecialNetworkIds.includes(id) ? "active" : ""} onClick={() => props.toggleSpecialNetwork(id)}><strong>{name}</strong><small>{props.disabledSpecialNetworkIds.includes(id) ? "Disabled for this profile" : "Enabled for this profile"}</small></button>)}</div>}
+    <div className="navigation-wormhole-policy"><div><span>Wormhole safety policy</span><small>Hard solver constraints. Current-ship mass uses the largest credible fitted prop-on scenario.</small></div><label><input type="checkbox" checked={props.avoidWormholeEol} onChange={(event)=>props.setAvoidWormholeEol(event.target.checked)} /><span>Avoid EOL</span></label><label><input type="checkbox" checked={props.avoidWormholeCritical} onChange={(event)=>props.setAvoidWormholeCritical(event.target.checked)} /><span>Avoid critical mass</span></label><label><input type="checkbox" checked={props.avoidFrigateOnlyWormholes} onChange={(event)=>props.setAvoidFrigateOnlyWormholes(event.target.checked)} /><span>Avoid frigate-only</span></label><label><input type="checkbox" checked={props.useCurrentShipWormholeMass} onChange={(event)=>props.setUseCurrentShipWormholeMass(event.target.checked)} disabled={!props.wormholeShipMass} /><span>Respect current ship mass</span></label><p>{props.wormholeShipMassMessage}</p></div>
   </div>;
 }
 

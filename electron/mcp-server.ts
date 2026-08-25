@@ -9,6 +9,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadMarketIndexHeaders, loadMarketRegion, loadLatestMarketDatasetByMode } from "./market-storage";
 import { loadCurrentRawMarketManifest, loadRawMarketRegion } from "./raw-market-storage";
+import { SAGE_MCP_AI_INSTRUCTIONS, SAGE_CHARACTER_LIST_GUIDANCE, SAGE_CHARACTER_DATA_GUIDANCE, SAGE_SAVED_FITTINGS_GUIDANCE, SAGE_FIT_SKILL_GUIDANCE } from "./mcp-ai-policy";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
@@ -127,14 +128,14 @@ function dataPaths(value: unknown, prefix = "", output = new Set<string>()) {
 }
 
 export async function startMcpServer() {
-  const server = new McpServer({ name: "new-eden-sage", version: "0.1.0" });
+  const server = new McpServer({ name: "new-eden-sage", version: "0.1.0" }, { instructions: SAGE_MCP_AI_INSTRUCTIONS });
 
   server.registerTool("list_characters", {
-    title: "List Sage characters", description: "List every locally synced EVE character and snapshot timestamp.", inputSchema: {}, annotations: READ_ONLY,
+    title: "List Sage characters", description: SAGE_CHARACTER_LIST_GUIDANCE, inputSchema: {}, annotations: READ_ONLY,
   }, async () => result((listSnapshots() as any[]).map((snapshot) => ({ characterId: snapshot.characterId, name: snapshot.character?.name, updatedAt: snapshot.updatedAt }))));
 
   server.registerTool("get_character_data", {
-    title: "Read character data", description: "Read the complete locally synced snapshot for one character, or one top-level dataset such as skills, assets, blueprints, jobs, wallet, orders, fittings, clones, location or corporation data.",
+    title: "Read character data", description: SAGE_CHARACTER_DATA_GUIDANCE,
     inputSchema: { characterId: z.string(), section: z.string().optional() }, annotations: READ_ONLY,
   }, async ({ characterId, section }) => {
     const snapshot = getSnapshot(characterId) as Record<string, unknown> | null;
@@ -163,12 +164,12 @@ export async function startMcpServer() {
   }, async () => result(listImportedInformation()));
 
   server.registerTool("get_saved_fittings", {
-    title: "Read saved fittings", description: "Read every fit and fitting-library metadata saved in the Sage renderer. For importing or creating fits, use save_sage_fit; call get_fit_import_instructions if you need the accepted formats and preferred fields.", inputSchema: {}, annotations: READ_ONLY,
+    title: "Read saved fittings", description: SAGE_SAVED_FITTINGS_GUIDANCE, inputSchema: {}, annotations: READ_ONLY,
   }, async () => result(await rendererData()));
 
   server.registerTool("save_sage_fit", {
     title: "Create or update a Sage fit",
-    description: FIT_IMPORT_INSTRUCTIONS + " Sage must be open.",
+    description: SAGE_FIT_SKILL_GUIDANCE + " " + FIT_IMPORT_INSTRUCTIONS + " Sage must be open.",
     inputSchema: { fit: z.unknown() }, annotations: WRITE,
   }, async ({ fit }) => result(await writeAction("save_sage_fit", { fit })));
 
@@ -180,7 +181,7 @@ export async function startMcpServer() {
 
   server.registerTool("push_eve_fitting", {
     title: "Push a fitting to EVE Online",
-    description: "Create a fitting in a connected character's live EVE Online fitting library. The character must be reconnected after this update to grant fitting write permission, and Sage must be open.",
+    description: SAGE_FIT_SKILL_GUIDANCE + " Create a fitting in the selected connected character's live EVE Online fitting library. The character must be reconnected after this update to grant fitting write permission, and Sage must be open.",
     inputSchema: {
       characterId: z.string().regex(/^\d+$/),
       fitting: z.object({

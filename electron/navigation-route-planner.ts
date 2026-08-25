@@ -16,7 +16,7 @@ export type NavigationRouteProfile = {
   minSecurity: number | null;
   avoids: { systemIds: number[]; constellationIds: number[]; regionIds: number[] };
   dynamicHazards: { providerIds: string[]; excludedSystemIds: number[]; snapshotAt?: string };
-  specialConnections: { enabledTypes: NavigationEdgeType[]; disabledNetworkIds: string[] };
+  specialConnections: { enabledTypes: NavigationEdgeType[]; disabledNetworkIds: string[]; wormholePolicy: { avoidEol:boolean; avoidCritical:boolean; avoidFrigateOnly:boolean; shipMassKg:number|null; shipName?:string } };
 };
 
 export type NavigationLockedSegment = {
@@ -149,6 +149,13 @@ function normalizeProfile(profile?: NavigationPlanInput["profile"]): NavigationR
       disabledNetworkIds: Array.isArray(profile?.specialConnections?.disabledNetworkIds)
         ? [...new Set(profile.specialConnections.disabledNetworkIds.map(String).filter(Boolean))]
         : [],
+      wormholePolicy: {
+        avoidEol: profile?.specialConnections?.wormholePolicy?.avoidEol !== false,
+        avoidCritical: profile?.specialConnections?.wormholePolicy?.avoidCritical !== false,
+        avoidFrigateOnly: profile?.specialConnections?.wormholePolicy?.avoidFrigateOnly !== false,
+        shipMassKg: Number(profile?.specialConnections?.wormholePolicy?.shipMassKg ?? 0) > 0 ? Number(profile?.specialConnections?.wormholePolicy?.shipMassKg) : null,
+        shipName: profile?.specialConnections?.wormholePolicy?.shipName ? String(profile.specialConnections.wormholePolicy.shipName).slice(0,120) : undefined,
+      },
     },
   };
 }
@@ -212,6 +219,18 @@ function customConnectionUsable(connection: NavigationCustomConnection, profile:
   const access = String(connection.access ?? "").trim().toLowerCase();
   if (["blocked", "denied", "no access", "inaccessible"].includes(access)) return false;
   if (connection.metadata?.blocked === true || connection.metadata?.accessible === false) return false;
+  if (connection.type === "wormhole" || connection.type === "thera" || connection.metadata?.wormholeTransit === true) {
+    const policy = profile.specialConnections.wormholePolicy;
+    const wormholeStatus = String(connection.metadata?.wormholeStatus ?? "").toLowerCase();
+    if (policy.avoidEol && wormholeStatus === "eol") return false;
+    if (policy.avoidCritical && wormholeStatus === "critical") return false;
+    const maxJumpMassKg = Number(connection.maxJumpMassKg ?? 0);
+    const frigateOnly = connection.metadata?.frigateOnly === true || (maxJumpMassKg > 0 && maxJumpMassKg <= 5_000_000);
+    if (policy.avoidFrigateOnly && frigateOnly) return false;
+    if (policy.shipMassKg != null && maxJumpMassKg > 0 && policy.shipMassKg > maxJumpMassKg) return false;
+    const remainingMassKg = Number(connection.remainingMassKg ?? -1);
+    if (policy.shipMassKg != null && remainingMassKg >= 0 && policy.shipMassKg > remainingMassKg) return false;
+  }
   return true;
 }
 

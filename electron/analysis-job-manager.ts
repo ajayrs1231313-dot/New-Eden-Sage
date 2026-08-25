@@ -213,6 +213,15 @@ type RunJobOptions = {
   skipWhenBusy?: boolean;
 };
 
+async function waitForLaneIdle(lane: AnalysisLane, timeoutMs = 15 * 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (lanes[lane].active) {
+    if (disposed) throw analysisError("Analysis service is shutting down.", "ANALYSIS_SHUTDOWN");
+    if (Date.now() >= deadline) throw analysisError("Prepared intelligence lookup waited too long for the active analysis lane.", "ANALYSIS_PEEK_TIMEOUT");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function runJob(
   kind: AnalysisKind,
   payload: Record<string, unknown>,
@@ -222,7 +231,10 @@ async function runJob(
   const lane = laneFor(kind);
   const state = lanes[lane];
   if (state.active) {
-    if (options.skipWhenBusy) return null;
+    if (options.skipWhenBusy) {
+      await waitForLaneIdle(lane);
+      return runJob(kind, payload, onProgress, options);
+    }
     await cancelLane(lane, "Replaced by a newer analysis request.");
   }
   const jobId = randomUUID();
@@ -300,13 +312,22 @@ export async function stopAnalysisWorkersForExclusiveTask() {
   }
 }
 
+export async function releaseIdleAnalysisWorkers(targetLanes?: AnalysisLane[]) {
+  const selected = targetLanes ?? (Object.keys(lanes) as AnalysisLane[]);
+  let released = 0;
+  for (const lane of selected) {
+    const state = lanes[lane];
+    if (state.active || !state.worker) continue;
+    stopWatchdog(lane);
+    const currentWorker = state.worker;
+    state.worker = null;
+    await currentWorker.terminate().catch(() => undefined);
+    released += 1;
+  }
+  return released;
+}
+
 /** Release the large market worker after its prepared result has been persisted. */
 export async function releaseIdleMarketAnalysisWorker() {
-  const state = lanes.market;
-  if (state.active || !state.worker) return false;
-  stopWatchdog("market");
-  const currentWorker = state.worker;
-  state.worker = null;
-  await currentWorker.terminate().catch(() => undefined);
-  return true;
+  return (await releaseIdleAnalysisWorkers(["market"])) > 0;
 }

@@ -45,3 +45,23 @@ export async function savePersistedResult(kind: string, key: unknown, value: unk
     if (backedUp) await fs.rm(backup, { force: true }).catch(() => undefined);
   }
 }
+
+export async function loadRecentPersistedResults<T>(kind: string, limit = 40): Promise<Array<{ value: T; path: string; mtimeMs: number }>> {
+  let entries: import("node:fs").Dirent[];
+  try { entries = await fs.readdir(root, { withFileTypes: true }); } catch { return []; }
+  const prefix = `${kind}-`;
+  const candidates = await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith(prefix) && /^[a-f0-9]{64}\.json\.gz$/i.test(entry.name.slice(prefix.length)))
+    .map(async (entry) => {
+      const target = path.join(root, entry.name);
+      try { return { target, mtimeMs: (await fs.stat(target)).mtimeMs }; } catch { return null; }
+    }));
+  const output: Array<{ value: T; path: string; mtimeMs: number }> = [];
+  for (const candidate of candidates.filter(Boolean).sort((a: any, b: any) => b.mtimeMs - a.mtimeMs).slice(0, Math.max(1, limit)) as Array<{ target: string; mtimeMs: number }>) {
+    try {
+      const value = JSON.parse((await gunzipAsync(await fs.readFile(candidate.target))).toString("utf8")) as T;
+      output.push({ value, path: candidate.target, mtimeMs: candidate.mtimeMs });
+    } catch { /* skip corrupt cache files */ }
+  }
+  return output;
+}

@@ -10,6 +10,7 @@ import { findFullMarketTrades, type FullTradeAnalysisMode, type FullTradeSearchC
 import { searchRawMarketOrders, type RawMarketSearchInput } from "./raw-market-search";
 import { filterRegionalMarket, type RegionalMarketFilterInput } from "./regional-market-filter";
 import { loadCurrentRawMarketManifest } from "./raw-market-storage";
+import { loadCurrentMarketRevision } from "./shared-market-data";
 import { analyzePveLocations, type PveLocationQuery } from "./pve-location-intelligence";
 import type { CloneState } from "./skill-training";
 
@@ -107,9 +108,51 @@ function snapshotFingerprint(snapshots: any[]) {
     .join("|");
 }
 
+async function opportunityCacheContext(input: OpportunityQuery, snapshots: any[]) {
+  const manifest = await loadCurrentMarketRevision();
+  const selected = input.characterId
+    ? snapshots.find((snapshot: any) => String(snapshot?.characterId) === String(input.characterId)) ?? null
+    : null;
+  const character = selected
+    ? String(selected.characterId ?? "?") + ":" + String(selected.updatedAt ?? "?")
+    : snapshotFingerprint(snapshots);
+  const key = JSON.stringify({ version: 4, snapshotId: manifest?.id ?? "none", input, character });
+  return { key, manifest, selected };
+}
+
 async function opportunityCacheKey(input: OpportunityQuery, snapshots: any[]) {
-  const manifest = await loadCurrentRawMarketManifest("all");
-  return JSON.stringify({ version: 3, snapshotId: manifest?.id ?? "none", input, characters: snapshotFingerprint(snapshots) });
+  return (await opportunityCacheContext(input, snapshots)).key;
+}
+
+function defaultPreparedOpportunityQuery(input: OpportunityQuery) {
+  return input.characterId != null && input.maxCapital == null && input.cargoCapacityM3 == null && input.maxJumps == null && input.maxMinutes == null;
+}
+
+async function loadCompatiblePreparedOpportunity(input: OpportunityQuery, snapshots: any[]) {
+  if (!defaultPreparedOpportunityQuery(input)) return undefined;
+  const { key, manifest, selected } = await opportunityCacheContext(input, snapshots);
+  if (!manifest || !selected) return undefined;
+  let entries: import("node:fs").Dirent[];
+  try { entries = await fs.readdir(PERSISTED_ANALYSIS_ROOT, { withFileTypes: true }); } catch { return undefined; }
+  const candidates = await Promise.all(entries
+    .filter((entry) => entry.isFile() && /^opportunity-[a-f0-9]{64}\.json\.gz$/i.test(entry.name))
+    .map(async (entry) => {
+      const file = path.join(PERSISTED_ANALYSIS_ROOT, entry.name);
+      try { return { file, mtimeMs: (await fs.stat(file)).mtimeMs }; } catch { return null; }
+    }));
+  const selectedUpdatedAt = Date.parse(String(selected.updatedAt ?? ""));
+  for (const candidate of candidates.filter(Boolean).sort((a: any,b: any)=>b.mtimeMs-a.mtimeMs).slice(0, 80) as Array<{file:string;mtimeMs:number}>) {
+    let value: any;
+    try { value = JSON.parse((await gunzipAsync(await fs.readFile(candidate.file))).toString("utf8")); } catch { continue; }
+    if (String(value?.character?.characterId ?? "") !== String(input.characterId)) continue;
+    if (String(value?.signals?.marketDatasetCreatedAt ?? "") !== String(manifest.createdAt ?? "")) continue;
+    const generatedMs = Date.parse(String(value?.generatedAt ?? ""));
+    if (Number.isFinite(selectedUpdatedAt) && (!Number.isFinite(generatedMs) || generatedMs < selectedUpdatedAt)) continue;
+    if (value?.constraints?.maxCapital != null || value?.constraints?.maxJumps != null || value?.constraints?.maxMinutes != null) continue;
+    await savePersistedResult("opportunity", key, value);
+    return value;
+  }
+  return undefined;
 }
 
 function pveCacheKey(input: PveLocationQuery, snapshot: any, cloneState: CloneState) {
@@ -141,7 +184,7 @@ parentPort.on("message", async (message: WorkerMessage) => {
 
     if (message.type === "peek-opportunity") {
       const key = await opportunityCacheKey(message.input, message.snapshots);
-      result = await loadPersistedResult("opportunity", key) ?? null;
+      result = await loadPersistedResult("opportunity", key) ?? await loadCompatiblePreparedOpportunity(message.input, message.snapshots) ?? null;
       cached = Boolean(result);
       progress(message.jobId, { stage: cached ? "disk-cache" : "cache-miss", message: cached ? "Loaded prepared ISK Lab result." : "No prepared ISK Lab result exists for this snapshot.", percent: 100, cached });
     } else if (message.type === "peek-capability") {
@@ -162,7 +205,7 @@ parentPort.on("message", async (message: WorkerMessage) => {
         cached = true;
         progress(message.jobId, { stage: "cache", message: "Reusing the completed analysis for these limits.", percent: 100, cached: true });
       } else {
-        const persisted = await loadPersistedResult("opportunity", key);
+        const persisted = await loadPersistedResult("opportunity", key) ?? await loadCompatiblePreparedOpportunity(message.input, message.snapshots);
         if (persisted) {
           result = persisted;
           cached = true;
@@ -199,7 +242,7 @@ parentPort.on("message", async (message: WorkerMessage) => {
       if (result) { cached = true; progress(message.jobId, { stage: "disk-cache", message: "Loaded saved market search.", percent: 100, cached: true }); }
       else { progress(message.jobId, { stage: "market-search", message: "Searching the complete raw market order book…", percent: 20 }); result = await searchRawMarketOrders(message.input); await savePersistedResult("raw-market", key, result); progress(message.jobId, { stage: "market-search", message: "Market search complete.", percent: 100 }); }
     } else if (message.type === "run-regional-filter") {
-      const manifest = await loadCurrentRawMarketManifest("all"); const key = genericCacheKey("regional-filter", message.input, manifest?.id);
+      const manifest = await loadCurrentMarketRevision(); const key = genericCacheKey("regional-filter", message.input, manifest?.id);
       result = await loadPersistedResult("regional-filter", key);
       if (result) { cached = true; progress(message.jobId, { stage: "disk-cache", message: "Loaded saved regional market result.", percent: 100, cached: true }); }
       else { progress(message.jobId, { stage: "regional-filter", message: "Filtering the regional market index…", percent: 20 }); result = await filterRegionalMarket(message.input, { progress: (value) => progress(message.jobId, value) }); await savePersistedResult("regional-filter", key, result); progress(message.jobId, { stage: "regional-filter", message: "Regional market filter complete.", percent: 100 }); }
