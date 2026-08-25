@@ -18,6 +18,7 @@ export const FITTING_PREPARED_CACHE = path.join(STATIC_ROOT, "fitting-dogma-prep
 export const FITTING_CATALOGUE_CACHE = path.join(STATIC_ROOT, "fitting-catalogue-prepared-v1.json.gz");
 export const MARKET_STATIC_PREPARED_CACHE = path.join(STATIC_ROOT, "market-static-prepared-v1.json.gz");
 export const INDUSTRIAL_PREPARED_CACHE = path.join(STATIC_ROOT, "industrial-blueprint-index-v1.json.gz");
+export const WORMHOLE_STATIC_PREPARED_CACHE = path.join(STATIC_ROOT, "wormhole-static-v1.json.gz");
 const SDE_URL =
   "https://developers.eveonline.com/static-data/eve-online-static-data-latest-jsonl.zip";
 const REPACKAGED_URL =
@@ -32,9 +33,20 @@ type CacheFile = {
 type ProcessStaticState = { promoted: boolean; hasArchive: boolean };
 
 let cachePromise: Promise<CacheFile> | undefined;
-let shipsPromise: Promise<Array<{ typeId: number; name: string }>> | undefined;
+export type PublishedShip = {
+  typeId: number;
+  name: string;
+  groupId: number;
+  groupName: string;
+  metaGroupId?: number;
+  metaGroupName?: string;
+  factionId?: number;
+  factionName?: string;
+};
+let shipsPromise: Promise<PublishedShip[]> | undefined;
 let processStaticPromise: Promise<ProcessStaticState> | undefined;
 let refreshPromise: Promise<unknown> | undefined;
+let volumeCacheLockDepth = 0;
 
 const CATEGORY_NAMES: Record<number, string> = {
   6: "Ships",
@@ -96,6 +108,7 @@ async function invalidateStaticDerivedCaches() {
     fs.rm(FITTING_CATALOGUE_CACHE, { force: true }).catch(() => undefined),
     fs.rm(MARKET_STATIC_PREPARED_CACHE, { force: true }).catch(() => undefined),
     fs.rm(INDUSTRIAL_PREPARED_CACHE, { force: true }).catch(() => undefined),
+    fs.rm(WORMHOLE_STATIC_PREPARED_CACHE, { force: true }).catch(() => undefined),
   ]);
 }
 
@@ -187,7 +200,7 @@ export async function stageStaticDataRefreshLowImpact(force = false, aggressive 
           staticRoot: STATIC_ROOT,
           activeArchive: SDE_ARCHIVE,
           stagedArchive: SDE_STAGED_ARCHIVE,
-          partialArchive: SDE_PARTIAL_ARCHIVE,
+          partialArchive: SDE_PARTIAL_ARCHIVE + "." + process.pid,
           statePath: SDE_UPDATE_STATE,
           force,
           aggressive,
@@ -218,11 +231,11 @@ export async function stageStaticDataRefreshLowImpact(force = false, aggressive 
 
 export async function listPublishedShips() {
   if (!shipsPromise)
-    shipsPromise = ensureStaticDataArchive().then(() => new Promise<Array<{ typeId: number; name: string }>>((resolve, reject) => {
+    shipsPromise = ensureStaticDataArchive().then(() => new Promise<PublishedShip[]>((resolve, reject) => {
       const worker = new Worker(path.join(__dirname, "ship-index-worker.js"), {
         workerData: { archive: SDE_ARCHIVE },
       });
-      worker.once("message", (message: { ships?: Array<{ typeId: number; name: string }>; error?: string }) => {
+      worker.once("message", (message: { ships?: PublishedShip[]; error?: string }) => {
         if (message.error) reject(new Error(message.error));
         else resolve(message.ships ?? []);
       });
@@ -278,13 +291,18 @@ export async function itemCategoryIds(typeIds: number[]) {
 }
 
 async function withVolumeCacheLock<T>(work: () => Promise<T>): Promise<T> {
+  // The initial cache build already holds this lock and calls saveCache().
+  // Re-enter in the same worker instead of waiting on our own lock file.
+  if (volumeCacheLockDepth > 0) return work();
   const deadline = Date.now() + 120_000;
   while (true) {
     try {
       const handle = await fs.open(VOLUME_CACHE_LOCK, "wx");
+      volumeCacheLockDepth += 1;
       try {
         return await work();
       } finally {
+        volumeCacheLockDepth = Math.max(0, volumeCacheLockDepth - 1);
         await handle.close().catch(() => undefined);
         await fs.rm(VOLUME_CACHE_LOCK, { force: true }).catch(() => undefined);
       }
@@ -398,11 +416,26 @@ export async function ensureStaticDataArchive() {
 }
 
 async function saveCache(cache: CacheFile) {
-  await fs.mkdir(STATIC_ROOT, { recursive: true });
-  const partial = `${VOLUME_CACHE}.${process.pid}.${threadId}.${Date.now()}.${Math.random().toString(16).slice(2)}.partial`;
-  await fs.writeFile(partial, JSON.stringify(cache), "utf8");
-  await fs.rm(VOLUME_CACHE, { force: true }).catch(() => undefined);
-  await fs.rename(partial, VOLUME_CACHE);
+  await withVolumeCacheLock(async () => {
+    await fs.mkdir(STATIC_ROOT, { recursive: true });
+    const partial = `${VOLUME_CACHE}.${process.pid}.${threadId}.${Date.now()}.${Math.random().toString(16).slice(2)}.partial`;
+    try {
+      await fs.writeFile(partial, JSON.stringify(cache), "utf8");
+      // Rename over the destination where supported; on Windows an existing target
+      // may reject the rename, so fall back to a short remove/rename sequence while
+      // still holding the shared cache lock.
+      try {
+        await fs.rename(partial, VOLUME_CACHE);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "EPERM" && code !== "EACCES") throw error;
+        await fs.rm(VOLUME_CACHE, { force: true });
+        await fs.rename(partial, VOLUME_CACHE);
+      }
+    } finally {
+      await fs.rm(partial, { force: true }).catch(() => undefined);
+    }
+  });
 }
 
 async function fetchJson<T>(url: string): Promise<T> {

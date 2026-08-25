@@ -31,14 +31,11 @@ async function run() {
       break;
     }
     case "full-market-index": {
-      // Reliability baseline: this path is proven on the full 1.5m-order
-      // snapshot. Parallel partitioning remains experimental until its memory
-      // envelope is independently verified for the largest market regions.
       const { buildFullMarketAnalysisIndex } = await import("./raw-market-analysis.js");
       const value = await buildFullMarketAnalysisIndex(undefined, { progress: (progress: any) => parentPort?.postMessage({ type: "progress", task, message: progress.message, percent: progress.percent }) });
-      const { buildRegionalMarketAggregateIndexFromFull } = await import("./regional-market-index.js");
-      const regional = await buildRegionalMarketAggregateIndexFromFull(value, { progress: (progress: any) => parentPort?.postMessage({ type: "progress", task, message: progress.message, percent: progress.percent }) });
-      detail = { orders: value.sourceOrdersInspected, items: value.items.size, regions: value.regionCount, regionalRows: regional.rows.length };
+      const { buildRegionalMarketAggregateIndex } = await import("./regional-market-index.js");
+      const regional = await buildRegionalMarketAggregateIndex({ progress: (progress: any) => parentPort?.postMessage({ type: "progress", task, message: progress.message, percent: progress.percent }) });
+      detail = { orders: value.sourceOrdersInspected, items: value.items.size, regions: value.regionCount, regionalRows: regional.rows.length, source: "shared-prepared" };
       break;
     }
     case "regional-market-index": {

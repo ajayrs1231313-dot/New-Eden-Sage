@@ -1,13 +1,13 @@
 {
   "name": "new-eden-sage",
-  "version": "1.1.4",
+  "version": "1.1.12",
   "private": true,
   "license": "MIT",
   "author": "New Eden Sage contributors",
   "description": "A private, local-first EVE Online assistant.",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite --port 42814 --strictPort\" \"npm:dev:electron\" \"npm:dev:app\"",
+    "dev": "node scripts/dev-ensure.cjs",
     "dev:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "dev:app": "node scripts/electron-dev-watch.cjs",
     "start": "npm run build && electron .",
@@ -18,7 +18,16 @@
     "dist:win": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --win nsis --publish never",
     "dist:linux": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --linux AppImage deb --publish never",
     "verify:release-resources": "node scripts/verify-release-resources.cjs",
-    "fitting:refresh-bundle": "tsc -p tsconfig.electron.json && node scripts/build-fitting-bundle.cjs"
+    "fitting:refresh-bundle": "tsc -p tsconfig.electron.json && node scripts/build-fitting-bundle.cjs",
+    "test:navigation": "tsc -p tsconfig.electron.json && node tests/navigation/run-all.cjs",
+    "dev:stack": "concurrently -k \"vite --port 42814 --strictPort\" \"npm:dev:electron\" \"npm:dev:app\"",
+    "test:system-news": "node --experimental-strip-types tests/system-news/killmail-windows.test.mjs",
+    "test:claude-mcpb": "node --experimental-strip-types tests/claude/mcpb.test.mjs",
+    "test:mcp-guidance": "node --experimental-strip-types tests/mcp/ai-guidance.test.mjs",
+    "test:wormhole": "tsc -p tsconfig.electron.json && node --experimental-strip-types tests/wormhole/run-all.mjs",
+    "test:planetary": "tsc -p tsconfig.electron.json && node tests/planetary/run-all.cjs",
+    "test:progression": "node --experimental-strip-types tests/progression/activity-ship-rules.test.mjs && node --experimental-strip-types tests/progression/fit-cluster-selection.test.mjs",
+    "test:activity-accuracy": "tsc -p tsconfig.electron.json && node tests/progression/activity-readiness-accuracy.test.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

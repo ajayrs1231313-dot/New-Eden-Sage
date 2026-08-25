@@ -1,17 +1,111 @@
 import { bestRawBuyOrdersForTypes } from "./raw-market-analysis";
 import { universeRoute } from "./universe-route-graph";
 import { findRegionalShortages, type RegionalShortageSignal } from "./regional-shortage";
-import { findFullMarketTrades, getHaulerProfiles, type FullTradeRuntime } from "./full-market-trade";
+import { findFullMarketTrades, type FullTradeRuntime } from "./full-market-trade";
+import { analyzeFittingDogma } from "./fitting-dogma";
 
 export type OpportunityRisk = "Low" | "Medium" | "High";
 export type OpportunityKind = "trade" | "asset" | "shortage";
 
 export type OpportunityAnalysisRuntime = FullTradeRuntime & { snapshots: any[] };
 
+function fittingRackFromAssetFlag(flag: unknown) {
+  const value = String(flag ?? "");
+  if (/^HiSlot\d+$/i.test(value)) return "high";
+  if (/^MedSlot\d+$/i.test(value)) return "mid";
+  if (/^LoSlot\d+$/i.test(value)) return "low";
+  if (/^RigSlot\d+$/i.test(value)) return "rig";
+  if (/^SubSystemSlot\d+$/i.test(value)) return "subsystem";
+  return null;
+}
+
+export type CargoCapacityProfile = {
+  id: string;
+  characterId: string;
+  characterName: string;
+  shipItemId: number;
+  shipTypeId: number;
+  shipName: string;
+  quantity: number;
+  systemName: string | null;
+  stationName: string | null;
+  capacityM3: number;
+  fittedItemCount: number;
+  isCurrentShip: boolean;
+  basis: string;
+};
+
+const cargoProfileCache = new Map<string, Promise<CargoCapacityProfile | null>>();
+
+async function cargoProfileForOwnedShip(snapshot: any, ship: any): Promise<CargoCapacityProfile | null> {
+  const characterId = String(snapshot?.characterId ?? "");
+  const characterName = String(snapshot?.character?.name ?? characterId ?? "Character");
+  const shipItemId = Number(ship?.item_id ?? 0);
+  const shipTypeId = Number(ship?.type_id ?? 0);
+  if (!characterId || !shipItemId || !shipTypeId) return null;
+  const assets = Array.isArray(snapshot?.extended?.assets) ? snapshot.extended.assets : [];
+  const fitRows = assets.filter((row: any) => Number(row?.location_id ?? 0) === shipItemId && fittingRackFromAssetFlag(row?.location_flag));
+  const fitSignature = fitRows.map((row: any) => `${row.type_id}:${row.location_flag}`).sort().join("|");
+  const cacheKey = [characterId, String(snapshot?.updatedAt ?? ""), shipItemId, shipTypeId, fitSignature].join(":");
+  let pending = cargoProfileCache.get(cacheKey);
+  if (!pending) {
+    pending = (async () => {
+      const items = fitRows.flatMap((row: any) => {
+        const rack = fittingRackFromAssetFlag(row?.location_flag);
+        const typeId = Number(row?.type_id ?? 0);
+        if (!rack || !typeId) return [];
+        return [{ typeId, quantity: Math.max(1, Number(row?.quantity ?? 1)), rack }];
+      });
+      try {
+        // Critical: use the owning character snapshot here. Hull/transport skill bonuses,
+        // implants and any other character modifiers must never leak across characters.
+        const analysis = await analyzeFittingDogma({ hullTypeId: shipTypeId, items, snapshot });
+        const capacityM3 = Number(analysis?.storage?.cargoCapacityM3 ?? 0);
+        if (!(capacityM3 > 0)) return null;
+        const shipName = String(ship?.item ?? `Type ${shipTypeId}`);
+        const isCurrentShip = shipItemId === Number(snapshot?.ship?.ship_item_id ?? 0);
+        return {
+          id: `${characterId}:${shipItemId}`,
+          characterId,
+          characterName,
+          shipItemId,
+          shipTypeId,
+          shipName,
+          quantity: Math.max(1, Number(ship?.quantity ?? 1)),
+          systemName: ship?.system ? String(ship.system) : null,
+          stationName: ship?.station ? String(ship.station) : null,
+          capacityM3,
+          fittedItemCount: fitRows.length,
+          isCurrentShip,
+          basis: `${characterName}'s ${shipName} - CCP SDE base cargo + this ship's synced fitted modules/rigs + ${characterName}'s skills${isCurrentShip ? " (current ship)" : ""}`,
+        };
+      } catch {
+        return null;
+      }
+    })();
+    cargoProfileCache.set(cacheKey, pending);
+  }
+  return pending;
+}
+
+export async function getOwnedCargoCapacityProfiles(snapshots: any[] = []): Promise<CargoCapacityProfile[]> {
+  const pending: Array<Promise<CargoCapacityProfile | null>> = [];
+  for (const snapshot of snapshots) {
+    const assets = Array.isArray(snapshot?.extended?.assets) ? snapshot.extended.assets : [];
+    for (const ship of assets) {
+      if (Number(ship?.category_id ?? 0) !== 6) continue;
+      pending.push(cargoProfileForOwnedShip(snapshot, ship));
+    }
+  }
+  const profiles = (await Promise.all(pending)).filter((profile): profile is CargoCapacityProfile => Boolean(profile));
+  return profiles.sort((a, b) => Number(b.isCurrentShip) - Number(a.isCurrentShip) || b.capacityM3 - a.capacityM3 || a.characterName.localeCompare(b.characterName) || a.shipName.localeCompare(b.shipName));
+}
+
 export type OpportunityQuery = {
   characterId?: string;
   maxCapital?: number | null;
   cargoCapacityM3?: number | null;
+  cargoProfileId?: string | null;
   maxJumps?: number | null;
   maxMinutes?: number | null;
 };
@@ -105,6 +199,8 @@ export type OpportunityAnalysis = {
   constraints: {
     maxCapital: number | null;
     cargoCapacityM3: number;
+    cargoProfileId: string | null;
+    cargoProfiles: CargoCapacityProfile[];
     maxJumps: number | null;
     maxMinutes: number | null;
     capitalBasis: string;
@@ -446,13 +542,16 @@ export async function analyzeOpportunities(
     : null;
   const wallet = Math.max(0, Number(snapshot?.wallet ?? 0));
   const maxCapital = input.maxCapital == null
-    ? (wallet > 0 ? wallet : null)
+    ? null
     : Math.max(0, Number(input.maxCapital));
   const maxJumps = input.maxJumps == null ? null : Math.max(0, Number(input.maxJumps));
   const maxMinutes = input.maxMinutes == null ? null : Math.max(0, Number(input.maxMinutes));
+  const cargoProfiles = await getOwnedCargoCapacityProfiles(runtime.snapshots ?? []);
+  const requestedProfile = input.cargoProfileId ? cargoProfiles.find((profile) => profile.id === input.cargoProfileId) ?? null : null;
+  const currentProfile = snapshot ? cargoProfiles.find((profile) => profile.characterId === String(snapshot.characterId) && profile.isCurrentShip) ?? null : null;
   const requestedCargo = input.cargoCapacityM3 == null ? null : Math.max(1, Number(input.cargoCapacityM3));
-  const detectedCargo = [...await getHaulerProfiles(snapshot ? [snapshot] : [])].sort((a: any, b: any) => Number(b.capacityM3) - Number(a.capacityM3))[0];
-  const cargoCapacityM3 = requestedCargo ?? Math.max(1, Number(detectedCargo?.capacityM3 ?? 1));
+  const selectedCargoProfile = requestedProfile ?? (input.cargoCapacityM3 == null ? currentProfile : null);
+  const cargoCapacityM3 = selectedCargoProfile?.capacityM3 ?? requestedCargo ?? 30_000;
   const base = await findFullMarketTrades(
     "top1000",
     { maxCapital, cargoCapacityM3, maxJumps, maxMinutes },
@@ -518,14 +617,14 @@ export async function analyzeOpportunities(
     constraints: {
       maxCapital,
       cargoCapacityM3,
+      cargoProfileId: selectedCargoProfile?.id ?? null,
+      cargoProfiles,
       maxJumps,
       maxMinutes,
       capitalBasis: input.maxCapital == null
-        ? (wallet > 0 ? `${snapshot.character?.name ?? "Character"} wallet` : "No wallet limit")
+        ? "No capital limit; use the Market Scanner maximum-capital filter when needed"
         : "Custom deployable capital",
-      cargoBasis: input.cargoCapacityM3 == null
-        ? (detectedCargo?.basis ?? "No owned ship cargo detected; using 1 m3 until a ship asset is synced")
-        : "Custom cargo capacity",
+      cargoBasis: selectedCargoProfile?.basis ?? "Custom cargo capacity",
     },
     market: {
       opportunities: eligibleTrades,

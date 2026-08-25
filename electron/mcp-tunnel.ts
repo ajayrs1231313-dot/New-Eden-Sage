@@ -47,15 +47,39 @@ async function runClient(args: string[], runtimeKey?: string) {
   });
 }
 
+async function resolveMcpNodeRuntime() {
+  const explicit = process.env.NEW_EDEN_SAGE_MCP_NODE?.trim();
+  const pathCandidates = (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((directory) => path.join(directory.replace(/^"|"$/g, ""), "node.exe"));
+  const candidates = [
+    explicit,
+    process.env.ProgramFiles ? path.join(process.env.ProgramFiles, "nodejs", "node.exe") : undefined,
+    process.env["ProgramFiles(x86)"] ? path.join(process.env["ProgramFiles(x86)"]!, "nodejs", "node.exe") : undefined,
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs", "nodejs", "node.exe") : undefined,
+    ...pathCandidates,
+  ].filter((value): value is string => Boolean(value));
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch { /* Try the next Node runtime. */ }
+  }
+  return null;
+}
+
 async function writeLauncher() {
   const root = runtimeRoot();
   await fs.mkdir(root, { recursive: true });
   const launcher = path.join(root, "sage-mcp.cmd");
-  const executable = app.getPath("exe");
+  const nodeRuntime = await resolveMcpNodeRuntime();
+  const executable = nodeRuntime ?? app.getPath("exe");
   const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
+  const runtimeEnv = nodeRuntime ? "" : "set ELECTRON_RUN_AS_NODE=1\r\n";
   await fs.writeFile(
     launcher,
-    `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${executable}" "${script}"\r\n`,
+    `@echo off\r\n${runtimeEnv}"${executable}" "${script}"\r\n`,
     { encoding: "utf8", mode: 0o600 },
   );
   return launcher.replaceAll("\\", "/");
@@ -110,15 +134,26 @@ export async function startMcpTunnel() {
   yaml = yaml.replace(/# url_file:.*$/m, `url_file: "${healthFile.replaceAll("\\", "/")}"`);
   await fs.writeFile(profile, yaml, { encoding: "utf8", mode: 0o600 });
   const key = decryptRuntimeKey(config);
+  // spawn() duplicates/inherits the supplied descriptors for the child. Keep the
+  // parent FileHandle objects alive only until spawn returns, then close them
+  // explicitly so Electron never relies on GC to release descriptors.
   const stdout = await fs.open(path.join(root, "tunnel.stdout.log"), "a");
-  const stderr = await fs.open(path.join(root, "tunnel.stderr.log"), "a");
-  tunnelProcess = spawn(tunnelExecutable(), ["run", "--profile-dir", profileDir, "--profile", "new-eden-sage"], {
-    detached: true,
-    windowsHide: true,
-    stdio: ["ignore", stdout.fd, stderr.fd],
-    env: { ...process.env, CONTROL_PLANE_API_KEY: key },
-  });
-  tunnelProcess.unref();
+  try {
+    const stderr = await fs.open(path.join(root, "tunnel.stderr.log"), "a");
+    try {
+      tunnelProcess = spawn(tunnelExecutable(), ["run", "--profile-dir", profileDir, "--profile", "new-eden-sage"], {
+        detached: true,
+        windowsHide: true,
+        stdio: ["ignore", stdout.fd, stderr.fd],
+        env: { ...process.env, CONTROL_PLANE_API_KEY: key },
+      });
+      tunnelProcess.unref();
+    } finally {
+      await stderr.close().catch(() => undefined);
+    }
+  } finally {
+    await stdout.close().catch(() => undefined);
+  }
   await new Promise((resolve) => setTimeout(resolve, 1200));
   return getMcpTunnelStatus();
 }

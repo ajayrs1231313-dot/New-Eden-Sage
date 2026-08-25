@@ -1,5 +1,6 @@
 import { loadRecentRawMarketManifests } from "./raw-market-storage";
-import { buildFullMarketAnalysisIndex, type FullMarketOrder } from "./raw-market-analysis";
+import { loadSharedPreparedTradeDataset } from "./shared-market-data";
+import { buildFullMarketAnalysisIndex, loadFullMarketMarginSnapshot, type FullMarketOrder } from "./raw-market-analysis";
 import { universeRoute } from "./universe-route-graph";
 import { itemCategoryIds } from "./type-volumes";
 import { availableParallelism } from "node:os";
@@ -74,11 +75,6 @@ export async function getHaulerProfiles(snapshots: any[] = []) {
   return profiles.filter((profile): profile is NonNullable<typeof profile> => Boolean(profile));
 }
 
-function marketMargin(item?: { buys: FullMarketOrder[]; sells: FullMarketOrder[] }) {
-  const buy = item?.buys[0];
-  const sell = item?.sells[0];
-  return buy && sell ? buy.price - sell.price : null;
-}
 
 function pairKey(sell: FullMarketOrder, buy: FullMarketOrder) {
   return `${sell.orderId}:${buy.orderId}`;
@@ -107,11 +103,9 @@ function securityBand(minimumSecurityStatus: number) {
   return "null" as const;
 }
 
-async function buildCandidatesInParallel(market: any, previousMarket: any, cargoCapacity: number, capitalLimit: number, runtime: FullTradeRuntime) {
+async function buildCandidatesInParallel(market: any, previousMargins: Record<string, number | null>, cargoCapacity: number, capitalLimit: number, runtime: FullTradeRuntime) {
   const entries = [...market.items] as Array<[number, any]>;
   const workers = Math.max(1, Math.min(6, availableParallelism(), entries.length));
-  const previousMargins: Record<string, number | null> = {};
-  if (previousMarket) for (const [typeId, item] of previousMarket.items) previousMargins[String(typeId)] = marketMargin(item);
   const chunkSize = Math.ceil(entries.length / workers);
   let completed = 0;
   const results = await Promise.all(Array.from({ length: workers }, (_, index) => new Promise<{ prelim: any[]; pairCount: number }>((resolve, reject) => {
@@ -153,12 +147,9 @@ export async function findFullMarketTrades(
   constraints: FullTradeSearchConstraints = {},
   runtime: FullTradeRuntime = {},
 ) {
-  const recent = await loadRecentRawMarketManifests("all", 2);
-  const currentManifest = recent[0] ?? null;
-  if (!currentManifest)
-    throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
-  const market = await buildFullMarketAnalysisIndex(currentManifest, runtime);
-  const previousMarket = recent[1] ? await buildFullMarketAnalysisIndex(recent[1], { shouldCancel: runtime.shouldCancel }) : null;
+  const preparedStartedAt = Date.now();
+  const prepared = await loadSharedPreparedTradeDataset();
+  runtime.progress?.({ stage: "prepared-market", message: "Loading server-prepared public market intelligence...", percent: 90, cached: true });
   const haulers = await getHaulerProfiles(runtime.snapshots ?? []);
   const maxHauler = [...haulers].sort((a, b) => b.capacityM3 - a.capacityM3)[0];
   const analysisHauler = maxHauler ?? {
@@ -179,125 +170,98 @@ export async function findFullMarketTrades(
       : Math.max(0, Number(constraints.maxCapital));
   const maxJumps = constraints.maxJumps == null ? null : Math.max(0, Number(constraints.maxJumps));
   const maxMinutes = constraints.maxMinutes == null ? null : Math.max(0, Number(constraints.maxMinutes));
-  runtime.progress?.({ stage: "candidates", message: "Building executable market candidates across all available cores…", completed: 0, total: Math.min(6, availableParallelism()), percent: 0 });
-  const { prelim, pairCount } = await buildCandidatesInParallel(market, previousMarket, cargoCapacity, capitalLimit, runtime);
 
-  const routesToCheck = prelim
-    .sort((a, b) => b.profit - a.profit)
-    .slice(0, mode === "top1000" ? 30_000 : 8_000);
-  runtime.progress?.({ stage: "routes", message: `Checking ${routesToCheck.length.toLocaleString()} candidate routes…`, completed: 0, total: routesToCheck.length, percent: 0 });
-  let routesCompleted = 0;
-  const checked = await mapLimited(
-    routesToCheck,
-    24,
-    async (trade) => {
-      if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
-      const route = await universeRoute(trade.sell.systemId, trade.buy.systemId);
-      const jumps = route.jumps;
-      const estimatedMinutes = Math.max(8, Math.round(8 + Math.max(0, jumps) * 2));
-      const availableUnits = Math.min(trade.sell.volumeRemain, trade.buy.volumeRemain);
-      const cargoUnits = trade.itemVolumeM3 > 0 ? Math.floor(cargoCapacity / trade.itemVolumeM3) : availableUnits;
-      const capitalUnits = Math.floor(capitalLimit / trade.sell.price);
-      const units = Math.min(availableUnits, cargoUnits, capitalUnits);
-      const profit = (trade.buy.price - trade.sell.price) * units;
-      const investment = trade.sell.price * units;
-      const margin = trade.buy.price - trade.sell.price;
-      const marginPercent = trade.sell.price > 0 ? (margin / trade.sell.price) * 100 : 0;
-      const iskPerM3 = trade.itemVolumeM3 > 0 ? margin / trade.itemVolumeM3 : profit > 0 ? Infinity : 0;
-      const marginWidenedBy = trade.previousMargin == null ? null : margin - trade.previousMargin;
-      const issuedAt = Date.parse(trade.buy.issued ?? "");
-      const ageDays = Number.isFinite(issuedAt) ? Math.max(0, (Date.now() - issuedAt) / 86_400_000) : 30;
-      const minimumVolumeAdjustment = trade.buy.minVolume <= units ? 10 : -20;
-      const fillScore = Math.round(
-        Math.max(
-          0,
-          Math.min(
-            100,
-            45 +
-              Math.min(25, Math.log10(Math.max(1, availableUnits)) * 6) +
-              Math.max(0, 20 - ageDays) +
-              minimumVolumeAdjustment,
-          ),
-        ),
-      );
-      const iskPerJump = profit / Math.max(1, jumps);
-      const routeSecurity = securityBand(route.minimumSecurityStatus);
-      const risk =
-        routeSecurity === "null" || fillScore < 55 || marginPercent > 100 || units < 2
-          ? "High"
-          : routeSecurity === "low" || fillScore < 75 || jumps > 12 || marginPercent > 45
-            ? "Medium"
-            : "Low";
-      routesCompleted += 1;
-      if (routesCompleted % 100 === 0 || routesCompleted === routesToCheck.length) {
-        runtime.progress?.({ stage: "routes", message: `Checking routes: ${routesCompleted.toLocaleString()}/${routesToCheck.length.toLocaleString()}`, completed: routesCompleted, total: routesToCheck.length, percent: Math.round((routesCompleted / Math.max(1, routesToCheck.length)) * 100) });
-      }
-      return {
-        ...trade,
-        units,
-        profit,
-        investment,
-        marginPercent,
-        iskPerM3,
-        fillScore,
-        iskPerJump,
-        risk,
-        routeSecurity,
-        minimumRouteSecurityStatus: route.minimumSecurityStatus,
-        marginWidenedBy,
-        volumeM3: trade.itemVolumeM3,
-        cargoM3: units * trade.itemVolumeM3,
-        jumps,
-        estimatedMinutes,
-        hauler:
-          mode === "viator"
-            ? {
-                characterId: "viator-assumption",
-                character: "Viator",
-                capacityM3: 10_000,
-                basis: "10,000 m3 fitted-cargo assumption",
-              }
-            : analysisHauler,
-      };
-    },
-  );
+  if (!prepared) {
+    return {
+      haulers,
+      mode,
+      opportunities: [],
+      diagnostics: {
+        source: "shared-server-prepared-intelligence-unavailable",
+        rawSnapshotId: null,
+        sourceOrders: 0,
+        sourceOrdersInspected: 0,
+        sourceRegions: 0,
+        sourceItems: 0,
+        candidateDepthPerSide: 0,
+        viablePairs: 0,
+        routeChecks: 0,
+        reachableRoutes: 0,
+        profitableRoutes: 0,
+        appliedMaxJumps: maxJumps,
+        appliedMaxMinutes: maxMinutes,
+        appliedCapitalLimit: Number.isFinite(capitalLimit) ? capitalLimit : null,
+        appliedCargoCapacityM3: cargoCapacity,
+        datasetCreatedAt: null,
+        localFilterMs: Date.now() - preparedStartedAt,
+      },
+      message: "The current shared generation does not include prepared trade intelligence yet. Sage will not rebuild the public market locally.",
+    };
+  }
 
-  runtime.progress?.({ stage: "ranking", message: "Ranking routes against your limits…", percent: 95 });
-  const valid = checked.filter((trade) => {
+  const valid = (prepared.opportunities as any[]).map((trade) => {
+    const availableUnits = Math.max(0, Math.min(Number(trade.availableUnits ?? trade.sell?.volumeRemain ?? 0), Number(trade.buy?.volumeRemain ?? 0)));
+    const sellPrice = Number(trade.sell?.price ?? 0);
+    const buyPrice = Number(trade.buy?.price ?? 0);
+    const itemVolumeM3 = Math.max(0, Number(trade.itemVolumeM3 ?? 0));
+    const cargoUnits = itemVolumeM3 > 0 ? Math.floor(cargoCapacity / itemVolumeM3) : availableUnits;
+    const capitalUnits = Number.isFinite(capitalLimit) ? Math.floor(capitalLimit / Math.max(0.000001, sellPrice)) : availableUnits;
+    const units = Math.max(0, Math.min(availableUnits, cargoUnits, capitalUnits));
+    const profit = (buyPrice - sellPrice) * units;
+    const investment = sellPrice * units;
+    const marginPercent = sellPrice > 0 ? ((buyPrice - sellPrice) / sellPrice) * 100 : 0;
+    const iskPerM3 = itemVolumeM3 > 0 ? (buyPrice - sellPrice) / itemVolumeM3 : profit > 0 ? Infinity : 0;
+    const jumps = Number(trade.jumps ?? 999);
+    return {
+      ...trade,
+      units,
+      profit,
+      investment,
+      marginPercent,
+      iskPerM3,
+      iskPerJump: profit / Math.max(1, jumps),
+      cargoM3: units * itemVolumeM3,
+      volumeM3: itemVolumeM3,
+      hauler: mode === "viator"
+        ? { characterId: "viator-assumption", character: "Viator", capacityM3: 10_000, basis: "10,000 m3 fitted-cargo assumption" }
+        : analysisHauler,
+    };
+  }).filter((trade) => {
     if (trade.jumps >= 999 || trade.units <= 0 || trade.profit <= 0) return false;
+    if (Number(trade.buy?.minVolume ?? 1) > trade.units) return false;
     if (maxJumps != null && trade.jumps > maxJumps) return false;
-    if (maxMinutes != null && trade.estimatedMinutes > maxMinutes) return false;
+    if (maxMinutes != null && Number(trade.estimatedMinutes ?? 0) > maxMinutes) return false;
     if (mode === "under10" && trade.jumps > 10) return false;
-    if (mode === "widened" && (trade.marginWidenedBy ?? 0) <= 0) return false;
+    if (mode === "widened") return false;
     return true;
   });
-  runtime.progress?.({ stage: "ranking", message: `${valid.length.toLocaleString()} routes satisfy the current limits.`, percent: 100 });
+
+  runtime.progress?.({ stage: "ranking", message: "Applying character limits to server-prepared opportunities...", percent: 100, cached: true });
+  const ranked = rankTrades(valid, mode);
   return {
     haulers,
     mode,
-    opportunities: rankTrades(valid, mode).slice(0, mode === "top1000" ? 1000 : 20),
+    opportunities: mode === "top1000" ? ranked : ranked.slice(0, 20),
     diagnostics: {
-      source: "complete raw all-region public order book",
-      rawSnapshotId: market.snapshotId,
-      sourceOrders: market.orderCount,
-      sourceOrdersInspected: market.sourceOrdersInspected,
-      sourceRegions: market.regionCount,
-      sourceItems: market.items.size,
-      candidateDepthPerSide: market.candidateDepthPerSide,
-      viablePairs: pairCount,
-      routeChecks: checked.length,
-      reachableRoutes: checked.filter((trade) => trade.jumps < 999).length,
+      source: "server-prepared public market intelligence",
+      rawSnapshotId: prepared.snapshotId,
+      sourceOrders: 0,
+      sourceOrdersInspected: 0,
+      sourceRegions: 0,
+      sourceItems: 0,
+      candidateDepthPerSide: 0,
+      viablePairs: prepared.viablePairs,
+      routeChecks: prepared.routeChecks,
+      reachableRoutes: prepared.opportunities.length,
       profitableRoutes: valid.length,
       appliedMaxJumps: maxJumps,
       appliedMaxMinutes: maxMinutes,
       appliedCapitalLimit: Number.isFinite(capitalLimit) ? capitalLimit : null,
       appliedCargoCapacityM3: cargoCapacity,
-      datasetCreatedAt: market.createdAt,
+      datasetCreatedAt: prepared.createdAt,
+      localFilterMs: Date.now() - preparedStartedAt,
     },
-    message:
-      mode === "widened" && !previousMarket
-        ? "Margin widening needs two complete raw all-region market snapshots. Run another full refresh later, then scan again."
-        : undefined,
+    message: mode === "widened" ? "Margin-widening history is not rebuilt on the desktop; the server-prepared current market remains available in other modes." : undefined,
   };
 }
 

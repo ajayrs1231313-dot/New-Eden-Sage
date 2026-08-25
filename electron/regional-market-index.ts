@@ -16,6 +16,7 @@ import {
 import { getMarketSystemIndex, loadMarketWorkerLookups, prepareMarketWorkerLookups } from "./market-static-index";
 import type { MarketOrder } from "./market";
 import type { FullMarketAnalysisIndex, FullMarketBandMetrics } from "./raw-market-analysis";
+import { loadSharedRegionalMarketAggregateIndex } from "./shared-market-data";
 
 const gunzipAsync = promisify(gunzip);
 
@@ -51,6 +52,7 @@ export type RegionalMarketAggregateIndex = {
   orderCount: number;
   regionCount: number;
   rows: RegionalMarketAggregateRow[];
+  rowsByType: Map<number, RegionalMarketAggregateRow[]>;
   cheapestSellByType: Map<number, Record<RegionalMarketSecurityBand, CheapestSell>>;
 };
 
@@ -182,6 +184,16 @@ function decodeRow(values: unknown[], regionNames: Map<number, string>): Regiona
   };
 }
 
+function buildRowsByType(rows: RegionalMarketAggregateRow[]) {
+  const result = new Map<number, RegionalMarketAggregateRow[]>();
+  for (const row of rows) {
+    const list = result.get(row.typeId);
+    if (list) list.push(row);
+    else result.set(row.typeId, [row]);
+  }
+  return result;
+}
+
 function buildCheapestSellMap(rows: RegionalMarketAggregateRow[]) {
   const result = new Map<number, Record<RegionalMarketSecurityBand, CheapestSell>>();
   for (const row of rows) {
@@ -251,6 +263,7 @@ export async function buildRegionalMarketAggregateIndexFromFull(
     orderCount: full.orderCount,
     regionCount: full.regionCount,
     rows,
+    rowsByType: buildRowsByType(rows),
     cheapestSellByType: buildCheapestSellMap(rows),
   };
   currentCache = { snapshotId: full.snapshotId, value };
@@ -307,6 +320,7 @@ async function loadPersisted(snapshot: RawMarketSnapshot): Promise<RegionalMarke
     orderCount: snapshot.orderCount,
     regionCount: snapshot.regionCount,
     rows,
+    rowsByType: buildRowsByType(rows),
     cheapestSellByType: buildCheapestSellMap(rows),
   };
 }
@@ -346,6 +360,13 @@ export async function buildRegionalMarketAggregateIndex(
   runtime: RegionalMarketIndexRuntime = {},
   workerCount = 1,
 ): Promise<RegionalMarketAggregateIndex> {
+  if (process.env.NEW_EDEN_SAGE_DISABLE_SHARED_MARKET !== "1") {
+    const shared = await loadSharedRegionalMarketAggregateIndex();
+    if (!shared) throw new Error("The shared regional generation is unavailable. Desktop regional reconstruction is disabled.");
+    currentCache = { snapshotId: shared.snapshotId, value: shared };
+    runtime.progress?.({ stage: "regional-index", message: "Loaded the validated shared regional market generation.", completed: shared.regionCount, total: shared.regionCount, percent: 100, cached: true });
+    return shared;
+  }
   const manifest = await loadCurrentRawMarketManifest("all");
   if (!manifest?.complete)
     throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
@@ -398,6 +419,7 @@ export async function buildRegionalMarketAggregateIndex(
     orderCount: manifest.orderCount,
     regionCount: manifest.regionCount,
     rows,
+    rowsByType: buildRowsByType(rows),
     cheapestSellByType: buildCheapestSellMap(rows),
   };
   currentCache = { snapshotId: manifest.id, value };

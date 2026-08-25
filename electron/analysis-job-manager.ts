@@ -61,6 +61,13 @@ function workerPath() {
   return path.join(__dirname, "analysis-worker.js");
 }
 
+function workerHeapLimitMb(lane: AnalysisLane) {
+  // Market analysis can legitimately build large indexes, but an unbounded
+  // worker must never be allowed to consume the whole Electron process.
+  if (lane === "market" || lane === "raw-query" || lane === "regional-query") return 1024;
+  return 512;
+}
+
 function analysisError(message: string, code: string) {
   const error = new Error(message) as Error & { code?: string };
   error.code = code;
@@ -151,6 +158,10 @@ function ensureWorker(lane: AnalysisLane) {
       ...process.env,
       NEW_EDEN_SAGE_USER_DATA: app.getPath("userData"),
     },
+    resourceLimits: {
+      maxOldGenerationSizeMb: workerHeapLimitMb(lane),
+      maxYoungGenerationSizeMb: 64,
+    },
   });
   state.worker = next;
   state.lastActivityAt = Date.now();
@@ -197,10 +208,35 @@ export function analysisStatus() {
   }));
 }
 
-async function runJob(kind: AnalysisKind, payload: Record<string, unknown>, onProgress?: (progress: AnalysisProgress) => void) {
+type RunJobOptions = {
+  /** Read-only cache probes must never interrupt real analysis work. */
+  skipWhenBusy?: boolean;
+};
+
+async function waitForLaneIdle(lane: AnalysisLane, timeoutMs = 15 * 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (lanes[lane].active) {
+    if (disposed) throw analysisError("Analysis service is shutting down.", "ANALYSIS_SHUTDOWN");
+    if (Date.now() >= deadline) throw analysisError("Prepared intelligence lookup waited too long for the active analysis lane.", "ANALYSIS_PEEK_TIMEOUT");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+async function runJob(
+  kind: AnalysisKind,
+  payload: Record<string, unknown>,
+  onProgress?: (progress: AnalysisProgress) => void,
+  options: RunJobOptions = {},
+) {
   const lane = laneFor(kind);
   const state = lanes[lane];
-  if (state.active) await cancelLane(lane, "Replaced by a newer analysis request.");
+  if (state.active) {
+    if (options.skipWhenBusy) {
+      await waitForLaneIdle(lane);
+      return runJob(kind, payload, onProgress, options);
+    }
+    await cancelLane(lane, "Replaced by a newer analysis request.");
+  }
   const jobId = randomUUID();
   const startedAt = new Date().toISOString();
   const target = ensureWorker(lane);
@@ -236,6 +272,18 @@ export function runPveLocationAnalysis(input: PveLocationQuery, snapshot: any, c
   return runJob("pve-location", { type: "run-pve-location", input, snapshot, cloneState }, onProgress);
 }
 
+export function loadPreparedOpportunityAnalysis(input: OpportunityQuery, snapshots: any[]) {
+  return runJob("opportunity", { type: "peek-opportunity", input, snapshots }, undefined, { skipWhenBusy: true });
+}
+
+export function loadPreparedCapabilityAnalysis(snapshot: any, cloneState: CloneState) {
+  return runJob("capability", { type: "peek-capability", snapshot, cloneState }, undefined, { skipWhenBusy: true });
+}
+
+export function loadPreparedPveLocationAnalysis(input: PveLocationQuery, snapshot: any, cloneState: CloneState) {
+  return runJob("pve-location", { type: "peek-pve-location", input, snapshot, cloneState }, undefined, { skipWhenBusy: true });
+}
+
 export async function disposeAnalysisWorker() {
   disposed = true;
   for (const lane of Object.keys(lanes) as AnalysisLane[]) stopWatchdog(lane);
@@ -264,13 +312,22 @@ export async function stopAnalysisWorkersForExclusiveTask() {
   }
 }
 
+export async function releaseIdleAnalysisWorkers(targetLanes?: AnalysisLane[]) {
+  const selected = targetLanes ?? (Object.keys(lanes) as AnalysisLane[]);
+  let released = 0;
+  for (const lane of selected) {
+    const state = lanes[lane];
+    if (state.active || !state.worker) continue;
+    stopWatchdog(lane);
+    const currentWorker = state.worker;
+    state.worker = null;
+    await currentWorker.terminate().catch(() => undefined);
+    released += 1;
+  }
+  return released;
+}
+
 /** Release the large market worker after its prepared result has been persisted. */
 export async function releaseIdleMarketAnalysisWorker() {
-  const state = lanes.market;
-  if (state.active || !state.worker) return false;
-  stopWatchdog("market");
-  const currentWorker = state.worker;
-  state.worker = null;
-  await currentWorker.terminate().catch(() => undefined);
-  return true;
+  return (await releaseIdleAnalysisWorkers(["market"])) > 0;
 }

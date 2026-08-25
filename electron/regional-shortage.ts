@@ -1,5 +1,7 @@
 import { buildFullMarketAnalysisIndex, type FullMarketRegionMetrics, type RawMarketAnalysisRuntime } from "./raw-market-analysis";
 import { universeRoute } from "./universe-route-graph";
+import { loadSharedPreparedShortageDataset } from "./shared-market-data";
+import { logEvent } from "./logger";
 
 export type RegionalShortageSignal = {
   id: string;
@@ -69,110 +71,28 @@ export async function findRegionalShortages(
   query: RegionalShortageQuery = {},
   runtime: RawMarketAnalysisRuntime = {},
 ): Promise<RegionalShortageSignal[]> {
-  const index = await buildFullMarketAnalysisIndex(undefined, runtime);
-  runtime.progress?.({ stage: "regional-shortages", message: "Finding regional shortages and price gaps…", percent: 92 });
-  const candidates: Array<Omit<RegionalShortageSignal, "jumpsFromCharacter" | "estimatedMinutes" | "risk"> & { targetSystemId: number }> = [];
-  // A full raw snapshot can yield millions of intermediate scarcity/premium
-  // combinations. Only the strongest signals are route-ranked, so bound this
-  // buffer instead of allowing the worker to consume gigabytes of memory.
-  const candidateBufferLimit = 5_000;
-  const candidateRetention = 2_500;
-
-  function retainStrongestCandidates() {
-    if (candidates.length < candidateBufferLimit) return;
-    candidates.sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore);
-    candidates.length = candidateRetention;
+  const startedAt = Date.now();
+  const prepared = await loadSharedPreparedShortageDataset();
+  if (!prepared) {
+    runtime.progress?.({ stage: "regional-shortages", message: "Server-prepared shortage intelligence is not available in this generation.", percent: 100, cached: true });
+    return [];
   }
 
-  let processed = 0;
-  const totalItems = Math.max(1, index.items.size);
-  for (const item of index.items.values()) {
-    processed += 1;
-    if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
-    if (processed % 1000 === 0) {
-      runtime.progress?.({
-        stage: "regional-shortages",
-        message: `Checking regional shortages: ${processed.toLocaleString("en-GB")} / ${totalItems.toLocaleString("en-GB")} items`,
-        completed: processed,
-        total: totalItems,
-        percent: 92 + Math.round((processed / totalItems) * 4),
-      });
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    const regions = Object.values(item.regions ?? {}).filter((region) => region.bestSell != null && region.sellOrders > 0);
-    if (!regions.length) continue;
-    const source = regions.sort((a, b) => (a.bestSell ?? Infinity) - (b.bestSell ?? Infinity))[0];
-    if (!(source.bestSell! > 0) || !source.bestSellSystemId) continue;
-    const allRegions = Object.values(item.regions ?? {});
-    for (const target of allRegions) {
-      if (target.regionId === source.regionId) continue;
-      if (target.buyOrders <= 0 && target.sellOrders <= 0) continue;
-      const premium = target.bestSell == null ? null : ((target.bestSell - source.bestSell!) / source.bestSell!) * 100;
-      const pressure = target.buyVolume / Math.max(1, target.sellVolume);
-      const supplyGap = target.sellOrders === 0 && target.buyOrders > 0;
-      const thinSupply = target.sellOrders <= 3 && target.buyOrders > 0 && pressure >= 1.5;
-      const priceGap = premium != null && premium >= 15;
-      if (!supplyGap && !thinSupply && !priceGap) continue;
-      const targetSystemId = target.bestBuySystemId ?? target.bestSellSystemId;
-      if (!targetSystemId) continue;
-      const executableMargin = target.bestBuy != null && target.bestBuy > source.bestSell!
-        ? ((target.bestBuy - source.bestSell!) / source.bestSell!) * 100
-        : null;
-      const confidence = depthConfidence(source, target);
-      const score = preliminaryScore({ premium, pressure, supplyGap, target, executableMargin });
-      candidates.push({
-        id: `shortage:${item.typeId}:${target.regionId}`,
-        typeId: item.typeId,
-        item: item.typeName,
-        category: item.categoryName,
-        itemVolumeM3: item.itemVolumeM3,
-        target,
-        source,
-        sourcePrice: source.bestSell!,
-        targetSellPrice: target.bestSell,
-        targetBuyPrice: target.bestBuy,
-        regionalPremiumPercent: premium,
-        executableMarginPercent: executableMargin,
-        demandPressure: pressure,
-        supplyGap,
-        score,
-        confidenceScore: confidence,
-        targetSystemId,
-        reasons: [
-          supplyGap
-            ? `${target.regionName} has active public buy demand but no retained public sell supply for this item.`
-            : `${target.regionName}'s cheapest public sell is ${premium!.toFixed(1)}% above the cheapest regional source price.`,
-          `${target.buyOrders.toLocaleString("en-GB")} buy orders / ${target.sellOrders.toLocaleString("en-GB")} sell orders with ${target.buyVolume.toLocaleString("en-GB")} wanted units versus ${target.sellVolume.toLocaleString("en-GB")} listed units.`,
-          executableMargin == null
-            ? "The signal shows regional scarcity/price pressure, not a guaranteed immediate buyer above the source price."
-            : `The best regional buyer is currently ${executableMargin.toFixed(1)}% above the cheapest source-region seller before taxes, fees and hauling costs.`,
-        ],
-      });
-      retainStrongestCandidates();
-    }
-  }
-
+  runtime.progress?.({ stage: "regional-shortages", message: "Applying character limits to server-prepared shortage signals…", percent: 96, cached: true });
   const maxJumps = query.maxJumps == null ? null : Math.max(0, Number(query.maxJumps));
   const maxMinutes = query.maxMinutes == null ? null : Math.max(0, Number(query.maxMinutes));
   const origin = Number(query.originSystemId ?? 0);
-  const preselected = candidates.sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore).slice(0, 400);
+  const limit = Math.max(10, Math.min(100, Number(query.limit ?? 50)));
+  const candidates = (prepared.signals as any[]).slice(0, Math.max(100, limit * 3));
   const results: RegionalShortageSignal[] = [];
-  for (let candidateIndex = 0; candidateIndex < preselected.length; candidateIndex += 1) {
-    const candidate = preselected[candidateIndex];
-    if (candidateIndex % 25 === 0) {
-      runtime.progress?.({
-        stage: "regional-shortage-routes",
-        message: `Checking routes for the strongest regional signals: ${candidateIndex + 1} / ${preselected.length}`,
-        completed: candidateIndex + 1,
-        total: preselected.length,
-        percent: 96 + Math.round((candidateIndex / Math.max(1, preselected.length)) * 3),
-      });
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
+    const candidate = candidates[index];
     let jumps = 0;
-    let minSecurity = 1;
+    let minSecurity = Number(candidate.minimumRouteSecurityStatus ?? 1);
     if (origin) {
-      const route = await universeRoute(origin, candidate.targetSystemId);
+      const route = await universeRoute(origin, Number(candidate.targetSystemId ?? candidate.target?.bestBuySystemId ?? candidate.target?.bestSellSystemId ?? 0));
       if (route.jumps >= 999) continue;
       jumps = route.jumps;
       minSecurity = route.minimumSecurityStatus;
@@ -181,18 +101,35 @@ export async function findRegionalShortages(
     if (maxJumps != null && jumps > maxJumps) continue;
     if (maxMinutes != null && estimatedMinutes > maxMinutes) continue;
     const travelPenalty = origin ? Math.min(30, jumps) : 0;
-    const score = clamp(candidate.score - travelPenalty * 0.7);
-    const { targetSystemId: _targetSystemId, ...rest } = candidate;
     results.push({
-      ...rest,
-      score,
+      id: String(candidate.id),
+      typeId: Number(candidate.typeId),
+      item: String(candidate.item),
+      category: String(candidate.category ?? "Other"),
+      itemVolumeM3: Number(candidate.itemVolumeM3 ?? 0),
+      target: candidate.target,
+      source: candidate.source,
+      sourcePrice: Number(candidate.sourcePrice ?? 0),
+      targetSellPrice: candidate.targetSellPrice == null ? null : Number(candidate.targetSellPrice),
+      targetBuyPrice: candidate.targetBuyPrice == null ? null : Number(candidate.targetBuyPrice),
+      regionalPremiumPercent: candidate.regionalPremiumPercent == null ? null : Number(candidate.regionalPremiumPercent),
+      executableMarginPercent: candidate.executableMarginPercent == null ? null : Number(candidate.executableMarginPercent),
+      demandPressure: Number(candidate.demandPressure ?? 0),
+      supplyGap: Boolean(candidate.supplyGap),
+      score: clamp(Number(candidate.score ?? 0) - travelPenalty * 0.7),
+      confidenceScore: clamp(Number(candidate.confidenceScore ?? 0)),
       risk: riskFromRoute(minSecurity),
       jumpsFromCharacter: jumps,
       estimatedMinutes,
-      reasons: [...candidate.reasons, origin ? `${jumps} jumps from the selected character to the target market area.` : "No character origin was supplied, so travel was not included in the score."],
+      reasons: [
+        ...(Array.isArray(candidate.reasons) ? candidate.reasons.map(String) : []),
+        origin ? `${jumps} jumps from the selected character to the target market area.` : `Server-prepared source-to-target route: ${Number(candidate.sourceToTargetJumps ?? 0)} jumps.`,
+      ],
     });
+    if (results.length >= limit && index >= limit) break;
   }
-  return results
-    .sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore)
-    .slice(0, Math.max(10, Math.min(100, Number(query.limit ?? 50))));
+
+  const ranked = results.sort((a, b) => b.score - a.score || b.confidenceScore - a.confidenceScore).slice(0, limit);
+  void logEvent("info", "shared_market.local_shortage_filter_ms", { durationMs: Date.now() - startedAt, generation: prepared.snapshotId, candidates: candidates.length, returned: ranked.length });
+  return ranked;
 }

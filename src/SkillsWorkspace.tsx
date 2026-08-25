@@ -17,6 +17,8 @@ type Props = {
   snapshot?: CharacterSnapshot;
   cloneState?: CloneState;
   confirmationRequired?: boolean;
+  activeTab?: SkillsTab;
+  onTabChange?(tab: SkillsTab): void;
   initialHullTypeId?: number;
   initialFitIntent?: FitResolutionIntent;
 };
@@ -33,15 +35,17 @@ function duration(seconds: number | null) {
   return `${Math.floor(seconds / 86400)}d ${Math.ceil((seconds % 86400) / 3600)}h`;
 }
 
-export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, initialHullTypeId, initialFitIntent }: Props) {
-  const [tab, setTab] = useState<SkillsTab>(initialHullTypeId ? "planner" : "activity-planner");
+export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, activeTab, onTabChange, initialHullTypeId, initialFitIntent }: Props) {
+  const [localTab, setLocalTab] = useState<SkillsTab>(initialHullTypeId ? "planner" : "activity-planner");
+  const tab = activeTab ?? localTab;
+  const setTab = (next: SkillsTab) => { if (onTabChange) onTabChange(next); else setLocalTab(next); };
   useEffect(() => { if (initialHullTypeId) setTab("planner"); }, [initialHullTypeId]);
 
   if (!snapshot) {
     return (
       <section className="empty">
         <p className="eyebrow">NO CAPSULEER SELECTED</p>
-        <h2>Connect a character to use Progression</h2>
+        <h2>Connect a character to use Activity Command</h2>
         <p>
           Activity Planner, Ship Planner and My Skills use your locally synced EVE
           character data.
@@ -63,7 +67,7 @@ export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, in
       </div>
       <ProgressionPriorities snapshot={snapshot} cloneState={cloneState} />
       {(confirmationRequired || !cloneState) && <TrainingTimeNotice cloneState={cloneState} />}
-      <div className="skills-tabs" role="tablist" aria-label="Progression sections">
+      <div className="skills-tabs" role="tablist" aria-label="Activity Command sections">
         <button
           className={tab === "activity-planner" ? "active" : ""}
           onClick={() => setTab("activity-planner")}
@@ -349,14 +353,14 @@ function FitResolutionPlan({ intent }: { intent: FitResolutionIntent }) {
     return item.reason;
   };
   return <section className="fit-resolution-plan">
-    <div className="fit-resolution-title"><div><p className="eyebrow">{intent.source === "dream-fit" ? "DREAM FIT RESOLUTION" : "FIT ISSUE RESOLUTION"}</p><h3>{intent.fitName}</h3><small>{intent.hullName} · exact fitting blockers carried from Fittings</small></div><strong>{intent.issues.length + missing.length} blockers</strong></div>
+    <div className="fit-resolution-title"><div><p className="eyebrow">{intent.source === "dream-fit" ? "DREAM FIT RESOLUTION" : "FIT ISSUE RESOLUTION"}</p><h3>{intent.fitName}</h3><small>{intent.hullName} · exact fitting blockers carried from Fitting Command</small></div><strong>{intent.issues.length + missing.length} blockers</strong></div>
     {intent.issues.length === 0 && missing.length === 0 ? <div className="fit-resolution-ready">This fit is already viable for the selected pilot.</div> : <div className="fit-resolution-grid">
       <article><h4>Train these skills</h4>{missing.length === 0 && supportSkills.length === 0 ? <small>No training fix identified.</small> : <>{missing.map((item) => <div key={`required-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><span>L{item.trainedLevel} → L{item.requiredLevel}</span><small>Required by {item.item}</small></div>)}{supportSkills.map((item) => <div key={`support-${item.typeId}-${item.solves.join("-")}`}><strong>{item.name}</strong><span>L{item.currentLevel ?? 0} → L{item.targetLevel ?? 1}</span><small>{item.reason}</small></div>)}</>}</article>
       <article><h4>Augments that can help</h4>{implants.length ? implants.map((item) => <div key={`implant-${item.typeId}`}><strong>{item.name}</strong><span>{item.solves.map(code => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ")}</span><small>{remedyNote(item)}</small></div>) : <small>No relevant fitting implant was found in the current local CCP SDE.</small>}</article>
       <article><h4>Rigs that can help</h4>{rigs.length ? rigs.map((item) => <div key={`rig-${item.typeId}`}><strong>{item.name}</strong><span>{item.solves.map(code => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ")}</span><small>{remedyNote(item)}</small></div>) : <small>No compatible fitting rig was identified for this hull and current issue set.</small>}</article>
       <article><h4>Fit changes required</h4>{hardIssues.length ? hardIssues.map((issue,index) => <div key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small></div>) : <small>No hard slot, calibration, hardpoint or compatibility blocker remains beyond the resource/skill issues above.</small>}</article>
     </div>}
-    <p className="fit-resolution-note">Sage only lists augments and rigs whose current CCP DOGMA modifiers target the failing fitting resource. Apply a suggested change in Fittings and the live analysis will verify whether the complete fit is resolved.</p>
+    <p className="fit-resolution-note">Sage only lists augments and rigs whose current CCP DOGMA modifiers target the failing fitting resource. Apply a suggested change in Fitting Command and the live analysis will verify whether the complete fit is resolved.</p>
   </section>;
 }
 function ShipPlanner({
@@ -413,7 +417,8 @@ function ShipPlanner({
   useEffect(() => {
     if (!selectedTypeId) return;
     let cancelled = false;
-    setBusy(true);
+    setBusy(false);
+    const busyTimer = setTimeout(() => { if (!cancelled) setBusy(true); }, 150);
     setError("");
     window.sage
       .getShipReadiness({
@@ -435,9 +440,13 @@ function ShipPlanner({
           );
         }
       })
-      .finally(() => !cancelled && setBusy(false));
+      .finally(() => {
+        clearTimeout(busyTimer);
+        if (!cancelled) setBusy(false);
+      });
     return () => {
       cancelled = true;
+      clearTimeout(busyTimer);
     };
   }, [selectedTypeId, snapshot.characterId, snapshot.updatedAt, cloneState, targetMasteryLevel]);
 

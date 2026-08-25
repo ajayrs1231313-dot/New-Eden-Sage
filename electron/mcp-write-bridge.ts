@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { decrypt, encrypt, readConfig, writeConfig } from "./config";
 import { refreshEveToken } from "./eve";
+import { importFits, validateImportedFit, type ImportedFit, type ImportedFitItem } from "./fitting-import";
+import { resolveFittingTypeNamesLocal } from "./fitting-dogma";
 
 type BridgeAction =
   | "save_sage_fit"
@@ -14,6 +16,7 @@ type BridgeAction =
   | "delete_eve_fitting";
 
 type RendererData = { savedFits: Array<Record<string, unknown>>; fitLibraryMeta: Record<string, unknown> };
+type RendererFitUpdate = RendererData & { selectedFitId?: string };
 let server: http.Server | null = null;
 
 function bridgePath() { return path.join(app.getPath("userData"), "mcp-write-bridge.json"); }
@@ -26,10 +29,90 @@ async function readRendererData(): Promise<RendererData> {
   } catch { return { savedFits: [], fitLibraryMeta: {} }; }
 }
 
-async function saveRendererData(value: RendererData, getWindow: () => BrowserWindow | null) {
+async function mergeWindowRendererData(value: RendererData, getWindow: () => BrowserWindow | null): Promise<RendererData> {
+  const window = getWindow();
+  if (!window || window.isDestroyed()) return value;
+  try {
+    const local = await window.webContents.executeJavaScript(`(() => {
+      try {
+        return {
+          savedFits: JSON.parse(localStorage.getItem("new-eden-sage-fits") || "[]"),
+          fitLibraryMeta: JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") || "{}")
+        };
+      } catch { return { savedFits: [], fitLibraryMeta: {} }; }
+    })()`, true) as Partial<RendererData>;
+    const merged = [...value.savedFits];
+    for (const fit of Array.isArray(local.savedFits) ? local.savedFits : []) {
+      if (!merged.some((item) => item.id === fit.id)) merged.push(fit);
+    }
+    return { savedFits: merged, fitLibraryMeta: { ...(local.fitLibraryMeta ?? {}), ...value.fitLibraryMeta } };
+  } catch { return value; }
+}
+
+async function saveRendererData(value: RendererData, getWindow: () => BrowserWindow | null, selectedFitId?: string) {
   await fs.writeFile(rendererPath(), JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
-  getWindow()?.webContents.send("mcp:fit-data-updated", value);
-  return value;
+  const window = getWindow();
+  const update: RendererFitUpdate = { ...value, ...(selectedFitId ? { selectedFitId } : {}) };
+  if (window && !window.isDestroyed()) {
+    const updateJson = JSON.stringify(update);
+    const script = `(() => {
+      const update = ${updateJson};
+      localStorage.setItem("new-eden-sage-fits", JSON.stringify(update.savedFits));
+      localStorage.setItem("new-eden-sage-fit-library-meta", JSON.stringify(update.fitLibraryMeta));
+      window.dispatchEvent(new CustomEvent("sage:mcp-fit-data-updated", { detail: update }));
+    })()`;
+    await window.webContents.executeJavaScript(script, true).catch(() => undefined);
+    window.webContents.send("mcp:fit-data-updated", update);
+  }
+  return update;
+}
+
+async function resolveFitForStorage(fit: ImportedFit): Promise<ImportedFit> {
+  const racks = ["low", "mid", "high", "rig", "subsystem", "drones", "fighters", "cargo", "implants", "boosters"] as const;
+  const items = [fit.hull, ...racks.flatMap((rack) => fit[rack])];
+  const names = [...new Set(items.flatMap((item) => [
+    !item.typeId ? item.name : "",
+    item.charge && !item.chargeTypeId ? item.charge : "",
+  ]).map((name) => name.trim()).filter(Boolean))];
+  const resolved = names.length ? await resolveFittingTypeNamesLocal(names) : [];
+  const byName = new Map(resolved.map((item) => [item.name.toLowerCase(), item]));
+  const resolveItem = (item: ImportedFitItem): ImportedFitItem => {
+    const match = !item.typeId ? byName.get(item.name.toLowerCase()) : undefined;
+    const chargeMatch = item.charge && !item.chargeTypeId ? byName.get(item.charge.toLowerCase()) : undefined;
+    return {
+      ...item,
+      name: match?.name ?? item.name,
+      typeId: item.typeId ?? match?.id,
+      charge: chargeMatch?.name ?? item.charge,
+      chargeTypeId: item.chargeTypeId ?? chargeMatch?.id,
+    };
+  };
+  const expandRack = (rackItems: ImportedFitItem[]) => rackItems.flatMap((item) => {
+    const resolvedItem = resolveItem(item);
+    return Array.from(
+      { length: Math.max(1, Math.floor(resolvedItem.quantity || 1)) },
+      () => ({ ...resolvedItem, quantity: 1 }),
+    );
+  });
+  const result: ImportedFit = {
+    ...fit,
+    hull: resolveItem(fit.hull),
+    low: expandRack(fit.low),
+    mid: expandRack(fit.mid),
+    high: expandRack(fit.high),
+    rig: expandRack(fit.rig),
+    subsystem: expandRack(fit.subsystem),
+    drones: fit.drones.map(resolveItem),
+    fighters: fit.fighters.map(resolveItem),
+    cargo: fit.cargo.map(resolveItem),
+    implants: fit.implants.map(resolveItem),
+    boosters: fit.boosters.map(resolveItem),
+  };
+  const unresolved = [result.hull, ...racks.flatMap((rack) => result[rack])].filter((item) => !item.typeId);
+  if (unresolved.length) {
+    throw new Error(`Sage could not resolve ${unresolved.length} fitting item name(s) against the local SDE: ${[...new Set(unresolved.map((item) => item.name))].slice(0, 8).join(", ")}${unresolved.length > 8 ? "..." : ""}`);
+  }
+  return result;
 }
 
 async function accessToken(characterId: string) {
@@ -65,17 +148,23 @@ async function eveRequest(characterId: string, pathname: string, method: "POST" 
 
 async function perform(action: BridgeAction, input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
   if (action === "save_sage_fit") {
-    const fit = input.fit as Record<string, unknown> | undefined;
-    if (!fit || typeof fit.id !== "string" || !fit.id || typeof fit.name !== "string") throw new Error("Fit must include a non-empty id and name.");
-    const data = await readRendererData();
-    const index = data.savedFits.findIndex((item) => item.id === fit.id);
-    if (index >= 0) data.savedFits[index] = fit; else data.savedFits.push(fit);
-    await saveRendererData(data, getWindow);
-    return { success: true, fitId: fit.id, operation: index >= 0 ? "updated" : "created" };
+    const payload = input.fit ?? input.payload ?? input.text;
+    const parsed = importFits(payload).map(validateImportedFit);
+    if (!parsed.length) throw new Error("No fitting could be parsed from the MCP payload.");
+    const imported = await Promise.all(parsed.map(resolveFitForStorage));
+    const data = await mergeWindowRendererData(await readRendererData(), getWindow);
+    const operations: Array<{ fitId: string; operation: "created" | "updated" }> = [];
+    for (const fit of imported) {
+      const index = data.savedFits.findIndex((item) => item.id === fit.id);
+      if (index >= 0) data.savedFits[index] = fit; else data.savedFits.push(fit);
+      operations.push({ fitId: fit.id, operation: index >= 0 ? "updated" : "created" });
+    }
+    await saveRendererData(data, getWindow, operations[0]?.fitId);
+    return { success: true, count: imported.length, fits: operations, fitId: operations[0]?.fitId, operation: operations[0]?.operation };
   }
   if (action === "delete_sage_fit") {
     const fitId = String(input.fitId ?? "");
-    const data = await readRendererData();
+    const data = await mergeWindowRendererData(await readRendererData(), getWindow);
     const before = data.savedFits.length;
     data.savedFits = data.savedFits.filter((item) => item.id !== fitId);
     delete data.fitLibraryMeta[fitId];

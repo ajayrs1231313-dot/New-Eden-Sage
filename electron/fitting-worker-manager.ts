@@ -13,7 +13,10 @@ type FittingWorkerOperation =
   | "item-compatibility"
   | "remedies"
   | "type-info"
+  | "augment-guide"
+  | "booster-side-effects"
   | "resolve-types"
+  | "resolve-type-ids"
   | "search-types"
   | "analyze";
 

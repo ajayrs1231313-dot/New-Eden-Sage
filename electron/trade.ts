@@ -4,6 +4,7 @@ import {
   loadRecentMarketDatasetsByMode,
 } from "./market-storage";
 import { highSecJumps } from "./route-graph";
+import { universeRoute } from "./universe-route-graph";
 import { findFullMarketTrades } from "./full-market-trade";
 
 type Order = {
@@ -28,8 +29,9 @@ type Item = {
   topBuyOrders?: Order[];
   topSellOrders?: Order[];
 };
-async function jumpsBetween(from: number, to: number) {
-  return highSecJumps(from, to);
+async function jumpsBetween(from: number, to: number, highSecOnly = true) {
+  if (highSecOnly) return highSecJumps(from, to);
+  return (await universeRoute(from, to)).jumps;
 }
 
 function marketItems(data: { summaries: unknown[] }) {
@@ -75,9 +77,11 @@ function marketItems(data: { summaries: unknown[] }) {
 export async function buildFitShoppingRoute(input: {
   characterId: string;
   buyEntireFit: boolean;
+  highSecOnly?: boolean;
   items: Array<{ typeId?: number; name: string; quantity: number }>;
 }) {
   const snapshot = getSnapshot(input.characterId) as any;
+  const highSecOnly = input.highSecOnly !== false;
   if (!snapshot?.location?.solar_system_id)
     throw new Error(
       "Sync the selected character before building a shopping route.",
@@ -147,6 +151,7 @@ export async function buildFitShoppingRoute(input: {
         jumps: await jumpsBetween(
           snapshot.location.solar_system_id,
           order.systemId,
+          highSecOnly,
         ),
       })),
     );
@@ -186,26 +191,46 @@ export async function buildFitShoppingRoute(input: {
         reason: "Insufficient qualifying sell volume",
       });
   }
-  const stops = [
-    ...new Set(
-      purchases.map(
-        (purchase) =>
-          purchase.locationId ?? `${purchase.systemId}:${purchase.station}`,
-      ),
-    ),
-  ];
+  const uniqueStops = [...new Map(
+    purchases.map((purchase) => [
+      String(purchase.locationId ?? `${purchase.systemId}:${purchase.station}`),
+      {
+        locationId: purchase.locationId,
+        station: purchase.station,
+        systemId: purchase.systemId,
+        system: purchase.system,
+      },
+    ]),
+  ).values()];
+  const routeStops: typeof uniqueStops = [];
+  const remainingStops = [...uniqueStops];
+  let routeFrom = snapshot.location.solar_system_id as number;
+  while (remainingStops.length) {
+    const ranked = await Promise.all(
+      remainingStops.map(async (stop, index) => ({
+        index,
+        jumps: await jumpsBetween(routeFrom, stop.systemId, highSecOnly),
+      })),
+    );
+    ranked.sort((a, b) => a.jumps - b.jumps || a.index - b.index);
+    const next = remainingStops.splice(ranked[0].index, 1)[0];
+    routeStops.push(next);
+    routeFrom = next.systemId;
+  }
   return {
     character: snapshot.character.name,
     origin: snapshot.location.place_name,
     buyEntireFit: input.buyEntireFit,
+    highSecOnly,
     purchases,
     unavailable,
+    routeStops,
     totalCost: purchases.reduce((sum, item) => sum + item.total, 0),
     estimatedSavings: purchases.reduce(
       (sum, item) => sum + Math.max(0, item.savingVsLocal ?? 0),
       0,
     ),
-    stops: stops.length,
+    stops: routeStops.length,
   };
 }
 

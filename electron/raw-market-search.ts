@@ -1,4 +1,4 @@
-import { loadLatestMarketDatasetByMode } from "./market-storage";
+﻿import { loadLatestMarketDatasetByMode } from "./market-storage";
 import {
   loadCurrentRawMarketManifest,
   loadRawMarketRegion,
@@ -10,6 +10,7 @@ import {
   searchMarketTypes,
 } from "./market-static-index";
 import type { MarketOrder } from "./market";
+import { universeRoute } from "./universe-route-graph";
 
 export type RawMarketSearchInput = {
   query: string;
@@ -19,6 +20,12 @@ export type RawMarketSearchInput = {
   regionId?: number | null;
   minPrice?: number | null;
   maxPrice?: number | null;
+  minVolume?: number | null;
+  systemNames?: string[];
+  systemQuery?: string;
+  locationQuery?: string;
+  originSystemId?: number | null;
+  maxJumps?: number | null;
   sort?: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest";
   offset?: number;
   limit?: number;
@@ -44,6 +51,7 @@ export type RawMarketSearchOrder = {
   securityBand: "high" | "low" | "null" | "unknown";
   locationId: number;
   locationName: string;
+  jumpsFromOrigin: number | null;
 };
 
 export type RawMarketSearchResult = {
@@ -75,6 +83,12 @@ export type RawMarketSearchResult = {
     regionId: number | null;
     minPrice: number | null;
     maxPrice: number | null;
+    minVolume: number | null;
+    systemNames: string[];
+    systemQuery: string;
+    locationQuery: string;
+    originSystemId: number | null;
+    maxJumps: number | null;
     sort: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest";
   };
   regionOptions: Array<{ regionId: number; regionName: string }>;
@@ -160,6 +174,7 @@ function orderFromRaw(
     securityBand: system?.securityBand ?? classifySecurity(securityStatus),
     locationId: raw.location_id,
     locationName: locations.get(raw.location_id) ?? `Location ${raw.location_id}`,
+    jumpsFromOrigin: null,
   };
 }
 
@@ -241,6 +256,12 @@ function emptyResult(
       regionId: cleanNumber(input.regionId),
       minPrice: cleanNumber(input.minPrice),
       maxPrice: cleanNumber(input.maxPrice),
+      minVolume: cleanNumber(input.minVolume),
+      systemNames: Array.isArray(input.systemNames) ? input.systemNames.map(String) : [],
+      systemQuery: String(input.systemQuery ?? ""),
+      locationQuery: String(input.locationQuery ?? ""),
+      originSystemId: cleanNumber(input.originSystemId),
+      maxJumps: cleanNumber(input.maxJumps),
       sort: input.sort ?? "sell-lowest",
     },
     regionOptions: snapshot?.regions.map((region) => ({ regionId: region.regionId, regionName: region.regionName })) ?? [],
@@ -293,14 +314,34 @@ export async function searchRawMarketOrders(input: RawMarketSearchInput): Promis
   const regionId = cleanNumber(input.regionId);
   const minPrice = cleanNumber(input.minPrice);
   const maxPrice = cleanNumber(input.maxPrice);
+  const minVolume = cleanNumber(input.minVolume);
+  const systemNames = new Set((input.systemNames ?? []).map((name) => String(name).trim().toLowerCase()).filter(Boolean));
+  const systemQuery = String(input.systemQuery ?? "").trim().toLowerCase();
+  const locationQuery = String(input.locationQuery ?? "").trim().toLowerCase();
+  const originSystemId = cleanNumber(input.originSystemId);
+  const maxJumps = cleanNumber(input.maxJumps);
   const sort = input.sort ?? "sell-lowest";
-  const filtered = allOrders.filter((order) =>
+  let filtered = allOrders.filter((order) =>
     (side === "all" || order.side === side) &&
     (security === "all" || order.securityBand === security) &&
     (regionId == null || order.regionId === regionId) &&
     (minPrice == null || order.price >= minPrice) &&
-    (maxPrice == null || order.price <= maxPrice),
+    (maxPrice == null || order.price <= maxPrice) &&
+    (minVolume == null || order.volumeRemain >= minVolume) &&
+    (!systemNames.size || systemNames.has(order.systemName.toLowerCase())) &&
+    (!systemQuery || order.systemName.toLowerCase().includes(systemQuery)) &&
+    (!locationQuery || order.locationName.toLowerCase().includes(locationQuery)),
   );
+  if (originSystemId != null) {
+    const jumpBySystem = new Map<number, number>();
+    for (const systemId of new Set(filtered.map((order) => order.systemId))) {
+      const route = await universeRoute(originSystemId, systemId);
+      jumpBySystem.set(systemId, route.jumps);
+    }
+    filtered = filtered
+      .map((order) => ({ ...order, jumpsFromOrigin: jumpBySystem.get(order.systemId) ?? 999 }))
+      .filter((order) => maxJumps == null || Number(order.jumpsFromOrigin ?? 999) <= maxJumps);
+  }
   const sorted = sortOrders(filtered, sort);
   const offset = Math.max(0, Math.min(sorted.length, input.offset ?? 0));
   const limit = Math.max(25, Math.min(500, input.limit ?? 200));
@@ -318,7 +359,7 @@ export async function searchRawMarketOrders(input: RawMarketSearchInput): Promis
     query,
     typeMatches,
     selectedType: selected,
-    filters: { side, security, regionId, minPrice, maxPrice, sort },
+    filters: { side, security, regionId, minPrice, maxPrice, minVolume, systemNames:[...systemNames], systemQuery, locationQuery, originSystemId, maxJumps, sort },
     regionOptions: snapshot.regions.map((region) => ({ regionId: region.regionId, regionName: region.regionName })),
     totalOrders: filtered.length,
     buyOrders: filtered.filter((order) => order.side === "buy").length,

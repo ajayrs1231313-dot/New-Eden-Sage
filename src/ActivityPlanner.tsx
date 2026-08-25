@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ActivityReadinessResult, CharacterSnapshot } from "./types";
+import type { ActivityReadinessResult, CharacterSnapshot, HullAccessPreview } from "./types";
 import {
   activityDefinitions,
   type ActivityContent,
@@ -7,12 +7,13 @@ import {
   type ActivitySkillTarget,
   type ActivitySubcategory,
 } from "./activity-planner-data";
-import { recommendationSelectors, recommendationShips } from "./activity-recommendations";
+import { recommendationMetaPicks, recommendationSelectors, recommendationShips } from "./activity-recommendations";
 import { categorizeReadinessSkill } from "./skill-intelligence";
 
 type CloneState = "alpha" | "omega";
 type Props = { snapshot: CharacterSnapshot; cloneState?: CloneState };
-type ShipOption = { typeId: number; name: string };
+type ShipOption = { typeId: number; name: string; groupId?: number; groupName?: string; metaGroupId?: number; metaGroupName?: string; factionId?: number; factionName?: string };
+type ShipPreview = { ship: ShipOption; preview: HullAccessPreview; owned: boolean; metaPick: boolean; metaReason?: string; order: number };
 type ShipAnalysis = { ship: ShipOption; analysis: ActivityReadinessResult };
 
 function duration(seconds: number | null) {
@@ -53,6 +54,61 @@ function sourceLabel(source: ActivityReadinessResult["fitEvidence"]["source"]) {
   if (source === "eve-workbench-abyss") return "Variation-specific Abyss run fits";
   if (source === "zkillboard-recent-losses") return "Recent observed hull fits";
   return "No fitted-ship evidence required";
+}
+
+function fitChoiceCopy(
+  fit: ActivityReadinessResult["selectedArchetype"] extends infer _T
+    ? NonNullable<ActivityReadinessResult["selectedArchetype"]>["fitChoices"][number]
+    : never,
+  index: number,
+) {
+  const fitted = [
+    ...fit.fit.high,
+    ...fit.fit.mid,
+    ...fit.fit.low,
+    ...fit.fit.rig,
+    ...fit.fit.subsystem,
+    ...fit.fit.drones,
+    ...fit.fit.fighters,
+  ];
+  const text = fitted.map((item) => item.name.toLowerCase()).join(" ");
+  const roles: string[] = [];
+  if (/ice harvester/.test(text)) roles.push("ice harvesting");
+  else if (/strip miner|mining laser/.test(text)) roles.push("ore mining");
+  else if (/gas cloud harvester/.test(text)) roles.push("gas harvesting");
+  else if (/missile|rocket|torpedo|launcher/.test(text)) roles.push("missiles");
+  else if (/autocannon|artillery/.test(text)) roles.push("projectiles");
+  else if (/blaster|railgun/.test(text)) roles.push("hybrids");
+  else if (/laser|maser/.test(text)) roles.push("lasers");
+  else if (fit.fit.drones.length) roles.push("drones");
+  if (/shield booster|shield extender|shield hardener|invulnerability|multispectrum shield/.test(text)) roles.push("shield tank");
+  else if (/armor repair|armour repair|armor plate|armour plate|energized|membrane|armor hardener|armour hardener|reactive armor|reactive armour/.test(text)) roles.push("armour tank");
+  if (/micro ?warpdrive|afterburner/.test(text)) roles.push("propulsion");
+  const profile = roles.slice(0, 3).join(" · ") || "general-purpose setup";
+  const keyItems = fitted
+    .map((item) => item.name)
+    .filter((name) => name && !/^Type \d+$/i.test(name))
+    .slice(0, 4);
+  return {
+    title: index === 0 ? `Recommended fit · ${profile}` : `Alternative fit ${index} · ${profile}`,
+    description: keyItems.length
+      ? `Key equipment: ${keyItems.join(", ")}.`
+      : `${fitted.length} fitted item type${fitted.length === 1 ? "" : "s"} for this route.`,
+  };
+}
+
+function ActivityFitRack({ label, items }: { label: string; items: Array<{ name: string; quantity?: number; typeId?: number }> }) {
+  if (!items.length) return null;
+  return (
+    <div className="activity-fit-rack">
+      <strong>{label}</strong>
+      <div>{items.map((item, index) => (
+        <span key={`${label}-${item.typeId ?? item.name}-${index}`}>
+          {(item.quantity ?? 1) > 1 ? `${item.quantity ?? 1}× ` : ""}{item.name}
+        </span>
+      ))}</div>
+    </div>
+  );
 }
 
 function orderedArchetypes(analysis: ActivityReadinessResult) {
@@ -107,11 +163,15 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     selectorDefaults(initialContent),
   );
   const [ships, setShips] = useState<ShipOption[]>([]);
-  const [shipAnalyses, setShipAnalyses] = useState<ShipAnalysis[]>([]);
+  const [shipPreviews, setShipPreviews] = useState<ShipPreview[]>([]);
   const [selectedShipId, setSelectedShipId] = useState(0);
+  const [selectedAnalysis, setSelectedAnalysis] = useState<ActivityReadinessResult | null>(null);
+  const [shipPickerOpen, setShipPickerOpen] = useState(false);
   const [selectedArchetypeId, setSelectedArchetypeId] = useState("");
+  const [selectedFitId, setSelectedFitId] = useState("");
   const [archetypeBusy, setArchetypeBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
   const [error, setError] = useState("");
 
   const activity =
@@ -120,8 +180,18 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     activity.subcategories.find((item) => item.id === subcategoryId) ?? firstSubcategory(activity);
   const content =
     subcategory.content.find((item) => item.id === contentId) ?? firstContent(subcategory);
-  const selectors = recommendationSelectors(content);
+  const selectors = recommendationSelectors(content).map((selector) =>
+    content.id === "fw-scout-small" && selector.id === "accessRule" && selectorValues.shipClass === "Frigate"
+      ? { ...selector, options: selector.options.slice(0, 1) }
+      : selector,
+  );
   const selectorKey = JSON.stringify(selectorValues);
+
+  useEffect(() => {
+    if (content.id !== "fw-scout-small" || selectorValues.shipClass !== "Frigate" || !selectorValues.accessRule?.startsWith("ADV")) return;
+    const gate = recommendationSelectors(content).find((selector) => selector.id === "accessRule");
+    if (gate?.options[0]) setSelectorValues((current) => ({ ...current, accessRule: gate.options[0] }));
+  }, [content.id, selectorValues.shipClass, selectorValues.accessRule]);
 
   useEffect(() => {
     let cancelled = false;
@@ -129,100 +199,106 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
       .listShips()
       .then((items) => !cancelled && setShips(items))
       .catch((caught) => {
-        if (!cancelled)
-          setError(caught instanceof Error ? caught.message : "Could not load ship data.");
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "Could not load ship data.");
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    const available = new Map(ships.map((ship) => [ship.name, ship]));
-    const recommendedNames = recommendationShips(content, selectorValues);
-    const recommendationOrder = new Map(recommendedNames.map((name, index) => [name, index]));
+    const available = new Map(ships.map((ship) => [ship.name.toLowerCase(), ship]));
+    const recommendedNames = recommendationShips(content, selectorValues, ships);
+    const recommendationOrder = new Map(recommendedNames.map((name, index) => [name.toLowerCase(), index]));
+    const metaPicks = new Map(recommendationMetaPicks(content, selectorValues, ships).map((pick) => [pick.name.toLowerCase(), pick.reason]));
     const candidates = recommendedNames
-      .map((name) => available.get(name))
+      .map((name) => available.get(name.toLowerCase()))
       .filter((ship): ship is ShipOption => Boolean(ship));
     if (!candidates.length) {
-      setShipAnalyses([]);
+      setShipPreviews([]);
       setSelectedShipId(0);
+      setSelectedAnalysis(null);
       return;
     }
 
     let cancelled = false;
     setBusy(true);
     setError("");
-    mapLimited(candidates, 4, async (ship) => ({
-        ship,
-        analysis: await window.sage.getActivityReadiness({
-          characterId: snapshot.characterId,
-          hullTypeId: ship.typeId,
-          cloneState: cloneState ?? "omega",
-          coreSkills: content.coreSkills,
-          supportSkills: content.supportSkills,
-          context: {
-            activityId: activity.id,
-            subcategoryId: subcategory.id,
-            contentId: content.id,
-            selectorValues,
-          },
-        }),
-      }))
-      .then((results) => {
-        if (cancelled) return;
-        const ranked = results.sort((a, b) => {
-          if (a.analysis.compatible !== b.analysis.compatible)
-            return a.analysis.compatible ? -1 : 1;
-          if (a.analysis.overallPercent !== b.analysis.overallPercent)
-            return b.analysis.overallPercent - a.analysis.overallPercent;
-          const aOwned = snapshot.extended?.assetSummary?.ownedShips?.some(
-            (owned) => owned.item === a.ship.name,
-          );
-          const bOwned = snapshot.extended?.assetSummary?.ownedShips?.some(
-            (owned) => owned.item === b.ship.name,
-          );
-          if (aOwned !== bOwned) return aOwned ? -1 : 1;
-          return (recommendationOrder.get(a.ship.name) ?? 999) - (recommendationOrder.get(b.ship.name) ?? 999);
-        });
-        setShipAnalyses(ranked);
-        setSelectedShipId((current) =>
-          ranked.some((item) => item.ship.typeId === current)
-            ? current
-            : ranked[0]?.ship.typeId ?? 0,
-        );
-      })
-      .catch((caught) => {
-        if (!cancelled) {
-          setShipAnalyses([]);
-          setError(
-            caught instanceof Error
-              ? caught.message
-              : "Could not calculate contextual readiness for this activity.",
-          );
-        }
-      })
-      .finally(() => !cancelled && setBusy(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activity.id,
-    subcategory.id,
-    content.id,
-    selectorKey,
-    ships,
-    snapshot.characterId,
-    snapshot.updatedAt,
-    cloneState,
-  ]);
+    window.sage.getActivityHullPreviews({
+      characterId: snapshot.characterId,
+      hullTypeIds: candidates.map((ship) => ship.typeId),
+    }).then((previews) => {
+      if (cancelled) return;
+      const byType = new Map(previews.map((preview) => [preview.hullTypeId, preview]));
+      const ranked = candidates.flatMap((ship) => {
+        const preview = byType.get(ship.typeId);
+        if (!preview) return [];
+        const metaReason = metaPicks.get(ship.name.toLowerCase());
+        return [{
+          ship, preview,
+          owned: Boolean(snapshot.extended?.assetSummary?.ownedShips?.some((owned) => owned.item === ship.name)),
+          metaPick: Boolean(metaReason),
+          metaReason,
+          order: recommendationOrder.get(ship.name.toLowerCase()) ?? 9999,
+        }];
+      }).sort((a, b) =>
+        Number(b.metaPick) - Number(a.metaPick) ||
+        Number(b.preview.hullAccessReady) - Number(a.preview.hullAccessReady) ||
+        b.preview.competencyPercent - a.preview.competencyPercent ||
+        b.preview.hullTrainingPercent - a.preview.hullTrainingPercent ||
+        Number(b.owned) - Number(a.owned) ||
+        a.order - b.order ||
+        a.ship.name.localeCompare(b.ship.name),
+      );
+      setShipPreviews(ranked);
+      setSelectedShipId((current) => ranked.some((item) => item.ship.typeId === current) ? current : ranked[0]?.ship.typeId ?? 0);
+    }).catch((caught) => {
+      if (!cancelled) {
+        setShipPreviews([]);
+        setError(caught instanceof Error ? caught.message : "Could not calculate ship training previews.");
+      }
+    }).finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [activity.id, subcategory.id, content.id, selectorKey, ships, snapshot.characterId, snapshot.updatedAt]);
 
-  const selectedShip =
-    shipAnalyses.find((item) => item.ship.typeId === selectedShipId) ?? shipAnalyses[0];
+  const selectedShipPreview = shipPreviews.find((item) => item.ship.typeId === selectedShipId) ?? shipPreviews[0];
+
+  useEffect(() => {
+    if (!selectedShipPreview) { setSelectedAnalysis(null); return; }
+    let cancelled = false;
+    setAnalysisBusy(true);
+    setError("");
+    setSelectedAnalysis(null);
+    setSelectedArchetypeId("");
+    setSelectedFitId("");
+    window.sage.getActivityReadiness({
+      characterId: snapshot.characterId,
+      hullTypeId: selectedShipPreview.ship.typeId,
+      cloneState: cloneState ?? "omega",
+      coreSkills: content.coreSkills,
+      supportSkills: content.supportSkills,
+      context: { activityId: activity.id, subcategoryId: subcategory.id, contentId: content.id, selectorValues },
+    }).then((analysis) => {
+      if (cancelled) return;
+      setSelectedAnalysis(analysis);
+      setSelectedArchetypeId(analysis.selectedArchetype?.id ?? "");
+      setSelectedFitId(analysis.selectedArchetype?.recommendedFit?.id ?? "");
+    }).catch((caught) => {
+      if (!cancelled) setError(caught instanceof Error ? caught.message : "Could not calculate contextual readiness for this hull.");
+    }).finally(() => { if (!cancelled) setAnalysisBusy(false); });
+    return () => { cancelled = true; };
+  }, [selectedShipPreview?.ship.typeId, activity.id, subcategory.id, content.id, selectorKey, snapshot.characterId, snapshot.updatedAt, cloneState]);
+
+  const selectedShip: ShipAnalysis | undefined = selectedShipPreview && selectedAnalysis
+    ? { ship: selectedShipPreview.ship, analysis: selectedAnalysis }
+    : undefined;
+  const fitChoices = selectedShip?.analysis.selectedArchetype?.fitChoices ??
+    (selectedShip?.analysis.selectedArchetype?.recommendedFit ? [selectedShip.analysis.selectedArchetype.recommendedFit] : []);
+  const selectedFit = fitChoices.find((fit) => fit.id === selectedFitId) ??
+    selectedShip?.analysis.selectedArchetype?.recommendedFit ?? fitChoices[0];
 
   useEffect(() => {
     setSelectedArchetypeId(selectedShip?.analysis.selectedArchetype?.id ?? "");
-  }, [selectedShip?.ship.typeId, content.id, selectorKey]);
+    setSelectedFitId(selectedShip?.analysis.selectedArchetype?.recommendedFit?.id ?? "");
+  }, [selectedShip?.ship.typeId, selectedShip?.analysis.selectedArchetype?.id, content.id, selectorKey]);
 
   const skillByName = useMemo(
     () => new Map(snapshot.skills.skills.map((skill) => [skill.name, skill])),
@@ -238,7 +314,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
   }));
   const coreMet = coreProgress.filter((skill) => skill.current >= skill.level).length;
   const supportMet = supportProgress.filter((skill) => skill.current >= skill.level).length;
-  const shipIsScored = (shipAnalyses[0]?.analysis.components.hull.weight ?? 0) > 0;
+  const shipIsScored = selectedAnalysis ? selectedAnalysis.components.hull.weight > 0 : true;
 
   function chooseActivity(nextId: string) {
     const nextActivity =
@@ -249,9 +325,12 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setSubcategoryId(nextSubcategory.id);
     setContentId(nextContent.id);
     setSelectorValues(selectorDefaults(nextContent));
-    setShipAnalyses([]);
+    setShipPreviews([]);
+    setSelectedAnalysis(null);
     setSelectedShipId(0);
     setSelectedArchetypeId("");
+    setSelectedFitId("");
+    setShipPickerOpen(false);
   }
   function chooseSubcategory(nextId: string) {
     const nextSubcategory =
@@ -260,18 +339,24 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setSubcategoryId(nextSubcategory.id);
     setContentId(nextContent.id);
     setSelectorValues(selectorDefaults(nextContent));
-    setShipAnalyses([]);
+    setShipPreviews([]);
+    setSelectedAnalysis(null);
     setSelectedShipId(0);
     setSelectedArchetypeId("");
+    setSelectedFitId("");
+    setShipPickerOpen(false);
   }
   function chooseContent(nextId: string) {
     const nextContent =
       subcategory.content.find((item) => item.id === nextId) ?? firstContent(subcategory);
     setContentId(nextContent.id);
     setSelectorValues(selectorDefaults(nextContent));
-    setShipAnalyses([]);
+    setShipPreviews([]);
+    setSelectedAnalysis(null);
     setSelectedShipId(0);
     setSelectedArchetypeId("");
+    setSelectedFitId("");
+    setShipPickerOpen(false);
   }
 
   async function chooseArchetype(archetypeId: string) {
@@ -295,12 +380,9 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
         },
         archetypeId,
       });
-      setShipAnalyses((current) =>
-        current.map((item) =>
-          item.ship.typeId === selectedShip.ship.typeId ? { ...item, analysis } : item,
-        ),
-      );
+      setSelectedAnalysis(analysis);
       setSelectedArchetypeId(analysis.selectedArchetype?.id ?? archetypeId);
+      setSelectedFitId(analysis.selectedArchetype?.recommendedFit?.id ?? "");
     } catch (caught) {
       setSelectedArchetypeId(previousArchetypeId);
       setError(caught instanceof Error ? caught.message : "Could not switch fitting route.");
@@ -309,6 +391,36 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     }
   }
 
+  function exportRecommendedFit() {
+    const recommendation = selectedFit;
+    if (!selectedShip?.analysis.hullAccessReady || !recommendation) return;
+    const contextText = [activity.label, subcategory.label, content.label, ...Object.values(selectorValues).filter(Boolean)].join(" · ");
+    const payload = {
+      id: crypto.randomUUID(),
+      characterId: snapshot.characterId,
+      characterName: snapshot.character.name,
+      name: `${selectedShip.ship.name} · ${content.label} · Sage recommended`,
+      hull: { name: selectedShip.ship.name, typeId: selectedShip.ship.typeId, quantity: 1 },
+      low: recommendation.fit.low ?? [],
+      mid: recommendation.fit.mid ?? [],
+      high: recommendation.fit.high ?? [],
+      rig: recommendation.fit.rig ?? [],
+      subsystem: recommendation.fit.subsystem ?? [],
+      drones: recommendation.fit.drones ?? [],
+      fighters: recommendation.fit.fighters ?? [],
+      cargo: recommendation.fit.cargo ?? [],
+      implants: [],
+      boosters: [],
+      instructions: [
+        `Generated for ${snapshot.character.name}: ${contextText}.`,
+        `Selected archetype: ${selectedShip.analysis.selectedArchetype?.label ?? "observed fit"}.`,
+        "Recommendation uses the full selected activity route, every route option and this pilot's current synced skills; verify final fitting resources in Fitting Command.",
+      ],
+      source: `Activity Planner · ${contextText}`,
+    };
+    localStorage.setItem("new-eden-sage-pending-fit", JSON.stringify(payload));
+    window.dispatchEvent(new CustomEvent("sage:navigate-fittings"));
+  }
   async function copyTrainingPlan() {
     if (!selectedShip?.analysis.recommendedQueue.length) return;
     const header = `${activity.label} → ${subcategory.label} → ${content.label} → ${selectedShip.ship.name}`;
@@ -345,7 +457,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
         <RouteStep
           number="4"
           label={shipIsScored ? "Ship" : "Utility ship"}
-          value={selectedShip?.ship.name ?? (busy ? "Comparing..." : "Choose a hull")}
+          value={selectedShipPreview?.ship.name ?? (busy ? "Comparing..." : "Choose a hull")}
         />
         <RouteStep
           number="5"
@@ -446,47 +558,69 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
         <div className="activity-section-heading">
           <div>
             <p className="eyebrow">4 · {shipIsScored ? "RECOMMENDED SHIPS" : "USEFUL SHIPS"}</p>
-            <h3>{shipIsScored ? "Best practical route from your current character" : "Activity readiness first; ship choice is optional here"}</h3>
+            <h3>{shipIsScored ? "Every valid hull for this activity, ranked for this character" : "Activity readiness first; ship choice is optional here"}</h3>
           </div>
-          <small>{busy ? "Calculating exact context..." : `${shipAnalyses.length} hulls shown`}</small>
+          <small>{busy ? "Building valid hull pool..." : `${shipPreviews.length} valid hull${shipPreviews.length === 1 ? "" : "s"}`}</small>
         </div>
         {error && <div className="planner-analysis-state error">{error}</div>}
-        {busy && !shipAnalyses.length && (
-          <div className="planner-analysis-state">
-            Matching the selected variation, fitting archetypes and {snapshot.character.name}&apos;s synced skills...
-          </div>
+        {busy && !shipPreviews.length && (
+          <div className="planner-analysis-state">Reading the CCP ship catalogue and ${snapshot.character.name}&apos;s hull training...</div>
         )}
-        {ships.length > 0 && !busy && !error && !shipAnalyses.length && (
-          <div className="planner-analysis-state">
-            No recommended hulls match this combination. Change the role, hull class or other content options to see compatible routes.
-          </div>
+        {ships.length > 0 && !busy && !error && !shipPreviews.length && (
+          <div className="planner-analysis-state">No hull in the current CCP catalogue satisfies this activity / role combination.</div>
         )}
-        {!busy && !error && !shipAnalyses.length && (
-          <div className="planner-analysis-state">
-            No recommended hulls match this role and ship-class combination. Choose a different role or class.
-          </div>
-        )}
-        <div className="activity-ship-grid practical-readiness-grid">
-          {shipAnalyses.map(({ ship, analysis }) => {
-            const owned = snapshot.extended?.assetSummary?.ownedShips?.some((item) => item.item === ship.name);
-            return (
+        {shipPreviews.length > 0 && (
+          <div className="activity-ship-selector">
+            <div className="activity-ship-picker">
+              <span className="activity-ship-picker-label">{shipIsScored ? "Ranked valid hull" : "Useful hull"}</span>
               <button
-                key={ship.typeId}
-                className={`${selectedShip?.ship.typeId === ship.typeId ? "active" : ""} readiness-${analysis.tier.id}`}
-                onClick={() => { setSelectedShipId(ship.typeId); setSelectedArchetypeId(analysis.selectedArchetype?.id ?? ""); }}
+                type="button"
+                className={`activity-ship-picker-trigger${selectedShipPreview?.metaPick ? " meta-pick" : ""}`}
+                aria-expanded={shipPickerOpen}
+                onClick={() => setShipPickerOpen((open) => !open)}
               >
-                <div><strong>{ship.name}</strong>{owned && <em>Owned</em>}</div>
-                <span>{analysis.overallPercent}% ready</span>
-                <b className="readiness-tier-label">{analysis.compatible ? analysis.tier.label : "Role mismatch"}</b>
-                <small>
-                  {analysis.components.hull.weight
-                    ? `Hull ${analysis.components.hull.percent ?? "?"}% · Fit ${analysis.components.fit.percent ?? "?"}% · Activity ${analysis.components.activity.percent}%`
-                    : `Activity-led score · Mastery ${analysis.masteryPercent}%`}
-                </small>
+                <span><strong>{selectedShipPreview?.ship.name ?? "Choose a hull"}</strong>{selectedShipPreview?.metaPick && <em>META PICK</em>}</span>
+                {selectedShipPreview && (
+                  <small>{selectedShipPreview.preview.competencyPercent}% ship competency · {selectedShipPreview.preview.hullAccessReady ? "CAN FLY" : "BLOCKED"}{selectedShipPreview.owned ? " · OWNED" : ""}</small>
+                )}
+                <b aria-hidden="true">⌄</b>
               </button>
-            );
-          })}
-        </div>
+              {shipPickerOpen && (
+                <div className="activity-ship-picker-menu" role="listbox" aria-label="Valid ships for this activity">
+                  {shipPreviews.map((item, index) => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={item.ship.typeId === selectedShipPreview?.ship.typeId}
+                      key={item.ship.typeId}
+                      title={item.metaReason}
+                      className={`activity-ship-picker-option${item.ship.typeId === selectedShipPreview?.ship.typeId ? " selected" : ""}${item.metaPick ? " meta-pick" : ""}`}
+                      onClick={() => {
+                        setSelectedShipId(item.ship.typeId);
+                        setSelectedAnalysis(null);
+                        setShipPickerOpen(false);
+                      }}
+                    >
+                      <span className="activity-ship-picker-rank">{index + 1}</span>
+                      <span className="activity-ship-picker-name"><strong>{item.ship.name}</strong><small>{item.ship.groupName ?? "Ship"}</small></span>
+                      <span className="activity-ship-picker-score"><b>{item.preview.competencyPercent}%</b><small>{item.preview.hullAccessReady ? "CAN FLY" : "BLOCKED"}{item.owned ? " · OWNED" : ""}</small></span>
+                      {item.metaPick && <em className="activity-meta-pick-badge">META PICK</em>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {analysisBusy && <div className="planner-analysis-state compact">Analyzing the selected hull&apos;s actual fit and activity context...</div>}
+            {selectedShip && (
+              <div className={`activity-selected-ship readiness-${selectedShip.analysis.tier.id}${selectedShipPreview?.metaPick ? " meta-pick" : ""}`}>
+                <div><strong>{selectedShip.ship.name}</strong>{selectedShipPreview?.owned && <em>Owned</em>}{selectedShipPreview?.metaPick && <em className="activity-meta-pick-badge">META PICK</em>}</div>
+                <span>{selectedShip.analysis.overallPercent}% exact readiness</span>
+                <b className="readiness-tier-label">{selectedShip.analysis.compatible ? selectedShip.analysis.tier.label : "Role mismatch"}</b>
+                <small>{selectedShip.analysis.components.hull.weight ? `Hull access ${selectedShip.analysis.components.hull.percent ?? "?"}% ┬À ${selectedShip.analysis.hullAccessReady ? "CAN FLY" : "BLOCKED"} ┬À Fit ${selectedShip.analysis.components.fit.percent ?? "?"}% ┬À Activity ${selectedShip.analysis.components.activity.percent}%` : `Activity-led score ┬À Mastery ${selectedShip.analysis.masteryPercent}%`}</small>
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {selectedShip && (
@@ -508,7 +642,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
 
           <div className="activity-training-summary readiness-components contextual-components">
             {selectedShip.analysis.components.hull.weight > 0 && (
-              <article><span>Hull access · {selectedShip.analysis.components.hull.weight}% weight</span><strong>{selectedShip.analysis.components.hull.percent ?? "?"}%</strong><small>{selectedShip.analysis.components.hull.missing ?? "?"} hull/prerequisite gaps</small></article>
+              <article><span>Hull access ┬À {selectedShip.analysis.components.hull.weight}% weight</span><strong>{selectedShip.analysis.components.hull.percent ?? "?"}%</strong><small>{selectedShip.analysis.hullAccessReady ? "CAN FLY ┬À no prerequisite gaps" : `${selectedShip.analysis.components.hull.missing ?? "?"} hull/prerequisite gap${selectedShip.analysis.components.hull.missing === 1 ? "" : "s"} ┬À training route ${selectedShip.analysis.components.hull.trainingPercent ?? "?"}%`}</small></article>
             )}
             {selectedShip.analysis.activityEvidence.status === "ready" && (
             <section className="activity-evidence-panel">
@@ -535,8 +669,26 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
             {selectedShip.analysis.components.context.weight > 0 && (
               <article><span>Variation / role · {selectedShip.analysis.components.context.weight}% weight</span><strong>{selectedShip.analysis.components.context.percent}%</strong><small>{selectedShip.analysis.components.context.missing} contextual targets remain</small></article>
             )}
-            <article><span>Estimated mandatory training</span><strong>{duration(selectedShip.analysis.totalEstimatedSeconds)}</strong><small>{selectedShip.analysis.missingSkills.length} combined targets remain</small></article>
+            <article><span>Estimated mandatory training</span><strong>{duration(selectedShip.analysis.totalEstimatedSeconds)}</strong><small>{selectedShip.analysis.missingSkills.length ? `${selectedShip.analysis.missingSkills.length} blocking target${selectedShip.analysis.missingSkills.length === 1 ? "" : "s"} remain` : "No blocking targets remain"}</small></article>
           </div>
+
+          {selectedShip.analysis.components.hull.gaps.length > 0 && (
+            <details className="activity-readiness-work hull-gap-breakdown">
+              <summary>Show {selectedShip.analysis.components.hull.gaps.length} exact hull/prerequisite gap{selectedShip.analysis.components.hull.gaps.length === 1 ? "" : "s"}</summary>
+              <ol className="activity-training-queue practical-training-queue">
+                {selectedShip.analysis.components.hull.gaps.map((skill) => (
+                  <li key={skill.skillId}>
+                    <div>
+                      <strong>{skill.name}</strong>
+                      <small>Current L{skill.currentLevel} ┬À required L{skill.targetLevel} ┬À blocks hull access</small>
+                    </div>
+                    <span className="training-skill-time">{duration(skill.estimatedSeconds)}</span>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
+
 
           {selectedShip.analysis.components.context.targets.length > 0 && (
             <section className="context-target-panel">
@@ -569,7 +721,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
                       >
                         <strong>{archetype.label}</strong>
                         <span>{archetype.overallPercent}% readiness · fit {archetype.fitPercent}%</span>
-                        <small>{archetype.sampleCount} sample{archetype.sampleCount === 1 ? "" : "s"} · {archetype.contextSpecific ? "context matched" : "hull fallback"}</small>
+                        <small>{archetype.sampleCount} observed · {archetype.representativeFitCount} representative · {archetype.usableFitCount} usable now · {archetype.contextSpecific ? "context matched" : "hull fallback"}</small>
                       </button>
                     ))}
                   </div>
@@ -634,6 +786,55 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
             <div className="planner-ready-state">{snapshot.character.name} meets every identified mandatory requirement for this exact route.</div>
           )}
 
+          <section className="activity-recommended-fit-panel">
+            <div>
+              <p className="eyebrow">RECOMMENDED FIT</p>
+              <h3>{selectedShip.ship.name} for this exact activity route</h3>
+              {selectedShip.analysis.hullAccessReady ? (
+                selectedFit ? (
+                  <>
+                    <p>Choose one of the fits from <strong>{selectedShip.analysis.selectedArchetype?.label ?? "this route"}</strong>. Every choice shown is fully usable with this character&apos;s currently trained skills; Sage preselects the strongest match.</p>
+                    <small>{Object.values(selectorValues).filter(Boolean).join(" · ")}</small>
+                    <div className="archetype-choice-grid recommended-fit-choice-grid">
+                      {fitChoices.map((fit, index) => {
+                        const copy = fitChoiceCopy(fit, index);
+                        return (
+                          <button
+                            type="button"
+                            key={fit.id}
+                            className={selectedFit?.id === fit.id ? "active" : ""}
+                            aria-pressed={selectedFit?.id === fit.id}
+                            onClick={() => setSelectedFitId(fit.id)}
+                          >
+                            <strong>{copy.title}</strong>
+                            <span>{copy.description}</span>
+                            <small>{fit.itemTypeIds.length} fitted item type{fit.itemTypeIds.length === 1 ? "" : "s"}{index === 0 ? " · best match for your skills" : ""}</small>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="activity-fit-racks">
+                      <ActivityFitRack label="High" items={selectedFit.fit.high} />
+                      <ActivityFitRack label="Mid" items={selectedFit.fit.mid} />
+                      <ActivityFitRack label="Low" items={selectedFit.fit.low} />
+                      <ActivityFitRack label="Rigs" items={selectedFit.fit.rig} />
+                      <ActivityFitRack label="Subsystems" items={selectedFit.fit.subsystem} />
+                      <ActivityFitRack label="Drones" items={selectedFit.fit.drones} />
+                      <ActivityFitRack label="Fighters" items={selectedFit.fit.fighters} />
+                      <ActivityFitRack label="Cargo" items={selectedFit.fit.cargo} />
+                    </div>
+                  </>
+                ) : (
+                  <p>No observed fit for this route is fully usable with this character&apos;s current skills, so Sage will not label or export one as recommended. Use the training route above or try another archetype.</p>
+                )
+              ) : (
+                <p>This character cannot currently sit in the selected hull. Sage will keep showing the training route, but fitted export stays unavailable until hull access is trained.</p>
+              )}
+            </div>
+            <button type="button" onClick={exportRecommendedFit} disabled={!selectedShip.analysis.hullAccessReady || !selectedFit}>
+              {selectedFit ? "Export selected fit to Fitting Command" : "Fit unavailable"}
+            </button>
+          </section>
           <section className="mastery-panel">
             <div><p className="eyebrow">OPTIONAL TRAINING</p><h3>Useful next skills</h3><p>These aren't required to get started, but they'll improve performance and efficiency.</p></div>
             <strong>{selectedShip.analysis.masteryPercent}%</strong>

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { OpportunityAnalysis, OpportunityKind, PersonalOpportunity } from "./types";
 
 const money = (value: number) =>
@@ -14,13 +14,23 @@ function kindLabel(kind: OpportunityKind) {
 export function OpportunityExplorer({
   analysis,
   extraRows = [],
+  onCargoCapacityChange,
+  marketBusy = false,
 }: {
   analysis: OpportunityAnalysis;
   extraRows?: PersonalOpportunity[];
+  onCargoCapacityChange?: (cargoCapacityM3: number | null) => void | Promise<void>;
+  marketBusy?: boolean;
 }) {
   const [kind, setKind] = useState<"all" | OpportunityKind>("all");
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [cargoInput, setCargoInput] = useState(String(Math.round(analysis.constraints.cargoCapacityM3)));
+  useEffect(() => setCargoInput(String(Math.round(analysis.constraints.cargoCapacityM3))), [analysis.constraints.cargoCapacityM3]);
+  const applyCargo = () => {
+    const parsed = Number(cargoInput.replace(/,/g, ""));
+    if (Number.isFinite(parsed) && parsed > 0) void onCargoCapacityChange?.(Math.round(parsed));
+  };
   const rows = useMemo(() => {
     const query = search.trim().toLowerCase();
     return [...analysis.ranked, ...extraRows]
@@ -47,7 +57,10 @@ export function OpportunityExplorer({
         <div className="opportunity-context">
           <strong>{analysis.character?.name ?? "Market only"}</strong>
           <small>{analysis.constraints.maxCapital == null ? "No capital cap" : `${money(analysis.constraints.maxCapital)} ISK deployable`}</small>
-          <small>{money(analysis.constraints.cargoCapacityM3)} m3 cargo limit</small>
+          <div className="opportunity-cargo-control">
+            <span>Cargo cap m3</span>
+            <div><input value={cargoInput} onChange={(event) => setCargoInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") applyCargo(); }} inputMode="numeric" aria-label="Cargo capacity in cubic metres" /><button type="button" disabled={marketBusy || !onCargoCapacityChange} onClick={applyCargo}>{marketBusy ? "Applying..." : "Apply"}</button></div>
+          </div>
         </div>
       </div>
 

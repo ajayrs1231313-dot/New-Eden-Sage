@@ -1,8 +1,12 @@
 import type { ActivityContent, ActivitySelector } from "./activity-planner-data";
+import { activityMetaPicks, expandActivityShipPool } from "./activity-ship-rules";
+
+export type RecommendationShip = { typeId: number; name: string; groupId?: number; groupName?: string; metaGroupId?: number; metaGroupName?: string; factionId?: number; factionName?: string };
 
 export type RecommendationRoute = {
   match?: Record<string, string[]>;
   ships: string[];
+  groups?: string[];
 };
 
 export type ActivityRecommendationProfile = {
@@ -10,7 +14,7 @@ export type ActivityRecommendationProfile = {
   routes: RecommendationRoute[];
 };
 
-const route = (ships: string[], match?: Record<string, string[]>): RecommendationRoute => ({ ships, match });
+const route = (ships: string[], match?: Record<string, string[]>, groups?: string[]): RecommendationRoute => ({ ships, match, groups });
 
 const profiles: Record<string, ActivityRecommendationProfile> = {
   "pvp-roaming": {
@@ -21,7 +25,7 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
       { id: "style", label: "Fighting style", options: ["Brawl", "Scram-kite", "Kite", "Projection"] },
     ],
     routes: [
-      route(["Rifter", "Tristan", "Kestrel", "Punisher", "Merlin", "Incursus", "Breacher", "Tormentor", "Hookbill", "Comet", "Firetail", "Slicer", "Dramiel", "Worm"], { shipClass: ["Frigate"], role: ["Damage / combat"] }),
+      route(["Rifter", "Tristan", "Kestrel", "Punisher", "Merlin", "Incursus", "Breacher", "Tormentor", "Caldari Navy Hookbill", "Federation Navy Comet", "Republic Fleet Firetail", "Imperial Navy Slicer", "Dramiel", "Worm"], { shipClass: ["Frigate"], role: ["Damage / combat"] }),
       route(["Hawk", "Harpy", "Enyo", "Ishkur", "Jaguar", "Wolf", "Retribution", "Vengeance"], { shipClass: ["Assault Frigate"], role: ["Damage / combat"] }),
       route(["Ares", "Taranis", "Crow", "Raptor", "Malediction", "Crusader", "Stiletto", "Claw"], { shipClass: ["Interceptor"], role: ["Tackle", "Damage / combat"] }),
       route(["Keres", "Kitsune", "Sentinel", "Hyena"], { shipClass: ["Electronic Attack Frigate"], role: ["EWAR / control", "Tackle"] }),
@@ -85,7 +89,7 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
   "missions-l3": {
     selectors: [{ id: "shipClass", label: "Mission hull", options: ["Cruiser", "Battlecruiser"] }],
     routes: [
-      route(["Gila", "Vexor", "Caracal", "Rupture"], { shipClass: ["Cruiser"] }),
+      route(["Gila", "Vexor", "Caracal", "Rupture"], { shipClass: ["Cruiser"] }, ["Heavy Assault Cruiser", "Strategic Cruiser"]),
       route(["Drake", "Myrmidon", "Hurricane", "Harbinger", "Prophecy", "Ferox"], { shipClass: ["Battlecruiser"] }),
     ],
   },
@@ -98,7 +102,7 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
   "highsec-combat-sites": {
     selectors: [{ id: "shipClass", label: "Combat hull", options: ["Cruiser", "Battlecruiser"] }],
     routes: [
-      route(["Vexor", "Caracal", "Gila"], { shipClass: ["Cruiser"] }),
+      route(["Vexor", "Caracal", "Gila"], { shipClass: ["Cruiser"] }, ["Heavy Assault Cruiser", "Strategic Cruiser"]),
       route(["Gnosis", "Drake", "Myrmidon", "Hurricane"], { shipClass: ["Battlecruiser"] }),
     ],
   },
@@ -108,7 +112,7 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
       { id: "shipClass", label: "Ship class", options: ["Frigate", "Destroyer"] },
     ],
     routes: [
-      route(["Rifter", "Tristan", "Kestrel", "Punisher", "Merlin", "Incursus", "Breacher", "Tormentor", "Hookbill", "Comet", "Firetail", "Slicer"], { shipClass: ["Frigate"], role: ["Damage / combat"] }),
+      route(["Rifter", "Tristan", "Kestrel", "Punisher", "Merlin", "Incursus", "Breacher", "Tormentor", "Caldari Navy Hookbill", "Federation Navy Comet", "Republic Fleet Firetail", "Imperial Navy Slicer"], { shipClass: ["Frigate"], role: ["Damage / combat"] }),
       route(["Atron", "Executioner", "Slasher", "Condor", "Malediction", "Stiletto", "Crow", "Ares"], { shipClass: ["Frigate"], role: ["Tackle"] }),
       route(["Griffin", "Maulus", "Crucifier", "Vigil", "Keres", "Kitsune", "Sentinel", "Hyena"], { shipClass: ["Frigate"], role: ["EWAR / control"] }),
       route(["Navitas", "Bantam", "Burst", "Inquisitor", "Deacon", "Kirin", "Thalia", "Scalpel"], { shipClass: ["Frigate"], role: ["Support / logistics"] }),
@@ -167,11 +171,12 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
   "fw-scout-small": {
     selectors: [
       { id: "role", label: "PvP role", options: ["Damage / combat", "Tackle", "EWAR / control"] },
-      { id: "shipClass", label: "Ship class", options: ["Frigate", "Destroyer"] },
+      { id: "shipClass", label: "Plex size / max hull", options: ["Frigate", "Destroyer"] },
+      { id: "accessRule", label: "Complex gate", options: ["NVY — T1 / Navy", "ADV — Advanced / Pirate"] },
     ],
     routes: [
-      route(["Tristan", "Kestrel", "Rifter", "Punisher", "Merlin", "Incursus", "Firetail", "Hookbill", "Comet", "Slicer", "Dramiel", "Worm"], { shipClass: ["Frigate"], role: ["Damage / combat"] }),
-      route(["Atron", "Executioner", "Slasher", "Condor", "Hookbill", "Firetail"], { shipClass: ["Frigate"], role: ["Tackle"] }),
+      route(["Tristan", "Kestrel", "Rifter", "Punisher", "Merlin", "Incursus", "Republic Fleet Firetail", "Caldari Navy Hookbill", "Federation Navy Comet", "Imperial Navy Slicer", "Dramiel", "Worm"], { shipClass: ["Frigate"], role: ["Damage / combat"] }),
+      route(["Atron", "Executioner", "Slasher", "Condor", "Caldari Navy Hookbill", "Republic Fleet Firetail"], { shipClass: ["Frigate"], role: ["Tackle"] }),
       route(["Griffin", "Maulus", "Crucifier", "Vigil"], { shipClass: ["Frigate"], role: ["EWAR / control"] }),
       route(["Thrasher", "Catalyst", "Coercer", "Cormorant", "Algos", "Dragoon", "Corax", "Talwar"], { shipClass: ["Destroyer"], role: ["Damage / combat"] }),
       route(["Thrasher", "Talwar", "Corax"], { shipClass: ["Destroyer"], role: ["Tackle"] }),
@@ -180,7 +185,8 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
   "fw-medium-large": {
     selectors: [
       { id: "role", label: "PvP role", options: ["Damage / combat", "Tackle", "EWAR / control", "Support / logistics"] },
-      { id: "shipClass", label: "Ship class", options: ["Cruiser", "Battlecruiser"] },
+      { id: "shipClass", label: "Plex size / max hull", options: ["Cruiser", "Battlecruiser", "Battleship"] },
+      { id: "accessRule", label: "Complex gate", options: ["NVY — T1 / Navy", "ADV — Advanced / Pirate"] },
     ],
     routes: [
       route(["Caracal", "Omen", "Vexor", "Stabber", "Thorax", "Moa", "Rupture", "Osprey Navy Issue", "Exequror Navy Issue", "Omen Navy Issue", "Stabber Fleet Issue"], { shipClass: ["Cruiser"], role: ["Damage / combat"] }),
@@ -189,16 +195,18 @@ const profiles: Record<string, ActivityRecommendationProfile> = {
       route(["Scimitar", "Basilisk", "Guardian", "Oneiros"], { shipClass: ["Cruiser"], role: ["Support / logistics"] }),
       route(["Hurricane", "Drake", "Ferox", "Harbinger", "Brutix", "Cyclone", "Prophecy", "Myrmidon"], { shipClass: ["Battlecruiser"], role: ["Damage / combat"] }),
       route(["Hurricane", "Cyclone", "Gnosis", "Claymore", "Damnation"], { shipClass: ["Battlecruiser"], role: ["Tackle", "EWAR / control", "Support / logistics"] }),
+      route(["Megathron", "Tempest", "Raven", "Apocalypse", "Typhoon", "Dominix", "Rokh", "Maelstrom", "Vargur", "Paladin"], { shipClass: ["Battleship"], role: ["Damage / combat", "Tackle", "EWAR / control", "Support / logistics"] }),
     ],
   },
   "fw-battlefields": {
     selectors: [
       { id: "role", label: "Fleet role", options: ["DPS", "Tackle / control", "Logistics"] },
-      { id: "shipClass", label: "Fleet hull", options: ["Cruiser", "Battlecruiser"] },
+      { id: "shipClass", label: "Fleet hull", options: ["Cruiser", "Battlecruiser", "Battleship"] },
     ],
     routes: [
-      route(["Caracal", "Omen", "Stabber", "Vexor", "Scimitar", "Basilisk", "Guardian", "Oneiros"], { shipClass: ["Cruiser"], role: ["DPS", "Tackle / control", "Logistics"] }),
-      route(["Ferox", "Hurricane", "Drake", "Harbinger", "Claymore", "Damnation"], { shipClass: ["Battlecruiser"], role: ["DPS", "Tackle / control"] }),
+      route(["Caracal", "Omen", "Stabber", "Vexor", "Omen Navy Issue", "Stabber Fleet Issue", "Osprey", "Augoror", "Exequror", "Scythe"], { shipClass: ["Cruiser"], role: ["DPS", "Tackle / control", "Logistics"] }),
+      route(["Ferox", "Hurricane", "Drake", "Harbinger", "Ferox Navy Issue", "Prophecy Navy Issue"], { shipClass: ["Battlecruiser"], role: ["DPS", "Tackle / control"] }),
+      route(["Megathron", "Tempest", "Raven", "Apocalypse", "Typhoon", "Dominix", "Rokh", "Maelstrom"], { shipClass: ["Battleship"], role: ["DPS", "Tackle / control"] }),
     ],
   },
   "ore-mining": {
@@ -364,8 +372,10 @@ export function recommendationSelectors(content: ActivityContent): ActivitySelec
   return merged;
 }
 
-export function recommendationShips(content: ActivityContent, selectorValues: Record<string, string>) {
+export function recommendationShips(content: ActivityContent, selectorValues: Record<string, string>, catalogue: RecommendationShip[] = []) {
   const profile = recommendationProfile(content.id);
+  let curated: string[] = [];
+
   if (!profile?.routes.length && content.shipRoutes?.length) {
     const shipClass = selectorValues.shipClass ?? "";
     const role = selectorValues.role ?? "";
@@ -375,16 +385,38 @@ export function recommendationShips(content: ActivityContent, selectorValues: Re
       (!route.roles?.length || !role || route.roles.includes(role)) &&
       (!route.engagements?.length || !engagement || route.engagements.includes(engagement)),
     );
-    return [...new Set(matched.flatMap((route) => route.ships))];
-  }
-  if (!profile?.routes.length) return content.ships;
-  const matching = profile.routes.filter((item) => {
-    if (!item.match) return true;
-    return Object.entries(item.match).every(([selectorId, allowed]) => {
-      const selected = selectorValues[selectorId];
-      return !selected || allowed.includes(selected);
+    curated = [...new Set(matched.flatMap((route) => route.ships))];
+  } else if (!profile?.routes.length) {
+    curated = [...content.ships];
+  } else {
+    const matching = profile.routes.filter((item) => {
+      if (!item.match) return true;
+      return Object.entries(item.match).every(([selectorId, allowed]) => {
+        const selected = selectorValues[selectorId];
+        return !selected || allowed.includes(selected);
+      });
     });
-  });
-  const ships = [...new Set(matching.flatMap((item) => item.ships))];
-  return ships;
+    const seen = new Set<string>();
+    const add = (name: string) => {
+      const key = name.toLowerCase();
+      if (!seen.has(key)) { seen.add(key); curated.push(name); }
+    };
+    for (const item of matching) {
+      item.ships.forEach(add);
+      if (item.groups?.length && catalogue.length) {
+        const groups = new Set(item.groups.map((group) => group.toLowerCase()));
+        catalogue
+          .filter((ship) => ship.groupName && groups.has(ship.groupName.toLowerCase()))
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .forEach((ship) => add(ship.name));
+      }
+    }
+  }
+
+  return expandActivityShipPool(content.id, selectorValues, catalogue, curated);
+}
+
+export function recommendationMetaPicks(content: ActivityContent, selectorValues: Record<string, string>, catalogue: RecommendationShip[] = []) {
+  const available = new Set(recommendationShips(content, selectorValues, catalogue).map((name) => name.toLowerCase()));
+  return activityMetaPicks(content.id, selectorValues).filter((pick) => available.has(pick.name.toLowerCase()));
 }

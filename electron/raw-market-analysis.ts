@@ -1,6 +1,6 @@
 import { createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
-import { createGzip, gunzip } from "node:zlib";
+import { createGzip, gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
@@ -16,6 +16,7 @@ import {
 import { getMarketSystemIndex, getMarketTypeIndex, loadMarketWorkerLookups, prepareMarketWorkerLookups } from "./market-static-index";
 import type { MarketOrder } from "./market";
 import { logEvent } from "./logger";
+import { loadSharedFullMarketAnalysisIndex } from "./shared-market-data";
 
 export type FullMarketOrder = {
   orderId: number;
@@ -80,6 +81,8 @@ export type RawMarketAnalysisRuntime = {
   shouldCancel?: () => boolean;
   skipPersist?: boolean;
   bypassCache?: boolean;
+  /** Historical snapshots used for one-off comparisons must not stay resident beside the current full-market index. */
+  retainHistoricalCache?: boolean;
   staticLookupPath?: string;
 };
 
@@ -99,7 +102,9 @@ export type FullMarketAnalysisIndex = {
 // safely within desktop memory limits.
 const SIDE_DEPTH = 16;
 const gunzipAsync = promisify(gunzip);
-const ANALYSIS_INDEX_SCHEMA = 3;
+const gzipAsync = promisify(gzip);
+const MARGIN_SNAPSHOT_SCHEMA = 1;
+const ANALYSIS_INDEX_SCHEMA = 4;
 const ANALYSIS_SAVE_TIMEOUT_MS = 5 * 60_000;
 let currentCache: { snapshotId: string; value: FullMarketAnalysisIndex } | null = null;
 const historicalCache = new Map<string, FullMarketAnalysisIndex>();
@@ -107,6 +112,55 @@ let metadataCache: { createdAt: string; names: Map<number, string>; volumes: Map
 
 function persistedIndexPath(snapshot: RawMarketSnapshot) {
   return path.join(RAW_MARKET_ROOT, snapshot.id, "analysis-index-v2.json.gz");
+}
+
+function persistedMarginPath(snapshot: RawMarketSnapshot) {
+  return path.join(RAW_MARKET_ROOT, snapshot.id, "analysis-margins-v1.json.gz");
+}
+
+function marginMapFromIndex(index: FullMarketAnalysisIndex) {
+  const margins: Record<string, number | null> = {};
+  for (const [typeId, item] of index.items) {
+    const buy = item.buys[0];
+    const sell = item.sells[0];
+    margins[String(typeId)] = buy && sell ? buy.price - sell.price : null;
+  }
+  return margins;
+}
+
+async function readPersistedMarginSnapshot(snapshot: RawMarketSnapshot) {
+  try {
+    const payload = JSON.parse((await gunzipAsync(await fs.readFile(persistedMarginPath(snapshot)))).toString("utf8")) as {
+      schema: number;
+      snapshotId: string;
+      itemCount: number;
+      margins: Record<string, number | null>;
+    };
+    if (payload.schema !== MARGIN_SNAPSHOT_SCHEMA || payload.snapshotId !== snapshot.id || !payload.margins || typeof payload.margins !== "object") return null;
+    return { snapshotId: payload.snapshotId, itemCount: payload.itemCount, margins: payload.margins };
+  } catch {
+    return null;
+  }
+}
+
+async function savePersistedMarginMap(snapshot: RawMarketSnapshot, margins: Record<string, number | null>) {
+  const target = persistedMarginPath(snapshot);
+  const partial = target + "." + process.pid + "." + randomUUID() + ".partial";
+  const itemCount = Object.keys(margins).length;
+  const compressed = await gzipAsync(Buffer.from(JSON.stringify({
+    schema: MARGIN_SNAPSHOT_SCHEMA,
+    snapshotId: snapshot.id,
+    itemCount,
+    margins,
+  }), "utf8"), { level: 6 });
+  await fs.writeFile(partial, compressed, { flag: "wx" });
+  await fs.rm(target, { force: true }).catch(() => undefined);
+  await fs.rename(partial, target);
+  return { snapshotId: snapshot.id, itemCount, bytes: compressed.byteLength };
+}
+
+async function savePersistedMarginSnapshot(snapshot: RawMarketSnapshot, index: FullMarketAnalysisIndex) {
+  return savePersistedMarginMap(snapshot, marginMapFromIndex(index));
 }
 
 async function loadPersistedAnalysisIndex(snapshot: RawMarketSnapshot): Promise<FullMarketAnalysisIndex | null> {
@@ -125,13 +179,10 @@ async function loadPersistedAnalysisIndex(snapshot: RawMarketSnapshot): Promise<
 }
 
 function persistedItem(item: FullMarketItem): FullMarketItem {
-  return {
-    ...item,
-    regions: Object.fromEntries(Object.entries(item.regions).map(([key, region]) => {
-      const { security: _security, ...persistedRegion } = region;
-      return [key, persistedRegion];
-    })),
-  };
+  // Regional high/low/null metrics are part of the canonical full-market
+  // index. Persist them intact so the regional view can be reconstructed
+  // without reopening 1.5m+ raw orders.
+  return item;
 }
 
 async function savePersistedAnalysisIndex(snapshot: RawMarketSnapshot, value: FullMarketAnalysisIndex, runtime: RawMarketAnalysisRuntime) {
@@ -205,12 +256,20 @@ async function savePersistedAnalysisIndex(snapshot: RawMarketSnapshot, value: Fu
     runtime.progress?.({ stage: "market-index-save", message: "Promoting compact analysis index…", completed: itemCount, total: itemCount, percent: 99 });
     await fs.rm(target, { force: true });
     await fs.rename(partial, target);
+    const marginSnapshot = await savePersistedMarginSnapshot(snapshot, value).catch(async (error) => {
+      await logEvent("warn", "full_market_margin_snapshot.save_failed", {
+        snapshotId: snapshot.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
 
     await logEvent("info", "full_market_index.save_complete", {
       snapshotId: snapshot.id,
       target,
       bytes: staged.size,
       durationMs: Date.now() - startedAt,
+      marginSnapshot,
     });
   } catch (error) {
     clearTimeout(timeout);
@@ -335,6 +394,13 @@ export async function buildFullMarketAnalysisIndex(
   snapshot?: RawMarketSnapshot,
   runtime: RawMarketAnalysisRuntime = {},
 ): Promise<FullMarketAnalysisIndex> {
+  if (!snapshot && process.env.NEW_EDEN_SAGE_DISABLE_SHARED_MARKET !== "1") {
+    const shared = await loadSharedFullMarketAnalysisIndex();
+    if (!shared) throw new Error("The shared server generation is unavailable. Desktop public-market reconstruction is disabled.");
+    currentCache = { snapshotId: shared.snapshotId, value: shared };
+    runtime.progress?.({ stage: "market-index", message: "Loaded the validated shared full-market generation.", completed: shared.regionCount, total: shared.regionCount, percent: 100, cached: true });
+    return shared;
+  }
   const manifest = snapshot ?? (await loadCurrentRawMarketManifest("all"));
   if (!manifest?.complete || manifest.mode !== "all")
     throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
@@ -342,11 +408,14 @@ export async function buildFullMarketAnalysisIndex(
     runtime.progress?.({ stage: "market-index", message: "Reusing the in-memory full-market index.", percent: 100, cached: true });
     return currentCache.value;
   }
-  const historical = runtime.bypassCache ? undefined : historicalCache.get(manifest.id);
+  const retainHistoricalCache = runtime.retainHistoricalCache !== false;
+  const historical = runtime.bypassCache || !retainHistoricalCache ? undefined : historicalCache.get(manifest.id);
   if (snapshot && historical) return historical;
   const persisted = runtime.bypassCache ? null : await loadPersistedAnalysisIndex(manifest);
   if (persisted) {
-    if (snapshot) historicalCache.set(manifest.id, persisted); else currentCache = { snapshotId: manifest.id, value: persisted };
+    if (snapshot) {
+      if (retainHistoricalCache) historicalCache.set(manifest.id, persisted);
+    } else currentCache = { snapshotId: manifest.id, value: persisted };
     runtime.progress?.({ stage: "market-index", message: "Loaded the saved full-market analysis index.", completed: manifest.regions.length, total: manifest.regions.length, percent: 100, cached: true });
     return persisted;
   }
@@ -437,8 +506,9 @@ export async function buildFullMarketAnalysisIndex(
     items,
   };
   if (!runtime.bypassCache) {
-    if (snapshot) historicalCache.set(manifest.id, value);
-    else currentCache = { snapshotId: manifest.id, value };
+    if (snapshot) {
+      if (retainHistoricalCache) historicalCache.set(manifest.id, value);
+    } else currentCache = { snapshotId: manifest.id, value };
   }
   for (const key of historicalCache.keys()) if (key !== manifest.id && historicalCache.size > 3) historicalCache.delete(key);
   if (!runtime.skipPersist) {
@@ -457,6 +527,47 @@ export async function buildFullMarketAnalysisIndex(
   return value;
 }
 
+/**
+ * Load exactly the historical signal the scanner needs. Historical margins are
+ * persisted as a tiny sidecar. For pre-sidecar snapshots, derive the lookup
+ * directly from one raw region at a time so no historical full-market graph is
+ * ever allocated in the Market Scanner worker.
+ */
+export async function loadFullMarketMarginSnapshot(
+  snapshot: RawMarketSnapshot,
+  runtime: Pick<RawMarketAnalysisRuntime, "shouldCancel"> = {},
+) {
+  const saved = await readPersistedMarginSnapshot(snapshot);
+  if (saved) return saved;
+
+  const best = new Map<number, { buy: number | null; sell: number | null }>();
+  for (const entry of snapshot.regions) {
+    if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
+    const region = await loadRawMarketRegion(entry.regionId, snapshot);
+    if (!region) continue;
+    for (const order of region.orders) {
+      if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
+      let item = best.get(order.type_id);
+      if (!item) {
+        item = { buy: null, sell: null };
+        best.set(order.type_id, item);
+      }
+      if (order.is_buy_order) {
+        if (item.buy == null || order.price > item.buy) item.buy = order.price;
+      } else if (item.sell == null || order.price < item.sell) {
+        item.sell = order.price;
+      }
+    }
+    // Drop the decompressed region before opening the next one.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  const margins: Record<string, number | null> = {};
+  for (const [typeId, item] of best) margins[String(typeId)] = item.buy != null && item.sell != null ? item.buy - item.sell : null;
+  await savePersistedMarginMap(snapshot, margins).catch(() => undefined);
+  return { snapshotId: snapshot.id, itemCount: best.size, margins };
+}
+
 function mergeFullMarketItem(target: FullMarketItem, source: FullMarketItem) {
   target.totalBuyOrders += source.totalBuyOrders;
   target.totalSellOrders += source.totalSellOrders;
@@ -471,6 +582,7 @@ export async function buildFullMarketAnalysisIndexParallel(
   workerCount: number,
   runtime: RawMarketAnalysisRuntime = {},
 ): Promise<FullMarketAnalysisIndex> {
+  if (process.env.NEW_EDEN_SAGE_DISABLE_SHARED_MARKET !== "1") throw new Error("Desktop full-market shard computation is disabled; use the shared server generation.");
   const manifest = await loadCurrentRawMarketManifest("all");
   if (!manifest?.complete) throw new Error("Run Refresh everything to build the complete all-region raw market order book first.");
   const saved = await loadPersistedAnalysisIndex(manifest);

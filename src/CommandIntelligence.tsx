@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CharacterSnapshot, EveNewsItem } from "./types";
+import type { CharacterNavigateTarget } from "./character-navigation";
 
 type Severity = "red" | "orange" | "yellow" | "green";
 type PriorityItem = {
@@ -8,7 +9,7 @@ type PriorityItem = {
   title: string;
   detail?: string;
   action?: string;
-  target?: "skills" | "market" | "regional" | "fittings";
+  target?: CharacterNavigateTarget;
   weight: number;
 };
 
@@ -47,11 +48,11 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
     const hours = (queueEnd.getTime() - now) / 3600000;
     result.push({
       id: "skill-queue",
-      severity: hours <= 3 ? "red" : hours <= 24 ? "orange" : "green",
+      severity: "red",
       title: `Skill queue ends in ${remaining(queueEnd, now)}`,
       detail: `${snapshot.queue.length} queued skill${snapshot.queue.length === 1 ? "" : "s"}`,
       action: "Add another skill",
-      target: "skills",
+      target: "activity-skills",
       weight: hours <= 3 ? 100 : hours <= 24 ? 75 : 20,
     });
   } else {
@@ -61,7 +62,7 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
       title: "Skill queue is empty",
       detail: "Training is currently idle.",
       action: "Open Skills",
-      target: "skills",
+      target: "activity-skills",
       weight: 110,
     });
   }
@@ -97,7 +98,7 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
       title: `${expiredOrders.length} market order${expiredOrders.length === 1 ? "" : "s"} expired`,
       detail: "Review pricing and relist where appropriate.",
       action: "Open Market",
-      target: "regional",
+      target: "asset-market",
       weight: 96,
     });
   }
@@ -119,7 +120,7 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
     result.push({
       id: "contract-active",
       severity: hours <= 6 ? "orange" : "green",
-      title: `Contract accepted${hours <= 24 ? ` · ${remaining(nearestContract.expires, now)} left` : ""}`,
+      title: `Contract accepted${hours <= 24 ? ` / ${remaining(nearestContract.expires, now)} left` : ""}`,
       detail: nearestContract.contract?.title || "Active contract requires follow-through.",
       action: "Review contract",
       weight: hours <= 6 ? 82 : 18,
@@ -132,8 +133,8 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
       severity: "yellow",
       title: `Wallet over ${(snapshot.wallet / 1_000_000_000).toFixed(1)}b ISK`,
       detail: "Large idle cash balance detected.",
-      action: "Open ISK Lab",
-      target: "market",
+      action: "Open ISK Command",
+      target: "isk",
       weight: 45,
     });
   }
@@ -156,13 +157,13 @@ export function CommandIntelligence({
   onNavigate,
 }: {
   snapshot: CharacterSnapshot;
-  onNavigate(target: "skills" | "market" | "regional" | "fittings"): void;
+  onNavigate(target: CharacterNavigateTarget): void;
 }) {
   const priorities = useMemo(() => makePriorityItems(snapshot), [snapshot]);
   const [showAll, setShowAll] = useState(false);
   const [news, setNews] = useState<EveNewsItem[]>([]);
   const [newsFilter, setNewsFilter] = useState<"ccp" | "market" | "war" | "events">("ccp");
-  const [newsState, setNewsState] = useState("Loading EVE news…");
+  const [newsState, setNewsState] = useState("Loading EVE news...");
 
   useEffect(() => {
     let cancelled = false;
@@ -178,15 +179,16 @@ export function CommandIntelligence({
   }, []);
 
   const visiblePriorities = showAll ? priorities : priorities.slice(0, 5);
+  const priorityTone = priorities.some((item) => item.severity === "red") ? "danger" : priorities.some((item) => item.severity === "orange") ? "warning" : "clear";
   const filteredNews = news.filter((item) => item.category === newsFilter).slice(0, 5);
 
   return (
     <div className="command-intelligence-grid">
-      <article className="command-priority-panel">
+      <article className={`command-priority-panel ${priorityTone}`}>
         <div className="command-panel-heading">
           <div>
             <p className="eyebrow">COMMAND PRIORITY</p>
-            <h3>⚠ Needs Attention</h3>
+            <h3>Needs Attention</h3>
           </div>
           <span>{priorities.length} tracked</span>
         </div>
@@ -222,13 +224,13 @@ export function CommandIntelligence({
           <button
             className="news-refresh"
             onClick={() => {
-              setNewsState("Refreshing…");
+              setNewsState("Refreshing...");
               window.sage.getEveNews(true).then((items) => {
                 setNews(items);
                 setNewsState("");
               }).catch((error) => setNewsState(error instanceof Error ? error.message : "Refresh failed."));
             }}
-          >↻</button>
+          >&#8635;</button>
         </div>
         <div className="news-filters">
           {(["ccp", "market", "war", "events"] as const).map((filter) => (

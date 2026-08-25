@@ -53,11 +53,17 @@ export type ActivityArchetypeReadiness = {
   missingFitSkills: number;
   itemTypeIds: number[];
   items: ContextFitArchetype["items"];
+  representativeFitCount: number;
+  usableFitCount: number;
+  fitChoices: ContextFitArchetype["representativeFits"];
+  progressionFit?: ContextFitArchetype["representativeFits"][number];
+  recommendedFit?: ContextFitArchetype["representativeFits"][number];
 };
 
 export type ActivityReadinessResult = {
   hullTypeId: number;
   hull: string;
+  hullAccessReady: boolean;
   context: ActivityContext;
   model: ReturnType<typeof resolveContextRule>["model"];
   overallPercent: number;
@@ -66,7 +72,15 @@ export type ActivityReadinessResult = {
   compatible: boolean;
   compatibilityReason?: string;
   components: {
-    hull: { percent: number | null; weight: number; missing: number | null };
+    hull: {
+      percent: number | null;
+      accessReady: boolean;
+      accessPercent: number | null;
+      trainingPercent: number | null;
+      weight: number;
+      missing: number | null;
+      gaps: ShipReadinessSkill[];
+    };
     fit: {
       percent: number | null;
       weight: number;
@@ -251,18 +265,12 @@ export async function analyzeActivityReadiness(
 
   const activityEvidence = await getActivityContextEvidence(input.context);
 
-  const fitEvidence = rule.includeFit
-    ? await getContextFitEvidence(input.hullTypeId, hullName, input.context, rule)
-    : {
-        status: "no-data" as const,
-        source: "none" as const,
-        contextSpecific: true,
-        fetchedAt: new Date().toISOString(),
-        sampleCount: 0,
-        confidence: "none" as const,
-        note: "A fitted-ship profile is not part of readiness for this activity.",
-        archetypes: [],
-      };
+  const fitEvidence = await getContextFitEvidence(
+    input.hullTypeId,
+    hullName,
+    input.context,
+    rule.includeFit ? rule : { ...rule, includeFit: true },
+  );
 
   const hasFitEvidence = rule.includeFit && fitEvidence.status === "ready" && fitEvidence.archetypes.length > 0;
   const weights = effectiveWeights(rule.weights, {
@@ -274,10 +282,39 @@ export async function analyzeActivityReadiness(
 
   const archetypeResults: ActivityArchetypeReadiness[] = [];
   for (const archetype of fitEvidence.archetypes) {
-    const fitPlan = await analyzeTrainingPlan(snapshot, archetype.itemTypeIds, [], cloneState);
-    let overallPercent = weightedScore(
+    const scoredFits: Array<{
+      fit: ContextFitArchetype["representativeFits"][number];
+      plan: Awaited<ReturnType<typeof analyzeTrainingPlan>>;
+      readiness: number;
+      missing: number;
+      usable: boolean;
+    }> = [];
+    for (const representative of archetype.representativeFits ?? []) {
+      const representativePlan = await analyzeTrainingPlan(snapshot, representative.itemTypeIds, [], cloneState);
+      scoredFits.push({
+        fit: representative,
+        plan: representativePlan,
+        readiness: representativePlan.readinessPercent,
+        missing: representativePlan.missingSkills.length,
+        usable: representativePlan.ready,
+      });
+    }
+    scoredFits.sort((a, b) =>
+      b.readiness - a.readiness || a.missing - b.missing || a.fit.name.localeCompare(b.fit.name),
+    );
+    // Score one real representative fit at a time. The archetype item union is
+    // evidence about common modules, not a valid fitting and must not create a
+    // synthetic training queue from mutually exclusive modules.
+    const progression = scoredFits[0];
+    const fallbackPlan = progression
+      ? null
+      : await analyzeTrainingPlan(snapshot, archetype.itemTypeIds, [], cloneState);
+    const fitPlan = progression?.plan ?? fallbackPlan!;
+    const progressionFit = progression?.fit;
+    const recommendedFit = scoredFits.find((item) => item.usable)?.fit;
+    let archetypeOverallPercent = weightedScore(
       {
-        hull: hull?.readinessPercent ?? 100,
+        hull: hull?.hullAccessPercent ?? 100,
         fit: fitPlan.readinessPercent,
         activity: activityPercent,
         context: contextCoverage.percent,
@@ -289,13 +326,15 @@ export async function analyzeActivityReadiness(
         context: rule.contextTargets.length > 0,
       }),
     );
-    overallPercent = confidenceCap(
-      overallPercent,
+    archetypeOverallPercent = confidenceCap(
+      archetypeOverallPercent,
       true,
       { ...fitEvidence, confidence: archetype.confidence, contextSpecific: archetype.contextSpecific },
-      (hull?.missingSkills.length ?? 0) + core.missing + support.missing + contextCoverage.missing + fitPlan.missingSkills.length,
+      (hull?.missingHullAccessSkills.length ?? 0) + core.missing + support.missing + contextCoverage.missing + fitPlan.missingSkills.length,
     );
-    if (!compatibility.compatible) overallPercent = 0;
+    if (rule.includeHull && hull && !hull.hullAccessReady)
+      archetypeOverallPercent = Math.min(archetypeOverallPercent, 74);
+    if (!compatibility.compatible) archetypeOverallPercent = 0;
     archetypeResults.push({
       id: archetype.id,
       label: archetype.label,
@@ -304,13 +343,20 @@ export async function analyzeActivityReadiness(
       confidence: archetype.confidence,
       contextSpecific: archetype.contextSpecific,
       fitPercent: fitPlan.readinessPercent,
-      overallPercent,
+      overallPercent: archetypeOverallPercent,
       missingFitSkills: fitPlan.missingSkills.length,
       itemTypeIds: archetype.itemTypeIds,
       items: archetype.items,
+      representativeFitCount: scoredFits.length,
+      usableFitCount: scoredFits.filter((item) => item.usable).length,
+      fitChoices: scoredFits.filter((item) => item.usable).map((item) => item.fit),
+      progressionFit,
+      recommendedFit,
     });
   }
   archetypeResults.sort((a, b) =>
+    Number(Boolean(b.recommendedFit)) - Number(Boolean(a.recommendedFit)) ||
+    b.usableFitCount - a.usableFitCount ||
     b.overallPercent - a.overallPercent ||
     b.fitPercent - a.fitPercent ||
     b.sampleCount - a.sampleCount,
@@ -320,22 +366,16 @@ export async function analyzeActivityReadiness(
     : undefined;
   const selectedArchetype = requestedArchetype ?? archetypeResults[0] ?? null;
   const selectedFitPercent = selectedArchetype?.fitPercent ?? 100;
-  const selectedItemTypeIds = selectedArchetype?.itemTypeIds ?? [];
+  // A real representative fit may create genuine module-use blockers. The
+  // archetype-wide item union is evidence only and must never fabricate a
+  // synthetic "mandatory" fitting queue.
+  const selectedItemTypeIds = selectedArchetype?.progressionFit?.itemTypeIds ?? [];
 
-  const mandatoryTargets = [
-    ...input.coreSkills.map((target) => ({
-      ...target,
-      reason: target.reason ?? "Core competency target for the selected activity",
-    })),
-    ...input.supportSkills.map((target) => ({
-      ...target,
-      reason: target.reason ?? "Support competency target for the selected activity",
-    })),
-    ...rule.contextTargets.map((target) => ({
-      ...target,
-      reason: target.reason ?? "Required by the selected variation or role",
-    })),
-  ];
+  // Core/support/context targets describe practical competency and feed the
+  // readiness score. They are not hard EVE usage gates, so they must not be
+  // labelled mandatory training. Hard blockers are derived from the selected
+  // hull and one concrete representative fit through authoritative DOGMA.
+  const mandatoryTargets: ExplicitSkillTarget[] = [];
   const mandatoryItems = [
     ...(rule.includeHull ? [input.hullTypeId] : []),
     ...(hasFitEvidence ? selectedItemTypeIds : []),
@@ -349,7 +389,7 @@ export async function analyzeActivityReadiness(
 
   let overallPercent = weightedScore(
     {
-      hull: hull?.readinessPercent ?? 100,
+      hull: hull?.hullAccessPercent ?? 100,
       fit: selectedFitPercent,
       activity: activityPercent,
       context: contextCoverage.percent,
@@ -362,15 +402,16 @@ export async function analyzeActivityReadiness(
     fitEvidence,
     combinedPlan.missingSkills.length,
   );
+  if (rule.includeHull && hull && !hull.hullAccessReady) overallPercent = Math.min(overallPercent, 74);
   if (!compatibility.compatible) overallPercent = 0;
 
   const masteryTargets = buildMasteryTargets(input.coreSkills, input.supportSkills, rule);
   const masteryPlan = await analyzeTrainingPlan(snapshot, [], masteryTargets, cloneState);
-  const masteryPercent = Math.min(overallPercent, masteryPlan.readinessPercent);
+  const masteryPercent = masteryPlan.readinessPercent;
 
   const reasons: string[] = [];
   if (rule.includeHull)
-    reasons.push(`Hull access contributes ${weights.hull}%: ${hull?.readinessPercent ?? 0}%.`);
+    reasons.push(`Hull access contributes ${weights.hull}%: ${hull?.hullAccessPercent ?? 0}% (${hull?.hullAccessReady ? "READY" : "BLOCKED"}); the dependency-correct training route is ${hull?.hullTrainingPercent ?? 0}% complete.`);
   if (rule.includeFit) {
     if (selectedArchetype)
       reasons.push(
@@ -403,6 +444,8 @@ export async function analyzeActivityReadiness(
       caveats.push(
         "The selected activity has no strong variation-specific fitting signal in the available evidence, so the fitting layer is using hull-wide observed archetypes as fallback rather than pretending they are exact doctrine or site fits.",
       );
+    if (rule.includeHull && hull && !hull.hullAccessReady)
+      caveats.push("Readiness is capped below Operational until the character can actually board the selected hull, regardless of strength in the other components.");
     if (fitEvidence.confidence !== "high")
       caveats.push(
         `Fitting evidence confidence is ${fitEvidence.confidence}; Sage limits the maximum readiness score when evidence is thin.`,
@@ -412,6 +455,7 @@ export async function analyzeActivityReadiness(
   return {
     hullTypeId: input.hullTypeId,
     hull: hullName,
+    hullAccessReady: hull?.hullAccessReady ?? !rule.includeHull,
     context: input.context,
     model: rule.model,
     overallPercent,
@@ -421,9 +465,13 @@ export async function analyzeActivityReadiness(
     compatibilityReason: "reason" in compatibility ? compatibility.reason : undefined,
     components: {
       hull: {
-        percent: hull?.readinessPercent ?? null,
+        percent: hull?.hullAccessPercent ?? null,
+        accessReady: hull?.hullAccessReady ?? !rule.includeHull,
+        accessPercent: hull?.hullAccessPercent ?? null,
+        trainingPercent: hull?.hullTrainingPercent ?? null,
         weight: weights.hull,
-        missing: hull?.missingSkills.length ?? null,
+        missing: hull?.hullAccessTrainingSkills.length ?? null,
+        gaps: hull?.hullAccessTrainingSkills ?? [],
       },
       fit: {
         percent: selectedArchetype?.fitPercent ?? null,
@@ -462,7 +510,7 @@ export async function analyzeActivityReadiness(
     missingMasterySkills: masteryPlan.missingSkills,
     explanation: {
       formula:
-        "Readiness uses a context-specific component model. Hull and fitted-equipment competency are included only when the activity actually depends on them; activity and selected variation/role targets are scored separately. Fit archetypes are scored independently instead of averaging unrelated fits together.",
+        "Readiness uses a context-specific component model. Hull access is binary boardability from authoritative DOGMA; fitted-equipment competency, activity skills and selected variation/role targets are scored separately. Mandatory training contains only genuine hull or concrete-fit usage blockers, while competency targets remain non-blocking development guidance.",
       reasons,
       caveats,
     },

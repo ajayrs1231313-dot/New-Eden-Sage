@@ -2,9 +2,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { ActivityContext, ContextRule } from "./activity-context";
 import { USER_DATA_ROOT } from "./data-paths";
+import { fitTankFamilyFromNames, selectDiverseFitClusters } from "./fit-cluster-selection";
 import {
   getRecentHullFitSamples,
   type CommunityFitSample,
+  type CommunityFitPayload,
 } from "./community-fit";
 
 const WORKBENCH = "https://api.eveworkbench.com/v1";
@@ -16,6 +18,7 @@ const ABYSS_MAX_PAGES = 3;
 const MAX_PUBLIC_FIT_IDS = 18;
 const MAX_RUN_WEIGHT_PER_FIT = 6;
 const EXACT_EVIDENCE_TARGET = 6;
+const FIT_EVIDENCE_MODEL = "top-level-fitted-items-v3-tank-diversity";
 
 const headers = {
   Accept: "application/json",
@@ -71,6 +74,7 @@ type FitSample = {
   name: string;
   itemTypeIds: number[];
   items: Array<{ typeId: number; name: string }>;
+  fit: CommunityFitPayload;
 };
 
 export type ContextFitArchetype = {
@@ -82,9 +86,11 @@ export type ContextFitArchetype = {
   contextSpecific: boolean;
   items: Array<{ typeId: number; name: string; presencePercent: number }>;
   itemTypeIds: number[];
+  representativeFits: Array<{ id: string; name: string; itemTypeIds: number[]; fit: CommunityFitPayload }>;
 };
 
 export type ContextFitEvidence = {
+  model?: string;
   status: "ready" | "no-data" | "error";
   source: "eve-workbench-abyss" | "zkillboard-recent-losses" | "none";
   contextSpecific: boolean;
@@ -193,6 +199,22 @@ function fitTypeIds(fit: EwbFitResponse) {
   ].filter((id) => Number.isInteger(id) && id > 0);
 }
 
+function workbenchPayload(fit: EwbFitResponse, names: Map<number, string>): CommunityFitPayload {
+  const rack = (items: EwbItem[] | null | undefined) => (items ?? []).map((item) => {
+    const typeId = itemTypeId(item);
+    return { typeId, name: names.get(typeId) ?? `Type ${typeId}`, quantity: 1 };
+  }).filter((item) => item.typeId > 0);
+  return {
+    low: rack(fit.lowSlots ?? fit.LowSlots),
+    mid: rack(fit.mediumSlots ?? fit.MediumSlots),
+    high: rack(fit.highSlots ?? fit.HighSlots),
+    rig: rack(fit.rigSlots ?? fit.RigSlots),
+    subsystem: [],
+    drones: rack(fit.droneBay ?? fit.DroneBay),
+    fighters: rack(fit.fighterBay ?? fit.FighterBay),
+    cargo: [],
+  };
+}
 function runFitId(run: EwbRun) {
   return run.fitId ?? run.FitId ?? null;
 }
@@ -344,6 +366,7 @@ async function getAbyssSamples(
         name: fitName(fit, hull),
         itemTypeIds,
         items,
+        fit: workbenchPayload(fit, names),
       });
     }
   }
@@ -356,6 +379,7 @@ function genericToFitSamples(samples: CommunityFitSample[]): FitSample[] {
     name: "Observed recent fit",
     itemTypeIds: sample.itemTypeIds,
     items: sample.items,
+    fit: sample.fit,
   }));
 }
 
@@ -395,7 +419,7 @@ function archetypeLabel(
   const parts: string[] = [];
   if (/shield booster|shield extender|shield hardener/.test(text))
     parts.push("Shield");
-  if (/armor repair|armor plate|energized/.test(text)) parts.push("Armor");
+  if (/armor repair|armour repair|armor plate|armour plate|energized|membrane|armor hardener|armour hardener|reactive armor|reactive armour/.test(text)) parts.push("Armor");
   if (/missile launcher|rocket launcher|torpedo launcher/.test(text))
     parts.push("Missile");
   if (/laser|pulse laser|beam laser/.test(text)) parts.push("Laser");
@@ -429,10 +453,13 @@ function clusterSamples(
     else clusters.push([sample]);
   }
 
-  return clusters
-    .sort((a, b) => b.length - a.length)
-    .slice(0, 3)
-    .map((cluster, clusterIndex): ContextFitArchetype => {
+  return selectDiverseFitClusters(
+    clusters,
+    (cluster) => fitTankFamilyFromNames(
+      cluster.flatMap((sample) => [...sample.fit.low, ...sample.fit.mid, ...sample.fit.rig].map((item) => item.name)),
+    ),
+    4,
+  ).map((cluster, clusterIndex): ContextFitArchetype => {
       const presence = new Map<number, { count: number; name: string }>();
       for (const sample of cluster)
         for (const item of sample.items) {
@@ -464,6 +491,7 @@ function clusterSamples(
         contextSpecific,
         items: ranked,
         itemTypeIds: ranked.map((item) => item.typeId),
+        representativeFits: [...new Map(cluster.map((sample) => [sample.id.replace(/-\d+$/, ""), sample])).values()].slice(0, 4).map((sample) => ({ id: sample.id, name: sample.name, itemTypeIds: sample.itemTypeIds, fit: sample.fit })),
       };
     });
 }
@@ -490,7 +518,14 @@ export async function getContextFitEvidence(
   const file = cacheFile(hullTypeId, context);
   if (!force) {
     const cached = await readCached(file);
-    if (cached) return cached;
+    if (
+      cached?.model === FIT_EVIDENCE_MODEL &&
+      cached.archetypes.every(
+        (archetype) =>
+          Array.isArray(archetype.representativeFits) &&
+          archetype.representativeFits.length > 0,
+      )
+    ) return cached;
   }
 
   let exactSourceNote: string | undefined;
@@ -505,6 +540,7 @@ export async function getContextFitEvidence(
         );
         if (archetypes.length) {
           const result: ContextFitEvidence = {
+            model: FIT_EVIDENCE_MODEL,
             status: "ready",
             source: "eve-workbench-abyss",
             contextSpecific: true,
@@ -550,6 +586,7 @@ export async function getContextFitEvidence(
         : "Sage used recent hull-wide observed archetypes because no stronger variation-specific fit signal was available."
       : observed.note;
     const result: ContextFitEvidence = {
+      model: FIT_EVIDENCE_MODEL,
       status: archetypes.length ? "ready" : observed.status,
       source: "zkillboard-recent-losses",
       contextSpecific,
@@ -563,6 +600,7 @@ export async function getContextFitEvidence(
     return result;
   } catch (error) {
     const failed: ContextFitEvidence = {
+      model: FIT_EVIDENCE_MODEL,
       status: "error",
       source: "none",
       contextSpecific: false,

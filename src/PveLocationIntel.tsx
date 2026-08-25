@@ -66,7 +66,7 @@ export function PveLocationIntel({ analysis }: { analysis: PveLocationAnalysis }
       <div className="pve-ship-context">
         <span>Current EVE ship</span>
         <strong>{analysis.character.shipName ?? "No active ship reported"}</strong>
-        <small>Readiness is matched against your synced character; imported Fittings remain a separate local planning reference.</small>
+        <small>Readiness is matched against your synced character; imported Fitting Command fits remain a separate local planning reference.</small>
       </div>
 
       {analysis.dataStatus.errors.length > 0 && (

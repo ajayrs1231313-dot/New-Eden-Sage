@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { Worker } from "node:worker_threads";
+import { fork, type ChildProcess } from "node:child_process";
 import AdmZip from "adm-zip";
 import ExcelJS from "exceljs";
 import {
@@ -11,16 +11,26 @@ import {
   publicConfig,
   readConfig,
   writeConfig,
+  CURRENT_IDENTITY_SCHEMA_VERSION,
 } from "./config";
-import { fetchCharacterSnapshot, loginWithEve, refreshEveToken } from "./eve";
+import { fetchCharacterCoreSnapshot, fetchCharacterCurrentShipSnapshot, fetchCharacterSnapshot, fetchWalletOnlySnapshot, loginWithEve, refreshEveToken } from "./eve";
+import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
 import {
   addImportedInformation,
+  clearCharacterSnapshots,
   deleteSnapshot,
   exportDatabaseData,
   getSnapshot,
   importDatabaseData,
   listImportedInformation,
+  getPlanetaryAlertSettings,
+  listPlanetaryPlans,
+  listPlanetaryResourceObservations,
   listSnapshots,
+  replacePlanetaryResourceObservations,
+  savePlanetaryAlertSettings,
+  savePlanetaryPlan,
+  deletePlanetaryPlan,
   saveSnapshot,
 } from "./database";
 import {
@@ -42,11 +52,14 @@ import {
 } from "./market-storage";
 import { listPublishedShips, stageStaticDataRefreshLowImpact } from "./type-volumes";
 import { runMasterUpdate } from "./master-update";
+import { getSyncMemorySnapshot, syncMemoryHeadroom } from "./sync-resources";
 import { CRASH_LOG_FILE, LOG_FILE, logCrash, logEvent } from "./logger";
 import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
 import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
-import { analyzeBlueprintActivities, analyzeInventionOpportunities, analyzeManufacturingPlan, getIndustrySystemCostIndices } from "./industrial-engine";
+import { analyzeBlueprintActivities, analyzeManufacturingPlan, analyzeReactionPlan, getIndustrySystemCostIndices, getReactionCatalogue } from "./industrial-engine";
+import { analyzeRefinery, getRefineryCatalogue } from "./refinery-engine";
+import { createFoundryProject, getFoundryProjects, getFoundryWorkspace, removeFoundryProject, searchFoundryBlueprintCatalogue, synchronizeFoundryLifecycle, updateFoundryProject } from "./project-foundry";
 import { getLootAcquisition, prepareLootDataLocal, searchLootItems } from "./loot-engine";
 import {
   beginRawMarketSnapshot,
@@ -55,14 +68,49 @@ import {
   RAW_MARKET_ROOT,
   saveRawMarketRegion,
 } from "./raw-market-storage";
-import { analyzeShipReadiness } from "./readiness";
+import { analyzeHullAccessPreviews, analyzeShipReadiness } from "./readiness";
 import { analyzeActivityReadiness } from "./activity-readiness";
+import { analyzeCurrentShipUse, type CurrentShipUseProfileId } from "./capability-engine";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { runOpportunityAnalysis, runCapabilityAnalysis, runTradeAnalysis, runRawMarketSearch, runRegionalMarketFilter, runPveLocationAnalysis, cancelAnalysis, analysisStatus, disposeAnalysisWorker, stopAnalysisWorkersForExclusiveTask, releaseIdleMarketAnalysisWorker } from "./analysis-job-manager";
+import { loadCurrentMarketRevision } from "./shared-market-data";
+import {
+  runOpportunityAnalysis,
+  runCapabilityAnalysis,
+  runTradeAnalysis,
+  runRawMarketSearch,
+  runRegionalMarketFilter,
+  runPveLocationAnalysis,
+  loadPreparedOpportunityAnalysis,
+  loadPreparedPveLocationAnalysis,
+  cancelAnalysis,
+  analysisStatus,
+  disposeAnalysisWorker,
+  stopAnalysisWorkersForExclusiveTask,
+  releaseIdleMarketAnalysisWorker,
+  releaseIdleAnalysisWorkers,
+} from "./analysis-job-manager";
+import {
+  getBlueprintActivitiesPrepared,
+  getIndustrialOpportunitiesPrepared,
+  getManufacturingPlanPrepared,
+  getSystemCostIndexPrepared,
+  loadIndustrialPreparedState,
+} from "./industrial-preparation";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
+import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility, repairClaudeDesktopDirectConfig, showClaudeDesktopBundle } from "./claude-integration";
 import { typeImageProtocolResponse } from "./eve-assets";
+import { getHostClockInfo, setHostClock, syncHostClock } from "./system-time";
+import { getContractMarketIntelligence, loadGlobalMarketQuotes } from "./market-intelligence";
+import { analyzeLpCorporation, getLpEarningCandidates, resolveLpCorporations } from "./lp-store";
+import { applyProfitBulkBookkeeping, completeProfitDeal, getProfitLedger, getProfitPurchaseReview, getProfitReconciliationReview, reconcileProfitLedger, removeProfitLedgerRecord, setProfitMatchDecision, setProfitMaterialProvenance, setProfitPurchaseTransactionOverride, setProfitTransactionOverride } from "./profit-ledger";
+import { analyzePlanetaryRevenue, buildPlanetaryPlan, type PlanetaryPlanInput, type PlanetaryRevenueSettings } from "./planetary-revenue";
+import { analyzePlanetaryAdvanced, buildPlanetaryBasketPlan, buildPlanetaryDesignerEveTemplate, buildPlanetaryDesignerSeedFromSnapshot, evaluatePlanetaryDesignerLayout, generatePlanetaryDesignerLayouts, type PlanetaryBasketInput, type PlanetaryDesignerInput } from "./planetary-advanced";
+import { getSagePiObject, listSagePiObjects, publishSagePiObject, unpublishSagePiObject, updateSagePiObject } from "./planetary-online";
+import { exportNavigationWaypoints } from "./navigation-eve-export";
+import { registerWormholeCommandIpc } from "./wormhole-command-store";
+import { getWormholeReference, getWormholeReferenceEntry, getWormholeRollingShipMass, getWormholeSystemReferences } from "./wormhole-reference";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "sage-asset",
@@ -71,12 +119,27 @@ protocol.registerSchemesAsPrivileged([{
 
 let window: BrowserWindow | null = null;
 let masterUpdateActive = false;
-let quietTabPreparationActive = false;
 const STARTUP_SYNC_GUARD_MS = 30_000;
 const startupSyncGuardUntil = Date.now() + STARTUP_SYNC_GUARD_MS;
 
 function automaticSyncStatePath() {
   return path.join(app.getPath("userData"), "automatic-sync-state.json");
+}
+
+function syncPreparationPreferencesPath() {
+  return path.join(app.getPath("userData"), "sync-preparation-preferences.json");
+}
+
+async function readSyncPreparationOptions(): Promise<CompleteSyncOptions> {
+  try {
+    return JSON.parse(await fs.readFile(syncPreparationPreferencesPath(), "utf8")) as CompleteSyncOptions;
+  } catch {
+    return {};
+  }
+}
+
+async function saveSyncPreparationOptions(options: CompleteSyncOptions) {
+  await fs.writeFile(syncPreparationPreferencesPath(), JSON.stringify(options), "utf8");
 }
 
 async function hasSyncedThisVersion() {
@@ -92,70 +155,352 @@ async function markVersionSynced() {
   await fs.writeFile(automaticSyncStatePath(), JSON.stringify({ version: app.getVersion(), syncedAt: new Date().toISOString() }), "utf8");
 }
 
-async function prepareTabsQuietly() {
-  if (quietTabPreparationActive) return;
-  quietTabPreparationActive = true;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const worker = new Worker(path.join(__dirname, "quiet-tab-prep-worker.js"), {
-        env: { ...process.env, NEW_EDEN_SAGE_USER_DATA: app.getPath("userData") },
-      });
-      worker.once("message", (message: any) => message?.type === "complete" ? resolve() : reject(new Error(message?.error ?? "Quiet tab preparation failed.")));
-      worker.once("error", reject);
-      worker.once("exit", (code) => { if (code !== 0) reject(new Error(`Quiet tab preparation worker exited (${code}).`)); });
-    });
-    // Build each character's default ISK Lab result once against the just-saved
-    // market snapshot. The retained analysis worker then serves the tab's
-    // matching initial request from memory instead of scanning every item again.
-    const snapshots = listSnapshots() as any[];
-    for (const snapshot of snapshots) {
-      await runOpportunityAnalysis({
-        characterId: snapshot.characterId,
-        maxCapital: null,
-        cargoCapacityM3: null,
-        maxJumps: null,
-        maxMinutes: null,
-      }, snapshots).catch((error) => logEvent("warn", "background_isk_lab.prepare_failed", {
-        characterId: snapshot.characterId,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-    }
-    // The result is persisted on disk, so keeping the multi-gigabyte market
-    // worker alive buys very little and can make Windows treat Sage as hung.
-    await releaseIdleMarketAnalysisWorker();
-    await logEvent("info", "background_tabs.prepared", { tabs: ["industrial", "isk-lab"] });
-  } finally {
-    quietTabPreparationActive = false;
-  }
+type PrepTrackStatus = "waiting" | "running" | "done" | "error";
+type PrepTrackId = "core" | "industrial-command" | "isk-lab" | "market-scanner" | "opportunities" | "inventions" | "pve-locations" | "progression";
+type PrepTrack = { id: PrepTrackId; label: string; percent: number; status: PrepTrackStatus; message: string };
+type CompleteSyncOptions = { cloneStates?: Record<string, "alpha" | "omega"> };
+
+const DEFAULT_ACTIVITY_PREPARATION = {
+  activityId: "pve",
+  subcategoryId: "missions",
+  contentId: "missions-l1-l2",
+  selectorValues: { shipClass: "Destroyer" },
+  coreSkills: [
+    { skill: "CPU Management", level: 5 },
+    { skill: "Power Grid Management", level: 5 },
+    { skill: "Navigation", level: 4 },
+    { skill: "Evasive Maneuvering", level: 4 },
+  ],
+  supportSkills: [
+    { skill: "Target Management", level: 3 },
+    { skill: "Social", level: 3 },
+  ],
+  shipNames: ["Cormorant", "Catalyst", "Coercer", "Thrasher"],
+};
+
+const PREP_TRACK_LABELS: Array<[PrepTrackId, string]> = [
+  ["core", "Live data & indexes"],
+  ["industrial-command", "Industrial Command"],
+  ["isk-lab", "ISK Lab"],
+  ["market-scanner", "Market Scanner"],
+  ["opportunities", "Opportunities"],
+  ["inventions", "Invention results"],
+  ["pve-locations", "PvE & Locations"],
+  ["progression", "Progression"],
+];
+
+function newPrepTracks(): PrepTrack[] {
+  return PREP_TRACK_LABELS.map(([id, label]) => ({ id, label, percent: 0, status: "waiting", message: "Waiting for shared data." }));
 }
 
-async function runCompleteSync(sendProgress: (progress: unknown) => void, skipIfVersionSynced = false) {
+function clampPrepPercent(value: unknown) {
+  const numeric = Number(value ?? 0);
+  return Math.max(0, Math.min(100, Number.isFinite(numeric) ? numeric : 0));
+}
+
+function prepTrack(tracks: PrepTrack[], id: PrepTrackId) {
+  const track = tracks.find((item) => item.id === id);
+  if (!track) throw new Error(`Preparation track ${id} is missing.`);
+  return track;
+}
+
+function refreshIskLabTrack(tracks: PrepTrack[]) {
+  const children = (["market-scanner", "opportunities", "inventions", "pve-locations"] as PrepTrackId[]).map((id) => prepTrack(tracks, id));
+  const parent = prepTrack(tracks, "isk-lab");
+  parent.percent = Math.round(children.reduce((sum, item) => sum + item.percent, 0) / children.length);
+  parent.status = children.some((item) => item.status === "error")
+    ? "error"
+    : children.every((item) => item.status === "done")
+      ? "done"
+      : children.some((item) => item.status === "running" || item.percent > 0)
+        ? "running"
+        : "waiting";
+  parent.message = parent.status === "done"
+    ? "All ISK Lab intelligence is prepared."
+    : parent.status === "error"
+      ? "One or more ISK Lab preparations need retrying."
+      : "Preparing the ISK Lab intelligence set.";
+}
+
+function completeSyncPercent(tracks: PrepTrack[]) {
+  const core = prepTrack(tracks, "core").percent;
+  const leaves = (["industrial-command", "market-scanner", "inventions", "pve-locations", "progression"] as PrepTrackId[]).map((id) => prepTrack(tracks, id).percent);
+  const prepared = leaves.reduce((sum, value) => sum + value, 0) / Math.max(1, leaves.length);
+  return Math.min(99, Math.round(core * 0.55 + prepared * 0.45));
+}
+
+let featurePrepProcessQueue: Promise<void> = Promise.resolve();
+
+async function runFeaturePrepProcessNow<T = unknown>(
+  processData: any,
+  onProgress?: (progress: { percent?: number; message?: string }) => void,
+) {
+  const task = String(processData?.task ?? "unknown");
+  const headroom = await ensureSyncMemoryHeadroom(`feature-process:${task}`);
+  if (!headroom.ok) {
+    throw new Error(
+      `Not enough memory to start ${task} safely (${headroom.sample.freeSystemMb.toLocaleString()} MB free; ${headroom.minFreeSystemMb.toLocaleString()} MB reserved). Existing prepared data was kept.`,
+    );
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let child: ChildProcess;
+    try {
+      child = fork(path.join(__dirname, "feature-prep-process.js"), [], {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
+          NEW_EDEN_SAGE_USER_DATA: app.getPath("userData"),
+        },
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+        execArgv: ["--max-old-space-size=1536"],
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    void logSyncMemory("master_update.feature_process_start", { task, pid: child.pid });
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr = `${stderr}${String(chunk)}`.slice(-4_000);
+    });
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      child.removeAllListeners("message");
+      child.removeAllListeners("error");
+      child.removeAllListeners("exit");
+
+      let finished = false;
+      const afterExit = () => {
+        if (finished) return;
+        finished = true;
+        callback();
+      };
+      child.once("exit", afterExit);
+      try {
+        if (child.connected) child.disconnect();
+      } catch {
+        // The process may already have closed its IPC channel.
+      }
+      if (child.exitCode !== null || child.signalCode !== null) {
+        afterExit();
+      } else {
+        child.kill();
+        const killFallback = setTimeout(afterExit, 2_000);
+        killFallback.unref();
+      }
+    };
+
+    timeout = setTimeout(
+      () => finish(() => reject(new Error(`Feature preparation timed out after 15 minutes (${task}).`))),
+      15 * 60_000,
+    );
+    timeout.unref();
+
+    child.on("message", (message: any) => {
+      if (message?.type === "progress") onProgress?.(message);
+      if (message?.type === "complete") {
+        finish(() => {
+          void logSyncMemory("master_update.feature_process_complete", { task, pid: child.pid });
+          resolve(message.result as T);
+        });
+      }
+      if (message?.type === "error") {
+        finish(() => reject(new Error(String(message.error ?? "Feature preparation failed."))));
+      }
+    });
+    child.once("error", (error) => finish(() => {
+      void logSyncMemory("master_update.feature_process_error", {
+        task,
+        pid: child.pid,
+        error: error instanceof Error ? error.message : String(error),
+        stderr,
+      });
+      reject(error);
+    }));
+    child.once("exit", (code, signal) => {
+      void logSyncMemory("master_update.feature_process_exit", { task, pid: child.pid, code, signal, settled, stderr });
+      if (!settled) {
+        finish(() => reject(new Error(`Feature preparation process exited before completion (${code ?? signal ?? "unknown"}).`)));
+      }
+    });
+    child.once("spawn", () => {
+      child.send?.(processData, (error) => {
+        if (error) finish(() => reject(error));
+      });
+    });
+  });
+}
+
+function runFeaturePrepProcess<T = unknown>(
+  processData: any,
+  onProgress?: (progress: { percent?: number; message?: string }) => void,
+) {
+  const queued = featurePrepProcessQueue.then(
+    () => runFeaturePrepProcessNow<T>(processData, onProgress),
+    () => runFeaturePrepProcessNow<T>(processData, onProgress),
+  );
+  featurePrepProcessQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
+async function logSyncMemory(event: string, detail: Record<string, unknown> = {}) {
+  await logEvent("info", event, { ...detail, memory: getSyncMemorySnapshot() });
+}
+
+async function ensureSyncMemoryHeadroom(context: string) {
+  let decision = syncMemoryHeadroom(getSyncMemorySnapshot());
+  if (!decision.ok) {
+    await Promise.all([
+      disposeFittingWorker(),
+      releaseIdleMarketAnalysisWorker(),
+      releaseIdleAnalysisWorkers(),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    decision = syncMemoryHeadroom(getSyncMemorySnapshot());
+  }
+  await logEvent(decision.ok ? "info" : "warn", "master_update.memory_guard", {
+    context,
+    ...decision,
+  });
+  return decision;
+}
+
+function inventionSkillFingerprint(snapshot: any) {
+  return (snapshot?.skills?.skills ?? [])
+    .map((skill: any) => `${skill.skill_id}:${skill.trained_skill_level ?? 0}`)
+    .sort()
+    .join("|");
+}
+
+function inventionOwnedOriginalIds(snapshot: any) {
+  return [...new Set([
+    ...(Array.isArray(snapshot?.extended?.blueprints) ? snapshot.extended.blueprints : []),
+    ...(Array.isArray(snapshot?.extended?.corporation?.blueprints) ? snapshot.extended.corporation.blueprints : []),
+  ]
+    .filter((blueprint: any) => Number(blueprint?.quantity) === -1)
+    .map((blueprint: any) => Number(blueprint.type_id))
+    .filter((typeId: number) => Number.isInteger(typeId) && typeId > 0))]
+    .sort((a: number, b: number) => a - b);
+}
+async function inventionPreparedCacheKey(input: { characterId: string; decryptorTypeId?: number | null }, snapshot: any) {
+  const manifest = await loadCurrentMarketRevision();
+  return {
+    schema: 11,
+    characterId: String(input.characterId),
+    skills: inventionSkillFingerprint(snapshot),
+    ownedOriginals: inventionOwnedOriginalIds(snapshot),
+    marketSnapshotId: manifest?.id ?? "none",
+    decryptorTypeId: Number(input.decryptorTypeId ?? 0),
+  };
+}
+
+async function loadPreparedInventionResult(input: { characterId: string; decryptorTypeId?: number | null }, snapshot: any) {
+  const key = await inventionPreparedCacheKey(input, snapshot);
+  const exact = await loadPersistedResult<any>("industry-invention-opportunities", key);
+  return { key, result: exact };
+}
+
+async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVersionSynced = false, options: CompleteSyncOptions = {}) {
   if (masterUpdateActive) return { alreadyRunning: true };
   if (skipIfVersionSynced && await hasSyncedThisVersion()) {
     await logEvent("info", "master_update.skipped_already_synced", { version: app.getVersion() });
     return { alreadySynced: true, version: app.getVersion() };
   }
-  let lastProgress: unknown = null;
+
+  const startedAtMs = Date.now();
+  let lastProgress: any = null;
   masterUpdateActive = true;
-  try {
-    await Promise.all([disposeFittingWorker(), stopAnalysisWorkersForExclusiveTask()]);
-    await logEvent("info", "master_update.sync_started", { source: "automatic-or-sync-all" });
-    const result = await runMasterUpdate((progress) => {
-      lastProgress = progress;
-      sendProgress(progress);
+  const tracks = newPrepTracks();
+
+  const publish = (message: string, extra: Record<string, unknown> = {}, running = true) => {
+    refreshIskLabTrack(tracks);
+    sendProgress({
+      ...extra,
+      running,
+      message,
+      percent: running ? completeSyncPercent(tracks) : 100,
+      tracks: tracks.map((item) => ({ ...item })),
     });
-    if (!(result as any).alreadyRunning && !(result as any).failures?.length) await markVersionSynced();
-    // Fitting and Industry deliberately start only after the live app data is
-    // ready, so neither delays the initial experience or competes for cores.
-    void prepareTabsQuietly();
-    return result;
+  };
+
+  const setTrack = (id: PrepTrackId, patch: Partial<PrepTrack>) => {
+    Object.assign(prepTrack(tracks, id), patch);
+  };
+
+  try {
+    await logEvent("info", "master_update.sync_started", { source: "automatic-or-sync-all", publicMarketCompute: "server-only" });
+    setTrack("core", { percent: 0, status: "running", message: "Refreshing characters and checking shared market." });
+    publish("Refreshing characters and checking shared market", { stage: "starting" });
+
+    const coreResult = await runMasterUpdate((progress: any) => {
+      lastProgress = progress;
+      setTrack("core", {
+        percent: clampPrepPercent(progress.percent),
+        status: progress.running === false || progress.percent >= 100 ? "done" : "running",
+        message: String(progress.message ?? "Refreshing characters and checking shared market."),
+      });
+      publish(String(progress.message ?? "Refreshing characters and checking shared market."), { ...progress, running: true });
+    });
+
+    const coreFailures = Array.isArray(coreResult?.failures) ? coreResult.failures : [];
+    setTrack("core", {
+      percent: 100,
+      status: coreFailures.length ? "error" : "done",
+      message: coreFailures.length ? `Sync completed with ${coreFailures.length} failed source(s).` : "Character data and shared market are ready.",
+    });
+
+    // Sync All ends at the data boundary. Public market intelligence is prepared by Modal;
+    // private/feature-specific work stays local and is evaluated on demand by its module.
+    setTrack("market-scanner", { percent: 100, status: "done", message: "Uses server-prepared public market intelligence." });
+    setTrack("opportunities", { percent: 100, status: "done", message: "Uses server-prepared public market intelligence." });
+    setTrack("industrial-command", { percent: 100, status: "done", message: "Uses shared market data with local character data on demand." });
+    setTrack("pve-locations", { percent: 100, status: "done", message: "Prepared on demand when opened." });
+    setTrack("progression", { percent: 100, status: "done", message: "Prepared on demand when opened." });
+    setTrack("inventions", { percent: 100, status: "done", message: "Prepared on demand when Invention is opened." });
+    refreshIskLabTrack(tracks);
+
+    if (!coreFailures.length) await markVersionSynced();
+    const snapshots = listSnapshots() as any[];
+    const totalDurationMs = Date.now() - startedAtMs;
+    const finalMessage = coreFailures.length ? `Sync finished with ${coreFailures.length} failed source(s).` : "Ready";
+    publish(finalMessage, {
+      stage: coreFailures.length ? "complete-with-core-errors" : "ready",
+      totalDurationMs,
+      downloadDurationMs: coreResult?.downloadDurationMs,
+      completed: PREP_TRACK_LABELS.length,
+      total: PREP_TRACK_LABELS.length,
+    }, false);
+    window?.webContents.send("prepared:data-updated", {
+      completedAt: new Date().toISOString(),
+      characterIds: snapshots.map((snapshot) => String(snapshot.characterId)),
+      preparationFailures: 0,
+      sharedMarketReady: !coreFailures.length,
+    });
+    await logEvent("info", "sync_all.total_ms", { durationMs: totalDurationMs, failures: coreFailures.length });
+    await logEvent("info", "master_update.sync_ready", { totalDurationMs, coreFailures: coreFailures.length, publicMarketCompute: "server-only" });
+    return { ...coreResult, totalDurationMs, preparationFailures: [] };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     logCrash("master_update.crashed", { error, lastProgress });
+    publish(`Update stopped: ${message}`, { stage: "failed", totalDurationMs: Date.now() - startedAtMs }, false);
     throw error;
   } finally {
     masterUpdateActive = false;
   }
 }
+app.on("render-process-gone", (_event, contents, details) => {
+  void logEvent("error", "electron.render_process_gone", { webContentsId: contents.id, reason: details.reason, exitCode: details.exitCode });
+});
+app.on("child-process-gone", (_event, details) => {
+  void logEvent("error", "electron.child_process_gone", { type: details.type, reason: details.reason, exitCode: details.exitCode, serviceName: details.serviceName, name: details.name });
+});
 
 process.on(
   "uncaughtException",
@@ -168,6 +513,251 @@ process.on(
       error: error instanceof Error ? error : String(error),
     }),
 );
+
+let walletReconciliationTimer: NodeJS.Timeout | undefined;
+let walletReconciliationRunning = false;
+const WALLET_RECONCILIATION_INTERVAL_MS = 30 * 60 * 1000;
+
+async function runWalletOnlyReconciliation() {
+  if (walletReconciliationRunning) return { skipped: true, reason: "already-running" };
+  walletReconciliationRunning = true;
+  const startedAt = Date.now();
+  let refreshed = 0;
+  let failed = 0;
+  try {
+    const config = await readConfig();
+    const characterIds = Object.keys(config.encryptedRefreshTokens ?? {});
+    let configChanged = false;
+    for (const characterId of characterIds) {
+      const encrypted = config.encryptedRefreshTokens[characterId];
+      const existing = getSnapshot(characterId) as any;
+      if (!encrypted || !existing) continue;
+      try {
+        const tokens = await refreshEveToken(config.eveClientId, decrypt(encrypted));
+        if (tokens.refresh_token) {
+          config.encryptedRefreshTokens[characterId] = encrypt(tokens.refresh_token);
+          configChanged = true;
+        }
+        const snapshot = await fetchWalletOnlySnapshot(characterId, tokens.access_token, existing);
+        saveSnapshot(snapshot);
+        refreshed += 1;
+      } catch (error) {
+        failed += 1;
+        await logEvent("warn", "wallet_reconciliation.character_refresh_failed", { characterId, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (configChanged) await writeConfig(config);
+    const ledger = reconcileProfitLedger();
+    const result = { skipped: false, refreshed, failed, ledgerRecords: ledger.length, durationMs: Date.now() - startedAt, completedAt: new Date().toISOString() };
+    window?.webContents.send("wallet:reconciled", result);
+    await logEvent("info", "wallet_reconciliation.completed", result);
+    return result;
+  } finally {
+    walletReconciliationRunning = false;
+  }
+}
+
+function startWalletReconciliationTimer() {
+  if (walletReconciliationTimer) clearInterval(walletReconciliationTimer);
+  walletReconciliationTimer = setInterval(() => { void runWalletOnlyReconciliation().catch((error) => void logEvent("warn", "wallet_reconciliation.failed", { error: error instanceof Error ? error.message : String(error) })); }, WALLET_RECONCILIATION_INTERVAL_MS);
+  walletReconciliationTimer.unref?.();
+}
+
+async function eveWriteAccessToken(characterId: string) {
+  const config = await readConfig();
+  const stored = config.encryptedRefreshTokens[characterId];
+  if (!stored) throw new Error("This character is not connected. Reconnect it in Settings first.");
+  const tokens = await refreshEveToken(config.eveClientId, decrypt(stored));
+  if (tokens.refresh_token) {
+    config.encryptedRefreshTokens[characterId] = encrypt(tokens.refresh_token);
+    await writeConfig(config);
+  }
+  return tokens.access_token;
+}
+
+async function resolveOnlineEveUiCharacter(preferredCharacterId: string) {
+  const config = await readConfig();
+  const connectedCharacterIds = Object.keys(config.encryptedRefreshTokens ?? {});
+  const orderedCharacterIds = [preferredCharacterId, ...connectedCharacterIds.filter((id) => id !== preferredCharacterId)].filter(Boolean);
+  if (!orderedCharacterIds.length) throw new Error("Connect a character to Sage before using Find in EVE.");
+  let permissionDenied = false;
+  for (const characterId of orderedCharacterIds) {
+    try {
+      const accessToken = await eveWriteAccessToken(characterId);
+      const response = await fetch(`https://esi.evetech.net/characters/${encodeURIComponent(characterId)}/online/`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "X-Compatibility-Date": "2026-08-02",
+          "X-User-Agent": "NewEdenSage/1.1.12",
+        },
+      });
+      if (response.status === 401 || response.status === 403) {
+        permissionDenied = true;
+        continue;
+      }
+      if (!response.ok) continue;
+      const state = await response.json() as { online?: boolean };
+      if (!state.online) continue;
+      const snapshot = getSnapshot(characterId) as any;
+      return {
+        characterId,
+        characterName: String(snapshot?.character?.name ?? characterId),
+        accessToken,
+        usedFallback: characterId !== preferredCharacterId,
+      };
+    } catch {
+      continue;
+    }
+  }
+  if (permissionDenied) throw new Error("Find in EVE needs the EVE online/UI permissions. Reconnect your EVE characters once with Add character, then try again.");
+  throw new Error("No connected Sage character is currently online in EVE. Log into EVE with one of your connected characters, then try Find in EVE again.");
+}
+
+async function eveWriteRequest(characterId: string, url: string, body?: unknown, accessToken?: string) {
+  const token = accessToken ?? await eveWriteAccessToken(characterId);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-Compatibility-Date": "2026-08-02",
+      "X-User-Agent": "NewEdenSage/1.1.7",
+    },
+    body: body == null ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 500);
+    const error = new Error(`EVE action failed (${response.status})${detail ? `: ${detail}` : "."}`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
+  if (response.status === 204) return { success: true };
+  return response.json() as Promise<any>;
+}
+
+function eveFittingPayload(fit: any) {
+  const hullTypeId = Number(fit?.hull?.typeId);
+  if (!Number.isSafeInteger(hullTypeId) || hullTypeId <= 0) throw new Error("Resolve the fitting hull before exporting it to EVE.");
+  const items: Array<{ type_id: number; flag: string; quantity: number }> = [];
+  const rack = (values: any[], prefix: string) => {
+    let slot = 0;
+    for (const item of values ?? []) {
+      const typeId = Number(item?.typeId);
+      if (!Number.isSafeInteger(typeId) || typeId <= 0) throw new Error(`Resolve ${item?.name ?? "a fitted module"} before exporting to EVE.`);
+      const quantity = Math.max(1, Math.floor(Number(item?.quantity ?? 1)));
+      for (let index = 0; index < quantity; index += 1) items.push({ type_id: typeId, flag: `${prefix}${slot++}`, quantity: 1 });
+    }
+  };
+  rack(fit.low, "LoSlot");
+  rack(fit.mid, "MedSlot");
+  rack(fit.high, "HiSlot");
+  rack(fit.rig, "RigSlot");
+  rack(fit.subsystem, "SubSystemSlot");
+  const bay = new Map<string, { type_id: number; flag: string; quantity: number }>();
+  const addBay = (values: any[], flag: string) => {
+    for (const item of values ?? []) {
+      const typeId = Number(item?.typeId);
+      if (!Number.isSafeInteger(typeId) || typeId <= 0) throw new Error(`Resolve ${item?.name ?? "a fitting item"} before exporting to EVE.`);
+      const quantity = Math.max(1, Math.floor(Number(item?.quantity ?? 1)));
+      const key = `${flag}:${typeId}`;
+      const current = bay.get(key);
+      bay.set(key, { type_id: typeId, flag, quantity: (current?.quantity ?? 0) + quantity });
+    }
+  };
+  addBay(fit.drones, "DroneBay");
+  addBay(fit.fighters, "FighterBay");
+  addBay(fit.cargo, "Cargo");
+  const fitted = [...(fit.low ?? []), ...(fit.mid ?? []), ...(fit.high ?? [])];
+  for (const item of fitted) {
+    const chargeTypeId = Number(item?.chargeTypeId);
+    if (!Number.isSafeInteger(chargeTypeId) || chargeTypeId <= 0) continue;
+    const quantity = Math.max(1, Math.floor(Number(item?.chargeQuantity ?? 1)));
+    const key = `Cargo:${chargeTypeId}`;
+    const current = bay.get(key);
+    bay.set(key, { type_id: chargeTypeId, flag: "Cargo", quantity: (current?.quantity ?? 0) + quantity });
+  }
+  items.push(...bay.values());
+  return {
+    name: String(fit?.name || fit?.hull?.name || "New Eden Sage fit").slice(0, 50),
+    description: "Exported from New Eden Sage.",
+    ship_type_id: hullTypeId,
+    items,
+  };
+}
+async function ensurePrimaryIdentityMigration() {
+  if (!app.isPackaged) return;
+  const config = await readConfig();
+  if (config.identitySchemaVersion >= CURRENT_IDENTITY_SCHEMA_VERSION) return;
+
+  const disconnectedCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  config.encryptedRefreshTokens = {};
+  config.encryptedSageSessionToken = undefined;
+  config.sageAccountId = undefined;
+  config.primaryCharacterId = undefined;
+  config.identitySchemaVersion = CURRENT_IDENTITY_SCHEMA_VERSION;
+  config.identityMigratedAt = new Date().toISOString();
+  await writeConfig(config);
+  clearCharacterSnapshots();
+  await logEvent("info", "identity.migration.reset-characters", {
+    identitySchemaVersion: CURRENT_IDENTITY_SCHEMA_VERSION,
+    disconnectedCharacters: disconnectedCharacterIds.length,
+  });
+}
+
+async function planetaryCorporationContext(characterId: string) {
+  const config = await readConfig();
+  if (!config.encryptedSageSessionToken) {
+    throw new Error("Sage Online is not connected. Reconnect your primary Sage character first.");
+  }
+
+  const requested = String(characterId ?? "").trim();
+  if (!requested) {
+    throw new Error("Select a connected EVE character for corporation verification.");
+  }
+
+  const refreshEncrypted = config.encryptedRefreshTokens[requested];
+  if (!refreshEncrypted) {
+    throw new Error("No EVE refresh token is available for the selected character. Reconnect that character before using corporation tools.");
+  }
+
+  const refreshed = await refreshEveToken(config.eveClientId, decrypt(refreshEncrypted));
+  const sessionToken = decrypt(config.encryptedSageSessionToken);
+  const workspace = await ensureSageCorporationWorkspace(sessionToken, refreshed.access_token);
+  const verifiedCharacterId = String(workspace.character_id ?? "");
+
+  if (verifiedCharacterId !== requested) {
+    if (refreshed.refresh_token && verifiedCharacterId) {
+      config.encryptedRefreshTokens[verifiedCharacterId] = encrypt(refreshed.refresh_token);
+    }
+    delete config.encryptedRefreshTokens[requested];
+    await writeConfig(config);
+    throw new Error(
+      `Stored EVE credentials for character ${requested} resolved to ${workspace.character_name || verifiedCharacterId}. Reconnect the selected character before using corporation tools.`,
+    );
+  }
+
+  if (refreshed.refresh_token) {
+    config.encryptedRefreshTokens[requested] = encrypt(refreshed.refresh_token);
+    await writeConfig(config);
+  }
+
+  return { sessionToken, workspace, eveAccessToken: refreshed.access_token };
+}
+
+async function sageOnlineSessionTokenOnly() {
+  const config=await readConfig();
+  if(!config.encryptedSageSessionToken) throw new Error("Sage Online is not connected. Reconnect your primary Sage character first.");
+  return decrypt(config.encryptedSageSessionToken);
+}
+async function loadPlanetaryCorporationLibrary(characterId:string) {
+  const {sessionToken,workspace}=await planetaryCorporationContext(characterId);
+  const [surveySummaries,templateSummaries]=await Promise.all([listSagePiObjects(sessionToken,workspace.workspace_id,"sage.pi-survey"),listSagePiObjects(sessionToken,workspace.workspace_id,"sage.pi-template")]);
+  const [surveys,templates]=await Promise.all([
+    Promise.all(surveySummaries.slice(0,100).map(async summary=>({summary,payload:(await getSagePiObject(sessionToken,workspace.workspace_id,summary.id)).payload}))),
+    Promise.all(templateSummaries.slice(0,100).map(async summary=>({summary,payload:(await getSagePiObject(sessionToken,workspace.workspace_id,summary.id)).payload}))),
+  ]);
+  return {workspace,surveys,templates};
+}
 
 function createWindow() {
   window = new BrowserWindow({
@@ -188,8 +778,26 @@ function createWindow() {
   else window.loadFile(path.join(__dirname, "../dist/index.html"));
 }
 
-app.whenReady().then(() => {
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  });
+
+  app.whenReady().then(async () => {
+    await ensurePrimaryIdentityMigration();
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
+  registerWormholeCommandIpc();
+  ipcMain.handle("wormhole:reference-list", () => getWormholeReference());
+  ipcMain.handle("wormhole:reference-get", (_event, code: unknown) => getWormholeReferenceEntry(code));
+  ipcMain.handle("wormhole:system-reference", (_event, systemIds: unknown) => getWormholeSystemReferences(systemIds));
+  ipcMain.handle("wormhole:rolling-ship-mass", (_event, input: unknown) => getWormholeRollingShipMass(input));
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   const sendUpdateStatus = (status: string, detail?: unknown) => window?.webContents.send("update:status", { status, detail });
@@ -211,6 +819,15 @@ app.whenReady().then(() => {
   ipcMain.handle("external:open-support", () =>
     shell.openExternal("https://www.paypal.com/donate/?hosted_button_id=5ZE4R48W6UWMC"),
   );
+  ipcMain.handle("external:open-discord-url", (_event, raw:string) => {
+    const url=new URL(String(raw??""));
+    if(url.protocol!=="https:" || (url.hostname!=="discord.com" && url.hostname!=="www.discord.com")) throw new Error("Only Discord HTTPS links may be opened from Discord Integration.");
+    return shell.openExternal(url.toString());
+  });  ipcMain.handle("external:open-zkillboard", (_event, killmailId?: number) => {
+    const id = Number(killmailId ?? 0);
+    const url = Number.isSafeInteger(id) && id > 0 ? `https://zkillboard.com/kill/${id}/` : "https://zkillboard.com/";
+    return shell.openExternal(url);
+  });
   ipcMain.handle("mcp:get-setup", () => {
     const command = app.getPath("exe");
     const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
@@ -222,8 +839,14 @@ app.whenReady().then(() => {
       json: JSON.stringify({ mcpServers: { "new-eden-sage": { command, args, env } } }, null, 2),
       codex: `[mcp_servers.new-eden-sage]\ncommand = ${JSON.stringify(command)}\nargs = [${JSON.stringify(script)}]\nenv = { ELECTRON_RUN_AS_NODE = "1" }`,
       access: "Local read access plus explicit fitting write actions. Live EVE writes require Sage to be open and a reconnected character. Credentials, tokens, secrets and encrypted values are never exposed.",
+      claudeDesktop: claudeSetupText().desktopJson,
+      claudeCode: claudeSetupText().claudeCodeCommand,
     };
   });
+  ipcMain.handle("mcp:claude-status", () => getClaudeCompatibilityStatus());
+  ipcMain.handle("mcp:claude-repair", () => installClaudeCompatibility());
+  ipcMain.handle("mcp:claude-direct-repair", () => repairClaudeDesktopDirectConfig());
+  ipcMain.handle("mcp:claude-show-bundle", () => showClaudeDesktopBundle());
   ipcMain.handle("mcp:tunnel-status", () => getMcpTunnelStatus());
   ipcMain.handle("mcp:tunnel-configure", (_event, input: { tunnelId: string; runtimeKey: string }) => configureAndStartMcpTunnel(input));
   ipcMain.handle("mcp:open-chatgpt", () => shell.openExternal("https://chatgpt.com/plugins"));
@@ -231,16 +854,227 @@ app.whenReady().then(() => {
   ipcMain.handle("mcp:open-api-keys", () => shell.openExternal("https://platform.openai.com/settings/organization/api-keys"));
   void startMcpTunnel().catch((error) => void logEvent("error", "mcp.tunnel_start_failed", { error }));
   void startMcpWriteBridge(() => window).catch((error) => void logEvent("error", "mcp.write_bridge_start_failed", { error }));
+  void ensureClaudeCompatibility()
+    .then((status) => void logEvent("info", "mcp.claude_compatibility", { desktop: status.desktop, code: status.code }))
+    .catch((error) => void logEvent("warn", "mcp.claude_compatibility_failed", { error }));
   ipcMain.handle("mcp:sync-renderer-data", async (_event, value: unknown) => {
     const target = path.join(app.getPath("userData"), "mcp-renderer-data.json");
     await fs.writeFile(target, JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
     return true;
   });
+  ipcMain.handle("system-time:get", () => getHostClockInfo());
+  ipcMain.handle("system-time:sync", () => syncHostClock());
+  ipcMain.handle("system-time:set", (_event, value:string) => setHostClock(String(value ?? "")));
+  ipcMain.handle("corp:discord-state", async (_event, characterId:string) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
+    return {workspace,status:await getSageDiscordStatus(sessionToken,workspace.workspace_id,Number(workspace.character_id))};
+  });
+  ipcMain.handle("corp:discord-server-structure", async (_event, characterId:string) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to configure corporation Discord channels.");
+    return getSageDiscordServerStructure(sessionToken,workspace.workspace_id,Number(workspace.character_id));
+  });
+  ipcMain.handle("corp:discord-configure", async (_event, input:{characterId:string;guildId:string;channelId:string;allowedChannelIds?:string[];enabled:boolean}) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to configure corporation Discord.");
+    return configureSageDiscord(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),{guildId:String(input.guildId??""),channelId:String(input.channelId??""),allowedChannelIds:Array.isArray(input.allowedChannelIds)?input.allowedChannelIds.map(String):[],enabled:Boolean(input.enabled)});
+  });
+  ipcMain.handle("corp:discord-link-url", async (_event, characterId:string) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
+    return getSageDiscordLinkUrl(sessionToken,workspace.workspace_id,Number(workspace.character_id));
+  });
+  ipcMain.handle("corp:discord-announce", async (_event, input:{characterId:string;content:string;channelId?:string;roleIds?:string[];userIds?:string[]}) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to send corporation Discord announcements.");
+    return sendSageDiscordAnnouncement(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),{content:String(input.content??""),channelId:String(input.channelId??""),roleIds:Array.isArray(input.roleIds)?input.roleIds.map(String):[],userIds:Array.isArray(input.userIds)?input.userIds.map(String):[]});
+  });
+  ipcMain.handle("corp:discord-notification-targets", async (_event, input:{characterId:string;characterIds:number[]}) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
+    return updateSageDiscordNotificationTargets(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),Array.isArray(input.characterIds)?input.characterIds.map(Number):[]);
+  });
+  ipcMain.handle("corp:discord-test-dm", async (_event, characterId:string) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(characterId??""));
+    return testSageDiscordDm(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id));
+  });
+  ipcMain.handle("corp:discord-unlink", async (_event, characterId:string) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(characterId??""));
+    return unlinkSageDiscord(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id));
+  });
+  ipcMain.handle("corp:ops-workspace", async (_event, characterId:string) => (await planetaryCorporationContext(String(characterId??""))).workspace);
+  ipcMain.handle("corp:ops-list", async (_event, input:{workspaceId:string}) => {
+    const token=await sageOnlineSessionTokenOnly();
+    const summaries=await listSageOperations(token,String(input?.workspaceId??""));
+    return Promise.all(summaries.slice(0,100).map(async summary=>({summary,payload:(await getSageOperation(token,String(input.workspaceId),summary.id)).payload})));
+  });
+  ipcMain.handle("corp:ops-publish", async (_event, input:{characterId:string;payload:Record<string,unknown>}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const result=await publishSageOperation(sessionToken,workspace.workspace_id,Number(workspace.character_id),input?.payload??{});
+    return {...result,workspace};
+  });
+  ipcMain.handle("corp:ops-announce-discord", async (_event, input:{characterId:string;workspaceId:string;objectId:string}) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to announce operations to Discord.");
+    return announceSageOperationToDiscord(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId));
+  });
+  ipcMain.handle("corp:ops-cancel", async (_event, input:{characterId:string;workspaceId:string;objectId:string;message?:string}) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to cancel operations.");
+    return cancelSageOperation(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId),String(input.message??""));
+  });
+  ipcMain.handle("corp:ops-take-ownership", async (_event, input:{characterId:string;workspaceId:string;objectId:string}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to take ownership of an operation.");
+    return takeSageOperationOwnership(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId));
+  });
+  ipcMain.handle("corp:ops-application-notifications", async (_event, input:{characterId:string;workspaceId:string;objectId:string;enabled:boolean}) => {
+    const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required for operation application notifications.");
+    return setSageOperationApplicationNotifications(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId),input.enabled===true);
+  });
+  ipcMain.handle("corp:ops-update", async (_event, input:{characterId:string;workspaceId:string;objectId:string;payload:Record<string,unknown>;expectedVersion:number}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    return updateSageOperation(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId),input?.payload??{},Number(input.expectedVersion));
+  });
+  ipcMain.handle("corp:ops-apply", async (_event, input:{characterId:string;workspaceId:string;objectId:string;roleId:string;fitName?:string;fitText?:string;hullName?:string}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    return applySageOperationRole(sessionToken,workspace.workspace_id,String(input.objectId),{characterId:Number(workspace.character_id),roleId:String(input.roleId),fitName:input.fitName,fitText:input.fitText,hullName:input.hullName});
+  });
+  ipcMain.handle("corp:ops-decision", async (_event, input:{characterId:string;workspaceId:string;objectId:string;applicationId:string;decision:"approved"|"denied";message?:string}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
+    return decideSageOperationApplication(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId),String(input.applicationId),{decision:input.decision,message:input.message});
+  });
+  ipcMain.handle("corp:roles-state", async (_event, characterId:string) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
+    return {workspace,policy:await getSageCorporationPermissions(sessionToken,workspace.workspace_id,Number(workspace.character_id))};
+  });
+  ipcMain.handle("corp:roles-update", async (_event, input:{characterId:string;permissionKey:string;authorities:Array<{type:"eve_role"|"eve_title";value:string}>}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const authorities=Array.isArray(input?.authorities)?input.authorities.filter(item=>(item?.type==="eve_role"||item?.type==="eve_title")&&typeof item?.value==="string"):[];
+    const policy=await updateSageCorporationPermission(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.permissionKey??""),authorities);
+    return {workspace,policy};
+  });
+  ipcMain.handle("market:global-quotes", (_event, typeIds:number[]) => loadGlobalMarketQuotes(Array.isArray(typeIds) ? typeIds : []));
+  ipcMain.handle("lp-store:corporations", (_event, corporationIds:number[]) => resolveLpCorporations(Array.isArray(corporationIds) ? corporationIds : []));
+  ipcMain.handle("lp-store:offers", (_event, corporationId:number, marketRevision:number) => analyzeLpCorporation(Number(corporationId), Number(marketRevision)));
+  ipcMain.handle("lp-store:earning-candidates", (_event, standings:unknown, currentCorporationIds:unknown) => getLpEarningCandidates(standings, currentCorporationIds));
+  ipcMain.handle("market:contract-intelligence", () => getContractMarketIntelligence());
+  ipcMain.handle("profit-ledger:list", (_event, characterId?:string) => getProfitLedger(characterId ? String(characterId) : undefined));
+  ipcMain.handle("profit-ledger:complete", (_event, input: any) => completeProfitDeal(input));
+  ipcMain.handle("profit-ledger:reconcile", (_event, characterId?:string) => reconcileProfitLedger(characterId ? String(characterId) : undefined));
+  ipcMain.handle("profit-ledger:remove", (_event, id:string) => removeProfitLedgerRecord(String(id)));
+  ipcMain.handle("profit-ledger:review", (_event, recordId:string) => getProfitReconciliationReview(String(recordId)));
+  ipcMain.handle("profit-ledger:transaction-override", (_event, input:any) => setProfitTransactionOverride({ recordId:String(input?.recordId??""), walletTransactionId:Number(input?.walletTransactionId??0), assigned:Boolean(input?.assigned) }));
+  ipcMain.handle("profit-ledger:match-decision", (_event, input:any) => setProfitMatchDecision({ recordId:String(input?.recordId??""), walletTransactionId:Number(input?.walletTransactionId??0), decision:input?.decision === "rejected" ? "rejected" : "confirmed" }));
+  ipcMain.handle("profit-ledger:material-provenance", (_event, input:any) => setProfitMaterialProvenance({ recordId:String(input?.recordId??""), mined:Boolean(input?.mined), donated:Boolean(input?.donated), owned:Boolean(input?.owned), bought:Boolean(input?.bought) }));
+  ipcMain.handle("profit-ledger:purchase-review", (_event, recordId:string) => getProfitPurchaseReview(String(recordId)));
+  ipcMain.handle("profit-ledger:purchase-override", (_event, input:any) => setProfitPurchaseTransactionOverride({ recordId:String(input?.recordId??""), walletTransactionId:Number(input?.walletTransactionId??0), assigned:Boolean(input?.assigned) }));
+  ipcMain.handle("profit-ledger:bulk-bookkeeping", (_event, input:any) => applyProfitBulkBookkeeping({ recordIds:Array.isArray(input?.recordIds)?input.recordIds.map(String):[], matchDecision:input?.matchDecision === "confirmed" || input?.matchDecision === "rejected" ? input.matchDecision : undefined, transactionDecisions:Array.isArray(input?.transactionDecisions)?input.transactionDecisions.map((row:any)=>({recordId:String(row?.recordId??""),walletTransactionId:Number(row?.walletTransactionId??0),decision:row?.decision === "rejected" ? "rejected" as const : "confirmed" as const})):undefined, provenance:input?.provenance ? { mined:Boolean(input.provenance.mined), donated:Boolean(input.provenance.donated), owned:Boolean(input.provenance.owned), bought:Boolean(input.provenance.bought) } : undefined }));
+  ipcMain.handle("eve:open-contract", async (_event, input: { characterId: string; contractId: number }) => {
+    const characterId = String(input?.characterId ?? "").trim();
+    const contractId = Number(input?.contractId);
+    if (!characterId) throw new Error("Select a connected character before using Find in EVE.");
+    if (!Number.isSafeInteger(contractId) || contractId <= 0) throw new Error("This contract does not have a valid EVE contract ID.");
+    const url = `https://esi.evetech.net/v1/ui/openwindow/contract/?contract_id=${contractId}`;
+    try {
+      const target = await resolveOnlineEveUiCharacter(characterId);
+      await eveWriteRequest(target.characterId, url, undefined, target.accessToken);
+      return { success: true, contractId, characterId: target.characterId, characterName: target.characterName, usedFallback: target.usedFallback };
+    } catch (error) {
+      const status = (error as Error & { status?: number }).status;
+      if (status === 401 || status === 403) {
+        throw new Error("Find in EVE needs the EVE UI permission. Reconnect this character once with Add character, then try again.");
+      }
+      if (status === 400 || status === 404) {
+        throw new Error("EVE could not open this contract. It may have expired or already been accepted.");
+      }
+      throw error;
+    }
+  });
+  ipcMain.handle("eve:open-market-type", async (_event, input:{characterId:string;typeId:number}) => {
+    const characterId=String(input?.characterId??"").trim(); const typeId=Number(input?.typeId);
+    if(!characterId) throw new Error("Select a connected character before opening the EVE market.");
+    if(!Number.isSafeInteger(typeId)||typeId<=0) throw new Error("This shopping-list item does not have a valid EVE type ID.");
+    const target=await resolveOnlineEveUiCharacter(characterId);
+    try{
+      await eveWriteRequest(target.characterId,`https://esi.evetech.net/v1/ui/openwindow/marketdetails/?type_id=${typeId}`,undefined,target.accessToken);
+      return {success:true,typeId,characterId:target.characterId,characterName:target.characterName,usedFallback:target.usedFallback};
+    } catch(error){
+      const status=(error as Error & {status?:number}).status;
+      if(status===401||status===403) throw new Error("Open in EVE needs the EVE UI permission. Reconnect this character once, then try again.");
+      throw error;
+    }
+  });
+  ipcMain.handle("isklab:planetary-revenue", async (_event, input:{ characterId:string; settings?:PlanetaryRevenueSettings }) => {
+    const characterId = String(input?.characterId ?? "").trim();
+    if (!characterId) throw new Error("Select and sync a connected character.");
+    const snapshot = getSnapshot(characterId) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    return analyzePlanetaryAdvanced(snapshot, listSnapshots() as any[], { settings:input?.settings, observations:listPlanetaryResourceObservations() as any[], alertSettings:getPlanetaryAlertSettings() });
+  });
+  ipcMain.handle("isklab:planetary-plan", async (_event, input:PlanetaryPlanInput) => {
+    const characterId = String(input?.characterId ?? "").trim();
+    if (!characterId) throw new Error("Select and sync a connected character.");
+    const snapshot = getSnapshot(characterId) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    return buildPlanetaryPlan(snapshot, listSnapshots() as any[], { ...input, resourceObservations:input.resourceObservations ?? listPlanetaryResourceObservations() as any[] });
+  });
+  ipcMain.handle("isklab:planetary-state", () => ({ plans:listPlanetaryPlans(), observations:listPlanetaryResourceObservations(), alertSettings:getPlanetaryAlertSettings() }));
+  ipcMain.handle("isklab:planetary-save-plan", (_event, plan:any) => savePlanetaryPlan(plan));
+  ipcMain.handle("isklab:planetary-delete-plan", (_event, id:string) => deletePlanetaryPlan(String(id ?? "")));
+  ipcMain.handle("isklab:planetary-save-observations", (_event, observations:any[]) => replacePlanetaryResourceObservations(Array.isArray(observations) ? observations : []));
+  ipcMain.handle("isklab:planetary-save-alert-settings", (_event, settings:any) => savePlanetaryAlertSettings(settings ?? {}));
+  ipcMain.handle("isklab:planetary-basket", async (_event, input:PlanetaryBasketInput) => {
+    const characterId=String(input?.characterId??"").trim();if(!characterId)throw new Error("Select and sync a connected character.");
+    const snapshot=getSnapshot(characterId) as any;if(!snapshot)throw new Error("Select and sync a connected character.");
+    const observations=(input.resourceObservations??listPlanetaryResourceObservations()) as any[];
+    const analysis=await analyzePlanetaryAdvanced(snapshot,listSnapshots() as any[],{settings:input,observations,alertSettings:getPlanetaryAlertSettings()});
+    return buildPlanetaryBasketPlan(snapshot,listSnapshots() as any[],analysis,{...input,resourceObservations:observations});
+  });
+  ipcMain.handle("isklab:planetary-evaluate-layout", (_event, input:PlanetaryDesignerInput) => evaluatePlanetaryDesignerLayout(input));
+  ipcMain.handle("isklab:planetary-generate-layouts", (_event, input:PlanetaryDesignerInput) => generatePlanetaryDesignerLayouts(input));
+  ipcMain.handle("isklab:planetary-designer-eve-template", (_event, input:{designer:PlanetaryDesignerInput;baseTemplate:any;comment?:string}) => buildPlanetaryDesignerEveTemplate(input.designer,input.baseTemplate,input.comment));
+  ipcMain.handle("isklab:planetary-designer-seed", (_event, input:{characterId:string;planetId:number;designer:PlanetaryDesignerInput}) => {
+    const snapshot=getSnapshot(String(input?.characterId??"")) as any;if(!snapshot)throw new Error("Select and sync a connected character.");
+    const seed=buildPlanetaryDesignerSeedFromSnapshot(snapshot,Number(input?.planetId));
+    if(!seed)throw new Error("No synced ESI colony detail exists for that planet.");
+    return evaluatePlanetaryDesignerLayout({...input.designer,...seed});
+  });
+  ipcMain.handle("isklab:planetary-corp-state", async (_event,input:{characterId:string}) => loadPlanetaryCorporationLibrary(String(input?.characterId??"")));
+  ipcMain.handle("isklab:planetary-corp-publish-survey", async (_event,input:{characterId:string;observations:any[];objectId?:string;expectedVersion?:number}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const rows=(Array.isArray(input?.observations)?input.observations:[]).filter(row=>Number(row?.planetId)>0&&Number.isFinite(Number(row?.percent))).map(row=>({...row,scope:"corporation",source:"sage-online"}));
+    const payload={schema:"new-eden-sage.pi-survey.v1",submittedAt:new Date().toISOString(),submittedBy:{characterId:workspace.character_id,characterName:workspace.character_name},observations:rows};
+    if(input?.objectId&&Number(input?.expectedVersion)>0)return updateSagePiObject(sessionToken,workspace.workspace_id,input.objectId,{payload,expectedVersion:Number(input.expectedVersion),idempotencyKey:"pi-survey-update:"+input.objectId+":"+input.expectedVersion+":"+Date.now()});
+    return publishSagePiObject(sessionToken,workspace.workspace_id,{objectType:"sage.pi-survey",payload,idempotencyKey:"pi-survey:"+workspace.workspace_id+":"+workspace.character_id+":"+Date.now()});
+  });
+  ipcMain.handle("isklab:planetary-corp-publish-template", async (_event,input:{characterId:string;planId:string}) => {
+    const plan=listPlanetaryPlans().find(row=>row.id===String(input?.planId??""));if(!plan)throw new Error("Saved PI template not found.");
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const payload={schema:"new-eden-sage.pi-template.v1",name:plan.name,category:plan.category??"Corporation",savedAt:plan.savedAt,publishedAt:new Date().toISOString(),publishedBy:{characterId:workspace.character_id,characterName:workspace.character_name},input:plan.input,designerLayout:plan.designerLayout,eveTemplate:plan.eveTemplate,layoutProfile:plan.layoutProfile};
+    const result=plan.publishedObjectId&&plan.publishedVersion?await updateSagePiObject(sessionToken,workspace.workspace_id,plan.publishedObjectId,{payload,expectedVersion:plan.publishedVersion,idempotencyKey:"pi-template-update:"+plan.publishedObjectId+":"+plan.publishedVersion+":"+Date.now()}):await publishSagePiObject(sessionToken,workspace.workspace_id,{objectType:"sage.pi-template",payload,idempotencyKey:"pi-template:"+workspace.workspace_id+":"+plan.id+":"+Date.now()});
+    return savePlanetaryPlan({...plan,kind:"template",scope:"corporation",publishedObjectId:result.id,publishedVersion:result.version,publishedAt:new Date().toISOString()});
+  });
+  ipcMain.handle("isklab:planetary-corp-unpublish", async (_event,input:{characterId:string;planId:string;objectId:string}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    await unpublishSagePiObject(sessionToken,workspace.workspace_id,String(input?.objectId??""));
+    const plan=listPlanetaryPlans().find(row=>row.id===String(input?.planId??""));
+    return plan?savePlanetaryPlan({...plan,scope:"personal",publishedObjectId:undefined,publishedVersion:undefined,publishedAt:undefined}):true;
+  });
+  ipcMain.handle("fitting:augment-guide", (_event, installedTypeIds:number[]) => runFittingWorker("augment-guide", { installedTypeIds:Array.isArray(installedTypeIds)?installedTypeIds:[] }));
+  ipcMain.handle("fitting:booster-side-effects-local", (_event, boosterTypeIds:number[]) => runFittingWorker("booster-side-effects", { boosterTypeIds:Array.isArray(boosterTypeIds)?boosterTypeIds:[] }));
   ipcMain.handle("clipboard:write", (_event, value: string) => {
     clipboard.writeText(value);
     return clipboard.readText() === value;
   });
   ipcMain.handle("fitting:resolve-types-local", (_event, names: string[]) => runFittingWorker("resolve-types", { names }));
+  ipcMain.handle("fitting:resolve-type-ids-local", (_event, typeIds: number[]) => runFittingWorker("resolve-type-ids", { typeIds }));
   ipcMain.handle("fitting:search-types-local", (_event, input: { query: string; limit?: number }) => runFittingWorker("search-types", { query: input?.query ?? "", limit: input?.limit ?? 60 }));
   ipcMain.handle("fitting:prepare-local", (event) => runFittingWorker("prepare", {}, (progress) => {
     if (!event.sender.isDestroyed()) event.sender.send("fitting:prepare-progress", progress);
@@ -307,107 +1141,86 @@ app.whenReady().then(() => {
     searchLootItems(String(input?.query ?? ""), Number(input?.limit ?? 60)));
   ipcMain.handle("loot:acquisition", (_event, typeId: number) => getLootAcquisition(Number(typeId)));
   ipcMain.handle("loot:prepare", () => prepareLootDataLocal());
-  ipcMain.handle(
-    "industrial:system-cost-index",
-    async (_event, input: { characterId: string }) => {
-      const snapshot = getSnapshot(input.characterId) as any;
-      if (!snapshot) throw new Error("Select and sync a connected character.");
-      const solarSystemId = Number(snapshot.location?.solar_system_id ?? 0);
-      if (!solarSystemId) throw new Error("The selected character has no resolved solar-system location.");
-      const key = { system: solarSystemId, snapshot: snapshot.updatedAt, market: (await loadCurrentRawMarketManifest("all"))?.id };
-      const saved = await loadPersistedResult("industry-system-cost", key);
-      if (saved) return saved;
-      const result = await getIndustrySystemCostIndices(solarSystemId);
-      await savePersistedResult("industry-system-cost", key, result);
-      return result;
-    },
-  );
-  ipcMain.handle(
-    "industrial:blueprint-activities",
-    async (_event, input: { characterId: string; blueprintTypeId: number }) => {
-      const snapshot = getSnapshot(input.characterId) as any;
-      if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { input, snapshot: snapshot.updatedAt };
-      const saved = await loadPersistedResult("industry-blueprint-activities", key);
-      if (saved) return saved;
-      const result = await analyzeBlueprintActivities({ ...input, snapshot });
-      await savePersistedResult("industry-blueprint-activities", key, result);
-      return result;
-    },
-  );
+  ipcMain.handle("industrial:system-cost-index", async (_event, input: { characterId: string; force?: boolean }) =>
+    getSystemCostIndexPrepared(String(input.characterId), Boolean(input.force)));
+  ipcMain.handle("industrial:blueprint-activities", async (_event, input: { characterId: string; blueprintTypeId: number; force?: boolean }) =>
+    getBlueprintActivitiesPrepared({ characterId: String(input.characterId), blueprintTypeId: Number(input.blueprintTypeId) }, Boolean(input.force)));
   ipcMain.handle(
     "industrial:invention-opportunities",
     async (_event, input: { characterId: string; marketDataRevision?: number; decryptorTypeId?: number | null }) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { schema: 9, characterId: input.characterId, snapshot: snapshot.updatedAt, marketDataRevision: Number(input.marketDataRevision ?? 0), decryptorTypeId: Number(input.decryptorTypeId ?? 0) };
-      const saved = await loadPersistedResult("industry-invention-opportunities", key);
-      if (saved) return saved;
-      const result = await analyzeInventionOpportunities({ snapshot, decryptorTypeId: input.decryptorTypeId });
-      await savePersistedResult("industry-invention-opportunities", key, result);
-      return result;
-    },
-  );
-  ipcMain.handle(
-    "industrial:manufacturing-plan",
-    async (_event, input: { characterId: string; blueprintTypeId: number; materialEfficiency?: number; timeEfficiency?: number; targetQuantity?: number; runs?: number; availableRuns?: number; includeConnectedStock?: boolean; sharedCharacterIds?: string[] }) => {
-      const snapshot = getSnapshot(input.characterId) as any;
-      if (!snapshot) throw new Error("Select and sync a connected character.");
-      const activeCharacterId = String(input.characterId);
-      const permittedCharacterIds = new Set([activeCharacterId, ...(input.sharedCharacterIds ?? []).map(String)]);
-      const scopedSnapshots = input.includeConnectedStock
-        ? (listSnapshots() as any[])
-            .filter((item) => item?.characterId && permittedCharacterIds.has(String(item.characterId)))
-            .sort((a, b) => String(a.characterId) === activeCharacterId ? -1 : String(b.characterId) === activeCharacterId ? 1 : String(a.character?.name ?? "").localeCompare(String(b.character?.name ?? "")))
-        : [snapshot];
-      const enrichAssets = (item: any) => {
-        const characterId = String(item.characterId);
-        const rawAssets = Array.isArray(item.extended?.assets) ? item.extended.assets : [];
-        return rawAssets.map((asset: any, index: number) => ({
-          ...asset,
-          ownerCharacterId: characterId,
-          sourceAssetId: `${characterId}:${asset.item_id ?? `stack-${index}`}`,
-        }));
-      };
-      const assets = enrichAssets(snapshot);
-      const stockSources = input.includeConnectedStock
-        ? scopedSnapshots.map((item) => ({
-            characterId: String(item.characterId),
-            characterName: String(item.character?.name ?? item.characterId),
-            assets: enrichAssets(item),
-          }))
-        : undefined;
-      const blueprintSnapshots = scopedSnapshots;
-      const ownedBlueprints = blueprintSnapshots.flatMap((item) => {
-        const personalBlueprintsForIndustry = Array.isArray(item.extended?.blueprints) ? item.extended.blueprints : [];
-        const corporationBlueprintsForIndustry = Array.isArray(item.extended?.corporation?.blueprints) ? item.extended.corporation.blueprints : [];
-        const trainedSkills = (item.skills?.skills ?? []).map((skill: any) => ({ skillId: Number(skill.skill_id), level: Number(skill.trained_skill_level ?? 0) }));
-        const mapBlueprint = (blueprint: any, corporation = false) => {
-          const blueprintTypeId = Number(blueprint.type_id ?? 0);
-          if (!blueprintTypeId) return [];
-          return [{
-            characterId: corporation ? `corp:${String(item.character?.corporation_id ?? item.characterId)}` : String(item.characterId),
-            characterName: corporation ? `${String(item.character?.corporation_name ?? "Corporation")} (corp, via ${String(item.character?.name ?? item.characterId)})` : String(item.character?.name ?? item.characterId),
-            blueprintTypeId,
-            materialEfficiency: Number(blueprint.material_efficiency ?? 0),
-            timeEfficiency: Number(blueprint.time_efficiency ?? 0),
-            availableRuns: Number(blueprint.runs ?? -1),
-            trainedSkills,
-          }];
-        };
-        return [
-          ...personalBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint)),
-          ...corporationBlueprintsForIndustry.flatMap((blueprint: any) => mapBlueprint(blueprint, true)),
-        ];
+      const prepared = await loadPreparedInventionResult(input, snapshot);
+      if (prepared.result) return prepared.result;
+      if (masterUpdateActive) {
+        throw new Error("Wait for Sync All to finish before building Invention results.");
+      }
+      await runFeaturePrepProcess({
+        task: "invention",
+        characterId: String(input.characterId),
+        decryptorTypeId: input.decryptorTypeId ?? null,
+        cacheKey: prepared.key,
       });
-      const key = { input, snapshots: scopedSnapshots.map((item) => [item.characterId, item.updatedAt]) };
-      const saved = await loadPersistedResult("industry-manufacturing-plan", key);
-      if (saved) return saved;
-      const result = await analyzeManufacturingPlan({ ...input, assets, stockSources, ownedBlueprints, snapshot });
-      await savePersistedResult("industry-manufacturing-plan", key, result);
+      const result = await loadPersistedResult<any>("industry-invention-opportunities", prepared.key);
+      if (!result) throw new Error("Invention analysis completed without a persisted result.");
       return result;
     },
   );
+  ipcMain.handle("industrial:manufacturing-plan", async (_event, input: any) =>
+    getManufacturingPlanPrepared(input, Boolean(input?.force)));
+  ipcMain.handle("industrial:foundry-workspace", async (_event, input: any) =>
+    getFoundryWorkspace(String(input?.characterId ?? ""), input?.projectId == null ? undefined : String(input.projectId)));
+  ipcMain.handle("industrial:foundry-projects", (_event, input: any) =>
+    getFoundryProjects(String(input?.characterId ?? "")));
+  ipcMain.handle("industrial:foundry-blueprint-search", async (_event, input: any) => searchFoundryBlueprintCatalogue(input));
+  ipcMain.handle("industrial:foundry-create", async (_event, input: any) => createFoundryProject(input));
+  ipcMain.handle("industrial:foundry-update", async (_event, input: any) => updateFoundryProject(input));
+  ipcMain.handle("industrial:foundry-delete", async (_event, input: any) =>
+    removeFoundryProject(String(input?.characterId ?? ""), String(input?.projectId ?? "")));
+  ipcMain.handle("industrial:refinery-catalogue", async () => getRefineryCatalogue());
+  ipcMain.handle("industrial:refinery-analysis", async (_event, input: any) => {
+    const characterId = String(input?.characterId ?? "");
+    const snapshot = getSnapshot(characterId) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    const selectedIds = new Set<string>(input?.includeConnectedStock
+      ? [characterId, ...(Array.isArray(input?.sharedCharacterIds) ? input.sharedCharacterIds.map(String) : [])]
+      : [characterId]);
+    const manualStock = Array.isArray(input?.manualStock) ? input.manualStock.map((item: any) => ({ type_id: Number(item?.typeId ?? 0), quantity: Math.max(0, Math.floor(Number(item?.quantity ?? 0))) })).filter((item: any) => item.type_id > 0 && item.quantity > 0) : [];
+    const stockSources = input?.stockMode === "manual"
+      ? [{ characterId: "manual", characterName: "Manual selection", assets: manualStock }]
+      : (listSnapshots() as any[])
+          .filter((candidate) => selectedIds.has(String(candidate.characterId)))
+          .map((candidate) => ({
+            characterId: String(candidate.characterId),
+            characterName: String(candidate.character?.name ?? candidate.characterId),
+            assets: Array.isArray(candidate.extended?.assets) ? candidate.extended.assets : [],
+          }));
+    return analyzeRefinery({
+      snapshot,
+      stockSources,
+      facility: input?.facility,
+      rig: input?.rig,
+      security: input?.security,
+      implant: input?.implant,
+    });
+  });
+  ipcMain.handle("industrial:reaction-catalogue", async () => getReactionCatalogue());
+  ipcMain.handle("industrial:reaction-plan", async (_event, input: any) => {
+    const characterId = String(input?.characterId ?? "");
+    const snapshot = getSnapshot(characterId) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    const selectedIds = new Set<string>(input?.includeConnectedStock
+      ? [characterId, ...(Array.isArray(input?.sharedCharacterIds) ? input.sharedCharacterIds.map(String) : [])]
+      : [characterId]);
+    const stockSources = (listSnapshots() as any[])
+      .filter((candidate) => selectedIds.has(String(candidate.characterId)))
+      .map((candidate) => ({ characterId: String(candidate.characterId), characterName: String(candidate.character?.name ?? candidate.characterId), assets: Array.isArray(candidate.extended?.assets) ? candidate.extended.assets : [] }));
+    return analyzeReactionPlan({ blueprintTypeId: Number(input?.blueprintTypeId ?? 0), runs: Number(input?.runs ?? 1), snapshot, stockSources });
+  });
+  ipcMain.handle("industrial:opportunities", async (_event, input: any) =>
+    getIndustrialOpportunitiesPrepared(input, { force: Boolean(input?.force) }));
+  ipcMain.handle("industrial:prepared-state", async (_event, input: { characterId: string }) =>
+    loadIndustrialPreparedState(String(input.characterId)));
   ipcMain.handle("universe:ships", () => listPublishedShips());
   ipcMain.handle(
     "skills:ship-readiness",
@@ -417,7 +1230,7 @@ app.whenReady().then(() => {
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { input, snapshot: snapshot.updatedAt };
+      const key = { input, snapshot: snapshot.updatedAt, readinessModel: "strict-skill-aware-fits-v5" };
       const saved = await loadPersistedResult("ship-readiness", key);
       if (saved) return saved;
       const result = await analyzeShipReadiness(
@@ -430,6 +1243,11 @@ app.whenReady().then(() => {
       return result;
     },
   );
+  ipcMain.handle("activity:hull-previews", async (_event, input: { characterId: string; hullTypeIds: number[] }) => {
+    const snapshot = getSnapshot(String(input?.characterId ?? "")) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    return analyzeHullAccessPreviews(snapshot, Array.isArray(input?.hullTypeIds) ? input.hullTypeIds : []);
+  });
   ipcMain.handle(
     "activity:readiness",
     async (
@@ -451,7 +1269,7 @@ app.whenReady().then(() => {
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
       if (!snapshot) throw new Error("Select and sync a connected character.");
-      const key = { input, snapshot: snapshot.updatedAt };
+      const key = { input, snapshot: snapshot.updatedAt, readinessModel: "strict-skill-aware-fits-v5" };
       const saved = await loadPersistedResult("activity-readiness", key);
       if (saved) return saved;
       const result = await analyzeActivityReadiness(snapshot, {
@@ -464,6 +1282,14 @@ app.whenReady().then(() => {
       });
       await savePersistedResult("activity-readiness", key, result);
       return result;
+    },
+  );
+  ipcMain.handle(
+    "capability:current-ship",
+    async (_event, input: { characterId: string; profileId: CurrentShipUseProfileId; cloneState?: "alpha" | "omega" }) => {
+      const snapshot = getSnapshot(input.characterId) as any;
+      if (!snapshot) throw new Error("Select and sync a connected character.");
+      return analyzeCurrentShipUse(snapshot, input.profileId, input.cloneState ?? "omega");
     },
   );
   ipcMain.handle(
@@ -695,16 +1521,68 @@ app.whenReady().then(() => {
     config.encryptedRefreshTokens[login.characterId] = encrypt(
       login.refreshToken,
     );
+    const becamePrimaryIdentity = !config.primaryCharacterId;
+    if (becamePrimaryIdentity) {
+      config.primaryCharacterId = login.characterId;
+      config.sageAccountId = login.characterId;
+      config.identitySchemaVersion = CURRENT_IDENTITY_SCHEMA_VERSION;
+    }
+
+    const onlineIdentitySynced = false;
+    const onlineIdentityError = login.characterId !== config.primaryCharacterId && !config.encryptedSageSessionToken
+      ? "Reconnect the primary Sage character to restore the online session before linking additional characters."
+      : undefined;
     await writeConfig(config);
-    const snapshot = await fetchCharacterSnapshot(
+    // EVE authorization is complete. Pull the character ESI snapshot now so the
+    // newly added character is immediately useful; derived/prepared intelligence
+    // remains owned by Sync All.
+    const characterSyncStartedAt = Date.now();
+    const snapshot = await fetchCharacterCoreSnapshot(
       login.characterId,
       login.accessToken,
+      getSnapshot(login.characterId),
     );
     saveSnapshot(snapshot);
+    void logEvent("info", "character.add.core_esi_sync", {
+      characterId: login.characterId,
+      elapsedMs: Date.now() - characterSyncStartedAt,
+    });
+    // Sage Online linking is useful, but it is not part of the Add Character critical path.
+    // The character is already registered locally; finish cloud identity work in the background.
+    if (!onlineIdentityError) {
+      void (async () => {
+        try {
+          if (login.characterId === config.primaryCharacterId) {
+            const claimed = await claimSageIdentity(login.accessToken);
+            if (claimed.account_id !== config.sageAccountId || String(claimed.primary_character_id) !== config.primaryCharacterId) {
+              throw new Error("Sage Online returned an identity that did not match the selected primary character.");
+            }
+            const latest = await readConfig();
+            if (latest.primaryCharacterId === login.characterId) {
+              latest.encryptedSageSessionToken = encrypt(claimed.session_token);
+              await writeConfig(latest);
+            }
+          } else if (config.encryptedSageSessionToken) {
+            await linkSageCharacter(decrypt(config.encryptedSageSessionToken), login.accessToken);
+          }
+          await logEvent("info", "sage-online.identity-linked", { characterId: login.characterId });
+        } catch (error) {
+          await logEvent("warn", "sage-online.identity-link-deferred-failed", {
+            characterId: login.characterId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })();
+    }
     return {
       characterId: login.characterId,
       characterName: login.characterName,
       snapshot,
+      becamePrimaryIdentity,
+      sageAccountId: config.sageAccountId ?? login.characterId,
+      primaryCharacterId: config.primaryCharacterId ?? login.characterId,
+      onlineIdentitySynced,
+      onlineIdentityError,
     };
   });
   ipcMain.handle("eve:refresh", async (_event, characterId: string) => {
@@ -718,10 +1596,32 @@ app.whenReady().then(() => {
       );
       await writeConfig(config);
     }
-    const snapshot = await fetchCharacterSnapshot(
+    const snapshot = await fetchCharacterCoreSnapshot(
       characterId,
       tokens.access_token,
+      getSnapshot(characterId),
     );
+    saveSnapshot(snapshot);
+    try {
+      const lifecycle = synchronizeFoundryLifecycle(characterId);
+      await logEvent("info", "character_refresh.industrial_lifecycle_reconciled", { characterId, projects: lifecycle.projects, ledgerRecords: lifecycle.ledgerRecords });
+    } catch (error) {
+      await logEvent("warn", "character_refresh.industrial_lifecycle_reconcile_failed", { characterId, error: error instanceof Error ? error.message : String(error) });
+    }
+    return snapshot;
+  });
+  ipcMain.handle("eve:refresh-current-ship", async (_event, characterId: string) => {
+    const config = await readConfig();
+    const stored = config.encryptedRefreshTokens[characterId];
+    if (!stored) throw new Error("This character is not connected.");
+    const existingSnapshot = getSnapshot(characterId);
+    if (!existingSnapshot) throw new Error("Sync this character before refreshing the current ship.");
+    const tokens = await refreshEveToken(config.eveClientId, decrypt(stored));
+    if (tokens.refresh_token) {
+      config.encryptedRefreshTokens[characterId] = encrypt(tokens.refresh_token);
+      await writeConfig(config);
+    }
+    const snapshot = await fetchCharacterCurrentShipSnapshot(characterId, tokens.access_token, existingSnapshot);
     saveSnapshot(snapshot);
     return snapshot;
   });
@@ -885,6 +1785,52 @@ app.whenReady().then(() => {
   ipcMain.handle("fit:shopping-route", async (_event, input) =>
     buildFitShoppingRoute(input),
   );
+  ipcMain.handle("eve:export-shopping-route", async (_event, input: { characterId: string; stops: Array<{ locationId?: number; systemId: number }> }) => {
+    const characterId = String(input?.characterId ?? "");
+    const stops = Array.isArray(input?.stops) ? input.stops : [];
+    if (!characterId || !stops.length) throw new Error("Calculate a shopping route before exporting waypoints to EVE.");
+    let exported = 0;
+    const accessToken = await eveWriteAccessToken(characterId);
+    for (let index = 0; index < stops.length; index += 1) {
+      const stop = stops[index];
+      const systemId = Number(stop.systemId);
+      let destinationId = Number(stop.locationId ?? systemId);
+      if (!Number.isSafeInteger(destinationId) || destinationId <= 0) destinationId = systemId;
+      const makeUrl = (destination: number) => {
+        const url = new URL("https://esi.evetech.net/v2/ui/autopilot/waypoint");
+        url.searchParams.set("add_to_beginning", "false");
+        url.searchParams.set("clear_other_waypoints", index === 0 ? "true" : "false");
+        url.searchParams.set("destination_id", String(destination));
+        return url.toString();
+      };
+      try {
+        await eveWriteRequest(characterId, makeUrl(destinationId), undefined, accessToken);
+      } catch (error) {
+        const status = (error as Error & { status?: number }).status;
+        if (destinationId !== systemId && (status === 400 || status === 404)) await eveWriteRequest(characterId, makeUrl(systemId), undefined, accessToken);
+        else if (status === 403) throw new Error("EVE denied waypoint access. Reconnect this character in Sage once to grant route-export permission.");
+        else throw error;
+      }
+      exported += 1;
+    }
+    return { success: true, waypoints: exported };
+  });
+  ipcMain.handle("eve:export-navigation-route", async (_event, input: { characterId: string; systemIds: number[]; clearOtherWaypoints?: boolean }) =>
+    exportNavigationWaypoints(input, {
+      getAccessToken: eveWriteAccessToken,
+      request: (characterId, url, accessToken) => eveWriteRequest(characterId, url, undefined, accessToken),
+    }),
+  );
+  ipcMain.handle("eve:export-fit", async (_event, input: { characterId: string; fit: unknown }) => {
+    const characterId = String(input?.characterId ?? "");
+    if (!characterId) throw new Error("Choose a connected character before exporting the fit.");
+    try {
+      return await eveWriteRequest(characterId, `https://esi.evetech.net/v2/characters/${characterId}/fittings`, eveFittingPayload(input.fit));
+    } catch (error) {
+      if ((error as Error & { status?: number }).status === 403) throw new Error("EVE denied fitting-write access. Reconnect this character in Sage to refresh its fitting permission.");
+      throw error;
+    }
+  });
   ipcMain.handle("trade:radius-opportunities", async (_event, mode) =>
     runTradeAnalysis(
       mode,
@@ -893,13 +1839,14 @@ app.whenReady().then(() => {
       (progress) => window?.webContents.send("analysis:progress", progress),
     ),
   );
-  ipcMain.handle("opportunity:analyze", async (_event, input) =>
-    runOpportunityAnalysis(
-      input ?? {},
+  ipcMain.handle("opportunity:analyze", async (_event, input: any) => {
+    const { force = false, ...query } = input ?? {};
+    return runOpportunityAnalysis(
+      query,
       listSnapshots() as any[],
       (progress) => window?.webContents.send("analysis:progress", progress),
-    ),
-  );
+    );
+  });
   ipcMain.handle("pve:locations", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega"; maxJumps?: number | null; maxMinutes?: number | null; forceLive?: boolean }) => {
     const snapshot = getSnapshot(input.characterId) as any;
     if (!snapshot) throw new Error("Select and sync a connected character.");
@@ -910,12 +1857,38 @@ app.whenReady().then(() => {
       (progress) => window?.webContents.send("analysis:progress", progress),
     );
   });
+  ipcMain.handle("prepared:isk-lab", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega" }) => {
+    const snapshot = getSnapshot(input.characterId) as any;
+    if (!snapshot) throw new Error("Select and sync a connected character.");
+    const snapshots = listSnapshots() as any[];
+    const marketInput = {
+      characterId: String(snapshot.characterId),
+      maxCapital: null,
+      cargoCapacityM3: null,
+      maxJumps: null,
+      maxMinutes: null,
+    };
+    const pveInput = { characterId: String(snapshot.characterId), maxJumps: null, maxMinutes: null, forceLive: false };
+    const [market, pve, preparedInvention] = await Promise.all([
+      loadPreparedOpportunityAnalysis(marketInput, snapshots),
+      loadPreparedPveLocationAnalysis(pveInput, snapshot, input.cloneState ?? "omega"),
+      loadPreparedInventionResult({ characterId: String(snapshot.characterId), decryptorTypeId: null }, snapshot),
+    ]);
+    const invention = preparedInvention.result;
+    // Prepared reads never launch heavyweight Invention work. Cache misses remain empty
+    // until the Invention tab requests the isolated feature worker on demand.
+    await releaseIdleMarketAnalysisWorker().catch(() => undefined);
+    return { market: market ?? null, pve: pve ?? null, invention: invention ?? null };
+  });
   ipcMain.handle("analysis:cancel", async (_event, kind) => cancelAnalysis("Analysis cancelled.", kind));
   ipcMain.handle("analysis:status", () => analysisStatus());
-  ipcMain.handle("master:update-all", async (event) => {
+  ipcMain.handle("master:update-all", async (event, input?: CompleteSyncOptions) => {
+    const options = input ?? {};
+    if (options.cloneStates) await saveSyncPreparationOptions(options);
     return runCompleteSync((progress) => {
       if (!event.sender.isDestroyed()) event.sender.send("master:update-progress", progress);
-    }, Date.now() < startupSyncGuardUntil);
+    // A button press is explicit; only automatic startup refreshes may be version-gated.
+    }, false, options);
   });
   ipcMain.on("diagnostics:renderer-error", (_event, report) => logCrash("renderer.javascript_error", { report }));
   ipcMain.handle("diagnostics:crash-log-path", () => CRASH_LOG_FILE);
@@ -929,8 +1902,8 @@ app.whenReady().then(() => {
     );
     const exportStamp = new Date().toISOString().replace(/[:.]/g, "-");
     const result = await dialog.showSaveDialog(window, {
-      title: "Export Top 1,000 arbitrage opportunities",
-      defaultPath: `new-eden-sage-top-1000-arbitrage-${exportStamp}.csv`,
+      title: "Export market arbitrage opportunities",
+      defaultPath: `new-eden-sage-arbitrage-${exportStamp}.csv`,
       filters: [{ name: "ChatGPT-ready CSV", extensions: ["csv"] }],
     });
     if (result.canceled || !result.filePath) return null;
@@ -962,7 +1935,7 @@ app.whenReady().then(() => {
       .map((row) => row.map(csvCell).join(","))
       .join("\r\n");
     await fs.writeFile(result.filePath, `${content}\r\n`, "utf8");
-    await logEvent("info", "arbitrage.top1000_exported", {
+    await logEvent("info", "arbitrage.exported", {
       filePath: result.filePath,
       rows: rows.length,
     });
@@ -1018,18 +1991,8 @@ app.whenReady().then(() => {
           ? regions
           : regions.filter((region) => region.regionId === input.regionId);
       const rawSnapshot = input.mode === "contracts" ? null : await beginRawMarketSnapshot(input.mode);
-      if (input.mode === "contracts") {
-        allowedSystemIds = await discoverHighSecSystems((completed, total) => {
-          window?.webContents.send("market:progress", {
-            mode: input.mode,
-            regionName: "Mapping every high-sec system",
-            regionsDone: 0,
-            regionsTotal: regions.length,
-            pagesDone: completed,
-            pagesTotal: total,
-          });
-        });
-      }
+      // Public item-exchange contracts are scanned EVE-wide across every region/security band.
+      // A location filter here would make the Contracts browser silently incomplete.
       if (input.mode === "radius") {
         const snapshot = getSnapshot(input.characterId) as {
           location?: { solar_system_id?: number };
@@ -1092,6 +2055,14 @@ app.whenReady().then(() => {
           });
         }
         const storage = await saveMarketDataset("contracts", contractSummaries);
+        window?.webContents.send("market:progress", {
+          mode: input.mode,
+          regionName: "Contracts refreshed",
+          regionsDone: selected.length,
+          regionsTotal: selected.length,
+          pagesDone: selected.length,
+          pagesTotal: selected.length,
+        });
         await logEvent("info", "market_pull.completed", {
           mode: input.mode,
           regions: selected.length,
@@ -1178,6 +2149,7 @@ app.whenReady().then(() => {
     },
   );
   createWindow();
+  startWalletReconciliationTimer();
   window?.webContents.once("did-finish-load", () => {
     void readConfig().then(async (config) => {
       if (!Object.keys(config.encryptedRefreshTokens ?? {}).length) {
@@ -1188,10 +2160,11 @@ app.whenReady().then(() => {
         await logEvent("info", "master_update.already_synced_this_version", { version: app.getVersion() });
         return;
       }
-      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true);
+      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true, await readSyncPreparationOptions());
     }).catch((error) => logCrash("master_update.auto_start_failed", { error }));
   });
-});
+  });
+}
 
 function makeChatGPTMarkdown(data: ReturnType<typeof exportDatabaseData>) {
   const snapshots = data.characterSnapshots
@@ -1839,6 +2812,7 @@ function makeRadiusChatGPTMarkdown(data: {
 }
 
 app.on("window-all-closed", () => {
+  if (walletReconciliationTimer) { clearInterval(walletReconciliationTimer); walletReconciliationTimer = undefined; }
   void logEvent("info", "app.window_all_closed");
   void disposeAnalysisWorker();
   void disposeFittingWorker();

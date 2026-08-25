@@ -1,9 +1,10 @@
-import crypto from "node:crypto";
+﻿import crypto from "node:crypto";
 import http from "node:http";
 import { shell } from "electron";
 
 import { itemCategoryIds, itemVolumes } from "./type-volumes";
 import { trainingTimesToLevels } from "./skill-training";
+import { getLocalSkillDogmaMetadata } from "./skill-static";
 
 export const EVE_SCOPES = [
   "esi-assets.read_assets.v1",
@@ -18,6 +19,8 @@ export const EVE_SCOPES = [
   "esi-contracts.read_character_contracts.v1",
   "esi-fittings.read_fittings.v1",
   "esi-fittings.write_fittings.v1",
+  "esi-ui.write_waypoint.v1",
+  "esi-ui.open_window.v1",
   "esi-industry.read_character_jobs.v1",
   "esi-killmails.read_killmails.v1",
   "esi-location.read_location.v1",
@@ -26,6 +29,10 @@ export const EVE_SCOPES = [
   "esi-markets.read_character_orders.v1",
   "esi-planets.manage_planets.v1",
   "esi-characters.read_corporation_roles.v1",
+  "esi-characters.read_titles.v1",
+  "esi-corporations.read_corporation_membership.v1",
+  "esi-corporations.read_titles.v1",
+  "esi-corporations.read_divisions.v1",
   "esi-assets.read_corporation_assets.v1",
   "esi-corporations.read_blueprints.v1",
   "esi-corporations.read_contacts.v1",
@@ -41,6 +48,7 @@ export const EVE_SCOPES = [
   "esi-skills.read_skills.v1",
   "esi-skills.read_skillqueue.v1",
   "esi-universe.read_structures.v1",
+  "esi-search.search_structures.v1",
   "esi-wallet.read_character_wallet.v1",
 ];
 
@@ -77,10 +85,10 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
 
   if (activeLoginServer) {
     const previous = activeLoginServer;
-    await new Promise<void>((resolve) => previous.close(() => {
-      if (activeLoginServer === previous) activeLoginServer = null;
-      resolve();
-    }));
+    if (activeLoginServer === previous) activeLoginServer = null;
+    // Browser keep-alive must never delay a new Add Character attempt.
+    try { previous.close(); } catch {}
+    try { previous.closeAllConnections(); } catch {}
   }
 
   const result = new Promise<{
@@ -128,7 +136,11 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
         const characterId = claims.sub.split(":").at(-1);
         if (!characterId) throw new Error("EVE did not return a character ID.");
 
-        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        response.shouldKeepAlive = false;
+        response.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          Connection: "close",
+        });
         response.end(
           "<h2>New Eden Sage is connected.</h2><p>You can close this tab and return to the app.</p>",
         );
@@ -138,27 +150,28 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
           characterId,
           characterName: claims.name,
         };
-        server.close(() => {
-          if (activeLoginServer === server) activeLoginServer = null;
-          resolve(login);
-        });
+        // Token exchange is complete. Unblock the renderer immediately; server close is cleanup only.
+        if (activeLoginServer === server) activeLoginServer = null;
+        resolve(login);
+        server.close();
       } catch (error) {
+        response.shouldKeepAlive = false;
         response.writeHead(400, {
           "Content-Type": "text/plain; charset=utf-8",
+          Connection: "close",
         });
         response.end(error instanceof Error ? error.message : "Login failed.");
-        server.close(() => {
-          if (activeLoginServer === server) activeLoginServer = null;
-          reject(error);
-        });
+        if (activeLoginServer === server) activeLoginServer = null;
+        reject(error);
+        server.close();
       }
     });
     activeLoginServer = server;
     const timeout = setTimeout(() => {
-      server.close(() => {
-        if (activeLoginServer === server) activeLoginServer = null;
-        reject(new Error("EVE login timed out. Start Add character again to retry."));
-      });
+      if (activeLoginServer === server) activeLoginServer = null;
+      reject(new Error("EVE login timed out. Start Add character again to retry."));
+      try { server.close(); } catch {}
+      try { server.closeAllConnections(); } catch {}
     }, 180_000);
     timeout.unref();
     server.on("close", () => clearTimeout(timeout));
@@ -184,6 +197,38 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
   return result;
 }
 
+export function createConnectedCharacterBootstrapSnapshot(
+  characterId: string,
+  characterName: string,
+  existingSnapshot?: any,
+) {
+  if (existingSnapshot?.characterId === characterId && existingSnapshot?.snapshotState !== "bootstrap") {
+    return {
+      ...existingSnapshot,
+      character: { ...existingSnapshot.character, name: characterName },
+      snapshotState: "synced" as const,
+    };
+  }
+  const connectedAt = new Date().toISOString();
+  return {
+    characterId,
+    character: {
+      name: characterName,
+      corporation_id: Number(existingSnapshot?.character?.corporation_id ?? 0),
+      corporation_name: String(existingSnapshot?.character?.corporation_name ?? "Awaiting first sync"),
+    },
+    wallet: 0,
+    skills: { total_sp: 0, skills: [] },
+    queue: [],
+    location: { solar_system_id: 0, solar_system_name: "Sync required", place_name: "Sync required" },
+    ship: { ship_item_id: 0, ship_name: "Sync required", ship_type_id: 0, ship_type_name: "Sync required" },
+    extended: {},
+    snapshotState: "bootstrap" as const,
+    connectedAt,
+    updatedAt: connectedAt,
+  };
+}
+
 export async function refreshEveToken(clientId: string, refreshToken: string) {
   const response = await fetch(`${SSO}/v2/oauth/token`, {
     method: "POST",
@@ -199,6 +244,220 @@ export async function refreshEveToken(clientId: string, refreshToken: string) {
   return (await response.json()) as {
     access_token: string;
     refresh_token?: string;
+  };
+}
+
+export async function fetchCharacterCoreSnapshot(
+  characterId: string,
+  accessToken: string,
+  existingSnapshot?: any,
+) {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "X-Compatibility-Date": "2026-08-02",
+    "X-User-Agent": "NewEdenSage/0.1.0",
+  };
+  const get = async <T>(path: string): Promise<T> => {
+    const response = await fetch(`https://esi.evetech.net${path}`, { headers });
+    if (!response.ok) throw new Error(`ESI request failed (${response.status}) for ${path}.`);
+    return response.json() as Promise<T>;
+  };
+  const publicGet = async <T>(path: string): Promise<T> => {
+    const response = await fetch(`https://esi.evetech.net${path}`, {
+      headers: {
+        "X-Compatibility-Date": "2026-08-02",
+        "X-User-Agent": "NewEdenSage/0.1.0",
+      },
+    });
+    if (!response.ok) throw new Error(`Public ESI request failed (${response.status}) for ${path}.`);
+    return response.json() as Promise<T>;
+  };
+
+  const [character, wallet, skills, queue, location, ship, attributes] = await Promise.all([
+    get<{ name:string; corporation_id:number; alliance_id?:number; security_status?:number }>(`/characters/${characterId}/`),
+    get<number>(`/characters/${characterId}/wallet/`),
+    get<{ total_sp:number; unallocated_sp?:number; skills:Array<{ skill_id:number; trained_skill_level:number; active_skill_level:number; skillpoints_in_skill:number }> }>(`/characters/${characterId}/skills/`),
+    get<Array<{ skill_id:number; finish_date?:string; start_date?:string; finished_level:number; training_start_sp?:number; level_end_sp?:number }>>(`/characters/${characterId}/skillqueue/`),
+    get<{ solar_system_id:number; station_id?:number; structure_id?:number }>(`/characters/${characterId}/location/`),
+    get<{ ship_item_id:number; ship_name:string; ship_type_id:number }>(`/characters/${characterId}/ship/`),
+    get<{ charisma:number; intelligence:number; memory:number; perception:number; willpower:number }>(`/characters/${characterId}/attributes/`),
+  ]);
+
+  const skillIds = skills.skills.map((skill) => skill.skill_id);
+  const namesPromise = skillIds.length
+    ? fetch("https://esi.evetech.net/universe/names/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Compatibility-Date": "2026-08-02",
+          "X-User-Agent": "NewEdenSage/0.1.0",
+        },
+        body: JSON.stringify(skillIds),
+      }).then(async (response) => {
+        if (!response.ok) throw new Error(`Skill-name lookup failed (${response.status}).`);
+        return response.json() as Promise<Array<{ id:number; name:string }>>;
+      })
+    : Promise.resolve([] as Array<{ id:number; name:string }>);
+
+  const [corporation, solarSystem, shipType, place, names, skillMetadata] = await Promise.all([
+    publicGet<{ name:string }>(`/corporations/${character.corporation_id}/`),
+    publicGet<{ name:string }>(`/universe/systems/${location.solar_system_id}/`),
+    publicGet<{ name:string }>(`/universe/types/${ship.ship_type_id}/`),
+    location.station_id
+      ? publicGet<{ name:string }>(`/universe/stations/${location.station_id}/`)
+      : location.structure_id
+        ? get<{ name:string }>(`/universe/structures/${location.structure_id}/`)
+        : Promise.resolve(null),
+    namesPromise,
+    getLocalSkillDogmaMetadata(skillIds),
+  ]);
+  const nameById = new Map(names.map((item) => [item.id, item.name]));
+  const existingSkills = new Map(
+    (existingSnapshot?.skills?.skills ?? []).map((skill: any) => [Number(skill.skill_id), skill]),
+  );
+  const detailedSkills = skills.skills
+    .map((skill) => {
+      const metadata = skillMetadata.get(skill.skill_id);
+      const previous = existingSkills.get(skill.skill_id) as any;
+      const rank = metadata?.rank ?? previous?.rank ?? 1;
+      const primaryAttributeId = metadata?.primaryAttributeId ?? previous?.primaryAttributeId;
+      const secondaryAttributeId = metadata?.secondaryAttributeId ?? previous?.secondaryAttributeId;
+      return {
+        ...skill,
+        name: nameById.get(skill.skill_id) ?? previous?.name ?? `Skill ${skill.skill_id}`,
+        rank,
+        primaryAttributeId,
+        secondaryAttributeId,
+        timeToLevels: trainingTimesToLevels(
+          { ...skill, rank, primaryAttributeId, secondaryAttributeId },
+          attributes,
+          queue.filter((item) => item.skill_id === skill.skill_id),
+        ),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const coreUpdatedAt = new Date().toISOString();
+  const hadFullSnapshot = existingSnapshot?.snapshotState === "synced";
+  return {
+    ...(existingSnapshot ?? {}),
+    characterId,
+    snapshotState: hadFullSnapshot ? "synced" as const : "bootstrap" as const,
+    connectedAt: existingSnapshot?.connectedAt ?? coreUpdatedAt,
+    coreUpdatedAt,
+    character: {
+      ...(existingSnapshot?.character ?? {}),
+      ...character,
+      corporation_name: corporation.name,
+    },
+    wallet,
+    skills: { ...skills, skills: detailedSkills },
+    queue,
+    attributes,
+    location: {
+      ...location,
+      solar_system_name: solarSystem.name,
+      place_name: place?.name ?? solarSystem.name,
+    },
+    ship: { ...ship, ship_type_name: shipType.name },
+    extended: existingSnapshot?.extended ?? {},
+    updatedAt: hadFullSnapshot ? existingSnapshot.updatedAt : coreUpdatedAt,
+  };
+}
+
+export async function fetchCharacterCurrentShipSnapshot(
+  characterId: string,
+  accessToken: string,
+  existingSnapshot: any,
+) {
+  if (!existingSnapshot) throw new Error("Current-ship refresh requires an existing synced character snapshot.");
+  const authenticatedHeaders = {
+    Authorization: `Bearer ${accessToken}`,
+    "X-Compatibility-Date": "2026-08-02",
+    "X-User-Agent": "NewEdenSage/0.1.0",
+  };
+  const publicHeaders = {
+    "X-Compatibility-Date": "2026-08-02",
+    "X-User-Agent": "NewEdenSage/0.1.0",
+  };
+  const shipResponse = await fetch(`https://esi.evetech.net/characters/${characterId}/ship/`, { headers: authenticatedHeaders });
+  if (!shipResponse.ok) throw new Error(`ESI current-ship refresh failed (${shipResponse.status}).`);
+  const ship = await shipResponse.json() as { ship_item_id: number; ship_name: string; ship_type_id: number };
+  const typeResponse = await fetch(`https://esi.evetech.net/universe/types/${ship.ship_type_id}/`, { headers: publicHeaders });
+  if (!typeResponse.ok) throw new Error(`ESI ship-type lookup failed (${typeResponse.status}).`);
+  const shipType = await typeResponse.json() as { name: string };
+  return {
+    ...existingSnapshot,
+    ship: { ...ship, ship_type_name: shipType.name },
+  };
+}
+
+export async function fetchWalletOnlySnapshot(
+  characterId: string,
+  accessToken: string,
+  existingSnapshot: any,
+) {
+  if (!existingSnapshot) throw new Error("Wallet-only refresh requires an existing synced character snapshot.");
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "X-Compatibility-Date": "2026-08-02",
+    "X-User-Agent": "NewEdenSage/0.1.0",
+  };
+  const capture = async (path: string, paged = false): Promise<unknown> => {
+    try {
+      const firstPath = paged ? `${path}${path.includes("?") ? "&" : "?"}page=1` : path;
+      const response = await fetch(`https://esi.evetech.net${firstPath}`, { headers });
+      if (response.status === 204) return null;
+      if (!response.ok) return { unavailable: true, status: response.status, endpoint: path };
+      const first = await response.json() as unknown;
+      if (!paged || !Array.isArray(first)) return first;
+      const pages = Number(response.headers.get("x-pages") ?? 1);
+      const rest = await mapLimited(Array.from({ length: Math.max(0, pages - 1) }, (_, index) => index + 2), 4, async (page) => {
+        const separator = path.includes("?") ? "&" : "?";
+        const pageResponse = await fetch(`https://esi.evetech.net${path}${separator}page=${page}`, { headers });
+        if (!pageResponse.ok) return [] as unknown[];
+        return pageResponse.json() as Promise<unknown[]>;
+      });
+      return first.concat(...rest);
+    } catch (error) {
+      return { unavailable: true, endpoint: path, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  const corporationId = Number(existingSnapshot?.character?.corporation_id ?? 0);
+  const [wallet, walletJournal, walletTransactions, corporationWallets] = await Promise.all([
+    capture(`/characters/${characterId}/wallet/`),
+    capture(`/characters/${characterId}/wallet/journal/`, true),
+    capture(`/characters/${characterId}/wallet/transactions/`, true),
+    corporationId > 0 ? capture(`/corporations/${corporationId}/wallets/`) : Promise.resolve(null),
+  ]);
+  const previousCorporation = existingSnapshot?.extended?.corporation ?? {};
+  let corporationWalletHistory = previousCorporation.walletHistory;
+  if (Array.isArray(corporationWallets)) {
+    corporationWalletHistory = await mapLimited(corporationWallets as Array<{ division:number }>, 3, async (division) => ({
+      division: Number(division.division),
+      journal: await capture(`/corporations/${corporationId}/wallets/${division.division}/journal/`, true),
+      transactions: await capture(`/corporations/${corporationId}/wallets/${division.division}/transactions/`, true),
+    }));
+  }
+  const usable = <T>(value: unknown, previous: T): T => Array.isArray(value) ? value as T : previous;
+  return {
+    ...existingSnapshot,
+    wallet: typeof wallet === "number" ? wallet : existingSnapshot.wallet,
+    walletUpdatedAt: new Date().toISOString(),
+    extended: {
+      ...(existingSnapshot.extended ?? {}),
+      walletJournal: usable(walletJournal, existingSnapshot?.extended?.walletJournal ?? []),
+      walletTransactions: usable(walletTransactions, existingSnapshot?.extended?.walletTransactions ?? []),
+      corporation: {
+        ...previousCorporation,
+        wallets: Array.isArray(corporationWallets) ? corporationWallets : previousCorporation.wallets,
+        walletHistory: Array.isArray(corporationWalletHistory) ? corporationWalletHistory.map((row:any) => ({
+          ...row,
+          journal: Array.isArray(row?.journal) ? row.journal : (previousCorporation.walletHistory ?? []).find((old:any) => Number(old?.division) === Number(row?.division))?.journal ?? [],
+          transactions: Array.isArray(row?.transactions) ? row.transactions : (previousCorporation.walletHistory ?? []).find((old:any) => Number(old?.division) === Number(row?.division))?.transactions ?? [],
+        })) : previousCorporation.walletHistory,
+      },
+    },
   };
 }
 
@@ -397,6 +656,12 @@ export async function fetchCharacterSnapshot(
     walletTransactions,
     planets,
     corporationRoles,
+    corporationMembers,
+    corporationMemberTracking,
+    corporationMemberTitles,
+    corporationTitles,
+    corporationDivisions,
+    corporationMemberLimit,
     corporationAssets,
     corporationBlueprints,
     corporationContacts,
@@ -431,6 +696,12 @@ export async function fetchCharacterSnapshot(
     capture(`/characters/${characterId}/wallet/transactions/`, true),
     capture(`/characters/${characterId}/planets/`),
     capture(`/characters/${characterId}/roles/`),
+    capture(`/corporations/${character.corporation_id}/members/`),
+    capture(`/corporations/${character.corporation_id}/membertracking/`),
+    capture(`/corporations/${character.corporation_id}/members/titles/`),
+    capture(`/corporations/${character.corporation_id}/titles/`),
+    capture(`/corporations/${character.corporation_id}/divisions/`),
+    capture(`/corporations/${character.corporation_id}/members/limit/`),
     capture(`/corporations/${character.corporation_id}/assets/`, true),
     capture(`/corporations/${character.corporation_id}/blueprints/`, true),
     capture(`/corporations/${character.corporation_id}/contacts/`, true),
@@ -447,6 +718,26 @@ export async function fetchCharacterSnapshot(
     capture(`/corporations/${character.corporation_id}/orders/`, true),
     capture(`/corporations/${character.corporation_id}/wallets/`),
   ]);
+  const corporationAssetNames = Array.isArray(corporationAssets)
+    ? (await mapLimited(
+        chunk((corporationAssets as AssetRecord[]).filter((asset) => asset.is_singleton).map((asset) => asset.item_id), 1000),
+        4,
+        async (itemIds) => {
+          if (!itemIds.length) return [] as Array<{ item_id: number; name: string }>;
+          try {
+            const response = await fetch(`https://esi.evetech.net/corporations/${character.corporation_id}/assets/names/`, {
+              method: "POST",
+              headers: { ...headers, "Content-Type": "application/json" },
+              body: JSON.stringify(itemIds),
+            });
+            if (!response.ok) return [] as Array<{ item_id: number; name: string }>;
+            return response.json() as Promise<Array<{ item_id: number; name: string }>>;
+          } catch {
+            return [] as Array<{ item_id: number; name: string }>;
+          }
+        },
+      )).flat()
+    : corporationAssets;
   const contractItems = Array.isArray(contracts)
     ? await mapLimited(
         contracts as Array<{ contract_id: number }>,
@@ -567,6 +858,7 @@ export async function fetchCharacterSnapshot(
 
   return {
     characterId,
+    snapshotState: "synced" as const,
     character: {
       ...character,
       corporation_name: corporation.name,
@@ -615,7 +907,14 @@ export async function fetchCharacterSnapshot(
         publicData: corporation,
         history: corporationHistory,
         roles: corporationRoles,
+        members: corporationMembers,
+        memberTracking: corporationMemberTracking,
+        memberTitles: corporationMemberTitles,
+        titles: corporationTitles,
+        divisions: corporationDivisions,
+        memberLimit: corporationMemberLimit,
         assets: corporationAssets,
+        assetNames: corporationAssetNames,
         blueprints: corporationBlueprints,
         contacts: corporationContacts,
         facilities: corporationFacilities,
@@ -931,7 +1230,3 @@ async function mapLimited<T, R>(
   await Promise.all(workers);
   return results;
 }
-
-
-
-

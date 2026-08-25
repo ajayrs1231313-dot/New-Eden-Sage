@@ -78,6 +78,13 @@ function placeholderSvg(typeId: number) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#08171d"/><rect x="1" y="1" width="62" height="62" fill="none" stroke="#31515a"/><text x="32" y="37" text-anchor="middle" font-family="sans-serif" font-size="17" fill="#6f929a">${typeId}</text></svg>`;
 }
 
+function imageContentType(data: Buffer) {
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return "image/jpeg";
+  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (data.length >= 12 && data.toString("ascii", 0, 4) === "RIFF" && data.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  return "application/octet-stream";
+}
+
 export async function typeImageProtocolResponse(requestUrl: string) {
   try {
     const url = new URL(requestUrl);
@@ -90,7 +97,7 @@ export async function typeImageProtocolResponse(requestUrl: string) {
     return new Response(data, {
       status: 200,
       headers: {
-        "Content-Type": "image/png",
+        "Content-Type": imageContentType(data),
         "Cache-Control": "public, max-age=31536000, immutable",
       },
     });

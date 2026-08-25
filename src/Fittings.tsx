@@ -7,6 +7,8 @@ import "./fittings-layout-v2.css";
 import type { FitResolutionIntent, FitRemedyCandidate } from "./types";
 import { FittingShowInfo, type ShowInfoTarget } from "./FittingShowInfo";
 import fittingStaticTree from "./fitting-static-tree.json";
+import { appendShoppingList } from "./shopping-list";
+import { canonicalizeFittingPlacement } from "./fitting-rack-normalization";
 
 type FitMutation = { mutaplasmidTypeId: number; mutaplasmidName: string; resultingTypeId: number; resultingTypeName: string };
 type FitItem = {
@@ -33,6 +35,20 @@ type ExternalEffectSelection = {
   state?: ModuleState;
   effectiveness?: number;
 };
+type BoosterSideEffectOption = { boosterTypeId:number; boosterName:string; effectId:number; effectName:string; chanceAttributeId:number; chance:number };
+type FittingCharacter = { characterId: string; character: { name: string; corporation_id?: number; corporation_name?: string } };
+type DoctrineExportSlotOption = { slot: number; name: string; fitCount: number };
+type DoctrineExportDraft = { corporationId: number; corporationName: string; slot: number; doctrineName: string; slots: DoctrineExportSlotOption[] };
+const PENDING_DOCTRINE_FIT_KEY = "new-eden-sage-pending-doctrine-fit";
+function doctrineExportSlots(corporationId: number): DoctrineExportSlotOption[] {
+  let saved: any[] = [];
+  try { const parsed = JSON.parse(localStorage.getItem(`new-eden-sage-corp-doctrines-v1:${corporationId}`) ?? "[]"); saved = Array.isArray(parsed) ? parsed : []; } catch { saved = []; }
+  return Array.from({ length: 5 }, (_, index) => {
+    const slot = index + 1;
+    const item = saved.find((value) => Number(value?.slot) === slot);
+    return { slot, name: String(item?.name ?? ""), fitCount: Array.isArray(item?.fits) ? Math.min(10, item.fits.length) : 0 };
+  });
+}
 type FitModuleRack = "low" | "mid" | "high" | "rig" | "subsystem";
 type FittingPlacement = "ship" | FitModuleRack | "drone" | "fighter" | "implant" | "booster" | "charge" | "cargo";
 type FittingSearchResult = { id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: FitModuleRack; placement?: FittingPlacement };
@@ -73,7 +89,7 @@ const PYFA_CATALOGUE_CATEGORIES:CatalogueCategory[]=[
   {id:"structure-modifications",label:"Structure Modifications",rootNames:["Structure Modifications"]},
   {id:"subsystems",label:"Subsystems",rootNames:["Subsystems"],hullFiltered:true},
   {id:"recent",label:"Recently Used Items",dynamic:"recent"},
-  {id:"charges-active",label:"Charges For Active Fit",dynamic:"charges-active"},
+  {id:"charges-active",label:"Ammo & Scripts for Active Fit",dynamic:"charges-active"},
 ];
 let sharedPreparationPromise:Promise<FittingPreparationResult>|null=null;
 let sharedPreparationResult:FittingPreparationResult|null=null;
@@ -176,6 +192,17 @@ function normalizeFit(value: any): Fit {
   };
 }
 
+type PendingFitImport = { fit: Fit; characterId?: string };
+
+function takePendingFit(): PendingFitImport | null {
+  const pendingRaw = localStorage.getItem("new-eden-sage-pending-fit");
+  if (!pendingRaw) return null;
+  const parsed = JSON.parse(pendingRaw);
+  const pending = { fit: normalizeFit(parsed), characterId: parsed?.characterId ? String(parsed.characterId) : undefined };
+  localStorage.removeItem("new-eden-sage-pending-fit");
+  return pending;
+}
+
 const emptyFit = (): Fit => ({
   id: crypto.randomUUID(),
   name: "New fitting",
@@ -193,6 +220,22 @@ const emptyFit = (): Fit => ({
   instructions: [],
   source: "",
 });
+type ModuleStateCapabilities = { canActivate:boolean; canOverheat:boolean };
+const moduleStateCapabilityCache = new Map<number,Promise<ModuleStateCapabilities>>();
+function getModuleStateCapabilities(typeId:number) {
+  let pending=moduleStateCapabilityCache.get(typeId);
+  if(!pending){
+    pending=window.sage.getFittingTypeInfoLocal(typeId).then((info)=>{
+      const effects=info.effects??[];
+      const canOverheat=effects.some((effect)=>Number(effect.category)===5);
+      const canActivate=effects.some((effect)=>Number(effect.effectId)!==16 && (Number(effect.category)===1 || Number(effect.category)===2));
+      return {canActivate,canOverheat};
+    }).catch(()=>({canActivate:true,canOverheat:false}));
+    moduleStateCapabilityCache.set(typeId,pending);
+  }
+  return pending;
+}
+
 const imageUrl = (
   typeId: number | undefined,
   variation: "icon" | "render",
@@ -349,7 +392,7 @@ function fitItems(fit: Fit) {
   ];
 }
 
-async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
+async function resolveFitFromEve(fit: Fit, known: Map<string, number>, options: { rejectUnresolvedFitted?: boolean } = {}) {
   let locallyResolved: Fit = resolveFit(normalizeFit(fit), known);
   const idItems = fitItems(locallyResolved).filter((item) => item.typeId && /^Type \d+$/i.test(item.name));
   if (idItems.length) {
@@ -357,45 +400,48 @@ async function resolveFitFromEve(fit: Fit, known: Map<string, number>) {
     const rename = (item: FitItem) => item.typeId && byId.has(item.typeId) ? { ...item, name: byId.get(item.typeId)! } : item;
     locallyResolved = { ...locallyResolved, hull: rename(locallyResolved.hull), low: locallyResolved.low.map(rename), mid: locallyResolved.mid.map(rename), high: locallyResolved.high.map(rename), rig: locallyResolved.rig.map(rename), subsystem: locallyResolved.subsystem.map(rename), drones: locallyResolved.drones.map(rename), fighters: locallyResolved.fighters.map(rename), cargo: locallyResolved.cargo.map(rename), implants: locallyResolved.implants.map(rename), boosters: locallyResolved.boosters.map(rename) };
   }
-  const missing = [
-    ...new Set(
-      fitItems(locallyResolved)
-        .filter((item) => !item.typeId)
-        .map((item) => item.name),
-    ),
-  ];
-  for (const item of fitItems(locallyResolved)) if (item.charge && !item.chargeTypeId) missing.push(item.charge);
 
-  // Always ask the local SDE for bay-item metadata. EFT omits empty sections, so
-  // blank-line position alone cannot reliably distinguish drones/fighters from cargo.
-  const allNames = fitItems(locallyResolved).map((item) => item.name);
-  const lookupNames = [...new Set([...missing, ...allNames])];
-  const resolved = lookupNames.length ? await window.sage.resolveFittingTypeNamesLocal(lookupNames) : [];
+  const allItems = fitItems(locallyResolved);
+  const missingNames = [...new Set(allItems.filter((item) => !item.typeId).map((item) => item.name))];
+  for (const item of allItems) if (item.charge && !item.chargeTypeId) missingNames.push(item.charge);
+  const allNames = allItems.map((item) => item.name);
+  const lookupNames = [...new Set([...missingNames, ...allNames])];
+  const lookupTypeIds = [...new Set(allItems.flatMap((item) => item.typeId && item.typeId > 0 ? [item.typeId] : []))];
+  const [resolvedByName, resolvedById] = await Promise.all([
+    lookupNames.length ? window.sage.resolveFittingTypeNamesLocal(lookupNames) : Promise.resolve([]),
+    lookupTypeIds.length ? window.sage.resolveFittingTypeIdsLocal(lookupTypeIds) : Promise.resolve([]),
+  ]);
+  const metadataById = new Map<number, any>();
+  for (const item of [...resolvedByName, ...resolvedById]) metadataById.set(Number(item.id), item);
+  const metadata = [...metadataById.values()];
   const names = new Map(known);
-  for (const item of resolved) names.set(item.name.toLowerCase(), item.id);
+  for (const item of metadata) names.set(String(item.name).toLowerCase(), Number(item.id));
   const withIds = resolveFit(locallyResolved, names);
-  const metadata = new Map(resolved.map((item: any) => [item.name.toLowerCase(), item]));
-  const drones: FitItem[] = [...withIds.drones];
-  const fighters: FitItem[] = [...withIds.fighters];
-  const cargo: FitItem[] = [];
-  const movedRacks: Record<FitModuleRack, FitItem[]> = { low: [], mid: [], high: [], rig: [], subsystem: [] };
-  const implants: FitItem[] = [...withIds.implants];
-  const boosters: FitItem[] = [...withIds.boosters];
-  const classifyCargo = (item: FitItem) => {
-    const info: any = metadata.get(item.name.toLowerCase());
-    if (!info) { cargo.push(item); return; }
-    const category = String(info.categoryName ?? "").toLowerCase();
-    if (category === "drone") drones.push(item);
-    else if (category === "fighter") fighters.push(item);
-    else if (info.rack && movedRacks[info.rack as FitModuleRack]) movedRacks[info.rack as FitModuleRack].push(item);
-    else if (category.includes("implant")) implants.push(item);
-    else cargo.push(item);
+
+  // Imported slot labels are untrusted. CCP DOGMA is authoritative for every fitted
+  // item, regardless of whether the source was JSON, EFT, MCP, Activity Command or cargo.
+  const canonical = canonicalizeFittingPlacement(withIds, metadata);
+  if (canonical.unresolvedFitted.length && options.rejectUnresolvedFitted !== false) {
+    const detail = canonical.unresolvedFitted.slice(0, 5).map(({ item, sourceRack }) => item.name + " (" + sourceRack + ")").join(", ");
+    throw new Error("Import blocked: Sage could not prove the CCP fitting rack for " + detail + ". Unverified fitted items are never stored in a ship slot.");
+  }
+  const expandRack = (items: FitItem[]) => items.flatMap((item) =>
+    Array.from({ length: Math.max(1, Math.floor(item.quantity || 1)) }, () => ({ ...item, quantity: 1 })),
+  );
+  return {
+    ...canonical.fit,
+    low: expandRack(canonical.fit.low),
+    mid: expandRack(canonical.fit.mid),
+    high: expandRack(canonical.fit.high),
+    rig: expandRack(canonical.fit.rig),
+    subsystem: expandRack(canonical.fit.subsystem),
   };
-  withIds.cargo.forEach(classifyCargo);
-  return { ...withIds, low: [...withIds.low, ...movedRacks.low], mid: [...withIds.mid, ...movedRacks.mid], high: [...withIds.high, ...movedRacks.high], rig: [...withIds.rig, ...movedRacks.rig], subsystem: [...withIds.subsystem, ...movedRacks.subsystem], drones, fighters, cargo, implants, boosters };
 }
 
-export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (intent: FitResolutionIntent) => void }) {
+export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { onExportToPlanner?: (intent: FitResolutionIntent) => void; activeCharacterId?: string }) {
+  const initialPending = useMemo(() => {
+    try { return takePendingFit(); } catch { return null; }
+  }, []);
   const [fits, setFits] = useState<Fit[]>(() => {
     try {
       return (JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]") as any[]).map(normalizeFit);
@@ -410,9 +456,10 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   );
   const [typeNames, setTypeNames] = useState(new Map<string, number>());
   const [characters, setCharacters] = useState<
-    Array<{ characterId: string; character: { name: string } }>
+    FittingCharacter[]
   >([]);
-  const [selectedCharacterId, setSelectedCharacterId] = useState("");
+  const [selectedCharacterId, setSelectedCharacterId] = useState(initialPending?.characterId ?? activeCharacterId ?? "");
+  const [doctrineExport, setDoctrineExport] = useState<DoctrineExportDraft | null>(null);
   const [routeOpen, setRouteOpen] = useState(false);
   const [sideMode, setSideMode] = useState<"build" | "import">("build");
   const [showInfoTarget, setShowInfoTarget] = useState<ShowInfoTarget | null>(null);
@@ -423,12 +470,78 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
     try { return JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") ?? "{}"); } catch { return {}; }
   });
   useEffect(() => {
+    if (!initialPending?.fit) return;
+    let cancelled = false;
+    void resolveFitFromEve(initialPending.fit, new Map<string, number>()).then((resolved) => {
+      if (cancelled) return;
+      setFits((current) => [resolved, ...current.filter((fit) => fit.id !== resolved.id)]);
+      setActiveId(resolved.id);
+      if (initialPending.characterId) setSelectedCharacterId(initialPending.characterId);
+      setSideMode("build");
+      setStatus(resolved.name + " imported from Activity Command and rack-validated against CCP DOGMA.");
+    }).catch((caught) => {
+      if (!cancelled) setStatus(caught instanceof Error ? caught.message : "Activity Command fit failed CCP rack validation.");
+    });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    const importPendingFit = () => {
+      try {
+        const pending = takePendingFit();
+        if (!pending) return;
+        void resolveFitFromEve(pending.fit, new Map<string, number>()).then((resolved) => {
+          setFits((current) => [resolved, ...current.filter((fit) => fit.id !== resolved.id)]);
+          setActiveId(resolved.id);
+          if (pending.characterId) setSelectedCharacterId(pending.characterId);
+          setSideMode("build");
+          setStatus(resolved.name + " imported from Activity Command and rack-validated against CCP DOGMA.");
+        }).catch((caught) => {
+          setStatus(caught instanceof Error ? caught.message : "Activity Command fit failed CCP rack validation.");
+        });
+      } catch (caught) {
+        setStatus(caught instanceof Error ? caught.message : "Could not import the Activity Command fit.");
+      }
+    };
+    window.addEventListener("sage:navigate-fittings", importPendingFit);
+    return () => window.removeEventListener("sage:navigate-fittings", importPendingFit);
+  }, []);
+  useEffect(() => {
     window.sage.listSnapshots().then((loaded) => {
       setCharacters(loaded);
-      setSelectedCharacterId(
-        (current) => current || loaded[0]?.characterId || "",
-      );
+      setSelectedCharacterId((current) => {
+        if (current && loaded.some((character) => character.characterId === current)) return current;
+        if (activeCharacterId && loaded.some((character) => character.characterId === activeCharacterId)) return activeCharacterId;
+        return loaded[0]?.characterId || "";
+      });
     });
+  }, []);
+  useEffect(() => {
+    if (!activeCharacterId) return;
+    if (characters.some((character) => character.characterId === activeCharacterId)) setSelectedCharacterId(activeCharacterId);
+  }, [activeCharacterId, characters]);
+  useEffect(() => {
+    const rackSchemaKey = "new-eden-sage-fitting-rack-schema";
+    const rackSchemaVersion = "ccp-dogma-v1";
+    if (localStorage.getItem(rackSchemaKey) === rackSchemaVersion) return;
+    const savedAtMount = fits;
+    if (!savedAtMount.length) {
+      localStorage.setItem(rackSchemaKey, rackSchemaVersion);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(savedAtMount.map(async (fit) => {
+      try {
+        return { id: fit.id, repaired: await resolveFitFromEve(fit, new Map<string, number>(), { rejectUnresolvedFitted: false }) };
+      } catch {
+        return { id: fit.id, repaired: null };
+      }
+    })).then((results) => {
+      if (cancelled) return;
+      const repairedById = new Map(results.flatMap((result) => result.repaired ? [[result.id, result.repaired] as const] : []));
+      if (repairedById.size) setFits((current) => current.map((fit) => repairedById.get(fit.id) ?? fit));
+      if (results.every((result) => result.repaired)) localStorage.setItem(rackSchemaKey, rackSchemaVersion);
+    });
+    return () => { cancelled = true; };
   }, []);
   useEffect(() => {
     localStorage.setItem("new-eden-sage-fits", JSON.stringify(fits));
@@ -470,10 +583,49 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   useEffect(() => {
     void window.sage.syncMcpRendererData({ savedFits: fits, fitLibraryMeta: libraryMeta });
   }, [fits, libraryMeta]);
-  useEffect(() => window.sage.onMcpFitDataUpdated((value) => {
-    if (Array.isArray(value.savedFits)) setFits(value.savedFits as Fit[]);
-    if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
-  }), []);
+  useEffect(() => {
+    let updateSequence = 0;
+    const applyMcpFitUpdate = async (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown>; selectedFitId?: string }) => {
+      const sequence = ++updateSequence;
+      if (Array.isArray(value.savedFits)) {
+        const normalized = value.savedFits
+          .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+          .map((candidate) => normalizeFit(candidate));
+        let resolved = normalized;
+        try {
+          resolved = await Promise.all(normalized.map((fit) => resolveFitFromEve(fit, new Map<string, number>())));
+        } catch (caught) {
+          if (sequence !== updateSequence) return;
+          setStatus(caught instanceof Error ? `MCP fit rejected by local CCP fitting validation: ${caught.message}` : "MCP fit rejected by local CCP fitting validation.");
+          return;
+        }
+        if (sequence !== updateSequence) return;
+        setFits(resolved);
+        const selected = typeof value.selectedFitId === "string" && resolved.some((fit) => fit.id === value.selectedFitId)
+          ? value.selectedFitId
+          : undefined;
+        setActiveId((current) => selected ?? (resolved.some((fit) => fit.id === current) ? current : (resolved[0]?.id ?? "")));
+        if (selected) {
+          const fit = resolved.find((candidate) => candidate.id === selected);
+          if (fit) {
+            const unresolved = fitItems(fit).filter((item) => !item.typeId).length;
+            setSideMode("build");
+            setStatus(unresolved ? `${fit.name} received from MCP; ${unresolved} item name(s) could not be resolved.` : `${fit.name} received from MCP and resolved against the local SDE.`);
+          }
+        }
+      }
+      if (sequence !== updateSequence) return;
+      if (value.fitLibraryMeta && typeof value.fitLibraryMeta === "object") setLibraryMeta(value.fitLibraryMeta as FitLibraryMetaMap);
+    };
+    const removeIpcListener = window.sage.onMcpFitDataUpdated((value) => { void applyMcpFitUpdate(value); });
+    const onDirectRendererUpdate = (event: Event) => { void applyMcpFitUpdate((event as CustomEvent).detail ?? {}); };
+    window.addEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
+    return () => {
+      updateSequence += 1;
+      removeIpcListener();
+      window.removeEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
+    };
+  }, []);
   // Saved fits render immediately. Resolving the complete CCP DOGMA index on
   // mount used to freeze the entire app the first time Fittings was opened.
   // Type resolution now happens only when a fit is imported or analyzed.
@@ -529,7 +681,11 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
     if (!active) return false;
     if (active.hull.typeId && item.id && item.placement !== "charge" && target !== "cargo" && typeof window.sage.checkFittingItemCompatibilityLocal === "function") {
       const placement:FittingPlacement = target === "drones" ? "drone" : target === "fighters" ? "fighter" : target === "implants" ? "implant" : target === "boosters" ? "booster" : target;
-      const fitted=(["high","mid","low","rig","subsystem"] as const).flatMap(rack=>active[rack].flatMap(candidate=>candidate.typeId?[{typeId:candidate.typeId,rack}]:[]));
+      const fitted=[
+        ...(["high","mid","low","rig","subsystem"] as const).flatMap(rack=>active[rack].flatMap(candidate=>candidate.typeId?[{typeId:candidate.typeId,rack}]:[])),
+        ...active.implants.flatMap(candidate=>candidate.typeId?[{typeId:candidate.typeId,rack:"implant"}]:[]),
+        ...active.boosters.flatMap(candidate=>candidate.typeId?[{typeId:candidate.typeId,rack:"booster"}]:[]),
+      ];
       try { const legality=await window.sage.checkFittingItemCompatibilityLocal({hullTypeId:active.hull.typeId,itemTypeId:item.id,placement,fitted}); if(!legality.compatible){setStatus(legality.reason);return false;} }
       catch(error){ setStatus(error instanceof Error ? error.message : "Could not validate this item against the selected hull."); return false; }
     }
@@ -542,7 +698,7 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
         try {
           const profile = await window.sage.getHullFittingProfileLocal(active.hull.typeId);
           const limit = profile.slots[target as FitModuleRack] ?? 0;
-          if (limit > 0 && active[target].length >= limit) {
+          if (active[target].length >= limit) {
             setStatus(`${active.hull.name} has no empty ${target} slots for ${item.name}.`);
             return false;
           }
@@ -663,6 +819,45 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
     setLibraryMeta((current) => ({ ...current, [copy.id]: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), readiness: "unknown" } }));
     setStatus(`Duplicated ${active.name}.`);
   }
+  function openDoctrineExport() {
+    if (!active) return;
+    const character = characters.find((item) => item.characterId === selectedCharacterId) ?? characters[0];
+    const corporationId = Number(character?.character?.corporation_id ?? 0);
+    if (!corporationId) {
+      setStatus("Choose a connected corporation character before exporting to a doctrine.");
+      return;
+    }
+    const slots = doctrineExportSlots(corporationId);
+    const available = slots.find((slot) => slot.fitCount < 10);
+    if (!available) {
+      setStatus("All five doctrine slots are full for this corporation.");
+      return;
+    }
+    setDoctrineExport({
+      corporationId,
+      corporationName: String(character?.character?.corporation_name ?? `Corporation ${corporationId}`),
+      slot: available.slot,
+      doctrineName: available.name || active.name,
+      slots,
+    });
+  }
+  function commitDoctrineExport() {
+    if (!active || !doctrineExport) return;
+    const selected = doctrineExport.slots.find((slot) => slot.slot === doctrineExport.slot);
+    if (!selected || selected.fitCount >= 10) { setStatus("That doctrine slot is full. Choose another slot."); return; }
+    const doctrineName = doctrineExport.doctrineName.trim() || selected.name || active.name;
+    sessionStorage.setItem(PENDING_DOCTRINE_FIT_KEY, JSON.stringify({
+      corporationId: doctrineExport.corporationId,
+      targetSlot: doctrineExport.slot,
+      doctrineName,
+      exportedAt: new Date().toISOString(),
+      fit: JSON.parse(JSON.stringify(active)),
+    }));
+    setDoctrineExport(null);
+    setStatus(`${active.name} ready for ${doctrineExport.corporationName} - Doctrine ${doctrineExport.slot}.`);
+    window.dispatchEvent(new CustomEvent("sage:navigate-corp-doctrines"));
+  }
+
   async function exportActiveFit() {
     if (!active) return;
     const verified = await window.sage.copyText(exportFitJson(active));
@@ -687,7 +882,7 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
   return (
     <section className="fit-workspace fit-workspace-v2">
       <div className="fit-v2-toolbar">
-        <label>Saved fit<select value={active?.id ?? ""} onChange={(event) => setActiveId(event.target.value)}><option value="">Select fitting...</option>{fits.map((fit) => <option key={fit.id} value={fit.id}>{fit.name} · {fit.hull.name}</option>)}</select></label>
+        <label>Saved fit<select value={active?.id ?? ""} onChange={(event) => setActiveId(event.target.value)}><option value="">Select fitting...</option>{fits.map((fit) => <option key={fit.id} value={fit.id}>{fit.name} - {fit.hull.name}</option>)}</select></label>
         <button type="button" className={sideMode === "build" ? "active" : ""} onClick={() => setSideMode("build")}>Modules</button>
         <button type="button" className={sideMode === "import" ? "active" : ""} onClick={() => setSideMode("import")}>Import</button>
       </div>
@@ -699,8 +894,18 @@ export function FittingsWorkspace({ onExportToPlanner }: { onExportToPlanner?: (
         )}
       </aside>
       <div className="fit-main">
-        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
+        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
       </div>
+      {doctrineExport && active && <div className="fit-doctrine-export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDoctrineExport(null); }}>
+        <section className="fit-doctrine-export-dialog" role="dialog" aria-modal="true" aria-label="Export fitting to doctrine">
+          <div className="fit-doctrine-export-head"><div><p className="eyebrow">CORPORATION - DOCTRINES</p><h3>Export to Doctrine</h3><p>{active.name} - {active.hull.name}</p></div><button className="fit-doctrine-export-close" onClick={() => setDoctrineExport(null)} aria-label="Close">×</button></div>
+          <div className="fit-doctrine-export-corp"><span>DESTINATION CORPORATION</span><strong>{doctrineExport.corporationName}</strong></div>
+          <label><span>Doctrine slot</span><select value={doctrineExport.slot} onChange={(event) => { const slot = Number(event.target.value); const target = doctrineExport.slots.find((item) => item.slot === slot); setDoctrineExport((current) => current ? { ...current, slot, doctrineName: target?.name || active.name } : current); }}>{doctrineExport.slots.map((slot) => <option key={slot.slot} value={slot.slot} disabled={slot.fitCount >= 10}>Slot {slot.slot} - {slot.name || "Empty"} ({slot.fitCount}/10)</option>)}</select></label>
+          <label><span>Doctrine name</span><input value={doctrineExport.doctrineName} onChange={(event) => setDoctrineExport((current) => current ? { ...current, doctrineName: event.target.value } : current)} placeholder={active.name} /></label>
+          <div className="fit-doctrine-export-actions"><button onClick={() => setDoctrineExport(null)}>Cancel</button><button className="primary" onClick={commitDoctrineExport}>Continue to doctrine</button></div>
+          <small>The fitter queues this exact fit into the existing corporation doctrine library; no duplicate doctrine store is created.</small>
+        </section>
+      </div>}
       <FittingShowInfo target={showInfoTarget} onClose={() => setShowInfoTarget(null)} />
     </section>
   );
@@ -868,7 +1073,7 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
     if(!automatic){setCatalogueStatus(item.name+" has no fitting destination in the current CCP SDE; added to Cargo for review.");const added=await onAdd("cargo",{...item,placement:"cargo"});if(added)rememberRecent(item);return;}
     const added=await onAdd(automatic,item);if(added)rememberRecent(item);setCatalogueStatus(added?"Added "+item.name+" to "+automatic+".":"Item was rejected by the fitting rules.");
   };
-  const renderItem=(item:CatalogueItem)=><div className="fit-catalogue-item" key={item.id} draggable onDragStart={(event)=>writeFittingDrag(event,item)} onContextMenu={(event)=>{event.preventDefault();setMutationMenu({x:event.clientX,y:event.clientY,item});}}><img src={imageUrl(item.id,"icon",64)}/><span><strong>{item.name}</strong><small>{item.rack ? (item.rack + " slot") : item.categoryName}{item.metaLevel>0?(" · meta " + item.metaLevel):""}</small></span><button type="button" className="fit-catalogue-add" aria-label={"Add "+item.name} title={item.categoryId===8?"Load into the first compatible fitted module":"Add to fit"} onClick={()=>void addResult(item)}>+</button></div>;
+  const renderItem=(item:CatalogueItem)=><div className="fit-catalogue-item" key={item.id} draggable onDragStart={(event)=>writeFittingDrag(event,item)} onContextMenu={(event)=>{event.preventDefault();setMutationMenu({x:event.clientX,y:event.clientY,item});}}><img src={imageUrl(item.id,"icon",64)}/><span><strong>{item.name}</strong><small>{item.rack ? (item.rack + " slot") : item.categoryName}{item.metaLevel>0?(" - meta " + item.metaLevel):""}</small></span><button type="button" className="fit-catalogue-add" aria-label={"Add "+item.name} title={item.categoryId===8?"Load into the first compatible fitted module":"Add to fit"} onClick={()=>void addResult(item)}>+</button></div>;
 
   const renderCategoryContent=(category:CatalogueCategory)=>{
     const rawItems=rawItemsForCategory(category);
@@ -880,9 +1085,9 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
     if(category.dynamic==="recent") return displayItems.length?<div>{displayItems.map(renderItem)}</div>:<div className="fit-category-loading">No recently used fitting items yet.</div>;
     if(category.dynamic==="charges-active"){
       if(activeChargesPending)return <div className="fit-category-loading">Checking charges for the active fit…</div>;
-      if(!fittedModuleTypeIds.length)return <div className="fit-category-loading">Fit a charge-using module to see compatible charges here.</div>;
+      if(!fittedModuleTypeIds.length)return <div className="fit-category-loading">Fit a charge-using module to see compatible ammo and scripts here.</div>;
       if(typeof window.sage.getFittingChargesForModulesLocal!=="function")return <div className="fit-category-loading">Active-fit charge filtering will be available after the Sage dev window restarts.</div>;
-      return displayItems.length?<div>{displayItems.map(renderItem)}</div>:<div className="fit-category-loading">No compatible charges found for the active fit.</div>;
+      return displayItems.length?<div>{displayItems.map(renderItem)}</div>:<div className="fit-category-loading">No compatible ammo or scripts found for the active fit.</div>;
     }
     const roots=new Set(category.rootNames??[]);
     const rootGroups=catalogue.groups.filter(group=>group.parentId==null&&roots.has(group.name));
@@ -921,7 +1126,7 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
     {browserTab==="ships" ? <div className="fit-ships-tab">
       <input value={fitName} onChange={event=>setFitName(event.target.value)} placeholder="Optional fit name"/>
       <input value={hullQuery} onChange={event=>setHullQuery(event.target.value)} placeholder="Filter ships..."/>
-      <div className="fit-builder-results hull-results">{hullMatches.map(ship=><button type="button" key={ship.typeId} onClick={()=>{onCreate(ship,fitName);setBrowserTab("catalogue");}} onContextMenu={(event)=>{event.preventDefault();onShowInfo(ship.typeId,ship.name);}}><img src={imageUrl(ship.typeId,"icon",64)}/><span><strong>{ship.name}</strong><small>Create fitting · right-click Show Info</small></span></button>)}</div>
+      <div className="fit-builder-results hull-results">{hullMatches.map(ship=><button type="button" key={ship.typeId} onClick={()=>{onCreate(ship,fitName);setBrowserTab("catalogue");}} onContextMenu={(event)=>{event.preventDefault();onShowInfo(ship.typeId,ship.name);}}><img src={imageUrl(ship.typeId,"icon",64)}/><span><strong>{ship.name}</strong><small>Create fitting - right-click Show Info</small></span></button>)}</div>
     </div> : <div className="fit-catalogue-tab">
       <div className="fit-catalogue-section-row"><strong>Catalogue</strong><small>{catalogueSource==="live"?"Current SDE":catalogueSource==="cached"?"Cached modules":"Navigation ready"}</small></div>
       <input className="fit-catalogue-filter" value={catalogueFilter} onChange={event=>setCatalogueFilter(event.target.value)} placeholder="Filter catalogue locally..."/>
@@ -932,7 +1137,7 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
       })}</div>
     </div>}
     {mutationMenu&&<div className="mutation-context-menu" style={{left:mutationMenu.x,top:mutationMenu.y}}><button type="button" onClick={()=>{onShowInfo(mutationMenu.item.id,mutationMenu.item.name);setMutationMenu(undefined);}}>Show Info</button>{mutationMenu.item.rack && <button type="button" onClick={()=>void openMutationEditor(mutationMenu.item)}>Mutate...</button>}<button type="button" onClick={()=>setMutationMenu(undefined)}>Cancel</button></div>}
-    {mutationEditor&&<div className="mutation-backdrop" onMouseDown={()=>setMutationEditor(undefined)}><div className="mutation-editor" onMouseDown={event=>event.stopPropagation()}><div className="mutation-editor-head"><div><p className="eyebrow">ABYSSAL MUTATION</p><h3>{mutationEditor.item.name}</h3></div><button type="button" onClick={()=>setMutationEditor(undefined)}>×</button></div><label>Mutaplasmid<select value={mutationEditor.selected} onChange={event=>selectMutation(Number(event.target.value))}>{mutationEditor.options.map((option,index)=><option key={option.mutaplasmidTypeId} value={index}>{option.mutaplasmidName}</option>)}</select></label><div className="mutation-attributes">{mutationEditor.options[mutationEditor.selected].attributes.map(attribute=>{const key=String(attribute.attributeId);const value=mutationEditor.values[key]??attribute.baseValue;const delta=attribute.baseValue?((value/attribute.baseValue)-1)*100:0;return <div className="mutation-attribute" key={attribute.attributeId}><div><strong>{attribute.name}</strong><small>Base {attribute.baseValue.toFixed(3)} · legal {attribute.minValue.toFixed(3)} – {attribute.maxValue.toFixed(3)}</small></div><input type="range" min={attribute.minValue} max={attribute.maxValue} step={Math.max(Math.abs(attribute.maxValue-attribute.minValue)/1000,0.000001)} value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Number(event.target.value)}})}/><input type="number" min={attribute.minValue} max={attribute.maxValue} step="any" value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Math.min(attribute.maxValue,Math.max(attribute.minValue,Number(event.target.value)))}})}/><em className={(attribute.highIsGood?delta>=0:delta<=0)?"good":"bad"}>{delta>=0?"+":""}{delta.toFixed(1)}%</em></div>})}</div><div className="mutation-editor-foot"><span>{mutationEditor.options[mutationEditor.selected].resultingTypeName}</span><button type="button" onClick={()=>void addMutated()}>Add mutated module</button></div></div></div>}
+    {mutationEditor&&<div className="mutation-backdrop" onMouseDown={()=>setMutationEditor(undefined)}><div className="mutation-editor" onMouseDown={event=>event.stopPropagation()}><div className="mutation-editor-head"><div><p className="eyebrow">ABYSSAL MUTATION</p><h3>{mutationEditor.item.name}</h3></div><button type="button" onClick={()=>setMutationEditor(undefined)}>×</button></div><label>Mutaplasmid<select value={mutationEditor.selected} onChange={event=>selectMutation(Number(event.target.value))}>{mutationEditor.options.map((option,index)=><option key={option.mutaplasmidTypeId} value={index}>{option.mutaplasmidName}</option>)}</select></label><div className="mutation-attributes">{mutationEditor.options[mutationEditor.selected].attributes.map(attribute=>{const key=String(attribute.attributeId);const value=mutationEditor.values[key]??attribute.baseValue;const delta=attribute.baseValue?((value/attribute.baseValue)-1)*100:0;return <div className="mutation-attribute" key={attribute.attributeId}><div><strong>{attribute.name}</strong><small>Base {attribute.baseValue.toFixed(3)} - legal {attribute.minValue.toFixed(3)} – {attribute.maxValue.toFixed(3)}</small></div><input type="range" min={attribute.minValue} max={attribute.maxValue} step={Math.max(Math.abs(attribute.maxValue-attribute.minValue)/1000,0.000001)} value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Number(event.target.value)}})}/><input type="number" min={attribute.minValue} max={attribute.maxValue} step="any" value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Math.min(attribute.maxValue,Math.max(attribute.minValue,Number(event.target.value)))}})}/><em className={(attribute.highIsGood?delta>=0:delta<=0)?"good":"bad"}>{delta>=0?"+":""}{delta.toFixed(1)}%</em></div>})}</div><div className="mutation-editor-foot"><span>{mutationEditor.options[mutationEditor.selected].resultingTypeName}</span><button type="button" onClick={()=>void addMutated()}>Add mutated module</button></div></div></div>}
     {mutationStatus&&<small className="mutation-status">{mutationStatus}</small>}
   </div>;
 }
@@ -946,6 +1151,7 @@ function FitDisplay({
   onRename,
   onDuplicate,
   onExport,
+  onExportToDoctrine,
   onModuleStateChange,
   onBayActiveQuantityChange,
   onRemoveItem,
@@ -956,7 +1162,7 @@ function FitDisplay({
   onShowInfo,
 }: {
   fit: Fit;
-  characters: Array<{ characterId: string; character: { name: string } }>;
+  characters: FittingCharacter[];
   characterId: string;
   onCharacterChange(id: string): void;
   onRemove(): void;
@@ -964,6 +1170,7 @@ function FitDisplay({
   onRename(): void;
   onDuplicate(): void;
   onExport(): void;
+  onExportToDoctrine(): void;
   onModuleStateChange(rack: FitModuleRack, index: number, state: ModuleState): void;
   onBayActiveQuantityChange(target: "drones" | "fighters", index: number, quantity: number): void;
   onRemoveItem(target: BuilderTarget, index: number): void;
@@ -976,6 +1183,8 @@ function FitDisplay({
   const [tab, setTab] = useState<"fitting" | "performance">("fitting");
   const [analysis, setAnalysis] = useState<any>(null);
   const [remedies, setRemedies] = useState<FitRemedyCandidate[]>([]);
+  const [eveExporting, setEveExporting] = useState(false);
+  const [eveExportStatus, setEveExportStatus] = useState("");
   const [hullProfile, setHullProfile] = useState<HullFittingProfile | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -999,6 +1208,23 @@ function FitDisplay({
   const [damageProfilePreset, setDamageProfilePreset] = useState<NpcDamagePreset>("omni");
   const [targetDamageProfilePreset, setTargetDamageProfilePreset] = useState<NpcDamagePreset>("omni");
   const [externalEffects, setExternalEffects] = useState<ExternalEffectSelection[]>([]);
+  const [boosterSideEffects,setBoosterSideEffects]=useState<BoosterSideEffectOption[]>([]);
+  const [selectedBoosterSideEffectKeys,setSelectedBoosterSideEffectKeys]=useState<string[]>([]);
+  const boosterSourceTypeIds=useMemo(()=>[...new Set([
+    ...fit.boosters.flatMap(item=>item.typeId?[item.typeId]:[]),
+    ...externalEffects.filter(item=>item.kind==="booster").map(item=>item.typeId),
+  ])],[fit.boosters,externalEffects]);
+  useEffect(()=>{
+    let cancelled=false;
+    if(!boosterSourceTypeIds.length){setBoosterSideEffects([]);setSelectedBoosterSideEffectKeys([]);return;}
+    void window.sage.getBoosterSideEffectsLocal(boosterSourceTypeIds).then((options)=>{
+      if(cancelled)return;
+      setBoosterSideEffects(options);
+      const available=new Set(options.map(option=>option.boosterTypeId+":"+option.effectId));
+      setSelectedBoosterSideEffectKeys(current=>current.filter(key=>available.has(key)));
+    }).catch(()=>{if(!cancelled)setBoosterSideEffects([]);});
+    return()=>{cancelled=true;};
+  },[boosterSourceTypeIds.join(",")]);
   const addExternalEffect = async (input: { kind: ExternalEffectKind; name: string; chargeName?: string }) => {
     const name = input.name.trim();
     const chargeName = input.chargeName?.trim() ?? "";
@@ -1010,6 +1236,10 @@ function FitDisplay({
     if (!effect) return "No current CCP SDE type matched “" + name + "”.";
     const charge = chargeName ? byName.get(chargeName.toLowerCase()) : undefined;
     if (chargeName && !charge) return "No current CCP SDE charge/script matched “" + chargeName + "”.";
+    if (charge && (input.kind === "projected" || input.kind === "command")) {
+      const compatibility = await window.sage.checkFittingChargeCompatibilityLocal(effect.id, charge.id);
+      if (!compatibility.compatible) return compatibility.reason;
+    }
     if (externalEffects.some((item) => item.kind === input.kind && item.typeId === effect.id && item.chargeTypeId === charge?.id)) return "That external effect is already selected.";
     setExternalEffects((current) => [...current, { id: crypto.randomUUID(), kind: input.kind, name: effect.name, typeId: effect.id, chargeName: charge?.name, chargeTypeId: charge?.id, state: "active", effectiveness: 1 }]);
     return null;
@@ -1039,6 +1269,7 @@ function FitDisplay({
         damageProfile,
         implantTypeIds: fit.implants.map((item) => item.typeId).filter((id): id is number => Boolean(id)),
         boosterTypeIds: [...fit.boosters.map((item) => item.typeId).filter((id): id is number => Boolean(id)), ...externalEffects.filter((item) => item.kind === "booster").map((item) => item.typeId)],
+        boosterSideEffectSelections: selectedBoosterSideEffectKeys.flatMap((key)=>{const [boosterTypeId,effectId]=key.split(":").map(Number);return boosterTypeId&&effectId?[{boosterTypeId,effectId}]:[];}),
         projectedItems: externalEffects.filter((item) => item.kind === "projected").map((item) => ({ typeId: item.typeId, chargeTypeId: item.chargeTypeId, state: item.state ?? "active", effectiveness: item.effectiveness ?? 1 })),
         commandBurstItems: externalEffects.filter((item) => item.kind === "command").map((item) => ({ typeId: item.typeId, chargeTypeId: item.chargeTypeId, state: item.state ?? "active", effectiveness: item.effectiveness ?? 1 })),
         environmentTypeIds: externalEffects.filter((item) => item.kind === "environment").map((item) => item.typeId),
@@ -1086,7 +1317,7 @@ function FitDisplay({
     return () => {
       cancelled = true;
     };
-  }, [tab, characterId, fit.id, fit.hull.typeId, fit.low, fit.mid, fit.high, fit.rig, fit.subsystem, fit.drones, fit.fighters, fit.cargo, fit.implants, fit.boosters, targetProfile.rangeM, targetProfile.signatureRadiusM, targetProfile.transverseVelocityMps, targetProfile.velocityMps, damageProfilePreset, externalEffects]);
+  }, [tab, characterId, fit.id, fit.hull.typeId, fit.low, fit.mid, fit.high, fit.rig, fit.subsystem, fit.drones, fit.fighters, fit.cargo, fit.implants, fit.boosters, targetProfile.rangeM, targetProfile.signatureRadiusM, targetProfile.transverseVelocityMps, targetProfile.velocityMps, damageProfilePreset, externalEffects, selectedBoosterSideEffectKeys.join("|")]);
   const exportResolution = (source: "dream-fit" | "fit-issues") => {
     if (!fit.hull.typeId) return;
     onExportToPlanner({
@@ -1101,6 +1332,41 @@ function FitDisplay({
       resources: analysis?.resources ? { used: { ...analysis.resources.used }, capacity: { ...analysis.resources.capacity } } : undefined,
     });
   };
+  async function exportCurrentFitToEve() {
+    if (!characterId) return;
+    setEveExporting(true);
+    setEveExportStatus("Saving fit to EVE...");
+    try {
+      await window.sage.exportFitToEve({ characterId, fit });
+      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      setEveExportStatus(`Saved to ${characterName}'s EVE fitting library.`);
+    } catch (error) {
+      setEveExportStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
+    } finally {
+      setEveExporting(false);
+    }
+  }
+  function exportCurrentFitToShoppingList() {
+    const additions = [
+      fit.hull,
+      ...fit.high,
+      ...fit.mid,
+      ...fit.low,
+      ...fit.rig,
+      ...fit.subsystem,
+      ...fit.drones,
+      ...fit.fighters,
+      ...fit.cargo,
+      ...fit.implants,
+      ...fit.boosters,
+    ].flatMap((item) => item.typeId ? [{ typeId: item.typeId, name: item.name, quantity: Math.max(1, Math.floor(item.quantity || 1)) }] : []);
+    for (const module of [...fit.high, ...fit.mid, ...fit.low]) {
+      if (module.chargeTypeId && module.charge) additions.push({ typeId: module.chargeTypeId, name: module.charge, quantity: Math.max(1, Math.floor(module.chargeQuantity || 1)) });
+    }
+    const result = appendShoppingList(additions, fit.name + " exported to Shopping List.");
+    setEveExportStatus(result.addedLines ? (fit.name + " exported: " + result.addedLines + " item types / " + result.addedUnits.toLocaleString() + " units added to Shopping List.") : "Nothing resolved in this fit could be exported to Shopping List.");
+  }
+
   const fitSummary = summarizeFit(fit);
   return (
     <div className="fit-display fit-display-v3">
@@ -1125,8 +1391,12 @@ function FitDisplay({
             <button onClick={onRename}>Rename</button>
             <button onClick={onDuplicate}>Duplicate</button>
             <button onClick={onExport}>Copy JSON</button>
-            <button className="route-fit" onClick={onRoute}>
-              Find cheapest purchase route
+            <button className="fit-export-corporation" onClick={onExportToDoctrine}>Export to Doctrine</button>
+            <button onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>
+              {eveExporting ? "Exporting..." : "Export to EVE"}
+            </button>
+            <button className="route-fit" onClick={exportCurrentFitToShoppingList}>
+              Export to Shopping List
             </button>
             <button onClick={onRemove}>Delete fit</button>
           </div>
@@ -1134,6 +1404,7 @@ function FitDisplay({
         <div className="fit-library-summary">
           <span>{fitSummary.moduleCount} modules</span><span>{fitSummary.droneCount} drones</span><span>{fitSummary.resolvedItems} resolved</span><span>{fitSummary.unresolvedItems} unresolved</span>
         </div>
+        {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
         <div className="fit-tabs">
           <button
             className={tab === "fitting" ? "active" : ""}
@@ -1172,7 +1443,7 @@ function FitDisplay({
         </>
       ) : (
         <div className="fit-v2-performance-stage">
-          <FitPerformance analysis={analysis} status={analysisStatus} fit={fit} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} externalEffects={externalEffects} onAddExternalEffect={addExternalEffect} onUpdateExternalEffect={updateExternalEffect} onRemoveExternalEffect={removeExternalEffect} onExportToPlanner={() => exportResolution("dream-fit")} />
+          <FitPerformance analysis={analysis} status={analysisStatus} fit={fit} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} externalEffects={externalEffects} boosterSideEffects={boosterSideEffects} selectedBoosterSideEffectKeys={selectedBoosterSideEffectKeys} onSelectedBoosterSideEffectKeysChange={setSelectedBoosterSideEffectKeys} onAddExternalEffect={addExternalEffect} onUpdateExternalEffect={updateExternalEffect} onRemoveExternalEffect={removeExternalEffect} onExportToPlanner={() => exportResolution("dream-fit")} />
         </div>
       )}
 
@@ -1209,8 +1480,8 @@ function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantity
   const info:Record<AdditionTab,string>={drones:"Drone bay loadout and launched count used by live DPS analysis.",fighters:"Fighter hangar and active squadrons validated against tubes and fighter class limits.",cargo:"Charges, scripts, paste, probes and other carried items.",implants:"Planned fit implants plus implants already installed on the selected pilot.",boosters:"Boosters assigned to the fit plus temporary external booster effects.",projected:"Remote effects projected onto this fit for performance analysis.",command:"Command burst effects currently applied to this fit.",notes:"Imported operating notes and fit instructions."};
   const activeCount=(entry:AdditionEntry)=>{if(entry.item.activeQuantity!=null)return Math.max(0,Math.min(entry.item.quantity,entry.item.activeQuantity));if(entry.target==="fighters")return Math.min(entry.item.quantity,1);const matches=(analysis?.damage?.activeDrones??[]).filter((candidate:any)=>(entry.item.typeId&&Number(candidate.typeId)===entry.item.typeId)||String(candidate.name??"")===entry.item.name);const explicit=matches.map((candidate:any)=>Number(candidate.activeQuantity??candidate.quantity)).find((value:number)=>Number.isFinite(value));if(explicit!=null)return Math.max(0,Math.min(entry.item.quantity,Math.round(explicit)));return Math.min(entry.item.quantity,5);};
   const step=(entry:AdditionEntry,delta:number)=>{if(entry.target!=="drones"&&entry.target!=="fighters")return;onBayActiveQuantityChange(entry.target,entry.index,Math.max(0,Math.min(entry.item.quantity,activeCount(entry)+delta)));};
-  const renderBay=(entries:AdditionEntry[],active=false)=>entries.length?<div className="fit-addition-list">{entries.map(entry=><div className="fit-addition-item" key={entry.target+"-"+entry.item.name+"-"+entry.index} onContextMenu={event=>{if(!entry.item.typeId)return;event.preventDefault();onShowInfo(entry.item.typeId,entry.item.name);}}>{entry.item.typeId?<img src={imageUrl(entry.item.typeId,"icon",64)}/>:<b>?</b>}<span><strong>{entry.item.name}</strong><small>{entry.item.quantity} assigned · {entry.target}</small></span>{active&&<div className="drone-active-stepper" title="Active count used by fit analysis"><small>Active</small><button type="button" onClick={()=>step(entry,-1)}>−</button><b>{activeCount(entry)}</b><button type="button" onClick={()=>step(entry,1)}>+</button></div>}<button type="button" className="fit-addition-remove" onClick={()=>onRemoveItem(entry.target,entry.index)} aria-label={"Remove "+entry.item.name}>×</button></div>)}</div>:<div className="fit-addition-empty">Nothing assigned here.</div>;
-  const renderEffects=(items:any[],empty:string,label:string)=>items.length?<div className="fit-addition-effect-list">{items.map((item:any,index:number)=><div className="fit-addition-effect" key={String(item.id??item.typeId??index)} onContextMenu={event=>{if(!item.typeId)return;event.preventDefault();onShowInfo(Number(item.typeId),item.name);}}>{item.typeId?<img src={imageUrl(Number(item.typeId),"icon",64)}/>:<b>◇</b>}<span><strong>{item.name??("Type "+item.typeId)}</strong><small>{item.chargeName?item.chargeName+" · ":""}{item.state?item.state+" · ":""}{label}</small></span></div>)}</div>:<div className="fit-addition-empty">{empty}</div>;
+  const renderBay=(entries:AdditionEntry[],active=false)=>entries.length?<div className="fit-addition-list">{entries.map(entry=><div className="fit-addition-item" key={entry.target+"-"+entry.item.name+"-"+entry.index} onContextMenu={event=>{if(!entry.item.typeId)return;event.preventDefault();onShowInfo(entry.item.typeId,entry.item.name);}}>{entry.item.typeId?<img src={imageUrl(entry.item.typeId,"icon",64)}/>:<b>?</b>}<span><strong>{entry.item.name}</strong><small>{entry.item.quantity} assigned - {entry.target}</small></span>{active&&<div className="drone-active-stepper" title="Active count used by fit analysis"><small>Active</small><button type="button" onClick={()=>step(entry,-1)}>−</button><b>{activeCount(entry)}</b><button type="button" onClick={()=>step(entry,1)}>+</button></div>}<button type="button" className="fit-addition-remove" onClick={()=>onRemoveItem(entry.target,entry.index)} aria-label={"Remove "+entry.item.name}>×</button></div>)}</div>:<div className="fit-addition-empty">Nothing assigned here.</div>;
+  const renderEffects=(items:any[],empty:string,label:string)=>items.length?<div className="fit-addition-effect-list">{items.map((item:any,index:number)=><div className="fit-addition-effect" key={String(item.id??item.typeId??index)} onContextMenu={event=>{if(!item.typeId)return;event.preventDefault();onShowInfo(Number(item.typeId),item.name);}}>{item.typeId?<img src={imageUrl(Number(item.typeId),"icon",64)}/>:<b>◇</b>}<span><strong>{item.name??("Type "+item.typeId)}</strong><small>{item.chargeName?item.chargeName+" - ":""}{item.state?item.state+" - ":""}{label}</small></span></div>)}</div>:<div className="fit-addition-empty">{empty}</div>;
   return <div className="fit-additions-panel"><div className="fit-additions-head"><strong>Additions</strong><small>{info[activeTab]}</small></div><div className="fit-addition-tabs-v3" role="tablist">{tabs.map(tab=><button type="button" role="tab" aria-selected={activeTab===tab.id} className={activeTab===tab.id?"active":""} key={tab.id} onClick={()=>setActiveTab(tab.id)}><span>{tab.label}</span>{counts[tab.id]>0&&<b>{counts[tab.id]}</b>}</button>)}</div><div className="fit-addition-content" role="tabpanel">
     {activeTab==="drones"&&renderBay(droneEntries,true)}{activeTab==="fighters"&&renderBay(fighterEntries,true)}{activeTab==="cargo"&&renderBay(cargoEntries)}
     {activeTab==="implants"&&<>{renderBay(plannedImplants)}{installedImplants.length>0&&<div className="fit-addition-secondary"><small>Installed on pilot</small>{renderEffects(installedImplants,"","Installed on selected pilot")}</div>}</>}
@@ -1255,35 +1526,45 @@ function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageP
   const ResistRow=({icon,label,resists,ehp}:{icon:string;label:string;resists:number[]|undefined;ehp:number|undefined})=><div className="pyfa-resist-row"><i>{icon}</i><span>{label}</span>{[0,1,2,3].map(index=><b key={index}>{resists?pct(resists[index]):"—"}</b>)}<strong>{ehp==null?"—":fmt(ehp)}</strong></div>;
   return <aside className="fit-v2-context pyfa-stats-panel">
     {refreshing&&<div className="fit-analysis-refreshing"><span>Calculating current fit…</span><i/></div>}
-    <div className="pyfa-profile-stack">
-      <label>
-        <span>Target damage profile</span>
-        <select value={targetDamageProfilePreset} onChange={event=>onTargetDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>
-          {NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} · deal {NPC_DAMAGE_PRESETS[key].dealLabel}</option>)}
-        </select>
-        <small>Recommended damage: {NPC_DAMAGE_PRESETS[targetDamageProfilePreset].dealLabel}</small>
-      </label>
-      <label>
-        <span>Defensive damage profile</span>
-        <select value={damageProfilePreset} onChange={event=>onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>
-          {NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} · {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}
-        </select>
-        <small>Incoming mix: {NPC_DAMAGE_PRESETS[damageProfilePreset].incomingLabel}</small>
-      </label>
-      <details className="pyfa-target-application">
-        <summary>Target application</summary>
-        <div className="fit-v2-target-grid">
-          <label>Range km<input type="number" min="0" value={targetProfile.rangeM/1000} onChange={event=>onTargetProfileChange({...targetProfile,rangeM:Math.max(0,Number(event.target.value)*1000)})}/></label>
-          <label>Signature m<input type="number" min="1" value={targetProfile.signatureRadiusM} onChange={event=>onTargetProfileChange({...targetProfile,signatureRadiusM:Math.max(1,Number(event.target.value))})}/></label>
-          <label>Transversal<input type="number" min="0" value={targetProfile.transverseVelocityMps} onChange={event=>onTargetProfileChange({...targetProfile,transverseVelocityMps:Math.max(0,Number(event.target.value))})}/></label>
-          <label>Velocity<input type="number" min="0" value={targetProfile.velocityMps} onChange={event=>onTargetProfileChange({...targetProfile,velocityMps:Math.max(0,Number(event.target.value))})}/></label>
-        </div>
-      </details>
-    </div>
-    <section><h3><i>⚙</i> Resources</h3><Resource icon="◫" label="CPU" used={res?.used.cpu} total={res?.capacity.cpu} unit="tf"/><Resource icon="⚡" label="Powergrid" used={res?.used.powergrid} total={res?.capacity.powergrid} unit="MW"/><Resource icon="⬡" label="Calibration" used={res?.used.calibration} total={res?.capacity.calibration} unit=""/><Resource icon="◇" label="Drone bay" used={storage?.droneBayUsedM3} total={storage?.droneBayCapacityM3??hullProfile?.storage.droneBayM3} unit="m³"/><Resource icon="⌁" label="Bandwidth" used={storage?.droneBandwidthUsed} total={storage?.droneBandwidthCapacity??hullProfile?.storage.droneBandwidth} unit="Mbit/s"/><Resource icon="▣" label="Cargo" used={storage?.cargoUsedM3} total={storage?.cargoCapacityM3??hullProfile?.storage.cargoM3} unit="m³"/><div className="pyfa-slot-line"><span>Slots</span><strong>{fit.high.length}/{slots?.high??"—"} H · {fit.mid.length}/{slots?.mid??"—"} M · {fit.low.length}/{slots?.low??"—"} L · {fit.rig.length}/{slots?.rig??"—"} R</strong></div></section>
+    <section><h3><i>⚙</i> Resources</h3><Resource icon="◫" label="CPU" used={res?.used.cpu} total={res?.capacity.cpu} unit="tf"/><Resource icon="⚡" label="Powergrid" used={res?.used.powergrid} total={res?.capacity.powergrid} unit="MW"/><Resource icon="⬡" label="Calibration" used={res?.used.calibration} total={res?.capacity.calibration} unit=""/><Resource icon="◇" label="Drone bay" used={storage?.droneBayUsedM3} total={storage?.droneBayCapacityM3??hullProfile?.storage.droneBayM3} unit="m³"/><Resource icon="⌁" label="Bandwidth" used={storage?.droneBandwidthUsed} total={storage?.droneBandwidthCapacity??hullProfile?.storage.droneBandwidth} unit="Mbit/s"/><Resource icon="▣" label="Cargo" used={storage?.cargoUsedM3} total={storage?.cargoCapacityM3??hullProfile?.storage.cargoM3} unit="m³"/><div className="pyfa-slot-line"><span>Slots</span><strong>{fit.high.length}/{slots?.high??"—"} H - {fit.mid.length}/{slots?.mid??"—"} M - {fit.low.length}/{slots?.low??"—"} L - {fit.rig.length}/{slots?.rig??"—"} R</strong></div></section>
     <section><h3><i>◈</i> Resistances <small>Effective HP {defence?fmt(defence.totalEhp):"—"}</small></h3><div className="pyfa-resist-head"><span></span><span></span><b title="EM"><i className="resist-damage-icon em">ϟ</i><small>EM</small></b><b title="Thermal"><i className="resist-damage-icon thermal">♨</i><small>TH</small></b><b title="Kinetic"><i className="resist-damage-icon kinetic">◆</i><small>KI</small></b><b title="Explosive"><i className="resist-damage-icon explosive">✹</i><small>EX</small></b><strong>EHP</strong></div><ResistRow icon="◉" label="Shield" resists={defence?.shieldResists} ehp={defence?.shieldEhp}/><ResistRow icon="◆" label="Armor" resists={defence?.armorResists} ehp={defence?.armorEhp}/><ResistRow icon="⬢" label="Hull" resists={defence?.hullResists} ehp={defence?.structureEhp}/></section>
     <section><h3><i>↻</i> Recharge & tank</h3><div className="pyfa-stat-grid"><Stat icon="◉" label="Passive shield" value={defence?fmt(defence.effectivePassiveShieldPeak,1)+" EHP/s":"—"}/><Stat icon="◆" label="Armor rep" value={defence?fmt(defence.effectiveArmorRepairPerSecond,1)+" EHP/s":"—"}/><Stat icon="◉" label="Shield rep" value={defence?fmt(defence.effectiveShieldRepairPerSecond,1)+" EHP/s":"—"}/><Stat icon="⬢" label="Hull rep" value={defence?fmt(defence.effectiveStructureRepairPerSecond,1)+" EHP/s":"—"}/></div></section>
     <section><h3><i>✦</i> Firepower</h3><div className="pyfa-stat-grid"><Stat icon="✹" label="Weapon DPS" value={damage?fmt(damage.weaponDps,1):"—"}/><Stat icon="◇" label="Drone DPS" value={damage?fmt(damage.droneDps,1):"—"}/><Stat icon="✦" label="Total volley" value={damage?fmt(damage.totalVolley,0):"—"}/><Stat icon="⌖" label="Applied weapon" value={damage?fmt(appliedWeaponDps,1)+" DPS":"—"}/></div></section>
+    <details className="pyfa-damage-profiles">
+      <summary>
+        <span className="pyfa-damage-profile-title"><i aria-hidden="true"/><strong>Damage profiles</strong></span>
+        <span className="pyfa-damage-profile-summary">
+          <small><b>DEAL</b> {NPC_DAMAGE_PRESETS[targetDamageProfilePreset].label}</small>
+          <small><b>TANK</b> {NPC_DAMAGE_PRESETS[damageProfilePreset].label}</small>
+        </span>
+        <i className="pyfa-damage-profile-chevron" aria-hidden="true"/>
+      </summary>
+      <div className="pyfa-damage-profile-body">
+        <label className="pyfa-damage-profile-field">
+          <span><strong>Target damage profile</strong><small>What you should deal to the target</small></span>
+          <select value={targetDamageProfilePreset} onChange={event=>onTargetDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>
+            {NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - deal {NPC_DAMAGE_PRESETS[key].dealLabel}</option>)}
+          </select>
+          <em>Recommended: {NPC_DAMAGE_PRESETS[targetDamageProfilePreset].dealLabel}</em>
+        </label>
+        <label className="pyfa-damage-profile-field">
+          <span><strong>Defensive damage profile</strong><small>Incoming damage mix used for tank and EHP</small></span>
+          <select value={damageProfilePreset} onChange={event=>onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>
+            {NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}
+          </select>
+          <em>Incoming: {NPC_DAMAGE_PRESETS[damageProfilePreset].incomingLabel}</em>
+        </label>
+        <div className="pyfa-damage-application">
+          <div className="pyfa-damage-application-head"><strong>Target application</strong><small>Range, signature and movement used for applied DPS</small></div>
+          <div className="fit-v2-target-grid">
+            <label>Range km<input type="number" min="0" value={targetProfile.rangeM/1000} onChange={event=>onTargetProfileChange({...targetProfile,rangeM:Math.max(0,Number(event.target.value)*1000)})}/></label>
+            <label>Signature m<input type="number" min="1" value={targetProfile.signatureRadiusM} onChange={event=>onTargetProfileChange({...targetProfile,signatureRadiusM:Math.max(1,Number(event.target.value))})}/></label>
+            <label>Transversal<input type="number" min="0" value={targetProfile.transverseVelocityMps} onChange={event=>onTargetProfileChange({...targetProfile,transverseVelocityMps:Math.max(0,Number(event.target.value))})}/></label>
+            <label>Velocity<input type="number" min="0" value={targetProfile.velocityMps} onChange={event=>onTargetProfileChange({...targetProfile,velocityMps:Math.max(0,Number(event.target.value))})}/></label>
+          </div>
+        </div>
+      </div>
+    </details>
     <section><h3><i>⚡</i> Capacitor</h3><div className="pyfa-stat-grid"><Stat icon="◍" label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"—"}/><Stat icon="⏱" label="State" value={cap?(cap.stable?"Stable "+fmt(cap.stablePercent,0)+"%":fmt(cap.depletionSeconds,0)+" s"):"—"}/><Stat icon="↓" label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"—"}/><Stat icon="↑" label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"—"}/></div></section>
     <section><h3><i>⌖</i> Targeting & misc</h3><div className="pyfa-stat-grid"><Stat icon="⌖" label="Targets" value={targeting?fmt(targeting.maximumLockedTargets):"—"}/><Stat icon="◎" label="Lock range" value={targeting?fmt(targeting.maximumRangeM/1000,1)+" km":"—"}/><Stat icon="◌" label="Scan res" value={targeting?fmt(targeting.scanResolution,0)+" mm":"—"}/><Stat icon="∿" label="Sensor str" value={targeting?fmt(targeting.sensorStrength,1):"—"}/><Stat icon="➤" label="Speed" value={nav?fmt(nav.maximumVelocity,0)+" m/s":"—"}/><Stat icon="⏱" label="Align" value={nav?fmt(nav.alignSeconds,2)+" s":"—"}/><Stat icon="◯" label="Signature" value={targeting?fmt(targeting.signatureRadiusM,0)+" m":"—"}/><Stat icon="✧" label="Warp" value={nav?fmt(nav.warpSpeedAuPerSecond,1)+" AU/s":"—"}/></div></section>
   </aside>;
@@ -1298,6 +1579,9 @@ function FitPerformance({
   damageProfilePreset,
   onDamageProfilePresetChange,
   externalEffects,
+  boosterSideEffects,
+  selectedBoosterSideEffectKeys,
+  onSelectedBoosterSideEffectKeysChange,
   onAddExternalEffect,
   onUpdateExternalEffect,
   onRemoveExternalEffect,
@@ -1311,6 +1595,9 @@ function FitPerformance({
   damageProfilePreset: NpcDamagePreset;
   onDamageProfilePresetChange(value: NpcDamagePreset): void;
   externalEffects: ExternalEffectSelection[];
+  boosterSideEffects: BoosterSideEffectOption[];
+  selectedBoosterSideEffectKeys: string[];
+  onSelectedBoosterSideEffectKeysChange(value:string[]):void;
   onAddExternalEffect(input: { kind: ExternalEffectKind; name: string; chargeName?: string }): Promise<string | null>;
   onUpdateExternalEffect(id: string, patch: Partial<ExternalEffectSelection>): void;
   onRemoveExternalEffect(id: string): void;
@@ -1320,6 +1607,44 @@ function FitPerformance({
   const [externalName, setExternalName] = useState("");
   const [externalCharge, setExternalCharge] = useState("");
   const [externalStatus, setExternalStatus] = useState("");
+  const [fleetBurstOptions, setFleetBurstOptions] = useState<FittingSearchResult[]>([]);
+  const [fleetBurstTypeId, setFleetBurstTypeId] = useState(0);
+  const [fleetBurstCharges, setFleetBurstCharges] = useState<Array<{ id:number; name:string }>>([]);
+  const [fleetBurstChargeTypeId, setFleetBurstChargeTypeId] = useState(0);
+  useEffect(() => {
+    let cancelled=false;
+    void window.sage.searchFittingTypesLocal("Command Burst", 120).then((items) => {
+      if(cancelled)return;
+      const bursts=items.filter((item) => item.categoryId===7 && item.rack==="high" && /Command Burst/i.test(item.name)).sort((a,b)=>a.name.localeCompare(b.name));
+      setFleetBurstOptions(bursts);
+      setFleetBurstTypeId((current)=>current&&bursts.some(item=>item.id===current)?current:(bursts[0]?.id??0));
+    }).catch(()=>{ if(!cancelled)setFleetBurstOptions([]); });
+    return()=>{cancelled=true;};
+  },[]);
+  useEffect(() => {
+    if(!fleetBurstTypeId){setFleetBurstCharges([]);setFleetBurstChargeTypeId(0);return;}
+    let cancelled=false;
+    void window.sage.getFittingChargesForModulesLocal([fleetBurstTypeId]).then(async (result)=>{
+      const resolved=result.compatibleTypeIds.length?await window.sage.resolveFittingTypeIdsLocal(result.compatibleTypeIds):[];
+      if(cancelled)return;
+      const charges=resolved.map(item=>({id:item.id,name:item.name})).filter(item=>/Charge$/i.test(item.name)).sort((a,b)=>a.name.localeCompare(b.name));
+      setFleetBurstCharges(charges);
+      setFleetBurstChargeTypeId((current)=>current&&charges.some(item=>item.id===current)?current:(charges[0]?.id??0));
+    }).catch(()=>{if(!cancelled){setFleetBurstCharges([]);setFleetBurstChargeTypeId(0);}});
+    return()=>{cancelled=true;};
+  },[fleetBurstTypeId]);
+  const addFleetBoost = async () => {
+    const burst=fleetBurstOptions.find(item=>item.id===fleetBurstTypeId);
+    const charge=fleetBurstCharges.find(item=>item.id===fleetBurstChargeTypeId);
+    if(!burst||!charge){setExternalStatus("Select a command burst and charge.");return;}
+    setExternalStatus("Applying fleet boost from current CCP SDE...");
+    const error=await onAddExternalEffect({kind:"command",name:burst.name,chargeName:charge.name});
+    setExternalStatus(error??(burst.name+" + "+charge.name+" applied to this fit."));
+  };
+  const toggleBoosterSideEffect=(option:BoosterSideEffectOption)=>{
+    const key=option.boosterTypeId+":"+option.effectId;
+    onSelectedBoosterSideEffectKeysChange(selectedBoosterSideEffectKeys.includes(key)?selectedBoosterSideEffectKeys.filter(item=>item!==key):[...selectedBoosterSideEffectKeys,key]);
+  };
   const submitExternalEffect = async () => {
     setExternalStatus("Resolving from local CCP SDE...");
     try {
@@ -1339,7 +1664,7 @@ function FitPerformance({
         </small>
       </div>
       <h3>Damage profile</h3>
-      <div className="damage-profile-controls"><label>Incoming NPC damage<select value={damageProfilePreset} onChange={(event) => onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} · {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}</select></label></div>
+      <div className="damage-profile-controls"><label>Incoming NPC damage<select value={damageProfilePreset} onChange={(event) => onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}</select></label></div>
       <h3>Target application</h3>
       <div className="target-profile-controls">
         <label>Range km<input type="number" min="0" step="1" value={targetProfile.rangeM / 1000} onChange={(event) => onTargetProfileChange({ ...targetProfile, rangeM: Math.max(0, Number(event.target.value) * 1000) })} /></label>
@@ -1349,6 +1674,22 @@ function FitPerformance({
       </div>
       <h3>External effects</h3>
       <div className="external-effects-panel">
+        {boosterSideEffects.length>0&&<div className="booster-side-effect-picker">
+          <div><strong>Booster side effects</strong><small>Tick the penalties that actually rolled. Base booster bonuses are always applied; these are source-specific random side effects.</small></div>
+          <div className="booster-side-effect-options">{boosterSideEffects.map(option=>{const key=option.boosterTypeId+":"+option.effectId;return <label key={key}><input type="checkbox" checked={selectedBoosterSideEffectKeys.includes(key)} onChange={()=>toggleBoosterSideEffect(option)}/><span><strong>{option.effectName}</strong><small>{option.boosterName} - {(option.chance*100).toFixed(0)}% roll chance</small></span></label>})}</div>
+        </div>}
+        <div className="fleet-boost-quick-pick">
+          <div><strong>Fleet boosts</strong><small>Pick a command burst and charge; Sage applies the actual CCP command-burst modifiers to this fit.</small></div>
+          <select aria-label="Fleet command burst" value={fleetBurstTypeId} onChange={(event)=>setFleetBurstTypeId(Number(event.target.value))} disabled={!fleetBurstOptions.length}>
+            {!fleetBurstOptions.length&&<option value={0}>No command bursts found</option>}
+            {fleetBurstOptions.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <select aria-label="Fleet command burst charge" value={fleetBurstChargeTypeId} onChange={(event)=>setFleetBurstChargeTypeId(Number(event.target.value))} disabled={!fleetBurstCharges.length}>
+            {!fleetBurstCharges.length&&<option value={0}>No compatible charges</option>}
+            {fleetBurstCharges.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
+          </select>
+          <button type="button" onClick={()=>void addFleetBoost()} disabled={!fleetBurstTypeId||!fleetBurstChargeTypeId}>Apply fleet boost</button>
+        </div>
         <div className="external-effect-add">
           <label>Type<select value={externalKind} onChange={(event) => setExternalKind(event.target.value as ExternalEffectKind)}><option value="environment">Environment</option><option value="booster">Booster</option><option value="projected">Projected module</option><option value="command">Command burst</option></select></label>
           <label>Exact CCP name<input value={externalName} onChange={(event) => setExternalName(event.target.value)} placeholder={externalKind === "environment" ? "Class 1 Pulsar Effects" : externalKind === "booster" ? "Strong Blue Pill Booster" : externalKind === "command" ? "Shield Command Burst II" : "Stasis Webifier II"} /></label>
@@ -1356,7 +1697,7 @@ function FitPerformance({
           <button type="button" onClick={submitExternalEffect}>Add effect</button>
         </div>
         {externalStatus && <small className="external-effect-status">{externalStatus}</small>}
-        {externalEffects.length > 0 && <div className="external-effect-list">{externalEffects.map((item) => <div className="external-effect-row" key={item.id}><div><strong>{item.name}</strong><small>{item.kind}{item.chargeName ? <> · {item.chargeName}</> : null}</small></div>{(item.kind === "projected" || item.kind === "command") && <><label>State<select value={item.state ?? "active"} onChange={(event) => onUpdateExternalEffect(item.id, { state: event.target.value as ModuleState })}><option value="active">Active</option><option value="overheated">Overheated</option></select></label><label>Effect %<input type="number" min="0" max="100" step="1" value={Math.round((item.effectiveness ?? 1) * 100)} onChange={(event) => onUpdateExternalEffect(item.id, { effectiveness: Math.max(0, Math.min(1, Number(event.target.value) / 100)) })} /></label></>}<button type="button" onClick={() => onRemoveExternalEffect(item.id)}>Remove</button></div>)}</div>}
+        {externalEffects.length > 0 && <div className="external-effect-list">{externalEffects.map((item) => <div className="external-effect-row" key={item.id}><div><strong>{item.name}</strong><small>{item.kind}{item.chargeName ? <> - {item.chargeName}</> : null}</small></div>{(item.kind === "projected" || item.kind === "command") && <><label>State<select value={item.state ?? "active"} onChange={(event) => onUpdateExternalEffect(item.id, { state: event.target.value as ModuleState })}><option value="active">Active</option><option value="overheated">Overheated</option></select></label><label>Effect %<input type="number" min="0" max="100" step="1" value={Math.round((item.effectiveness ?? 1) * 100)} onChange={(event) => onUpdateExternalEffect(item.id, { effectiveness: Math.max(0, Math.min(1, Number(event.target.value) / 100)) })} /></label></>}<button type="button" onClick={() => onRemoveExternalEffect(item.id)}>Remove</button></div>)}</div>}
       </div>
       {analysis && (
         <>
@@ -1403,7 +1744,7 @@ function FitPerformance({
             <div className="base-stat-grid">
               <article><span>Capacitor demand</span><strong>{analysis.capacitor.demandGjPerSecond.toFixed(2)} GJ/s</strong></article>
               <article><span>Peak recharge</span><strong>{analysis.capacitor.peakRechargeGjPerSecond.toFixed(2)} GJ/s</strong></article>
-              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable Â· ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
+              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable - ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
             </div>
           )}
           {analysis.damage && (
@@ -1412,7 +1753,7 @@ function FitPerformance({
               <article><span>Weapon / drone DPS</span><strong>{analysis.damage.weaponDps.toFixed(1)} / {analysis.damage.droneDps.toFixed(1)}</strong></article>
               <article><span>Total volley</span><strong>{analysis.damage.totalVolley.toFixed(1)}</strong></article>
               <article><span>Active drones</span><strong>{analysis.damage.activeDrones.length}</strong><small>{analysis.damage.activeDrones.map((drone: any) => drone.name).join(", ") || "None selected"}</small></article>
-              {analysis.damage.weaponProfiles.map((weapon: any, index: number) => <article key={`${weapon.typeId}-${index}`}><span>{weapon.name}</span><strong>{weapon.kind === "turret" ? `${(weapon.optimalM / 1000).toFixed(1)} + ${(weapon.falloffM / 1000).toFixed(1)} km` : `${(weapon.maximumRangeM / 1000).toFixed(1)} km`}</strong><small>{weapon.kind === "turret" ? `${weapon.tracking.toFixed(3)} tracking` : `${weapon.explosionRadiusM.toFixed(0)} m explosion Â· ${weapon.explosionVelocity.toFixed(0)} m/s`}</small></article>)}
+              {analysis.damage.weaponProfiles.map((weapon: any, index: number) => <article key={`${weapon.typeId}-${index}`}><span>{weapon.name}</span><strong>{weapon.kind === "turret" ? `${(weapon.optimalM / 1000).toFixed(1)} + ${(weapon.falloffM / 1000).toFixed(1)} km` : `${(weapon.maximumRangeM / 1000).toFixed(1)} km`}</strong><small>{weapon.kind === "turret" ? `${weapon.tracking.toFixed(3)} tracking` : `${weapon.explosionRadiusM.toFixed(0)} m explosion - ${weapon.explosionVelocity.toFixed(0)} m/s`}</small></article>)}
             </div>
           )}
           {analysis.defence && (
@@ -1421,15 +1762,15 @@ function FitPerformance({
               <article><span>Shield / armor / hull</span><strong>{analysis.defence.shieldHp} / {analysis.defence.armorHp} / {analysis.defence.structureHp}</strong></article>
               <article><span>Raw active repair</span><strong>{(analysis.defence.shieldRepairPerSecond + analysis.defence.armorRepairPerSecond + analysis.defence.structureRepairPerSecond).toFixed(1)} HP/s</strong></article>
               <article><span>Effective active tank</span><strong>{(analysis.defence.effectiveShieldRepairPerSecond + analysis.defence.effectiveArmorRepairPerSecond + analysis.defence.effectiveStructureRepairPerSecond).toFixed(1)} EHP/s</strong></article>
-              <article><span>Peak passive shield</span><strong>{analysis.defence.passiveShieldPeak.toFixed(1)} HP/s · {analysis.defence.effectivePassiveShieldPeak.toFixed(1)} EHP/s</strong></article>
+              <article><span>Peak passive shield</span><strong>{analysis.defence.passiveShieldPeak.toFixed(1)} HP/s - {analysis.defence.effectivePassiveShieldPeak.toFixed(1)} EHP/s</strong></article>
             </div>
           )}
           {analysis.navigation && analysis.targeting && (
             <div className="base-stat-grid">
               <article><span>Align time</span><strong>{analysis.navigation.alignSeconds.toFixed(2)} s</strong></article>
-              <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s Â· {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
-              <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km Â· {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
-              <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m Â· {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
+              <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s - {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
+              <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km - {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
+              <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m - {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
             </div>
           )}
           {analysis.heat && (
@@ -1442,22 +1783,35 @@ function FitPerformance({
               {analysis.heat.racks.some((rack: any) => rack.overheatedModules > 0) ? analysis.heat.racks.filter((rack: any) => rack.overheatedModules > 0).map((rack: any) => (
                 <div key={rack.rack}>
                   <div className="base-stat-grid">
-                    <article><span>{rack.rack} rack heat · 30s</span><strong>{(rack.heatAt30Seconds * 100).toFixed(1)}%</strong></article>
-                    <article><span>{rack.rack} rack heat · 60s</span><strong>{(rack.heatAt60Seconds * 100).toFixed(1)}%</strong></article>
+                    <article><span>{rack.rack} rack heat - 30s</span><strong>{(rack.heatAt30Seconds * 100).toFixed(1)}%</strong></article>
+                    <article><span>{rack.rack} rack heat - 60s</span><strong>{(rack.heatAt60Seconds * 100).toFixed(1)}%</strong></article>
                     <article><span>Expected first burnout</span><strong>{rack.firstExpectedBurnoutSeconds > 0 ? Math.floor(rack.firstExpectedBurnoutSeconds / 60) + "m " + Math.round(rack.firstExpectedBurnoutSeconds % 60) + "s" : "Beyond 60m / none"}</strong></article>
-                    <article><span>Heat attenuation</span><strong>{rack.attenuation.toFixed(2)}</strong><small>{rack.overheatedModules} overloaded · {(rack.occupiedSlotFactor * 100).toFixed(1)}% occupied-slot factor</small></article>
+                    <article><span>Heat attenuation</span><strong>{rack.attenuation.toFixed(2)}</strong><small>{rack.overheatedModules} overloaded - {(rack.occupiedSlotFactor * 100).toFixed(1)}% occupied-slot factor</small></article>
                   </div>
                   <div className="requirement-list">
                     {rack.modules.filter((module: any) => module.state === "overheated" || module.expectedBurnoutSeconds > 0).map((module: any) => (
                       <article className={module.state === "overheated" ? "missing" : "ready"} key={rack.rack + "-" + module.position + "-" + module.typeId}>
                         <strong>{module.name}</strong>
                         <span>{module.state === "overheated" ? "Overheated source" : "Rack position " + (module.position + 1)}</span>
-                        <small>{module.heatDamage.toFixed(2)} heat damage · {module.cycleSeconds.toFixed(2)}s cycle · {module.expectedBurnoutSeconds > 0 ? "expected burnout " + Math.floor(module.expectedBurnoutSeconds / 60) + "m " + Math.round(module.expectedBurnoutSeconds % 60) + "s" : "no expected burnout within 60m"}</small>
+                        <small>{module.heatDamage.toFixed(2)} heat damage - {module.cycleSeconds.toFixed(2)}s cycle - {module.expectedBurnoutSeconds > 0 ? "expected burnout " + Math.floor(module.expectedBurnoutSeconds / 60) + "m " + Math.round(module.expectedBurnoutSeconds % 60) + "s" : "no expected burnout within 60m"}</small>
                       </article>
                     ))}
                   </div>
                 </div>
               )) : <div className="performance-note"><small>No fitted modules are currently set to Overheated.</small></div>}
+            </>
+          )}
+          {(analysis.magazines?.length > 0 || analysis.capacitor?.capacitorInjectors?.length > 0 || analysis.commandBurstSources?.length > 0 || analysis.projectedSources?.length > 0 || analysis.environmentSources?.length > 0 || analysis.fighterSystem?.capacityM3 > 0) && (
+            <>
+              <h3>Advanced simulation</h3>
+              <div className="base-stat-grid">
+                {analysis.magazines?.map((magazine:any,index:number)=><article key={`mag-${magazine.typeId}-${index}`}><span>{magazine.name} magazine</span><strong>{magazine.rawCharges} x {magazine.charge}</strong><small>{magazine.cycleSeconds>0?`${magazine.cyclesPerMagazine} cycles - ${magazine.reloadSeconds.toFixed(1)}s reload - ${(magazine.sustainedDutyCycle*100).toFixed(1)}% duty`:"Loaded script / non-cycling charge"}</small></article>)}
+                {analysis.capacitor?.capacitorInjectors?.map((injector:any,index:number)=><article key={`cap-${injector.typeId}-${index}`}><span>{injector.name}</span><strong>{injector.sustainedGjPerSecond.toFixed(1)} GJ/s sustained</strong><small>{injector.injectionPerCycleGj.toFixed(0)} GJ per cycle - {injector.charge}</small></article>)}
+                {analysis.commandBurstSources?.map((source:any,index:number)=><article key={`burst-${source.typeId}-${index}`}><span>Fleet boost - {source.name}</span><strong>{source.charge??"Command burst"}</strong><small>{source.buffs.map((buff:any)=>`${buff.description}: ${Number(buff.value).toFixed(2)}`).join(" - ")}</small></article>)}
+                {analysis.projectedSources?.map((source:any,index:number)=><article key={`projected-${source.typeId}-${index}`}><span>Projected - {source.name}</span><strong>{Math.round(Number(source.effectiveness??1)*100)}% effectiveness</strong><small>{source.effects?.join(" - ")||"Projected DOGMA effects applied"}</small></article>)}
+                {analysis.environmentSources?.map((source:any,index:number)=><article key={`environment-${source.typeId}-${index}`}><span>Environment</span><strong>{source.name}</strong><small>Environment DOGMA modifiers applied</small></article>)}
+                {analysis.fighterSystem?.capacityM3>0&&<article><span>Fighter system</span><strong>{analysis.fighterSystem.activeSquadrons} / {analysis.fighterSystem.tubes} active tubes</strong><small>{analysis.fighterSystem.usedM3.toFixed(0)} / {analysis.fighterSystem.capacityM3.toFixed(0)} m³ fighter hangar used</small></article>}
+              </div>
             </>
           )}
           {analysis.issues?.length > 0 && <div className="requirement-list">{analysis.issues.map((issue: any, index: number) => <article className={issue.level === "error" ? "missing" : "ready"} key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small></article>)}</div>}
@@ -1472,8 +1826,8 @@ function FitPerformance({
             ))}
           </div>
           <div className="planner-panel-title">
-            <div><p className="eyebrow">FIT PROGRESSION</p><h3>Continue in Progression</h3></div>
-            <button onClick={onExportToPlanner}>Export to Progression Ship Planner</button>
+            <div><p className="eyebrow">FIT PROGRESSION</p><h3>Continue in Activity Command</h3></div>
+            <button onClick={onExportToPlanner}>Export to Activity Command Ship Planner</button>
           </div>
         </>
       )}
@@ -1487,19 +1841,21 @@ function FitRouteScreen({
   onBack,
 }: {
   fit: Fit;
-  characters: Array<{ characterId: string; character: { name: string } }>;
+  characters: FittingCharacter[];
   onBack(): void;
 }) {
   const [characterId, setCharacterId] = useState(
     characters[0]?.characterId ?? "",
   );
   const [buyEntireFit, setBuyEntireFit] = useState(false);
+  const [highSecOnly, setHighSecOnly] = useState(true);
+  const [eveAction, setEveAction] = useState<"route" | "fit" | null>(null);
   const [result, setResult] = useState<any>(null);
   const [status, setStatus] = useState(
     "Choose a character whose current location will be the route origin.",
   );
   async function calculate() {
-    setStatus("Comparing owned assets, prices and secure routes...");
+    setStatus(`Comparing owned assets, prices and ${highSecOnly ? "high-sec-only" : "unrestricted"} routes...`);
     setResult(null);
     try {
       const items = [
@@ -1515,14 +1871,40 @@ function FitRouteScreen({
       const next = await window.sage.buildFitShoppingRoute({
         characterId,
         buyEntireFit,
+        highSecOnly,
         items,
       });
       setResult(next);
-      setStatus(`Route calculated from ${next.origin}.`);
+      setStatus(`Route calculated from ${next.origin}${highSecOnly ? " using high-sec-only travel" : " using unrestricted shortest routes"}.`);
     } catch (error) {
       setStatus(
         error instanceof Error ? error.message : "Route calculation failed.",
       );
+    }
+  }
+  async function exportRouteToEve() {
+    if (!result?.routeStops?.length || !characterId) return;
+    setEveAction("route");
+    try {
+      const exported = await window.sage.exportShoppingRouteToEve({ characterId, stops: result.routeStops });
+      setStatus(`Exported ${exported.waypoints} shopping waypoint${exported.waypoints === 1 ? "" : "s"} to ${result.character} in EVE.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export the shopping route to EVE.");
+    } finally {
+      setEveAction(null);
+    }
+  }
+  async function exportFitToEve() {
+    if (!characterId) return;
+    setEveAction("fit");
+    try {
+      await window.sage.exportFitToEve({ characterId, fit });
+      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      setStatus(`Saved ${fit.name} to ${characterName}'s EVE fitting library.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
+    } finally {
+      setEveAction(null);
     }
   }
   return (
@@ -1550,12 +1932,26 @@ function FitRouteScreen({
           <input
             type="checkbox"
             checked={buyEntireFit}
-            onChange={(event) => setBuyEntireFit(event.target.checked)}
+            onChange={(event) => { setBuyEntireFit(event.target.checked); setResult(null); setStatus("Purchase options changed. Recalculate the shopping route."); }}
           />
           Buy the entire fit; ignore owned assets
         </label>
+        <label title="Only choose sellers reachable without entering low-sec or null-sec.">
+          <input
+            type="checkbox"
+            checked={highSecOnly}
+            onChange={(event) => { setHighSecOnly(event.target.checked); setResult(null); setStatus("Route safety changed. Recalculate the shopping route."); }}
+          />
+          High-sec only shopping
+        </label>
         <button onClick={calculate} disabled={!characterId}>
           Calculate optimal route
+        </button>
+        <button onClick={exportRouteToEve} disabled={!characterId || !result?.routeStops?.length || eveAction !== null}>
+          {eveAction === "route" ? "Exporting route..." : "Export route to EVE"}
+        </button>
+        <button onClick={exportFitToEve} disabled={!characterId || eveAction !== null}>
+          {eveAction === "fit" ? "Exporting fit..." : "Export fit to EVE"}
         </button>
       </div>
       {result && (
@@ -1622,7 +2018,7 @@ function FitRouteScreen({
 }
 
 function SlotRack({ title, side, items, limit, onStateChange, onRemove, onDropItem, onLoadCharge, onShowInfo }: { title:string; side:FitModuleRack; items:FitItem[]; limit:number; onStateChange(rack:FitModuleRack,index:number,state:ModuleState):void; onRemove(target:BuilderTarget,index:number):void; onDropItem(target:BuilderTarget,item:FittingSearchResult):Promise<boolean>; onLoadCharge(target:FitModuleRack,index:number,item:FittingSearchResult):Promise<boolean>; onShowInfo(typeId:number,name?:string):void }) {
-  const states:ModuleState[]=side==="rig"||side==="subsystem"?["offline","online"]:["offline","online","active","overheated"];
+  const states:ModuleState[]=side==="rig"||side==="subsystem"?["online"]:["offline","online","active","overheated"];
   const count=Math.max(items.length,Math.max(0,Math.floor(limit||0)));
   const allowDrag=(event:DragEvent<HTMLElement>)=>{if(event.dataTransfer.types.includes(FITTING_DRAG_MIME)){event.preventDefault();event.dataTransfer.dropEffect="copy";}};
   return <div className={"slot-rack "+side} onDragOver={allowDrag}><span>{title}<small>{items.length} / {limit || count}</small></span><div>{Array.from({length:count},(_,index)=>{const item=items[index];return item?<ItemIcon item={item} states={states} onStateChange={state=>onStateChange(side,index,state)} onRemove={()=>onRemove(side,index)} onChargeDrop={charge=>onLoadCharge(side,index,charge)} onShowInfo={onShowInfo} key={(item.name)+"-"+index}/>:<div className="fit-item fit-empty-slot" key={"empty-"+side+"-"+index} title={"Drop a "+side+" module here"} onDragOver={allowDrag} onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onDropItem(side,dragged);}}><b>+</b><span>Drop / Empty</span></div>;})}</div></div>;
@@ -1642,13 +2038,24 @@ function ItemIcon({
   onChargeDrop(item:FittingSearchResult): Promise<boolean>;
   onShowInfo(typeId:number,name?:string):void;
 }) {
-  const defaultState: ModuleState = states.includes("active") ? "active" : "online";
-  const currentState = item.state && states.includes(item.state) ? item.state : defaultState;
+  const [capabilities,setCapabilities]=useState<ModuleStateCapabilities|null>(null);
+  useEffect(()=>{
+    if(!item.typeId||!states.includes("active")){setCapabilities(null);return;}
+    let cancelled=false;
+    void getModuleStateCapabilities(item.typeId).then((value)=>{if(!cancelled)setCapabilities(value);});
+    return()=>{cancelled=true;};
+  },[item.typeId,states.includes("active")]);
+  const allowedStates:ModuleState[]=states.includes("active")&&capabilities
+    ? ["offline","online",...(capabilities.canActivate?["active" as ModuleState]:[]),...(capabilities.canOverheat?["overheated" as ModuleState]:[])]
+    : states;
+  const defaultState: ModuleState = capabilities ? (capabilities.canActivate ? "active" : "online") : (states.includes("active") ? "active" : "online");
+  const currentState=allowedStates.includes(item.state??defaultState)?(item.state??defaultState):defaultState;
+  useEffect(()=>{if(item.state&&!allowedStates.includes(item.state))onStateChange(defaultState);},[item.state,defaultState,allowedStates.join("|")]);
   const allowCharge=(event:DragEvent<HTMLElement>)=>{if(event.dataTransfer.types.includes(FITTING_DRAG_MIME)){event.preventDefault();event.dataTransfer.dropEffect="copy";}};
   return (
     <div
       className={`fit-item state-${currentState}`}
-      title={`${item.name}${item.charge ? `, ${item.charge}` : ""} · drop compatible ammo/charges here`}
+      title={`${item.name}${item.charge ? `, ${item.charge}` : ""} - drop compatible ammo / script here`}
       onDragOver={allowCharge}
       onContextMenu={(event)=>{if(!item.typeId)return;event.preventDefault();onShowInfo(item.typeId,item.name);}}
       onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onChargeDrop(dragged);}}
@@ -1691,7 +2098,3 @@ function ItemBay({ title, items, activeDroneSelection = false, onActiveQuantityC
     </div>
   );
 }
-
-
-
-

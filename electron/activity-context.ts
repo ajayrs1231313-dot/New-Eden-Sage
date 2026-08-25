@@ -109,23 +109,33 @@ export function resolveContextRule(context: ActivityContext): ContextRule {
     fitHints.push("strip miner", "mining laser");
     const operation = selector(context, "operation").toLowerCase();
     const priority = selector(context, "priority").toLowerCase();
+    const shipClass = selector(context, "shipClass").toLowerCase();
     if (operation.includes("fleet")) contextTargets.push(target("Mining Upgrades", 4));
     if (priority.includes("yield")) contextTargets.push(target("Mining", 5), target("Astrogeology", 5), target("Mining Upgrades", 5));
     if (priority.includes("tank")) contextTargets.push(target("Shield Management", 5), target("Shield Operation", 4));
-    masteryTargets.push(target("Exhumers", 5));
+    if (shipClass.includes("exhumer")) masteryTargets.push(target("Exhumers", 5));
+    else if (shipClass.includes("barge")) masteryTargets.push(target("Mining Barge", 5));
+    else if (shipClass.includes("frigate")) masteryTargets.push(target("Mining Frigate", 5));
   }
   if (context.contentId === "ice-mining") {
     fitHints.push("ice harvester");
     contextTargets.push(target("Ice Harvesting", 5));
     if (selector(context, "priority").toLowerCase().includes("tank"))
       contextTargets.push(target("Shield Management", 5), target("Shield Operation", 4));
-    masteryTargets.push(target("Exhumers", 5), target("Mining Upgrades", 5));
+    const shipClass = selector(context, "shipClass").toLowerCase();
+    if (shipClass.includes("exhumer")) masteryTargets.push(target("Exhumers", 5));
+    else if (shipClass.includes("barge")) masteryTargets.push(target("Mining Barge", 5));
+    else if (shipClass.includes("frigate")) masteryTargets.push(target("Mining Frigate", 5));
+    masteryTargets.push(target("Mining Upgrades", 5));
   }
   if (context.contentId === "gas-huffing") {
     fitHints.push("gas cloud");
     contextTargets.push(target("Gas Cloud Harvesting", 5));
     if (selector(context, "space").toLowerCase().includes("wormhole"))
       contextTargets.push(target("Astrometrics", 4), target("Cloaking", 4));
+    const shipClass = selector(context, "shipClass").toLowerCase();
+    if (shipClass.includes("expedition")) masteryTargets.push(target("Expedition Frigates", 4));
+    else if (shipClass.includes("frigate")) masteryTargets.push(target("Mining Frigate", 5));
   }
   if (context.contentId === "mining-command") {
     fitHints.push("mining foreman burst", "industrial core");
@@ -174,18 +184,21 @@ export function resolveContextRule(context: ActivityContext): ContextRule {
   }
   if (context.contentId === "logistics") {
     fitHints.push("remote shield", "remote armor", "remote capacitor");
-    contextTargets.push(target("Logistics Cruisers", 4), target("Signature Analysis", 5));
+    const shipClass = selector(context, "shipClass").toLowerCase();
+    contextTargets.push(target(shipClass.includes("frigate") ? "Logistics Frigates" : "Logistics Cruisers", 4), target("Signature Analysis", 5));
   }
   if (context.contentId === "ewar-tackle") {
     fitHints.push("warp disruptor", "warp scrambler", "ecm", "sensor dampener", "tracking disruptor");
   }
 
-  if (context.contentId === "relic-data" || context.contentId === "covert-scout" || context.contentId === "wh-daytrip") {
+  if (context.contentId === "relic-data") {
     fitHints.push("probe launcher", "data analyzer", "relic analyzer", "cloaking device");
     const space = selector(context, "space").toLowerCase();
     if (space.includes("null") || space.includes("wormhole"))
       contextTargets.push(target("Cloaking", 4), target("Astrometric Rangefinding", 4));
   }
+  if (context.contentId === "covert-scout") fitHints.push("probe launcher", "cloaking device");
+  if (context.contentId === "wh-daytrip") fitHints.push("probe launcher", "cloaking device");
   if (context.contentId === "combat-exploration") fitHints.push("probe launcher", "cloaking device");
 
   if (context.contentId === "blockade-runner") {
@@ -317,16 +330,6 @@ export function resolveContextRule(context: ActivityContext): ContextRule {
 }
 
 export function contextualHullCompatibility(hull: string, context: ActivityContext) {
-  if (context.contentId === "missions-burner") {
-    const family = selector(context, "family").toLowerCase();
-    const frigates = new Set(["Daredevil", "Garmur", "Nergal", "Hawk", "Vengeance", "Retribution"]);
-    const cruisers = new Set(["Deimos", "Vagabond", "Cerberus", "Sacrilege"]);
-    if ((family.includes("agent") || family.includes("team")) && !frigates.has(hull))
-      return { compatible: false, reason: hull + " is not in Sage's Burner Agent/Team frigate route for the selected family." };
-    if (family.includes("base") && !cruisers.has(hull))
-      return { compatible: false, reason: hull + " is not in Sage's Burner Base cruiser route for the selected family." };
-  }
-
   const role = selector(context, "role").toLowerCase();
   if (context.activityId === "incursions" && role) {
     const logistics = new Set(["Basilisk", "Scimitar", "Guardian", "Oneiros"]);
