@@ -756,7 +756,7 @@ export function IndustrialCommand({
             </article>
           </div>
 
-          
+
         </>
       )}
 
