@@ -31,7 +31,7 @@ export function DataAgeBadge({view,snapshot,marketDataRevision}:Props){
   },[view,snapshot?.characterId,snapshot?.updatedAt,snapshot?.snapshotState,marketDataRevision]);
   const oldest=useMemo(()=>sourceTimes.length?sourceTimes.reduce((a,b)=>a.at<=b.at?a:b):null,[sourceTimes,tick]);
   if(view==="settings")return <div className="data-age-badge local" title="Settings use local configuration rather than synced EVE data.">LOCAL DATA</div>;
-  if(snapshot?.snapshotState==="bootstrap")return <div className="data-age-badge required" title="Character is connected but has not completed its first Sync All yet.">SYNC REQUIRED</div>;
+  if(snapshot?.snapshotState==="bootstrap")return <div className="data-age-badge required" title="Character is connected but has not completed its first private data refresh yet.">SYNC REQUIRED</div>;
   if(!oldest)return <div className="data-age-badge missing" title="No relevant synced dataset is loaded for this view.">NO DATA</div>;
   const minutes=Math.max(0,Math.floor((Date.now()-oldest.at)/60_000));
   const title=`Oldest relevant source: ${oldest.source} · ${new Date(oldest.at).toLocaleString()}`;

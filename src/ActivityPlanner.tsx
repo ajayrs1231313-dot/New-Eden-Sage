@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import type { ActivityReadinessResult, CharacterSnapshot, HullAccessPreview } from "./types";
 import {
   activityDefinitions,
@@ -167,6 +167,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
   const [selectedShipId, setSelectedShipId] = useState(0);
   const [selectedAnalysis, setSelectedAnalysis] = useState<ActivityReadinessResult | null>(null);
   const [shipPickerOpen, setShipPickerOpen] = useState(false);
+  const [routeProgress, setRouteProgress] = useState(0);
   const [selectedArchetypeId, setSelectedArchetypeId] = useState("");
   const [selectedFitId, setSelectedFitId] = useState("");
   const [archetypeBusy, setArchetypeBusy] = useState(false);
@@ -317,6 +318,8 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
   const shipIsScored = selectedAnalysis ? selectedAnalysis.components.hull.weight > 0 : true;
 
   function chooseActivity(nextId: string) {
+    if (nextId === activity.id) { setRouteProgress((current) => Math.max(current, 1)); return; }
+    setRouteProgress(1);
     const nextActivity =
       activityDefinitions.find((item) => item.id === nextId) ?? activityDefinitions[0];
     const nextSubcategory = firstSubcategory(nextActivity);
@@ -333,6 +336,8 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setShipPickerOpen(false);
   }
   function chooseSubcategory(nextId: string) {
+    if (nextId === subcategory.id) { setRouteProgress((current) => Math.max(current, 2)); return; }
+    setRouteProgress(2);
     const nextSubcategory =
       activity.subcategories.find((item) => item.id === nextId) ?? firstSubcategory(activity);
     const nextContent = firstContent(nextSubcategory);
@@ -347,6 +352,8 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     setShipPickerOpen(false);
   }
   function chooseContent(nextId: string) {
+    if (nextId === content.id) { setRouteProgress((current) => Math.max(current, 3)); return; }
+    setRouteProgress(3);
     const nextContent =
       subcategory.content.find((item) => item.id === nextId) ?? firstContent(subcategory);
     setContentId(nextContent.id);
@@ -360,6 +367,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
   }
 
   async function chooseArchetype(archetypeId: string) {
+    setRouteProgress((current) => Math.max(current, 5));
     if (!selectedShip || archetypeBusy || selectedArchetypeId === archetypeId) return;
     const previousArchetypeId = selectedArchetypeId || selectedShip.analysis.selectedArchetype?.id || "";
     setSelectedArchetypeId(archetypeId);
@@ -391,9 +399,35 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
     }
   }
 
-  function exportRecommendedFit() {
+  async function exportRecommendedFit() {
     const recommendation = selectedFit;
     if (!selectedShip?.analysis.hullAccessReady || !recommendation) return;
+    setError("");
+
+    const fittedRacks = ["low", "mid", "high", "rig", "subsystem"] as const;
+    const fittedTypeIds = [...new Set(fittedRacks.flatMap((rack) => recommendation.fit[rack].map((item) => item.typeId)))];
+    let fittingMetadata: Awaited<ReturnType<typeof window.sage.resolveFittingTypeIdsLocal>>;
+    try {
+      fittingMetadata = fittedTypeIds.length ? await window.sage.resolveFittingTypeIdsLocal(fittedTypeIds) : [];
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not validate the recommended fit against the local CCP SDE.");
+      return;
+    }
+    const metadataByTypeId = new Map(fittingMetadata.map((item) => [item.id, item]));
+    const validatedRacks = { low: [] as typeof recommendation.fit.low, mid: [] as typeof recommendation.fit.mid, high: [] as typeof recommendation.fit.high, rig: [] as typeof recommendation.fit.rig, subsystem: [] as typeof recommendation.fit.subsystem };
+    const exportedCargo = [...(recommendation.fit.cargo ?? [])];
+    for (const sourceRack of fittedRacks) {
+      for (const item of recommendation.fit[sourceRack]) {
+        const metadata = metadataByTypeId.get(item.typeId);
+        if (metadata?.categoryId === 8 || metadata?.categoryName?.toLowerCase() === "charge") {
+          exportedCargo.push(item);
+          continue;
+        }
+        const targetRack = metadata?.rack ?? sourceRack;
+        validatedRacks[targetRack].push(item);
+      }
+    }
+
     const contextText = [activity.label, subcategory.label, content.label, ...Object.values(selectorValues).filter(Boolean)].join(" · ");
     const payload = {
       id: crypto.randomUUID(),
@@ -401,14 +435,14 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
       characterName: snapshot.character.name,
       name: `${selectedShip.ship.name} · ${content.label} · Sage recommended`,
       hull: { name: selectedShip.ship.name, typeId: selectedShip.ship.typeId, quantity: 1 },
-      low: recommendation.fit.low ?? [],
-      mid: recommendation.fit.mid ?? [],
-      high: recommendation.fit.high ?? [],
-      rig: recommendation.fit.rig ?? [],
-      subsystem: recommendation.fit.subsystem ?? [],
+      low: validatedRacks.low,
+      mid: validatedRacks.mid,
+      high: validatedRacks.high,
+      rig: validatedRacks.rig,
+      subsystem: validatedRacks.subsystem,
       drones: recommendation.fit.drones ?? [],
       fighters: recommendation.fit.fighters ?? [],
-      cargo: recommendation.fit.cargo ?? [],
+      cargo: exportedCargo,
       implants: [],
       boosters: [],
       instructions: [
@@ -439,138 +473,157 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
   }
 
   return (
-    <div className="activity-planner task4-activity-planner">
-      <div className="planner-intro-card">
-        <p className="eyebrow">ACTIVITY PLANNER</p>
-        <h3>Start from what you want to do</h3>
-        <p>
-          Choose the exact content and variation you plan to run. Sage compares the
-          skills, roles and fitting archetypes that matter for that context rather
-          than treating hull access as activity readiness.
-        </p>
-      </div>
+    <div className="activity-planner task4-activity-planner activity-command-atlas">
+      <header className="activity-command-context">
+        <div className="activity-command-title">
+          <p className="eyebrow">CAPSULEER INTELLIGENCE</p>
+          <h3>Activity Command</h3>
+          <small>Plan the route, prove readiness, then fit and train only what matters.</small>
+        </div>
+        <div className="activity-command-pilot" title="Pilot used for all Activity Command calculations">
+          <img
+            src={`https://images.evetech.net/characters/${snapshot.characterId}/portrait?size=64`}
+            alt=""
+            onError={(event) => { event.currentTarget.style.display = "none"; }}
+          />
+          <span><small>ANALYSING PILOT</small><strong>{snapshot.character.name}</strong></span>
+        </div>
+      </header>
 
       <div className="activity-route-bar" aria-label="Activity planner progression">
-        <RouteStep number="1" label="Activity" value={activity.label} />
-        <RouteStep number="2" label="Sub-activity" value={subcategory.label} />
-        <RouteStep number="3" label="Content" value={content.label} />
-        <RouteStep
-          number="4"
-          label={shipIsScored ? "Ship" : "Utility ship"}
-          value={selectedShipPreview?.ship.name ?? (busy ? "Comparing..." : "Choose a hull")}
-        />
-        <RouteStep
-          number="5"
-          label="Readiness"
-          value={
-            selectedShip
-              ? `${selectedShip.analysis.overallPercent}% · ${selectedShip.analysis.tier.label}`
-              : "Pending"
-          }
-        />
+        <RouteStep number="1" label="Activity" value="What do you want to do?" active={routeProgress >= 1} />
+        <RouteStep number="2" label="Sub-Activity" value="Narrow the route" active={routeProgress >= 2} />
+        <RouteStep number="3" label="Content" value="Choose the content" active={routeProgress >= 3} />
+        <RouteStep number="4" label="Readiness" value="Route & Readiness" active={routeProgress >= 4} />
+        <RouteStep number="5" label="Training" value="Fitting & Next Steps" active={routeProgress >= 5} />
       </div>
 
-      <section className="activity-choice-section">
-        <div className="activity-section-heading">
-          <div><p className="eyebrow">1 · ACTIVITY</p><h3>What do you want to do?</h3></div>
-          <small>{activityDefinitions.length} career routes</small>
-        </div>
-        <div className="activity-primary-grid">
-          {activityDefinitions.map((item) => (
-            <button key={item.id} className={activity.id === item.id ? "active" : ""} onClick={() => chooseActivity(item.id)}>
-              <strong>{item.label}</strong><small>{item.description}</small>
-            </button>
-          ))}
-        </div>
-      </section>
+      <div className="activity-command-top-grid">
+        <section className="activity-command-panel activity-command-activities">
+          <div className="activity-section-heading">
+            <div><StepEyebrow number="1" label="ACTIVITY" title="WHAT DO YOU WANT TO DO?" /></div>
+            <small>{activityDefinitions.length} career routes</small>
+          </div>
+          <div className="activity-primary-grid">
+            {activityDefinitions.map((item, index) => (
+              <button key={item.id} className={routeProgress >= 1 && activity.id === item.id ? "active" : ""} onClick={() => chooseActivity(item.id)}>
+                <ActivityGlyph label={item.label} index={index} />
+                <span><strong>{item.label}</strong><small>{item.description}</small></span>
+              </button>
+            ))}
+          </div>
+        </section>
 
-      <section className="activity-choice-section">
-        <div className="activity-section-heading"><div><p className="eyebrow">2 · SUB-ACTIVITY</p><h3>Narrow the route</h3></div></div>
-        <div className="activity-subcategory-grid">
-          {activity.subcategories.map((item) => (
-            <button key={item.id} className={subcategory.id === item.id ? "active" : ""} onClick={() => chooseSubcategory(item.id)}>
-              <strong>{item.label}</strong><small>{item.description}</small>
-            </button>
-          ))}
-        </div>
-      </section>
+        <section className="activity-command-panel activity-command-subactivities">
+          <div className="activity-section-heading"><div><StepEyebrow number="2" label="SUB-ACTIVITY" title="NARROW THE ROUTE" /></div></div>
+          <div className="activity-subcategory-grid">
+            {activity.subcategories.map((item, index) => (
+              <button key={item.id} className={routeProgress >= 2 && subcategory.id === item.id ? "active" : ""} onClick={() => chooseSubcategory(item.id)}>
+                <ActivityGlyph label={item.label} index={index} compact />
+                <span><strong>{item.label}</strong><small>{item.description}</small></span>
+              </button>
+            ))}
+          </div>
+        </section>
 
-      <section className="activity-choice-section">
-        <div className="activity-section-heading"><div><p className="eyebrow">3 · SPECIFIC CONTENT</p><h3>Choose the content</h3></div></div>
-        <div className="activity-content-grid">
-          {subcategory.content.map((item) => (
-            <button key={item.id} className={content.id === item.id ? "active" : ""} onClick={() => chooseContent(item.id)}>
-              <strong>{item.label}</strong><small>{item.description}</small>
-            </button>
-          ))}
-        </div>
-      </section>
+        <section className="activity-command-panel activity-command-content">
+          <div className="activity-section-heading"><div><StepEyebrow number="3" label="CONTENT" title="CHOOSE THE CONTENT" /></div></div>
+          <div className="activity-content-grid">
+            {subcategory.content.map((item, index) => (
+              <button key={item.id} className={routeProgress >= 3 && content.id === item.id ? "active" : ""} onClick={() => chooseContent(item.id)}>
+                <ActivityGlyph label={item.label} index={index} compact />
+                <span><strong>{item.label}</strong><small>{item.description}</small></span>
+              </button>
+            ))}
+          </div>
+        </section>
 
-      {selectors.length > 0 && (
-        <section className="activity-variant-panel">
-          <div><p className="eyebrow">CONTENT OPTIONS</p><h3>Set the version you plan to run</h3></div>
-          <div className="activity-variant-controls">
-            {selectors.map((selector) => (
+        <section className="activity-command-panel activity-command-options">
+          <div className="activity-section-heading"><div><StepEyebrow number="3" label="CONTENT" title="CONTENT OPTIONS" /></div></div>
+          <div className="activity-option-stack">
+            {selectors.length > 0 ? selectors.map((selector) => (
               <label key={selector.id}>
-                {selector.label}
+                <span>{selector.label}</span>
                 <select
                   value={selectorValues[selector.id] ?? selector.options[0]}
-                  onChange={(event) =>
-                    setSelectorValues((current) => ({ ...current, [selector.id]: event.target.value }))
-                  }
+                  onChange={(event) => { setSelectorValues((current) => ({ ...current, [selector.id]: event.target.value })); setRouteProgress(3); }}
                 >
                   {selector.options.map((option) => <option key={option} value={option}>{option}</option>)}
                 </select>
               </label>
-            ))}
+            )) : (
+              <div className="activity-option-static"><span>Route variation</span><strong>Default route</strong></div>
+            )}
+            <div className="activity-option-static"><span>Difficulty</span><strong>{content.difficulty}</strong></div>
+            <div className="activity-value-list">
+              <span>INCOME / VALUE COMES FROM</span>
+              {content.incomeHooks.map((hook) => <strong key={hook}>{hook}</strong>)}
+            </div>
           </div>
         </section>
-      )}
 
-      <section className="activity-detail-panel">
-        <div className="activity-detail-copy">
-          <p className="eyebrow">{content.label.toUpperCase()}</p>
-          <h3>{content.description}</h3>
-          <div className="activity-detail-meta">
-            <span><b>Difficulty</b>{content.difficulty}</span>
-            <span><b>Recommended experience</b>{content.experience}</span>
+        <section className="activity-command-panel activity-command-summary">
+          <div className="activity-section-heading"><div><StepEyebrow number="4" label="READINESS" title="ROUTE SUMMARY" /></div></div>
+          {selectedShipPreview ? (
+            <>
+              <div className="activity-summary-ship">
+                <img
+                  src={`https://images.evetech.net/types/${selectedShipPreview.ship.typeId}/render?size=128`}
+                  alt=""
+                  onError={(event) => { event.currentTarget.style.display = "none"; }}
+                />
+                <div>
+                  <strong>{selectedShipPreview.ship.name}</strong>
+                  <b>{selectedShip ? `${selectedShip.analysis.overallPercent}% readiness` : "Analysing..."}</b>
+                  <small>{selectedShipPreview.ship.groupName ?? "Recommended hull"}</small>
+                </div>
+              </div>
+              {selectedShip ? (
+                <>
+                  <div className="activity-summary-line">
+                    <span>{selectedShip.analysis.compatible ? selectedShip.analysis.tier.label : "Role mismatch"}</span>
+                    <strong>{selectedShip.analysis.hullAccessReady ? "CAN FLY" : "HULL BLOCKED"}</strong>
+                  </div>
+                  <div className="activity-summary-metrics">
+                    <ReadinessMetric label="Hull Access" value={selectedShip.analysis.components.hull.percent} />
+                    <ReadinessMetric label="Fitting" value={selectedShip.analysis.components.fit.percent} />
+                    <ReadinessMetric label="Activity Skills" value={selectedShip.analysis.components.activity.percent} />
+                    <ReadinessMetric label="Route Context" value={selectedShip.analysis.components.context.weight ? selectedShip.analysis.components.context.percent : 100} />
+                  </div>
+                  <div className={`activity-moment ${selectedShip.analysis.missingSkills.length === 0 && selectedShip.analysis.hullAccessReady && selectedShip.analysis.compatible ? "ready" : ""}`}>
+                    <span>THE MOMENT OF TRUTH</span>
+                    <strong>{selectedShip.analysis.missingSkills.length === 0 && selectedShip.analysis.hullAccessReady && selectedShip.analysis.compatible ? "Ready now" : duration(selectedShip.analysis.totalEstimatedSeconds)}</strong>
+                    <small>{selectedShip.analysis.missingSkills.length ? `${selectedShip.analysis.missingSkills.length} blocking target${selectedShip.analysis.missingSkills.length === 1 ? "" : "s"} remain` : "No blockers identified for this route"}</small>
+                  </div>
+                </>
+              ) : <div className="planner-analysis-state compact">Calculating route readiness...</div>}
+            </>
+          ) : (
+            <div className="planner-analysis-state compact">{busy ? "Ranking valid hulls..." : "No valid hull is available for this route."}</div>
+          )}
+        </section>
+      </div>
+
+      {error && <div className="planner-analysis-state error">{error}</div>}
+
+      <div className="activity-command-middle-grid">
+        <section className="activity-command-panel activity-command-skill-focus">
+          <div className="activity-section-heading">
+            <div><p className="eyebrow">SKILL FOCUS</p></div>
+            <small>Core {coreMet}/{coreProgress.length} · Support {supportMet}/{supportProgress.length}</small>
           </div>
-          {content.notes?.map((note) => <p className="activity-note" key={note}>{note}</p>)}
-        </div>
-        <div className="activity-income-hooks">
-          <span>Income / value comes from</span>
-          {content.incomeHooks.map((hook) => <strong key={hook}>{hook}</strong>)}
-        </div>
-      </section>
-
-      <section className="activity-skills-section">
-        <div className="activity-section-heading">
-          <div><p className="eyebrow">SKILL FOCUS</p><h3>Useful targets for this content</h3></div>
-          <small>Core {coreMet}/{coreProgress.length} · Support {supportMet}/{supportProgress.length}</small>
-        </div>
-        <div className="activity-skill-columns">
-          <SkillTargetList title="Core skills" targets={coreProgress} />
-          <SkillTargetList title="Useful support skills" targets={supportProgress} />
-        </div>
-      </section>
-
-      <section className="activity-ships-section">
-        <div className="activity-section-heading">
-          <div>
-            <p className="eyebrow">4 · {shipIsScored ? "RECOMMENDED SHIPS" : "USEFUL SHIPS"}</p>
-            <h3>{shipIsScored ? "Every valid hull for this activity, ranked for this character" : "Activity readiness first; ship choice is optional here"}</h3>
+          <div className="activity-skill-columns">
+            <SkillTargetList title="Core skills" targets={coreProgress} />
+            <SkillTargetList title="Useful support skills" targets={supportProgress} />
           </div>
-          <small>{busy ? "Building valid hull pool..." : `${shipPreviews.length} valid hull${shipPreviews.length === 1 ? "" : "s"}`}</small>
-        </div>
-        {error && <div className="planner-analysis-state error">{error}</div>}
-        {busy && !shipPreviews.length && (
-          <div className="planner-analysis-state">Reading the CCP ship catalogue and ${snapshot.character.name}&apos;s hull training...</div>
-        )}
-        {ships.length > 0 && !busy && !error && !shipPreviews.length && (
-          <div className="planner-analysis-state">No hull in the current CCP catalogue satisfies this activity / role combination.</div>
-        )}
-        {shipPreviews.length > 0 && (
-          <div className="activity-ship-selector">
+        </section>
+
+        <section className="activity-command-panel activity-command-ships">
+          <div className="activity-section-heading">
+            <div><p className="eyebrow">RECOMMENDED SHIPS</p></div>
+            <small>{busy ? "Ranking..." : `${shipPreviews.length} valid hull${shipPreviews.length === 1 ? "" : "s"}`}</small>
+          </div>
+          {shipPreviews.length > 0 ? (
             <div className="activity-ship-picker">
               <span className="activity-ship-picker-label">{shipIsScored ? "Ranked valid hull" : "Useful hull"}</span>
               <button
@@ -580,9 +633,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
                 onClick={() => setShipPickerOpen((open) => !open)}
               >
                 <span><strong>{selectedShipPreview?.ship.name ?? "Choose a hull"}</strong>{selectedShipPreview?.metaPick && <em>META PICK</em>}</span>
-                {selectedShipPreview && (
-                  <small>{selectedShipPreview.preview.competencyPercent}% ship competency · {selectedShipPreview.preview.hullAccessReady ? "CAN FLY" : "BLOCKED"}{selectedShipPreview.owned ? " · OWNED" : ""}</small>
-                )}
+                {selectedShipPreview && <small>{selectedShipPreview.preview.competencyPercent}% ship competency · {selectedShipPreview.preview.hullAccessReady ? "CAN FLY" : "BLOCKED"}{selectedShipPreview.owned ? " · OWNED" : ""}</small>}
                 <b aria-hidden="true">⌄</b>
               </button>
               {shipPickerOpen && (
@@ -595,11 +646,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
                       key={item.ship.typeId}
                       title={item.metaReason}
                       className={`activity-ship-picker-option${item.ship.typeId === selectedShipPreview?.ship.typeId ? " selected" : ""}${item.metaPick ? " meta-pick" : ""}`}
-                      onClick={() => {
-                        setSelectedShipId(item.ship.typeId);
-                        setSelectedAnalysis(null);
-                        setShipPickerOpen(false);
-                      }}
+                      onClick={() => { setSelectedShipId(item.ship.typeId); setSelectedAnalysis(null); setShipPickerOpen(false); setRouteProgress(4); }}
                     >
                       <span className="activity-ship-picker-rank">{index + 1}</span>
                       <span className="activity-ship-picker-name"><strong>{item.ship.name}</strong><small>{item.ship.groupName ?? "Ship"}</small></span>
@@ -609,104 +656,56 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
                   ))}
                 </div>
               )}
+              {selectedShipPreview && (
+                <div className="activity-ranked-hull">
+                  <img src={`https://images.evetech.net/types/${selectedShipPreview.ship.typeId}/render?size=128`} alt="" />
+                  <div><strong>{selectedShipPreview.preview.competencyPercent}%</strong><small>SHIP COMPETENCY</small></div>
+                </div>
+              )}
             </div>
-            {analysisBusy && <div className="planner-analysis-state compact">Analyzing the selected hull&apos;s actual fit and activity context...</div>}
-            {selectedShip && (
-              <div className={`activity-selected-ship readiness-${selectedShip.analysis.tier.id}${selectedShipPreview?.metaPick ? " meta-pick" : ""}`}>
-                <div><strong>{selectedShip.ship.name}</strong>{selectedShipPreview?.owned && <em>Owned</em>}{selectedShipPreview?.metaPick && <em className="activity-meta-pick-badge">META PICK</em>}</div>
-                <span>{selectedShip.analysis.overallPercent}% exact readiness</span>
-                <b className="readiness-tier-label">{selectedShip.analysis.compatible ? selectedShip.analysis.tier.label : "Role mismatch"}</b>
-                <small>{selectedShip.analysis.components.hull.weight ? `Hull access ${selectedShip.analysis.components.hull.percent ?? "?"}% ┬À ${selectedShip.analysis.hullAccessReady ? "CAN FLY" : "BLOCKED"} ┬À Fit ${selectedShip.analysis.components.fit.percent ?? "?"}% ┬À Activity ${selectedShip.analysis.components.activity.percent}%` : `Activity-led score ┬À Mastery ${selectedShip.analysis.masteryPercent}%`}</small>
+          ) : <div className="planner-analysis-state compact">{busy ? "Building valid hull pool..." : "No matching hulls found."}</div>}
+        </section>
+
+        <section className="activity-command-panel activity-command-capability">
+          <div className="activity-section-heading"><div><p className="eyebrow">SHIP & CAPABILITY READINESS</p></div></div>
+          {selectedShip ? (
+            <div className="activity-capability-body">
+              <div className="activity-capability-orbit">
+                <img src={`https://images.evetech.net/types/${selectedShip.ship.typeId}/render?size=128`} alt="" />
+                <strong>{selectedShip.analysis.overallPercent}%</strong>
               </div>
-            )}
+              <div className="activity-capability-bars">
+                <CapabilityBar label="Hull" value={selectedShip.analysis.components.hull.percent} />
+                <CapabilityBar label="Fitting" value={selectedShip.analysis.components.fit.percent} />
+                <CapabilityBar label="Activity" value={selectedShip.analysis.components.activity.percent} />
+                <CapabilityBar label="Context" value={selectedShip.analysis.components.context.weight ? selectedShip.analysis.components.context.percent : 100} />
+              </div>
+              <small className="activity-capability-note">{selectedShip.analysis.explanation.formula}</small>
+            </div>
+          ) : <div className="planner-analysis-state compact">{analysisBusy ? "Analysing selected hull..." : "Select a valid hull to score readiness."}</div>}
+        </section>
+
+        <section className="activity-command-panel activity-command-training-brief">
+          <div className="activity-section-heading">
+            <div><StepEyebrow number="5" label="TRAINING" title="FITTING & NEXT STEPS" /><h3>{selectedShip ? `${selectedShip.ship.name} progression route` : content.label}</h3></div>
+            {selectedShip && <button className="activity-copy-queue" onClick={copyTrainingPlan} disabled={!selectedShip.analysis.recommendedQueue.length}>Copy queue</button>}
           </div>
-        )}
-      </section>
+          {selectedShip ? (
+            <div className="activity-training-brief-body">
+              <div><span>MANDATORY TRAINING</span><strong>{duration(selectedShip.analysis.totalEstimatedSeconds)}</strong><small>{selectedShip.analysis.missingSkills.length ? `${selectedShip.analysis.missingSkills.length} blocking target${selectedShip.analysis.missingSkills.length === 1 ? "" : "s"}` : "No blockers"}</small></div>
+              <div><span>EXTRA / MASTERY</span><strong>{selectedShip.analysis.masteryPercent}%</strong><small>Useful improvements beyond minimum</small></div>
+              <div><span>FIT EVIDENCE</span><strong>{selectedShip.analysis.components.fit.percent === null ? "Unknown" : `${selectedShip.analysis.components.fit.percent}%`}</strong><small>{selectedShip.analysis.fitEvidence.sampleCount} observed sample{selectedShip.analysis.fitEvidence.sampleCount === 1 ? "" : "s"} · {selectedShip.analysis.fitEvidence.confidence}</small></div>
+            </div>
+          ) : <div className="planner-analysis-state compact">Readiness appears here after a hull is ranked.</div>}
+        </section>
+      </div>
 
       {selectedShip && (
-        <section className="activity-training-section practical-training-section">
-          <div className="activity-section-heading">
-            <div><p className="eyebrow">5 · CONTEXT READINESS & TRAINING</p><h3>{selectedShip.ship.name} progression route</h3></div>
-            <button className="activity-copy-queue" onClick={copyTrainingPlan} disabled={!selectedShip.analysis.recommendedQueue.length}>Copy queue</button>
-          </div>
-
-          <div className={`practical-readiness-hero readiness-${selectedShip.analysis.tier.id}`}>
-            <div><span>Readiness</span><strong>{selectedShip.analysis.overallPercent}%</strong></div>
-            <div><b>{selectedShip.analysis.tier.label}</b><p>{selectedShip.analysis.tier.description}</p></div>
-            <div className="mastery-readiness"><span>Extra training</span><strong>{selectedShip.analysis.masteryPercent}%</strong><small>Useful improvements beyond the minimum requirements</small></div>
-          </div>
-
-          {!selectedShip.analysis.compatible && selectedShip.analysis.compatibilityReason && (
-            <div className="planner-analysis-state error">{selectedShip.analysis.compatibilityReason}</div>
-          )}
-
-          <div className="activity-training-summary readiness-components contextual-components">
-            {selectedShip.analysis.components.hull.weight > 0 && (
-              <article><span>Hull access ┬À {selectedShip.analysis.components.hull.weight}% weight</span><strong>{selectedShip.analysis.components.hull.percent ?? "?"}%</strong><small>{selectedShip.analysis.hullAccessReady ? "CAN FLY ┬À no prerequisite gaps" : `${selectedShip.analysis.components.hull.missing ?? "?"} hull/prerequisite gap${selectedShip.analysis.components.hull.missing === 1 ? "" : "s"} ┬À training route ${selectedShip.analysis.components.hull.trainingPercent ?? "?"}%`}</small></article>
-            )}
-            {selectedShip.analysis.activityEvidence.status === "ready" && (
-            <section className="activity-evidence-panel">
+        <>
+          <div className="activity-command-bottom-grid">
+            <section className="activity-command-panel activity-command-archetypes">
               <div className="activity-section-heading">
-                <div><p className="eyebrow">OBSERVED ACTIVITY EVIDENCE</p><h3>{selectedShip.analysis.activityEvidence.label}</h3></div>
-                <small>{selectedShip.analysis.activityEvidence.sampleCount} public runs · {selectedShip.analysis.activityEvidence.confidence} confidence</small>
-              </div>
-              <div className="activity-evidence-entries">
-                {selectedShip.analysis.activityEvidence.entries.map((entry) => (
-                  <div key={entry.name}>
-                    <strong>{entry.name}</strong>
-                    <span>{entry.runs} observed · {entry.survivedRuns} survived{entry.level !== null ? " · level " + entry.level : ""}</span>
-                  </div>
-                ))}
-              </div>
-              {selectedShip.analysis.activityEvidence.note && <small className="activity-evidence-note">{selectedShip.analysis.activityEvidence.note}</small>}
-            </section>
-          )}
-
-          {selectedShip.analysis.components.fit.weight > 0 && (
-              <article><span>Fit archetype · {selectedShip.analysis.components.fit.weight}% weight</span><strong>{selectedShip.analysis.components.fit.percent === null ? "Unknown" : `${selectedShip.analysis.components.fit.percent}%`}</strong><small>{selectedShip.analysis.components.fit.contextSpecific ? "Context-specific evidence" : "Hull-wide fallback evidence"}</small></article>
-            )}
-            <article><span>Activity skills · {selectedShip.analysis.components.activity.weight}% weight</span><strong>{selectedShip.analysis.components.activity.percent}%</strong><small>Core {selectedShip.analysis.components.activity.corePercent}% · Support {selectedShip.analysis.components.activity.supportPercent}%</small></article>
-            {selectedShip.analysis.components.context.weight > 0 && (
-              <article><span>Variation / role · {selectedShip.analysis.components.context.weight}% weight</span><strong>{selectedShip.analysis.components.context.percent}%</strong><small>{selectedShip.analysis.components.context.missing} contextual targets remain</small></article>
-            )}
-            <article><span>Estimated mandatory training</span><strong>{duration(selectedShip.analysis.totalEstimatedSeconds)}</strong><small>{selectedShip.analysis.missingSkills.length ? `${selectedShip.analysis.missingSkills.length} blocking target${selectedShip.analysis.missingSkills.length === 1 ? "" : "s"} remain` : "No blocking targets remain"}</small></article>
-          </div>
-
-          {selectedShip.analysis.components.hull.gaps.length > 0 && (
-            <details className="activity-readiness-work hull-gap-breakdown">
-              <summary>Show {selectedShip.analysis.components.hull.gaps.length} exact hull/prerequisite gap{selectedShip.analysis.components.hull.gaps.length === 1 ? "" : "s"}</summary>
-              <ol className="activity-training-queue practical-training-queue">
-                {selectedShip.analysis.components.hull.gaps.map((skill) => (
-                  <li key={skill.skillId}>
-                    <div>
-                      <strong>{skill.name}</strong>
-                      <small>Current L{skill.currentLevel} ┬À required L{skill.targetLevel} ┬À blocks hull access</small>
-                    </div>
-                    <span className="training-skill-time">{duration(skill.estimatedSeconds)}</span>
-                  </li>
-                ))}
-              </ol>
-            </details>
-          )}
-
-
-          {selectedShip.analysis.components.context.targets.length > 0 && (
-            <section className="context-target-panel">
-              <div className="activity-section-heading"><div><p className="eyebrow">SELECTED VARIATION</p><h3>What changes for this exact route</h3></div></div>
-              <div className="context-target-chips">
-                {selectedShip.analysis.components.context.targets.map((target) => <span key={`${target.skill}-${target.level}`}>{target.skill} · L{target.level}</span>)}
-              </div>
-            </section>
-          )}
-
-          {selectedShip.analysis.components.fit.weight > 0 && (
-            <section className="community-fit-baseline archetype-baseline">
-              <div className="activity-section-heading">
-                <div>
-                  <p className="eyebrow">FIT ARCHETYPE</p>
-                  <h3>Choose the fitting route you want Sage to score</h3>
-                </div>
-                <small>{sourceLabel(selectedShip.analysis.fitEvidence.source)} · {selectedShip.analysis.fitEvidence.sampleCount} sample{selectedShip.analysis.fitEvidence.sampleCount === 1 ? "" : "s"} · {selectedShip.analysis.fitEvidence.confidence} confidence</small>
+                <div><p className="eyebrow">FIT ARCHETYPE</p><h3>Choose the fitting route Sage should score</h3></div>
               </div>
               {selectedShip.analysis.selectedArchetype ? (
                 <>
@@ -721,91 +720,48 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
                       >
                         <strong>{archetype.label}</strong>
                         <span>{archetype.overallPercent}% readiness · fit {archetype.fitPercent}%</span>
-                        <small>{archetype.sampleCount} observed · {archetype.representativeFitCount} representative · {archetype.usableFitCount} usable now · {archetype.contextSpecific ? "context matched" : "hull fallback"}</small>
+                        <small>{archetype.sampleCount} observed · {archetype.representativeFitCount} representative · {archetype.usableFitCount} usable now</small>
                       </button>
                     ))}
                   </div>
-                  {archetypeBusy && <div className="archetype-switch-state">Recalculating this fitting route...</div>}
-                  <div className="archetype-meta">
-                    <span>{selectedShip.analysis.selectedArchetype.contextSpecific ? "Matched to the selected context" : "Generic hull fallback"}</span>
-                    <strong>{selectedShip.analysis.selectedArchetype.fitPercent}% fitting competency</strong>
-                  </div>
-                  <div className="community-fit-items">
-                    {selectedShip.analysis.selectedArchetype.items.slice(0, 16).map((item) => (
-                      <div key={item.typeId}><strong>{item.name}</strong><span>{item.presencePercent}% of archetype samples</span></div>
-                    ))}
-                  </div>
+                  <div className="archetype-meta"><span>{selectedShip.analysis.selectedArchetype.contextSpecific ? "Context matched" : "Hull fallback"}</span><strong>{selectedShip.analysis.selectedArchetype.fitPercent}% fitting competency</strong></div>
+                  <small className="activity-evidence-note">{sourceLabel(selectedShip.analysis.fitEvidence.source)} · {selectedShip.analysis.fitEvidence.confidence} confidence</small>
                 </>
-              ) : (
-                <div className="community-fit-unavailable">
-                  {selectedShip.analysis.fitEvidence.note ?? "No sufficiently reliable fitting evidence is available. Sage caps readiness rather than inventing a perfect score."}
-                </div>
-              )}
+              ) : <div className="community-fit-unavailable">{selectedShip.analysis.fitEvidence.note ?? "No sufficiently reliable fitting evidence is available. Sage will not invent a perfect score."}</div>}
+              {archetypeBusy && <div className="archetype-switch-state">Recalculating this fitting route...</div>}
             </section>
-          )}
 
-          {selectedShip.analysis.recommendedQueue.length ? (
-            <div className="training-category-stack">
-              {[...selectedShip.analysis.recommendedQueue.reduce((groups, skill, queueIndex) => {
-                const category = categorizeReadinessSkill(skill.name);
-                const current = groups.get(category.id) ?? { category, skills: [] as Array<{ skill: typeof skill; queueIndex: number }> };
-                current.skills.push({ skill, queueIndex });
-                groups.set(category.id, current);
-                return groups;
-              }, new Map<string, { category: ReturnType<typeof categorizeReadinessSkill>; skills: Array<{ skill: ActivityReadinessResult["recommendedQueue"][number]; queueIndex: number }> }>()).values()]
-                .sort((a, b) => a.category.order - b.category.order)
-                .map(({ category, skills }) => (
-                  <section className="training-skill-category" key={category.id}>
-                    <header>
-                      <div>
-                        <strong>{category.label}</strong>
-                        <small>{category.description}</small>
-                      </div>
-                      <span>{skills.length} skill{skills.length === 1 ? "" : "s"}</span>
-                    </header>
-                    <ol className="activity-training-queue practical-training-queue categorized-training-queue">
-                      {skills.map(({ skill, queueIndex }) => {
-                        const reasons = displayedSkillReasons(skill, content.label, selectorValues);
-                        return (
-                          <li key={skill.skillId}>
-                            <span className="training-queue-index">#{queueIndex + 1}</span>
-                            <div>
-                              <strong>{skill.name}</strong>
-                              <small>L{skill.currentLevel} → L{skill.targetLevel}</small>
-                              <small className="training-skill-why"><b>Why:</b> {reasons.slice(0, 3).join(" · ")}{reasons.length > 3 ? ` · +${reasons.length - 3} more` : ""}</small>
-                            </div>
-                            <span className="training-skill-time">{skill.alreadyQueued ? `Already queued to L${skill.queuedToLevel}` : duration(skill.estimatedSeconds)}</span>
-                          </li>
-                        );
-                      })}
-                    </ol>
-                  </section>
-                ))}
-            </div>
-          ) : (
-            <div className="planner-ready-state">{snapshot.character.name} meets every identified mandatory requirement for this exact route.</div>
-          )}
+            <section className="activity-command-panel activity-command-fit-competency">
+              <div className="activity-section-heading">
+                <div><p className="eyebrow">{selectedShip.analysis.components.fit.percent === null ? "FITTING COMPETENCY" : `${selectedShip.analysis.components.fit.percent}% FITTING COMPETENCY`}</p></div>
+              </div>
+              {selectedFit ? (
+                <div className="activity-fit-family-grid">
+                  <FitFamilyTile label="High" items={selectedFit.fit.high} />
+                  <FitFamilyTile label="Mid" items={selectedFit.fit.mid} />
+                  <FitFamilyTile label="Low" items={selectedFit.fit.low} />
+                  <FitFamilyTile label="Rigs" items={selectedFit.fit.rig} />
+                  <FitFamilyTile label="Drones" items={selectedFit.fit.drones} />
+                  <FitFamilyTile label="Cargo" items={selectedFit.fit.cargo} />
+                </div>
+              ) : <div className="planner-analysis-state compact">No fully usable fit is available yet.</div>}
+            </section>
 
-          <section className="activity-recommended-fit-panel">
-            <div>
-              <p className="eyebrow">RECOMMENDED FIT</p>
-              <h3>{selectedShip.ship.name} for this exact activity route</h3>
+            <section className="activity-command-panel activity-command-recommended-fit">
+              <div className="activity-section-heading">
+                <div><p className="eyebrow">RECOMMENDED FIT</p><h3>{selectedShip.ship.name} for this exact activity route</h3></div>
+                <button type="button" onClick={exportRecommendedFit} disabled={!selectedShip.analysis.hullAccessReady || !selectedFit}>
+                  {selectedFit ? "Export selected fit to Fitting Command" : "Fit unavailable"}
+                </button>
+              </div>
               {selectedShip.analysis.hullAccessReady ? (
                 selectedFit ? (
                   <>
-                    <p>Choose one of the fits from <strong>{selectedShip.analysis.selectedArchetype?.label ?? "this route"}</strong>. Every choice shown is fully usable with this character&apos;s currently trained skills; Sage preselects the strongest match.</p>
-                    <small>{Object.values(selectorValues).filter(Boolean).join(" · ")}</small>
                     <div className="archetype-choice-grid recommended-fit-choice-grid">
                       {fitChoices.map((fit, index) => {
                         const copy = fitChoiceCopy(fit, index);
                         return (
-                          <button
-                            type="button"
-                            key={fit.id}
-                            className={selectedFit?.id === fit.id ? "active" : ""}
-                            aria-pressed={selectedFit?.id === fit.id}
-                            onClick={() => setSelectedFitId(fit.id)}
-                          >
+                          <button type="button" key={fit.id} className={selectedFit?.id === fit.id ? "active" : ""} aria-pressed={selectedFit?.id === fit.id} onClick={() => { setSelectedFitId(fit.id); setRouteProgress(5); }}>
                             <strong>{copy.title}</strong>
                             <span>{copy.description}</span>
                             <small>{fit.itemTypeIds.length} fitted item type{fit.itemTypeIds.length === 1 ? "" : "s"}{index === 0 ? " · best match for your skills" : ""}</small>
@@ -824,41 +780,145 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
                       <ActivityFitRack label="Cargo" items={selectedFit.fit.cargo} />
                     </div>
                   </>
-                ) : (
-                  <p>No observed fit for this route is fully usable with this character&apos;s current skills, so Sage will not label or export one as recommended. Use the training route above or try another archetype.</p>
-                )
+                ) : <p className="activity-panel-copy">No observed fit for this route is fully usable with this pilot's current skills. Train the blocking route or try another archetype.</p>
+              ) : <p className="activity-panel-copy">This pilot cannot currently sit in the selected hull. Fit export remains unavailable until hull access is trained.</p>}
+            </section>
+
+            <section className="activity-command-panel activity-command-optional-training">
+              <div className="activity-section-heading"><div><p className="eyebrow">OPTIONAL TRAINING</p><h3>Useful next skills</h3></div><strong className="activity-mastery-score">{selectedShip.analysis.masteryPercent}%</strong></div>
+              <p className="activity-panel-copy">Not required to start, but useful for performance, fitting margin and efficiency.</p>
+              {selectedShip.analysis.masteryQueue.length > 0 ? (
+                <div className="mastery-targets">{selectedShip.analysis.masteryQueue.slice(0, 8).map((skill) => <span key={skill.skillId}>{skill.name} · L{skill.targetLevel}</span>)}</div>
+              ) : <div className="planner-ready-state">No optional mastery targets remain.</div>}
+              <details className="activity-readiness-work">
+                <summary>Show Work — why {selectedShip.analysis.overallPercent}%?</summary>
+                <p>{selectedShip.analysis.explanation.formula}</p>
+                {selectedShip.analysis.explanation.reasons.map((reason) => <small key={reason}>{reason}</small>)}
+                {selectedShip.analysis.explanation.caveats.map((caveat) => <small className="readiness-caveat" key={caveat}>{caveat}</small>)}
+              </details>
+            </section>
+          </div>
+
+          <section className="activity-command-panel activity-command-route-intelligence">
+            <div className="activity-section-heading">
+              <div><p className="eyebrow">ROUTE INTELLIGENCE</p><h3>Exact blockers, evidence and training order</h3></div>
+              <small>{content.label} · {selectedShip.ship.name}</small>
+            </div>
+            <div className="activity-route-intel-grid">
+              <div className="activity-route-copy">
+                <p>{content.description}</p>
+                <small>{content.experience}</small>
+                {content.notes?.map((note) => <p className="activity-note" key={note}>{note}</p>)}
+                {!selectedShip.analysis.compatible && selectedShip.analysis.compatibilityReason && <div className="planner-analysis-state error">{selectedShip.analysis.compatibilityReason}</div>}
+                {selectedShip.analysis.components.context.targets.length > 0 && (
+                  <div className="context-target-chips">{selectedShip.analysis.components.context.targets.map((target) => <span key={`${target.skill}-${target.level}`}>{target.skill} · L{target.level}</span>)}</div>
+                )}
+              </div>
+
+              {selectedShip.analysis.activityEvidence.status === "ready" ? (
+                <div className="activity-evidence-panel">
+                  <strong>{selectedShip.analysis.activityEvidence.label}</strong>
+                  <small>{selectedShip.analysis.activityEvidence.sampleCount} public runs · {selectedShip.analysis.activityEvidence.confidence} confidence</small>
+                  <div className="activity-evidence-entries">
+                    {selectedShip.analysis.activityEvidence.entries.slice(0, 6).map((entry) => (
+                      <div key={entry.name}><strong>{entry.name}</strong><span>{entry.runs} observed · {entry.survivedRuns} survived{entry.level !== null ? ` · level ${entry.level}` : ""}</span></div>
+                    ))}
+                  </div>
+                  {selectedShip.analysis.activityEvidence.note && <small className="activity-evidence-note">{selectedShip.analysis.activityEvidence.note}</small>}
+                </div>
               ) : (
-                <p>This character cannot currently sit in the selected hull. Sage will keep showing the training route, but fitted export stays unavailable until hull access is trained.</p>
+                <div className="activity-evidence-panel muted"><strong>Observed activity evidence</strong><small>{selectedShip.analysis.activityEvidence.note ?? "No route-specific public activity evidence is required or available."}</small></div>
               )}
             </div>
-            <button type="button" onClick={exportRecommendedFit} disabled={!selectedShip.analysis.hullAccessReady || !selectedFit}>
-              {selectedFit ? "Export selected fit to Fitting Command" : "Fit unavailable"}
-            </button>
-          </section>
-          <section className="mastery-panel">
-            <div><p className="eyebrow">OPTIONAL TRAINING</p><h3>Useful next skills</h3><p>These aren't required to get started, but they'll improve performance and efficiency.</p></div>
-            <strong>{selectedShip.analysis.masteryPercent}%</strong>
-            {selectedShip.analysis.masteryQueue.length > 0 && (
-              <div className="mastery-targets">
-                {selectedShip.analysis.masteryQueue.slice(0, 8).map((skill) => <span key={skill.skillId}>{skill.name} → L{skill.targetLevel}</span>)}
-              </div>
-            )}
-          </section>
 
-          <details className="activity-readiness-work" open>
-            <summary>Show Work — why {selectedShip.analysis.overallPercent}%?</summary>
-            <p>{selectedShip.analysis.explanation.formula}</p>
-            {selectedShip.analysis.explanation.reasons.map((reason) => <small key={reason}>{reason}</small>)}
-            {selectedShip.analysis.explanation.caveats.map((caveat) => <small className="readiness-caveat" key={caveat}>{caveat}</small>)}
-          </details>
-        </section>
+            {selectedShip.analysis.components.hull.gaps.length > 0 && (
+              <details className="activity-readiness-work hull-gap-breakdown">
+                <summary>Show {selectedShip.analysis.components.hull.gaps.length} exact hull/prerequisite gap{selectedShip.analysis.components.hull.gaps.length === 1 ? "" : "s"}</summary>
+                <ol className="activity-training-queue practical-training-queue">
+                  {selectedShip.analysis.components.hull.gaps.map((skill) => (
+                    <li key={skill.skillId}><div><strong>{skill.name}</strong><small>Current L{skill.currentLevel} → required L{skill.targetLevel} · blocks hull access</small></div><span className="training-skill-time">{duration(skill.estimatedSeconds)}</span></li>
+                  ))}
+                </ol>
+              </details>
+            )}
+
+            {selectedShip.analysis.recommendedQueue.length ? (
+              <details className="activity-readiness-work activity-training-details">
+                <summary>Open mandatory training queue · {selectedShip.analysis.recommendedQueue.length} skills</summary>
+                <div className="training-category-stack">
+                  {[...selectedShip.analysis.recommendedQueue.reduce((groups, skill, queueIndex) => {
+                    const category = categorizeReadinessSkill(skill.name);
+                    const current = groups.get(category.id) ?? { category, skills: [] as Array<{ skill: typeof skill; queueIndex: number }> };
+                    current.skills.push({ skill, queueIndex });
+                    groups.set(category.id, current);
+                    return groups;
+                  }, new Map<string, { category: ReturnType<typeof categorizeReadinessSkill>; skills: Array<{ skill: ActivityReadinessResult["recommendedQueue"][number]; queueIndex: number }> }>()).values()]
+                    .sort((a, b) => a.category.order - b.category.order)
+                    .map(({ category, skills }) => (
+                      <section className="training-skill-category" key={category.id}>
+                        <header><div><strong>{category.label}</strong><small>{category.description}</small></div><span>{skills.length} skill{skills.length === 1 ? "" : "s"}</span></header>
+                        <ol className="activity-training-queue practical-training-queue categorized-training-queue">
+                          {skills.map(({ skill, queueIndex }) => {
+                            const reasons = displayedSkillReasons(skill, content.label, selectorValues);
+                            return (
+                              <li key={skill.skillId}>
+                                <span className="training-queue-index">#{queueIndex + 1}</span>
+                                <div><strong>{skill.name}</strong><small>L{skill.currentLevel} → L{skill.targetLevel}</small><small className="training-skill-why"><b>Why:</b> {reasons.slice(0, 3).join(" · ")}{reasons.length > 3 ? ` · +${reasons.length - 3} more` : ""}</small></div>
+                                <span className="training-skill-time">{skill.alreadyQueued ? `Already queued to L${skill.queuedToLevel}` : duration(skill.estimatedSeconds)}</span>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      </section>
+                    ))}
+                </div>
+              </details>
+            ) : <div className="planner-ready-state">{snapshot.character.name} meets every identified mandatory requirement for this exact route.</div>}
+          </section>
+        </>
       )}
     </div>
   );
 }
 
-function RouteStep({ number, label, value }: { number: string; label: string; value: string }) {
-  return <div><span>{number}</span><small>{label}</small><strong>{value}</strong></div>;
+function ActivityGlyph({ label, index, compact = false }: { label: string; index: number; compact?: boolean }) {
+  const letters = label.replace(/[^A-Za-z0-9 ]/g, "").split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || String(index + 1);
+  return <span className={`activity-glyph${compact ? " compact" : ""}`} aria-hidden="true"><i>{letters}</i></span>;
+}
+
+function ReadinessMetric({ label, value }: { label: string; value: number | null }) {
+  return <div><span>{label}</span><strong>{value === null ? "—" : `${value}%`}</strong></div>;
+}
+
+function CapabilityBar({ label, value }: { label: string; value: number | null }) {
+  const safe = Math.max(0, Math.min(100, value ?? 0));
+  return (
+    <div className="activity-capability-bar">
+      <span>{label}</span>
+      <i><b style={{ width: `${safe}%` }} /></i>
+      <strong>{value === null ? "—" : `${value}%`}</strong>
+    </div>
+  );
+}
+
+function FitFamilyTile({ label, items }: { label: string; items: Array<{ name: string; quantity?: number; typeId?: number }> }) {
+  if (!items.length) return null;
+  const first = items[0];
+  return (
+    <div className="activity-fit-family-tile">
+      <span className="activity-fit-family-icon" aria-hidden="true">{label.slice(0, 1)}</span>
+      <strong>{first.name}</strong>
+      <small>{items.length > 1 ? `+${items.length - 1} more · ${label}` : label}</small>
+    </div>
+  );
+}
+
+function RouteStep({ number, label, value, active = false }: { number: string; label: string; value: string; active?: boolean }) {
+  return <div className={active ? "active" : ""}><span>{number}</span><small>{label}</small><strong>{value}</strong></div>;
+}
+
+function StepEyebrow({ number, label, title }: { number: string; label: string; title: string }) {
+  return <p className="eyebrow activity-step-eyebrow"><span className="activity-step-number">{number}</span><b>{label}</b><em>{title}</em></p>;
 }
 
 function SkillTargetList({ title, targets }: { title: string; targets: Array<ActivitySkillTarget & { current: number }> }) {

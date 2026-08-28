@@ -65,7 +65,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0, onMarketD
   }, [snapshot?.characterId]);
 
   useEffect(() => window.sage.onPreparedDataUpdated((value) => {
-    if (!snapshot?.characterId || value.characterIds.includes(snapshot.characterId)) {
+    if (!snapshot?.characterId || !value.characterIds?.length || value.characterIds.includes(snapshot.characterId)) {
       setPreparedDataRevision((revision) => revision + 1);
     }
   }), [snapshot?.characterId]);
@@ -179,14 +179,14 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0, onMarketD
           `${prepared.market.market.opportunities.length.toLocaleString()} candidate routes ready from ${prepared.market.signals.marketOrdersInspected.toLocaleString()} retained public orders across ${prepared.market.signals.marketRegionsInspected.toLocaleString()} regions.`,
         );
       } else {
-        setMarketStatus("No prepared Market Scanner result is available. Run Sync All to prepare it.");
+        setMarketStatus("No prepared Market Scanner result is available yet. Sage uses the installed server-prepared market generation and builds this view on demand.");
       }
       if (prepared.pve) {
         setPveStatus(
           `${prepared.pve.locations.length} PvE/location leads are ready from ${prepared.pve.character.systemName}. Public activity data is ${ageLabel(prepared.pve.dataStatus.ageMinutes)}.`,
         );
       } else {
-        setPveStatus("No prepared PvE/location result is available. Run Sync All to prepare it.");
+        setPveStatus("No prepared PvE/location result is available yet. Open the PvE tab to build it from local character context and shared public activity data.");
       }
       if (prepared.invention) {
         setInventionStatus(
@@ -303,18 +303,18 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0, onMarketD
       </div>
 
       {tab === "market" && !analysis && marketBusy && <div className="planner-analysis-state">Analyzing retained market data in the background...</div>}
-      {tab === "market" && !analysis && !marketBusy && <div className="market-no-results">No prepared Market Scanner result is available. Run Sync All to prepare it.</div>}
+      {tab === "market" && !analysis && !marketBusy && <div className="market-no-results">No prepared Market Scanner result is available yet. Sage uses the installed server-prepared market generation and builds this view on demand.</div>}
       {analysis && tab === "market" && <MarketOpportunityScanner analysis={analysis} onExport={exportMarketCsv} />}
 
       {tab === "market-opportunities" && analysis && <MarketDayTrader analysis={analysis} snapshot={snapshot} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
-      {tab === "market-opportunities" && !analysis && <div className="market-no-results">No prepared Market Opportunities result is available. Run Sync All to prepare it.</div>}
+      {tab === "market-opportunities" && !analysis && <div className="market-no-results">No prepared Market Opportunities result is available yet. Sage builds this view from the installed server-prepared market generation.</div>}
 
       {tab === "orders" && <OrderDesk snapshot={snapshot} />}
 
       {tab === "contracts" && <MarketContracts characterId={snapshot?.characterId} marketDataRevision={marketDataRevision} onMarketDataUpdated={onMarketDataUpdated} />}
 
       {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
-      {tab === "opportunities" && !analysis && <div className="market-no-results">No prepared Opportunities result is available. Run Sync All to prepare it.</div>}
+      {tab === "opportunities" && !analysis && <div className="market-no-results">No prepared Opportunities result is available yet. Sage builds this view from installed public data and local character context.</div>}
 
       {tab === "invention" && !snapshot && <div className="market-no-results">Connect and sync a character to include owned blueprint originals.</div>}
       {tab === "invention" && snapshot && inventionBusy && !inventionAnalysis && <div className="planner-analysis-state">Building and pricing the complete invention catalogue…</div>}
@@ -375,7 +375,7 @@ export function IskLab({ snapshot, cloneState, marketDataRevision = 0, onMarketD
       )}
       {tab === "pve" && !snapshot && <div className="market-no-results">Connect and sync a character so Sage can rank locations from your current system.</div>}
       {tab === "pve" && snapshot && !pveAnalysis && pveBusy && <div className="planner-analysis-state">Building PvE and location intelligence in the background...</div>}
-      {tab === "pve" && snapshot && !pveAnalysis && !pveBusy && <div className="market-no-results">No prepared PvE/location result is available. Run Sync All to prepare it.</div>}
+      {tab === "pve" && snapshot && !pveAnalysis && !pveBusy && <div className="market-no-results">No prepared PvE/location result is available yet. Open the PvE tab to build it from local character context and shared public activity data.</div>}
       {tab === "pve" && pveAnalysis && <PveLocationIntel analysis={pveAnalysis} />}
     </section>
   );

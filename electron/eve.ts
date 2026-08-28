@@ -5,6 +5,8 @@ import { shell } from "electron";
 import { itemCategoryIds, itemVolumes } from "./type-volumes";
 import { trainingTimesToLevels } from "./skill-training";
 import { getLocalSkillDogmaMetadata } from "./skill-static";
+import { privateEsiJson, privateEsiPagedJson } from "./private-esi-cache";
+import { loadSharedPublicSource } from "./shared-market-data";
 
 export const EVE_SCOPES = [
   "esi-assets.read_assets.v1",
@@ -257,11 +259,7 @@ export async function fetchCharacterCoreSnapshot(
     "X-Compatibility-Date": "2026-08-02",
     "X-User-Agent": "NewEdenSage/0.1.0",
   };
-  const get = async <T>(path: string): Promise<T> => {
-    const response = await fetch(`https://esi.evetech.net${path}`, { headers });
-    if (!response.ok) throw new Error(`ESI request failed (${response.status}) for ${path}.`);
-    return response.json() as Promise<T>;
-  };
+  const get = async <T>(path: string): Promise<T> => (await privateEsiJson<T>(characterId, path, accessToken)).data;
   const publicGet = async <T>(path: string): Promise<T> => {
     const response = await fetch(`https://esi.evetech.net${path}`, {
       headers: {
@@ -380,9 +378,7 @@ export async function fetchCharacterCurrentShipSnapshot(
     "X-Compatibility-Date": "2026-08-02",
     "X-User-Agent": "NewEdenSage/0.1.0",
   };
-  const shipResponse = await fetch(`https://esi.evetech.net/characters/${characterId}/ship/`, { headers: authenticatedHeaders });
-  if (!shipResponse.ok) throw new Error(`ESI current-ship refresh failed (${shipResponse.status}).`);
-  const ship = await shipResponse.json() as { ship_item_id: number; ship_name: string; ship_type_id: number };
+  const ship = (await privateEsiJson<{ ship_item_id: number; ship_name: string; ship_type_id: number }>(characterId, `/characters/${characterId}/ship/`, accessToken)).data;
   const typeResponse = await fetch(`https://esi.evetech.net/universe/types/${ship.ship_type_id}/`, { headers: publicHeaders });
   if (!typeResponse.ok) throw new Error(`ESI ship-type lookup failed (${typeResponse.status}).`);
   const shipType = await typeResponse.json() as { name: string };
@@ -403,24 +399,13 @@ export async function fetchWalletOnlySnapshot(
     "X-Compatibility-Date": "2026-08-02",
     "X-User-Agent": "NewEdenSage/0.1.0",
   };
-  const capture = async (path: string, paged = false): Promise<unknown> => {
+  const capture = async (requestPath: string, paged = false): Promise<unknown> => {
     try {
-      const firstPath = paged ? `${path}${path.includes("?") ? "&" : "?"}page=1` : path;
-      const response = await fetch(`https://esi.evetech.net${firstPath}`, { headers });
-      if (response.status === 204) return null;
-      if (!response.ok) return { unavailable: true, status: response.status, endpoint: path };
-      const first = await response.json() as unknown;
-      if (!paged || !Array.isArray(first)) return first;
-      const pages = Number(response.headers.get("x-pages") ?? 1);
-      const rest = await mapLimited(Array.from({ length: Math.max(0, pages - 1) }, (_, index) => index + 2), 4, async (page) => {
-        const separator = path.includes("?") ? "&" : "?";
-        const pageResponse = await fetch(`https://esi.evetech.net${path}${separator}page=${page}`, { headers });
-        if (!pageResponse.ok) return [] as unknown[];
-        return pageResponse.json() as Promise<unknown[]>;
-      });
-      return first.concat(...rest);
+      return paged
+        ? await privateEsiPagedJson<unknown>(characterId, requestPath, accessToken, 4)
+        : (await privateEsiJson<unknown>(characterId, requestPath, accessToken)).data;
     } catch (error) {
-      return { unavailable: true, endpoint: path, error: error instanceof Error ? error.message : String(error) };
+      return { unavailable: true, endpoint: requestPath, error: error instanceof Error ? error.message : String(error) };
     }
   };
   const corporationId = Number(existingSnapshot?.character?.corporation_id ?? 0);
@@ -470,46 +455,14 @@ export async function fetchCharacterSnapshot(
     "X-Compatibility-Date": "2026-08-02",
     "X-User-Agent": "NewEdenSage/0.1.0",
   };
-  const get = async <T>(path: string): Promise<T> => {
-    const response = await fetch(`https://esi.evetech.net${path}`, { headers });
-    if (!response.ok)
-      throw new Error(`ESI request failed (${response.status}) for ${path}.`);
-    return response.json() as Promise<T>;
-  };
-  const capture = async (path: string, paged = false): Promise<unknown> => {
+  const get = async <T>(path: string): Promise<T> => (await privateEsiJson<T>(characterId, path, accessToken)).data;
+  const capture = async (requestPath: string, paged = false): Promise<unknown> => {
     try {
-      const firstPath = paged
-        ? `${path}${path.includes("?") ? "&" : "?"}page=1`
-        : path;
-      const response = await fetch(`https://esi.evetech.net${firstPath}`, {
-        headers,
-      });
-      if (response.status === 204) return null;
-      if (!response.ok)
-        return { unavailable: true, status: response.status, endpoint: path };
-      const first = (await response.json()) as unknown;
-      if (!paged || !Array.isArray(first)) return first;
-      const pages = Number(response.headers.get("x-pages") ?? 1);
-      const rest = await mapLimited(
-        Array.from({ length: Math.max(0, pages - 1) }, (_, index) => index + 2),
-        6,
-        async (page) => {
-          const separator = path.includes("?") ? "&" : "?";
-          const pageResponse = await fetch(
-            `https://esi.evetech.net${path}${separator}page=${page}`,
-            { headers },
-          );
-          if (!pageResponse.ok) return [];
-          return pageResponse.json() as Promise<unknown[]>;
-        },
-      );
-      return first.concat(...rest);
+      return paged
+        ? await privateEsiPagedJson<unknown>(characterId, requestPath, accessToken, 6)
+        : (await privateEsiJson<unknown>(characterId, requestPath, accessToken)).data;
     } catch (error) {
-      return {
-        unavailable: true,
-        endpoint: path,
-        error: error instanceof Error ? error.message : String(error),
-      };
+      return { unavailable: true, endpoint: requestPath, error: error instanceof Error ? error.message : String(error) };
     }
   };
   const [character, wallet, skills, queue, location, ship, attributes] =
@@ -964,16 +917,12 @@ async function enrichAssets(
   const typeNameById = new Map(typeNames.map((item) => [item.id, item.name]));
   const volumes = await itemVolumes(typeIds);
   const categoryIds = await itemCategoryIds(typeIds);
-  const priceResponse = await fetch("https://esi.evetech.net/markets/prices/", {
-    headers,
-  });
-  const prices = priceResponse.ok
-    ? ((await priceResponse.json()) as Array<{
-        type_id: number;
-        average_price?: number;
-        adjusted_price?: number;
-      }>)
-    : [];
+  const sharedPrices = await loadSharedPublicSource<Array<{
+    type_id: number;
+    average_price?: number;
+    adjusted_price?: number;
+  }>>("markets-prices").catch(() => null);
+  const prices = Array.isArray(sharedPrices?.data) ? sharedPrices.data : [];
   const priceByType = new Map(
     prices.map((price) => [
       price.type_id,

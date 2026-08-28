@@ -17,7 +17,7 @@ import type {
 const gunzipAsync = promisify(gunzip);
 const SHARED_MANIFEST_SCHEMA = 1;
 const REQUIRED_ARTIFACTS = ["market-global", "market-regional"] as const;
-const KNOWN_OPTIONAL_ARTIFACTS = ["market-trades", "market-shortages"] as const;
+const KNOWN_OPTIONAL_ARTIFACTS = ["market-trades", "market-shortages", "public-shared", "public-contracts"] as const;
 const DEFAULT_SHARED_MARKET_BASE_URL = "https://newedensage--new-eden-sage-market-benchmark-shared-market-web.modal.run";
 const MANIFEST_FILE = "manifest.json";
 
@@ -62,6 +62,25 @@ export type SharedPreparedShortageDataset = {
   signals: any[];
 };
 
+export type SharedPreparedPublicDataset = {
+  schemaVersion: 1;
+  dataset: "public-shared";
+  snapshotId: string;
+  createdAt: string;
+  sources: Record<string, { fetchedAt: string; data: unknown }>;
+};
+
+export type SharedPublicContractsDataset = {
+  schemaVersion: 1;
+  dataset: "public-contracts";
+  snapshotId: string;
+  createdAt: string;
+  regionCount: number;
+  contractCount: number;
+  pendingDetailCount: number;
+  regions: Array<{ regionId: number; regionName: string; publicContracts: any[] }>;
+};
+
 export type SharedMarketSyncResult = {
   manifest: SharedMarketManifest;
   changed: string[];
@@ -70,11 +89,20 @@ export type SharedMarketSyncResult = {
   refreshError?: string;
 };
 
+export type SharedMarketAvailability = {
+  updateAvailable: boolean;
+  installedGeneration: string | null;
+  availableGeneration: string | null;
+  checkedAt: string;
+};
+
 type ParsedGeneration = {
   global: FullMarketAnalysisIndex;
   regional: RegionalMarketAggregateIndex;
   trades: SharedPreparedTradeDataset | null;
   shortages: SharedPreparedShortageDataset | null;
+  publicShared: SharedPreparedPublicDataset | null;
+  contracts: SharedPublicContractsDataset | null;
 };
 
 let manifestMemory: SharedMarketManifest | null | undefined;
@@ -82,6 +110,8 @@ const globalGenerationCache = new Map<string, Promise<FullMarketAnalysisIndex | 
 const regionalGenerationCache = new Map<string, Promise<RegionalMarketAggregateIndex | null>>();
 const tradeGenerationCache = new Map<string, Promise<SharedPreparedTradeDataset | null>>();
 const shortageGenerationCache = new Map<string, Promise<SharedPreparedShortageDataset | null>>();
+const publicSharedGenerationCache = new Map<string, Promise<SharedPreparedPublicDataset | null>>();
+const contractGenerationCache = new Map<string, Promise<SharedPublicContractsDataset | null>>();
 
 function baseUrl() {
   return String(process.env.NEW_EDEN_SAGE_SHARED_MARKET_URL || DEFAULT_SHARED_MARKET_BASE_URL).trim().replace(/\/$/, "");
@@ -103,11 +133,10 @@ function safeArtifactName(key: string, artifact: SharedMarketArtifact) {
   return name;
 }
 
-function validateArtifact(key: string, value: unknown, generation?: string): SharedMarketArtifact {
+function validateArtifact(key: string, value: unknown): SharedMarketArtifact {
   if (!value || typeof value !== "object") throw new Error(`Shared market manifest is missing artifact ${key}.`);
   const artifact = value as SharedMarketArtifact;
   if (!artifact.version || typeof artifact.version !== "string") throw new Error(`Shared market artifact ${key} has no version.`);
-  if (generation && artifact.version !== generation) throw new Error(`Shared market artifact ${key} does not belong to generation ${generation}.`);
   if (!artifact.path || typeof artifact.path !== "string") throw new Error(`Shared market artifact ${key} has no path.`);
   if (!Number.isFinite(artifact.bytes) || artifact.bytes <= 0) throw new Error(`Shared market artifact ${key} has invalid byte size.`);
   if (!/^[a-f0-9]{64}$/i.test(String(artifact.sha256))) throw new Error(`Shared market artifact ${key} has invalid SHA-256.`);
@@ -124,8 +153,8 @@ export function validateSharedMarketManifest(value: unknown): SharedMarketManife
   if (!manifest.publishedAt || !Number.isFinite(Date.parse(manifest.publishedAt))) throw new Error("Shared market manifest publish time is invalid.");
   if (manifest.sourceCreatedAt && !Number.isFinite(Date.parse(manifest.sourceCreatedAt))) throw new Error("Shared market source time is invalid.");
   if (!manifest.files || typeof manifest.files !== "object") throw new Error("Shared market manifest has no file map.");
-  for (const key of REQUIRED_ARTIFACTS) validateArtifact(key, manifest.files[key], manifest.generation);
-  for (const [key, artifact] of Object.entries(manifest.files)) validateArtifact(key, artifact, manifest.generation);
+  for (const key of REQUIRED_ARTIFACTS) validateArtifact(key, manifest.files[key]);
+  for (const [key, artifact] of Object.entries(manifest.files)) validateArtifact(key, artifact);
   return manifest;
 }
 
@@ -236,7 +265,7 @@ async function cleanupOldGenerations(current: string, previous?: string) {
 }
 
 function localArtifactPath(manifest: SharedMarketManifest, key: string, root = generationRoot(manifest.generation)) {
-  const artifact = validateArtifact(key, manifest.files[key], manifest.generation);
+  const artifact = validateArtifact(key, manifest.files[key]);
   return path.join(root, safeArtifactName(key, artifact));
 }
 
@@ -246,7 +275,7 @@ async function parseGlobalArtifact(manifest: SharedMarketManifest, root: string)
     schemaVersion: number; dataset: string; snapshotId: string; createdAt: string; orderCount: number; regionCount: number;
     sourceOrdersInspected: number; candidateDepthPerSide: number; items: FullMarketItem[];
   };
-  if (payload.schemaVersion !== 1 || payload.dataset !== "market-global" || payload.snapshotId !== manifest.generation) throw new Error("Shared market-global payload identity is invalid.");
+  if (payload.schemaVersion !== 1 || payload.dataset !== "market-global" || payload.snapshotId !== validateArtifact("market-global", manifest.files["market-global"]).version) throw new Error("Shared market-global payload identity is invalid.");
   if (payload.orderCount !== manifest.orderCount || payload.regionCount !== manifest.regionCount || payload.items.length !== manifest.itemCount) throw new Error("Shared market-global payload counts do not match its manifest.");
   return {
     snapshotId: payload.snapshotId,
@@ -297,7 +326,7 @@ async function parseRegionalArtifact(manifest: SharedMarketManifest, root: strin
     }
     rows.push(JSON.parse(line) as RegionalMarketAggregateRow);
   }
-  if (!header || header.schemaVersion !== 1 || header.dataset !== "market-regional" || header.snapshotId !== manifest.generation) throw new Error("Shared market-regional payload identity is invalid.");
+  if (!header || header.schemaVersion !== 1 || header.dataset !== "market-regional" || header.snapshotId !== validateArtifact("market-regional", manifest.files["market-regional"]).version) throw new Error("Shared market-regional payload identity is invalid.");
   if (header.orderCount !== manifest.orderCount || header.regionCount !== manifest.regionCount || rows.length !== manifest.regionalRowCount || rows.length !== header.rowCount) throw new Error("Shared market-regional payload counts do not match its manifest.");
   return {
     snapshotId: header.snapshotId,
@@ -313,22 +342,25 @@ async function parseRegionalArtifact(manifest: SharedMarketManifest, root: strin
 async function parseJsonDataset<T extends { schemaVersion: number; dataset: string; snapshotId: string }>(manifest: SharedMarketManifest, root: string, key: string, dataset: string): Promise<T | null> {
   if (!manifest.files[key]) return null;
   const payload = JSON.parse((await gunzipAsync(await fs.readFile(localArtifactPath(manifest, key, root)))).toString("utf8")) as T;
-  if (payload.schemaVersion !== 1 || payload.dataset !== dataset || payload.snapshotId !== manifest.generation) throw new Error(`Shared ${key} payload identity is invalid.`);
+  if (payload.schemaVersion !== 1 || payload.dataset !== dataset || payload.snapshotId !== validateArtifact(key, manifest.files[key]).version) throw new Error(`Shared ${key} payload identity is invalid.`);
   return payload;
 }
 
 async function validateStagedGeneration(manifest: SharedMarketManifest, root: string): Promise<ParsedGeneration> {
   const startedAt = Date.now();
-  const [global, regional, trades, shortages] = await Promise.all([
+  const [global, regional, trades, shortages, publicShared, contracts] = await Promise.all([
     parseGlobalArtifact(manifest, root),
     parseRegionalArtifact(manifest, root),
     parseJsonDataset<SharedPreparedTradeDataset>(manifest, root, "market-trades", "market-trades"),
     parseJsonDataset<SharedPreparedShortageDataset>(manifest, root, "market-shortages", "market-shortages"),
+    parseJsonDataset<SharedPreparedPublicDataset>(manifest, root, "public-shared", "public-shared"),
+    parseJsonDataset<SharedPublicContractsDataset>(manifest, root, "public-contracts", "public-contracts"),
   ]);
   if (trades && !Array.isArray(trades.opportunities)) throw new Error("Shared market-trades payload has no opportunity list.");
   if (shortages && !Array.isArray(shortages.signals)) throw new Error("Shared market-shortages payload has no signal list.");
+  if (contracts && !Array.isArray(contracts.regions)) throw new Error("Shared public-contracts payload has no region list.");
   void logEvent("info", "shared_market.validation_ms", { durationMs: Date.now() - startedAt, generation: manifest.generation });
-  return { global, regional, trades, shortages };
+  return { global, regional, trades, shortages, publicShared, contracts };
 }
 
 function installWarmGeneration(manifest: SharedMarketManifest, parsed: ParsedGeneration) {
@@ -336,6 +368,8 @@ function installWarmGeneration(manifest: SharedMarketManifest, parsed: ParsedGen
   regionalGenerationCache.set(manifest.generation, Promise.resolve(parsed.regional));
   tradeGenerationCache.set(manifest.generation, Promise.resolve(parsed.trades));
   shortageGenerationCache.set(manifest.generation, Promise.resolve(parsed.shortages));
+  publicSharedGenerationCache.set(manifest.generation, Promise.resolve(parsed.publicShared));
+  contractGenerationCache.set(manifest.generation, Promise.resolve(parsed.contracts));
 }
 
 function manifestsIdentical(a: SharedMarketManifest | null, b: SharedMarketManifest) {
@@ -348,6 +382,17 @@ function manifestsIdentical(a: SharedMarketManifest | null, b: SharedMarketManif
     const right = b.files[key];
     return Boolean(left && right && left.sha256 === right.sha256 && left.bytes === right.bytes && left.schemaVersion === right.schemaVersion && left.path === right.path);
   });
+}
+
+export async function checkSharedMarketDataAvailability(): Promise<SharedMarketAvailability> {
+  const installed = await loadCurrentSharedMarketManifest();
+  const available = await fetchLatestCompleteManifestFromServer();
+  return {
+    updateAvailable: !manifestsIdentical(installed, available),
+    installedGeneration: installed?.generation ?? null,
+    availableGeneration: available.generation,
+    checkedAt: new Date().toISOString(),
+  };
 }
 
 export async function ensureCurrentSharedMarketData(
@@ -485,9 +530,74 @@ export async function loadSharedPreparedShortageDataset(): Promise<SharedPrepare
   return cachedLoad(shortageGenerationCache, manifest, "market-shortages", () => parseJsonDataset<SharedPreparedShortageDataset>(manifest, generationRoot(manifest.generation), "market-shortages", "market-shortages"));
 }
 
+export async function loadSharedPublicContractsDataset(): Promise<SharedPublicContractsDataset | null> {
+  const manifest = await loadCurrentSharedMarketManifest();
+  if (!manifest?.files["public-contracts"]) return null;
+  return cachedLoad(contractGenerationCache, manifest, "public-contracts", () => parseJsonDataset<SharedPublicContractsDataset>(manifest, generationRoot(manifest.generation), "public-contracts", "public-contracts"));
+}
+
+export async function loadSharedPublicDataset(): Promise<SharedPreparedPublicDataset | null> {
+  const manifest = await loadCurrentSharedMarketManifest();
+  if (!manifest?.files["public-shared"]) return null;
+  return cachedLoad(publicSharedGenerationCache, manifest, "public-shared", () => parseJsonDataset<SharedPreparedPublicDataset>(manifest, generationRoot(manifest.generation), "public-shared", "public-shared"));
+}
+
+export async function loadSharedPublicSource<T>(source: string): Promise<{ fetchedAt: string; data: T } | null> {
+  const dataset = await loadSharedPublicDataset();
+  const value = dataset?.sources?.[source];
+  return value ? { fetchedAt: value.fetchedAt, data: value.data as T } : null;
+}
+
+export function startSharedPublicDataListener(onAvailable?: (notice: { generation: string }) => void) {
+  let stopped = false;
+  let controller: AbortController | null = null;
+  let lastNotifiedGeneration = "";
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const run = async () => {
+    while (!stopped) {
+      try {
+        const current = await loadCurrentSharedMarketManifest();
+        controller = new AbortController();
+        const url = new URL(baseUrl() + "/events");
+        if (current?.generation) url.searchParams.set("generation", current.generation);
+        const response = await fetch(url, { headers: { Accept: "text/event-stream", "X-New-Eden-Sage-Client": "desktop" }, signal: controller.signal });
+        if (!response.ok || !response.body) throw new Error("Shared public event stream returned HTTP " + response.status + ".");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!stopped) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+          let boundary;
+          while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const event = frame.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
+            const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+            if (event !== "public-data-ready" || !data) continue;
+            const notice = JSON.parse(data) as { generation?: string };
+            const installed = await loadCurrentSharedMarketManifest();
+            if (!notice.generation || notice.generation === installed?.generation || notice.generation === lastNotifiedGeneration) continue;
+            lastNotifiedGeneration = notice.generation;
+            onAvailable?.({ generation: notice.generation });
+          }
+        }
+      } catch (error) {
+        if (!stopped) void logEvent("warn", "shared_public.event_stream_disconnected", { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        controller = null;
+      }
+      if (!stopped) await sleep(5_000);
+    }
+  };
+  void run();
+  return () => { stopped = true; controller?.abort(); };
+}
+
 export async function loadCurrentMarketRevision() {
   const shared = await loadCurrentSharedMarketManifest();
-  if (shared) return { id: shared.generation, createdAt: shared.sourceCreatedAt ?? shared.publishedAt, source: "shared" as const, orderCount: shared.orderCount, regionCount: shared.regionCount };
+  if (shared) return { id: shared.files["market-global"]?.version ?? shared.generation, createdAt: shared.sourceCreatedAt ?? shared.publishedAt, source: "shared" as const, orderCount: shared.orderCount, regionCount: shared.regionCount };
   const raw = await loadCurrentRawMarketManifest("all");
   if (raw?.complete) return { id: raw.id, createdAt: raw.createdAt, source: "raw" as const, orderCount: raw.orderCount, regionCount: raw.regionCount };
   return null;

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -33,23 +33,6 @@ import {
   deletePlanetaryPlan,
   saveSnapshot,
 } from "./database";
-import {
-  discoverHighSecSystems,
-  discoverMarketRadius,
-  listRegions,
-  pullRegionContracts,
-  pullRegionMarket,
-} from "./market";
-import {
-  countMarketDatasets,
-  loadLatestMarketDataset,
-  loadLatestMarketDatasetByMode,
-  loadMarketIndexHeaders,
-  loadMarketRegion,
-  marketSummaryHeaders,
-  MARKET_DATA_ROOT,
-  saveMarketDataset,
-} from "./market-storage";
 import { listPublishedShips, stageStaticDataRefreshLowImpact } from "./type-volumes";
 import { runMasterUpdate } from "./master-update";
 import { getSyncMemorySnapshot, syncMemoryHeadroom } from "./sync-resources";
@@ -57,23 +40,18 @@ import { CRASH_LOG_FILE, LOG_FILE, logCrash, logEvent } from "./logger";
 import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
 import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
+import { getFittingTypeInfoLocal } from "./fitting-dogma";
 import { analyzeBlueprintActivities, analyzeManufacturingPlan, analyzeReactionPlan, getIndustrySystemCostIndices, getReactionCatalogue } from "./industrial-engine";
 import { analyzeRefinery, getRefineryCatalogue } from "./refinery-engine";
 import { createFoundryProject, getFoundryProjects, getFoundryWorkspace, removeFoundryProject, searchFoundryBlueprintCatalogue, synchronizeFoundryLifecycle, updateFoundryProject } from "./project-foundry";
 import { getLootAcquisition, prepareLootDataLocal, searchLootItems } from "./loot-engine";
-import {
-  beginRawMarketSnapshot,
-  completeRawMarketSnapshot,
-  loadCurrentRawMarketManifest,
-  RAW_MARKET_ROOT,
-  saveRawMarketRegion,
-} from "./raw-market-storage";
 import { analyzeHullAccessPreviews, analyzeShipReadiness } from "./readiness";
 import { analyzeActivityReadiness } from "./activity-readiness";
 import { analyzeCurrentShipUse, type CurrentShipUseProfileId } from "./capability-engine";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { loadCurrentMarketRevision } from "./shared-market-data";
+import { checkSharedMarketDataAvailability, ensureCurrentSharedMarketData, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
+import { loadSharedMarketBrowserDataset, loadSharedMarketBrowserRegion, loadSharedMarketBrowserRegions, loadSharedMarketBrowserSummaries } from "./shared-market-browser";
 import {
   runOpportunityAnalysis,
   runCapabilityAnalysis,
@@ -122,6 +100,100 @@ let masterUpdateActive = false;
 const STARTUP_SYNC_GUARD_MS = 30_000;
 const startupSyncGuardUntil = Date.now() + STARTUP_SYNC_GUARD_MS;
 
+let stopSharedPublicListener: (() => void) | undefined;
+let publicReconcileTimer: NodeJS.Timeout | undefined;
+const PUBLIC_RECONCILE_INTERVAL_MS = 60 * 60 * 1000;
+let publicAvailability = {
+  updateAvailable: false,
+  availableGeneration: null as string | null,
+  lastCheckedAt: null as string | null,
+};
+
+function announceInstalledPublicData(result: SharedMarketSyncResult) {
+  window?.webContents.send("prepared:data-updated", {
+    completedAt: new Date().toISOString(),
+    publicDataUpdated: true,
+    publicGeneration: result.manifest.generation,
+    publicArtifacts: result.changed,
+  });
+}
+
+async function loadPublicDataStatus() {
+  const manifest = await loadCurrentSharedMarketManifest();
+  return {
+    installed: Boolean(manifest),
+    generation: manifest?.generation ?? null,
+    createdAt: manifest?.sourceCreatedAt ?? manifest?.publishedAt ?? null,
+    source: manifest ? ("shared" as const) : null,
+    orderCount: manifest?.orderCount ?? 0,
+    regionCount: manifest?.regionCount ?? 0,
+    updateAvailable: publicAvailability.updateAvailable,
+    availableGeneration: publicAvailability.availableGeneration,
+    lastCheckedAt: publicAvailability.lastCheckedAt,
+  };
+}
+
+function publishPublicDataStatus(status: Awaited<ReturnType<typeof loadPublicDataStatus>>) {
+  window?.webContents.send("public-data:status-changed", status);
+}
+
+async function refreshPublicDataAvailability() {
+  const availability = await checkSharedMarketDataAvailability();
+  publicAvailability = {
+    updateAvailable: availability.updateAvailable,
+    availableGeneration: availability.availableGeneration,
+    lastCheckedAt: availability.checkedAt,
+  };
+  const status = await loadPublicDataStatus();
+  publishPublicDataStatus(status);
+  return status;
+}
+
+function markPublicDataAvailable(generation: string) {
+  publicAvailability = { updateAvailable: true, availableGeneration: generation, lastCheckedAt: new Date().toISOString() };
+  void loadPublicDataStatus().then(publishPublicDataStatus).catch(() => undefined);
+}
+
+function publicInstallPercent(message: string, completed?: number, total?: number) {
+  if (/ready/i.test(message)) return 100;
+  if (/install/i.test(message)) return 96;
+  if (/validat/i.test(message)) return 90;
+  if (/download/i.test(message) && total && total > 0) return Math.min(84, 10 + Math.round((Math.max(0, completed ?? 0) / total) * 74));
+  if (/check/i.test(message)) return 5;
+  return 8;
+}
+
+async function installSharedPublicData() {
+  window?.webContents.send("public-data:progress", { running: true, percent: 2, message: "Checking server generation..." });
+  try {
+    const result = await ensureCurrentSharedMarketData((message, completed, total) => {
+      window?.webContents.send("public-data:progress", { running: true, percent: publicInstallPercent(message, completed, total), message, completed, total });
+    });
+    if (result.changed.length) announceInstalledPublicData(result);
+    publicAvailability = { updateAvailable: false, availableGeneration: result.manifest.generation, lastCheckedAt: new Date().toISOString() };
+    const status = await loadPublicDataStatus();
+    publishPublicDataStatus(status);
+    window?.webContents.send("public-data:progress", { running: false, percent: 100, message: result.changed.length ? "Public data updated." : "Public data is current." });
+    return { ...status, changed: result.changed.length > 0, changedArtifacts: result.changed };
+  } catch (error) {
+    window?.webContents.send("public-data:progress", { running: false, percent: 0, message: "Public data update failed.", error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
+function startSharedPublicDataFlow() {
+  stopSharedPublicListener?.();
+  stopSharedPublicListener = startSharedPublicDataListener((notice) => markPublicDataAvailable(notice.generation));
+  if (publicReconcileTimer) clearInterval(publicReconcileTimer);
+  publicReconcileTimer = setInterval(() => {
+    void refreshPublicDataAvailability().catch((error) => void logEvent("warn", "shared_public.hourly_availability_check_failed", { error: error instanceof Error ? error.message : String(error) }));
+  }, PUBLIC_RECONCILE_INTERVAL_MS);
+  publicReconcileTimer.unref?.();
+  powerMonitor.on("resume", () => {
+    void refreshPublicDataAvailability().catch((error) => void logEvent("warn", "shared_public.resume_availability_check_failed", { error: error instanceof Error ? error.message : String(error) }));
+  });
+}
+
 function automaticSyncStatePath() {
   return path.join(app.getPath("userData"), "automatic-sync-state.json");
 }
@@ -158,7 +230,7 @@ async function markVersionSynced() {
 type PrepTrackStatus = "waiting" | "running" | "done" | "error";
 type PrepTrackId = "core" | "industrial-command" | "isk-lab" | "market-scanner" | "opportunities" | "inventions" | "pve-locations" | "progression";
 type PrepTrack = { id: PrepTrackId; label: string; percent: number; status: PrepTrackStatus; message: string };
-type CompleteSyncOptions = { cloneStates?: Record<string, "alpha" | "omega"> };
+type CompleteSyncOptions = { cloneStates?: Record<string, "alpha" | "omega">; characterIds?: string[] };
 
 const DEFAULT_ACTIVITY_PREPARATION = {
   activityId: "pve",
@@ -435,28 +507,28 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
   };
 
   try {
-    await logEvent("info", "master_update.sync_started", { source: "automatic-or-sync-all", publicMarketCompute: "server-only" });
-    setTrack("core", { percent: 0, status: "running", message: "Refreshing characters and checking shared market." });
-    publish("Refreshing characters and checking shared market", { stage: "starting" });
+    await logEvent("info", "private_refresh.sync_started", { source: "automatic-or-manual-private-refresh", publicMarketCompute: "server-only", privateDataDestination: "local-only" });
+    setTrack("core", { percent: 0, status: "running", message: "Refreshing private data locally." });
+    publish("Refreshing private data", { stage: "private-starting" });
 
     const coreResult = await runMasterUpdate((progress: any) => {
       lastProgress = progress;
       setTrack("core", {
         percent: clampPrepPercent(progress.percent),
         status: progress.running === false || progress.percent >= 100 ? "done" : "running",
-        message: String(progress.message ?? "Refreshing characters and checking shared market."),
+        message: String(progress.message ?? "Refreshing private data."),
       });
-      publish(String(progress.message ?? "Refreshing characters and checking shared market."), { ...progress, running: true });
-    });
+      publish(String(progress.message ?? "Refreshing private data."), { ...progress, running: true });
+    }, options.characterIds);
 
     const coreFailures = Array.isArray(coreResult?.failures) ? coreResult.failures : [];
     setTrack("core", {
       percent: 100,
       status: coreFailures.length ? "error" : "done",
-      message: coreFailures.length ? `Sync completed with ${coreFailures.length} failed source(s).` : "Character data and shared market are ready.",
+      message: coreFailures.length ? `Private refresh completed with ${coreFailures.length} failed source(s).` : "Private character data is ready.",
     });
 
-    // Sync All ends at the data boundary. Public market intelligence is prepared by Modal;
+    // Private refresh ends at the player-data boundary. Public intelligence is prepared by the server;
     // private/feature-specific work stays local and is evaluated on demand by its module.
     setTrack("market-scanner", { percent: 100, status: "done", message: "Uses server-prepared public market intelligence." });
     setTrack("opportunities", { percent: 100, status: "done", message: "Uses server-prepared public market intelligence." });
@@ -469,7 +541,7 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
     if (!coreFailures.length) await markVersionSynced();
     const snapshots = listSnapshots() as any[];
     const totalDurationMs = Date.now() - startedAtMs;
-    const finalMessage = coreFailures.length ? `Sync finished with ${coreFailures.length} failed source(s).` : "Ready";
+    const finalMessage = coreFailures.length ? `Private refresh finished with ${coreFailures.length} failed source(s).` : "Private data refreshed";
     publish(finalMessage, {
       stage: coreFailures.length ? "complete-with-core-errors" : "ready",
       totalDurationMs,
@@ -479,11 +551,11 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
     }, false);
     window?.webContents.send("prepared:data-updated", {
       completedAt: new Date().toISOString(),
-      characterIds: snapshots.map((snapshot) => String(snapshot.characterId)),
+      characterIds: options.characterIds?.length ? options.characterIds : snapshots.map((snapshot) => String(snapshot.characterId)),
       preparationFailures: 0,
-      sharedMarketReady: !coreFailures.length,
+      privateDataReady: !coreFailures.length,
     });
-    await logEvent("info", "sync_all.total_ms", { durationMs: totalDurationMs, failures: coreFailures.length });
+    await logEvent("info", "private_refresh.total_ms", { durationMs: totalDurationMs, failures: coreFailures.length });
     await logEvent("info", "master_update.sync_ready", { totalDurationMs, coreFailures: coreFailures.length, publicMarketCompute: "server-only" });
     return { ...coreResult, totalDurationMs, preparationFailures: [] };
   } catch (error) {
@@ -514,9 +586,7 @@ process.on(
     }),
 );
 
-let walletReconciliationTimer: NodeJS.Timeout | undefined;
 let walletReconciliationRunning = false;
-const WALLET_RECONCILIATION_INTERVAL_MS = 30 * 60 * 1000;
 
 async function runWalletOnlyReconciliation() {
   if (walletReconciliationRunning) return { skipped: true, reason: "already-running" };
@@ -555,12 +625,6 @@ async function runWalletOnlyReconciliation() {
   } finally {
     walletReconciliationRunning = false;
   }
-}
-
-function startWalletReconciliationTimer() {
-  if (walletReconciliationTimer) clearInterval(walletReconciliationTimer);
-  walletReconciliationTimer = setInterval(() => { void runWalletOnlyReconciliation().catch((error) => void logEvent("warn", "wallet_reconciliation.failed", { error: error instanceof Error ? error.message : String(error) })); }, WALLET_RECONCILIATION_INTERVAL_MS);
-  walletReconciliationTimer.unref?.();
 }
 
 async function eveWriteAccessToken(characterId: string) {
@@ -778,7 +842,9 @@ function createWindow() {
   else window.loadFile(path.join(__dirname, "../dist/index.html"));
 }
 
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+const hasSingleInstanceLock =
+  (globalThis as typeof globalThis & { __sageSingleInstanceLockHeld?: boolean }).__sageSingleInstanceLockHeld
+  ?? app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -1153,7 +1219,7 @@ if (!hasSingleInstanceLock) {
       const prepared = await loadPreparedInventionResult(input, snapshot);
       if (prepared.result) return prepared.result;
       if (masterUpdateActive) {
-        throw new Error("Wait for Sync All to finish before building Invention results.");
+        throw new Error("Wait for the private data refresh to finish before building Invention results.");
       }
       await runFeaturePrepProcess({
         task: "invention",
@@ -1349,27 +1415,12 @@ if (!hasSingleInstanceLock) {
       ];
       const details = await Promise.all(
         typeIds.map(async (typeId) => {
-          const response = await fetch(
-            `https://esi.evetech.net/universe/types/${typeId}/`,
-            {
-              headers: {
-                "X-Compatibility-Date": "2026-08-02",
-                "X-User-Agent": "NewEdenSage/0.1.0",
-              },
-            },
-          );
-          if (!response.ok)
-            throw new Error(
-              `EVE fitting analysis failed (${response.status}).`,
-            );
-          return response.json() as Promise<{
-            type_id: number;
-            name: string;
-            dogma_attributes?: Array<{
-              attribute_id: number;
-              value: number;
-            }>;
-          }>;
+          const local = await getFittingTypeInfoLocal(typeId);
+          return {
+            type_id: local.typeId,
+            name: local.name,
+            dogma_attributes: local.attributes.map((attribute) => ({ attribute_id: attribute.attributeId, value: attribute.value })),
+          };
         }),
       );
       const requirementPairs = [
@@ -1396,26 +1447,10 @@ if (!hasSingleInstanceLock) {
         ),
       ];
       const skillNames = new Map<number, string>();
-      if (requiredSkillIds.length) {
-        const response = await fetch(
-          "https://esi.evetech.net/universe/names/",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Compatibility-Date": "2026-08-02",
-              "X-User-Agent": "NewEdenSage/0.1.0",
-            },
-            body: JSON.stringify(requiredSkillIds),
-          },
-        );
-        if (response.ok)
-          for (const item of (await response.json()) as Array<{
-            id: number;
-            name: string;
-          }>)
-            skillNames.set(item.id, item.name);
-      }
+      await Promise.all(requiredSkillIds.map(async (skillId) => {
+        const local = await getFittingTypeInfoLocal(skillId).catch(() => null);
+        if (local) skillNames.set(skillId, local.name);
+      }));
       const trained = new Map(
         (snapshot.skills?.skills ?? []).map((skill: any) => [
           skill.skill_id,
@@ -1535,7 +1570,7 @@ if (!hasSingleInstanceLock) {
     await writeConfig(config);
     // EVE authorization is complete. Pull the character ESI snapshot now so the
     // newly added character is immediately useful; derived/prepared intelligence
-    // remains owned by Sync All.
+    // remains owned by the local private refresh.
     const characterSyncStartedAt = Date.now();
     const snapshot = await fetchCharacterCoreSnapshot(
       login.characterId,
@@ -1698,16 +1733,13 @@ if (!hasSingleInstanceLock) {
       let content: string;
       if (format === "json") content = JSON.stringify(data, null, 2);
       else if (format === "chatgpt-radius") {
-        const full = await loadLatestMarketDatasetByMode("all");
-        if (!full)
-          throw new Error(
-            "No full public market dataset exists yet. Run a full market pull first.",
-          );
-        const contracts = await loadLatestMarketDatasetByMode("contracts");
-        if (!contracts)
-          throw new Error(
-            "No full high-sec contracts dataset exists yet. Run the contracts pull first.",
-          );
+        const full = await loadSharedMarketBrowserDataset();
+        if (!full.summaries.length)
+          throw new Error("No server-prepared public market generation is installed yet. Let Sage install the latest shared public data and try again.");
+        const sharedContracts = await loadSharedPublicContractsDataset();
+        if (!sharedContracts)
+          throw new Error("No server-prepared public contract generation is installed yet. Let Sage install the latest shared public data and try again.");
+        const contracts = { createdAt: sharedContracts.createdAt, summaries: sharedContracts.regions };
         const parsed = path.parse(result.filePath);
         const stationPath = path.join(parsed.dir, `${parsed.name}.xlsx`);
         const contractPath = path.join(
@@ -1781,7 +1813,7 @@ if (!hasSingleInstanceLock) {
     });
     return result.filePath;
   });
-  ipcMain.handle("market:regions", async () => listRegions());
+  ipcMain.handle("market:regions", () => loadSharedMarketBrowserRegions());
   ipcMain.handle("fit:shopping-route", async (_event, input) =>
     buildFitShoppingRoute(input),
   );
@@ -1884,10 +1916,10 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("analysis:status", () => analysisStatus());
   ipcMain.handle("master:update-all", async (event, input?: CompleteSyncOptions) => {
     const options = input ?? {};
-    if (options.cloneStates) await saveSyncPreparationOptions(options);
+    if (options.cloneStates) await saveSyncPreparationOptions({ cloneStates: options.cloneStates });
     return runCompleteSync((progress) => {
       if (!event.sender.isDestroyed()) event.sender.send("master:update-progress", progress);
-    // A button press is explicit; only automatic startup refreshes may be version-gated.
+    // A button press explicitly refreshes private/authenticated data only.
     }, false, options);
   });
   ipcMain.on("diagnostics:renderer-error", (_event, report) => logCrash("renderer.javascript_error", { report }));
@@ -1953,219 +1985,43 @@ if (!hasSingleInstanceLock) {
       (progress) => window?.webContents.send("analysis:progress", progress),
     ),
   );
-  ipcMain.handle("market:summaries", () => loadMarketIndexHeaders());
-  ipcMain.handle("market:region", (_event, regionId: number) =>
-    loadMarketRegion(regionId),
-  );
+  ipcMain.handle("market:summaries", () => loadSharedMarketBrowserSummaries());
+  ipcMain.handle("market:region", (_event, regionId: number) => loadSharedMarketBrowserRegion(Number(regionId)));
+  ipcMain.handle("public-data:status", () => loadPublicDataStatus());
+  ipcMain.handle("public-data:check-availability", () => refreshPublicDataAvailability());
+  ipcMain.handle("public-data:check", () => installSharedPublicData());
   ipcMain.handle("market:storage", async () => {
-    const raw = await loadCurrentRawMarketManifest("all");
-    return {
-      path: MARKET_DATA_ROOT,
-      retainedDatasets: await countMarketDatasets(),
-      raw: raw
-        ? { root: RAW_MARKET_ROOT, snapshotId: raw.id, createdAt: raw.createdAt, orderCount: raw.orderCount, regionCount: raw.regionCount, complete: raw.complete }
-        : null,
-    };
+    const manifest = await loadCurrentSharedMarketManifest();
+    return { path: SHARED_MARKET_ROOT, retainedDatasets: manifest ? 1 : 0, raw: null, generation: manifest?.generation ?? null };
   });
-  ipcMain.handle(
-    "market:pull",
-    async (
-      _event,
-      input: {
-        mode: "single" | "all" | "radius" | "contracts";
-        regionId?: number;
-        characterId?: string;
-        includeLowSec?: boolean;
-      },
-    ) => {
-      const pullStartedAt = Date.now();
-      await logEvent("info", "market_pull.started", {
-        mode: input.mode,
-        regionId: input.regionId,
-        includeLowSec: Boolean(input.includeLowSec),
-      });
-      const regions = await listRegions();
-      let allowedSystemIds: Set<number> | undefined;
-      let selected =
-        input.mode === "all" || input.mode === "contracts"
-          ? regions
-          : regions.filter((region) => region.regionId === input.regionId);
-      const rawSnapshot = input.mode === "contracts" ? null : await beginRawMarketSnapshot(input.mode);
-      // Public item-exchange contracts are scanned EVE-wide across every region/security band.
-      // A location filter here would make the Contracts browser silently incomplete.
-      if (input.mode === "radius") {
-        const snapshot = getSnapshot(input.characterId) as {
-          location?: { solar_system_id?: number };
-          character?: { name?: string };
-        } | null;
-        const origin = snapshot?.location?.solar_system_id;
-        if (!origin)
-          throw new Error(
-            "Sync the selected character before using the 20-jump pull.",
-          );
-        const radius = await discoverMarketRadius(
-          origin,
-          20,
-          Boolean(input.includeLowSec),
-          (systems, depth) => {
-            window?.webContents.send("market:progress", {
-              mode: input.mode,
-              regionName: `Mapping from ${snapshot?.character?.name ?? "character"}`,
-              regionsDone: depth,
-              regionsTotal: 20,
-              pagesDone: systems,
-              pagesTotal: systems,
-            });
-          },
-        );
-        allowedSystemIds = radius.systemIds;
-        selected = regions.filter((region) =>
-          radius.regionIds.has(region.regionId),
-        );
-      }
-      if (!selected.length) throw new Error("Select a market region first.");
-      if (input.mode === "contracts") {
-        const contractSummaries = [];
-        for (let index = 0; index < selected.length; index += 1) {
-          const region = selected[index];
-          window?.webContents.send("market:progress", {
-            mode: input.mode,
-            regionName: `Contracts: ${region.name}`,
-            regionsDone: index,
-            regionsTotal: selected.length,
-            pagesDone: index,
-            pagesTotal: selected.length,
-          });
-          const publicContracts = await pullRegionContracts(
-            region,
-            allowedSystemIds,
-          );
-          await logEvent("info", "contracts.region_completed", {
-            regionId: region.regionId,
-            regionName: region.name,
-            contracts: publicContracts.length,
-            regionNumber: index + 1,
-            regionTotal: selected.length,
-          });
-          contractSummaries.push({
-            regionId: region.regionId,
-            regionName: region.name,
-            updatedAt: new Date().toISOString(),
-            publicContracts,
-          });
-        }
-        const storage = await saveMarketDataset("contracts", contractSummaries);
-        window?.webContents.send("market:progress", {
-          mode: input.mode,
-          regionName: "Contracts refreshed",
-          regionsDone: selected.length,
-          regionsTotal: selected.length,
-          pagesDone: selected.length,
-          pagesTotal: selected.length,
-        });
-        await logEvent("info", "market_pull.completed", {
-          mode: input.mode,
-          regions: selected.length,
-          durationMs: Date.now() - pullStartedAt,
-          datasetPath: storage.path,
-          snapshotsStored: storage.retained,
-        });
-        const stationDataset = await loadLatestMarketDatasetByMode("all");
-        return {
-          summaries: await loadMarketIndexHeaders(),
-          storage,
-        };
-      }
-      let regionsDone = 0;
-      const existing = (
-        input.mode === "single" ? await loadLatestMarketDataset() : []
-      ) as Array<{ regionId: number }>;
-      const summaryByRegion = new Map(
-        existing.map((summary) => [summary.regionId, summary]),
-      );
-      for (const region of selected) {
-        const summary = await pullRegionMarket(
-          region,
-          (pagesDone, pagesTotal) => {
-            window?.webContents.send("market:progress", {
-              mode: input.mode,
-              regionName: region.name,
-              regionsDone,
-              regionsTotal: selected.length,
-              pagesDone,
-              pagesTotal,
-            });
-          },
-          allowedSystemIds,
-          rawSnapshot
-            ? (orders) => saveRawMarketRegion(rawSnapshot, region, orders).then(() => undefined)
-            : undefined,
-        );
-        summaryByRegion.set(summary.regionId, summary);
-        regionsDone += 1;
-        await logEvent("info", "market.region_completed", {
-          regionId: region.regionId,
-          regionName: region.name,
-          orders: summary.orderCount,
-          itemTypes: summary.uniqueTypes,
-          pages: summary.pageCount,
-          regionNumber: regionsDone,
-          regionTotal: selected.length,
-        });
-        window?.webContents.send("market:progress", {
-          mode: input.mode,
-          regionName: region.name,
-          regionsDone,
-          regionsTotal: selected.length,
-          pagesDone: summary.pageCount,
-          pagesTotal: summary.pageCount,
-        });
-      }
-      const summaries = Array.from(summaryByRegion.values()).sort((a, b) =>
-        String((a as { regionName?: string }).regionName).localeCompare(
-          String((b as { regionName?: string }).regionName),
-        ),
-      );
-      const storage = await saveMarketDataset(input.mode, summaries);
-      const rawStorage = rawSnapshot ? await completeRawMarketSnapshot(rawSnapshot) : null;
-      await logEvent("info", "market_pull.completed", {
-        mode: input.mode,
-        regions: selected.length,
-        durationMs: Date.now() - pullStartedAt,
-        datasetPath: storage.path,
-        snapshotsStored: storage.retained,
-        rawOrderCount: rawStorage?.orderCount ?? 0,
-        rawRegionCount: rawStorage?.regionCount ?? 0,
-      });
-      return {
-        summaries: marketSummaryHeaders(summaries),
-        storage: {
-          ...storage,
-          raw: rawStorage
-            ? { root: RAW_MARKET_ROOT, snapshotId: rawStorage.id, orderCount: rawStorage.orderCount, regionCount: rawStorage.regionCount }
-            : null,
-        },
-      };
-    },
-  );
+  ipcMain.handle("market:pull", async (_event, input?: { mode?: string; regionId?: number }) => {
+    if (input?.mode !== "contracts" && input?.mode !== "single") throw new Error("Public market data is server-managed. Use Data Control to install a newer generation.");
+    const manifest = await loadCurrentSharedMarketManifest();
+    if (!manifest) throw new Error("No public data is installed. Use Data Control > Check for new data, then install the available update.");
+    if (input.mode === "contracts") {
+      const contracts = await loadSharedPublicContractsDataset();
+      if (!contracts) throw new Error("The installed public generation does not contain public contracts. Check Data Control for an update.");
+      window?.webContents.send("market:progress", { mode: "contracts", regionName: "Installed server-prepared public contracts", pagesDone: 1, pagesTotal: 1, regionsDone: 1, regionsTotal: 1 });
+      return { summaries: contracts.regions, storage: { path: `Shared public generation ${manifest.generation}`, retained: 1 }, generation: manifest.generation, contractCount: contracts.contractCount, pendingDetailCount: contracts.pendingDetailCount };
+    }
+    const summaries = await loadSharedMarketBrowserSummaries();
+    window?.webContents.send("market:progress", { mode: "single", regionName: "Installed server-prepared public market", pagesDone: 1, pagesTotal: 1, regionsDone: 1, regionsTotal: 1 });
+    return { summaries, storage: { path: `Shared public generation ${manifest.generation}`, retained: 1 }, generation: manifest.generation };
+  });
   createWindow();
-  startWalletReconciliationTimer();
   window?.webContents.once("did-finish-load", () => {
-    void readConfig().then(async (config) => {
-      if (!Object.keys(config.encryptedRefreshTokens ?? {}).length) {
-        await logEvent("info", "master_update.awaiting_first_characters", {});
-        return;
+    void (async () => {
+      try {
+        await refreshPublicDataAvailability();
+      } catch (error) {
+        await logEvent("warn", "shared_public.startup_availability_check_failed", { error: error instanceof Error ? error.message : String(error) });
       }
-      if (await hasSyncedThisVersion()) {
-        await logEvent("info", "master_update.already_synced_this_version", { version: app.getVersion() });
-        return;
-      }
-      await runCompleteSync((progress) => window?.webContents.send("master:update-progress", progress), true, await readSyncPreparationOptions());
-    }).catch((error) => logCrash("master_update.auto_start_failed", { error }));
+      startSharedPublicDataFlow();
+      await logEvent("info", "private_refresh.automatic_disabled", { reason: "Private data refreshes are user initiated; targeted live-location refreshes remain feature controlled." });
+    })().catch((error) => logCrash("public_data.availability_start_failed", { error }));
   });
   });
 }
-
 function makeChatGPTMarkdown(data: ReturnType<typeof exportDatabaseData>) {
   const snapshots = data.characterSnapshots
     .map((item) => JSON.stringify(item, null, 2))
@@ -2812,7 +2668,8 @@ function makeRadiusChatGPTMarkdown(data: {
 }
 
 app.on("window-all-closed", () => {
-  if (walletReconciliationTimer) { clearInterval(walletReconciliationTimer); walletReconciliationTimer = undefined; }
+  stopSharedPublicListener?.(); stopSharedPublicListener = undefined;
+  if (publicReconcileTimer) { clearInterval(publicReconcileTimer); publicReconcileTimer = undefined; }
   void logEvent("info", "app.window_all_closed");
   void disposeAnalysisWorker();
   void disposeFittingWorker();

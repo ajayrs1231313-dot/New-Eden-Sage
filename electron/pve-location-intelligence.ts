@@ -5,6 +5,7 @@ import { analyzeCapabilities, type CapabilityAnalysis, type CapabilityResult } f
 import { getPveStaticIndex, type PveSystemStatic } from "./pve-static-index";
 import { universeRoute } from "./universe-route-graph";
 import type { CloneState } from "./skill-training";
+import { loadSharedPublicSource } from "./shared-market-data";
 
 export type PveLocationKind = "incursion" | "mission-staging" | "ded-search" | "lowsec-ratting" | "nullsec-ratting";
 export type PveAvailability = "live" | "search-area" | "static-candidate";
@@ -201,28 +202,24 @@ async function fetchJson<T>(url: string): Promise<T> {
 async function loadLivePveData(force = false): Promise<LivePveData> {
   if (!force && memoryLive && Date.now() - Date.parse(memoryLive.fetchedAt) <= LIVE_TTL_MS) return memoryLive;
   const disk = await readLiveCache();
-  if (!force && disk && Date.now() - Date.parse(disk.fetchedAt) <= LIVE_TTL_MS) {
-    memoryLive = disk;
-    return disk;
-  }
+  if (!force && disk && Date.now() - Date.parse(disk.fetchedAt) <= LIVE_TTL_MS) { memoryLive = disk; return disk; }
 
   const [incursionsResult, killsResult, jumpsResult] = await Promise.allSettled([
-    fetchJson<LivePveData["incursions"]>("https://esi.evetech.net/incursions/"),
-    fetchJson<LivePveData["kills"]>("https://esi.evetech.net/universe/system_kills/"),
-    fetchJson<LivePveData["jumps"]>("https://esi.evetech.net/universe/system_jumps/"),
+    loadSharedPublicSource<LivePveData["incursions"]>("incursions").then((source) => { if (!source) throw new Error("Shared incursions are not installed yet."); return source; }),
+    loadSharedPublicSource<LivePveData["kills"]>("system-kills").then((source) => { if (!source) throw new Error("Shared system kills are not installed yet."); return source; }),
+    loadSharedPublicSource<LivePveData["jumps"]>("system-jumps").then((source) => { if (!source) throw new Error("Shared system jumps are not installed yet."); return source; }),
   ]);
   const errors: string[] = [];
-  const fallbackUsable = disk && Date.now() - Date.parse(disk.fetchedAt) <= FALLBACK_MAX_AGE_MS;
-  const pick = <T>(result: PromiseSettledResult<T>, fallback: T, label: string) => {
-    if (result.status === "fulfilled") return result.value;
-    errors.push(`${label}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
-    return fallback;
-  };
+  const fallbackUsable = Boolean(disk && Date.now() - Date.parse(disk.fetchedAt) <= FALLBACK_MAX_AGE_MS);
+  const failure = (result: PromiseSettledResult<unknown>, label: string) => { if (result.status === "rejected") errors.push(label + ": " + (result.reason instanceof Error ? result.reason.message : String(result.reason))); };
+  failure(incursionsResult, "Incursions"); failure(killsResult, "System kills"); failure(jumpsResult, "System traffic");
+  const timestamps = [incursionsResult, killsResult, jumpsResult].flatMap((result) => result.status === "fulfilled" ? [Date.parse(result.value.fetchedAt)] : []).filter(Number.isFinite);
+  const fetchedAt = timestamps.length ? new Date(Math.min(...timestamps)).toISOString() : (fallbackUsable ? disk!.fetchedAt : new Date().toISOString());
   const data: LivePveData = {
-    fetchedAt: new Date().toISOString(),
-    incursions: pick(incursionsResult, fallbackUsable ? disk!.incursions : [], "Incursions"),
-    kills: pick(killsResult, fallbackUsable ? disk!.kills : [], "System kills"),
-    jumps: pick(jumpsResult, fallbackUsable ? disk!.jumps : [], "System traffic"),
+    fetchedAt,
+    incursions: incursionsResult.status === "fulfilled" ? incursionsResult.value.data : (fallbackUsable ? disk!.incursions : []),
+    kills: killsResult.status === "fulfilled" ? killsResult.value.data : (fallbackUsable ? disk!.kills : []),
+    jumps: jumpsResult.status === "fulfilled" ? jumpsResult.value.data : (fallbackUsable ? disk!.jumps : []),
     errors,
     stale: errors.length > 0,
   };

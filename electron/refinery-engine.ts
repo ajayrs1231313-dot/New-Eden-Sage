@@ -122,7 +122,7 @@ async function refineryIndex() {
 
 async function requireRefineryIndex() {
   const index = await refineryIndex();
-  if (!index) throw new Error("Refinery static data is still preparing. Run Sync All to prepare the refinery cache; opening this page will not parse the SDE.");
+  if (!index) throw new Error("Refinery static data is still preparing locally. Wait for static-data preparation to finish; opening this page will not parse the SDE.");
   return index;
 }
 

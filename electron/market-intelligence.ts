@@ -1,5 +1,6 @@
 ﻿import { loadLatestMarketDatasetByMode } from "./market-storage";
 import { buildFullMarketAnalysisIndex } from "./raw-market-analysis";
+import { loadSharedPublicContractsDataset } from "./shared-market-data";
 import type { PublicContract } from "./market";
 import {
   getMarketSystemIndex,
@@ -330,12 +331,15 @@ export type ContractOpportunity = {
 };
 
 export async function getContractMarketIntelligence() {
-  const [contractsDataset, market, systemIndex, typeIndex] = await Promise.all([
-    loadLatestMarketDatasetByMode("contracts"),
+  const [sharedContracts, market, systemIndex, typeIndex] = await Promise.all([
+    loadSharedPublicContractsDataset(),
     loadGlobalMarketQuotes(),
     getMarketSystemIndex(),
     getMarketTypeIndex(),
   ]);
+  const contractsDataset = sharedContracts
+    ? { schemaVersion: 1 as const, mode: "contracts" as const, createdAt: sharedContracts.createdAt, summaries: sharedContracts.regions }
+    : await loadLatestMarketDatasetByMode("contracts");
 
   const quoteById = new Map(market.quotes.map((quote) => [quote.typeId, quote]));
   // Public contract ESI does not resolve player structures without character
@@ -352,6 +356,7 @@ export async function getContractMarketIntelligence() {
   const rows: ContractOpportunity[] = [];
   for (const region of (contractsDataset?.summaries ?? []) as RegionSummaryLike[]) {
     for (const originalContract of region.publicContracts ?? []) {
+      if (!Array.isArray(originalContract.items) || originalContract.items.length === 0) continue;
       const inferred = originalContract.systemId > 0 ? undefined : marketLocationSystem.get(originalContract.startLocationId);
       const resolvedSystemId = originalContract.systemId > 0 ? originalContract.systemId : (inferred?.systemId ?? 0);
       const resolvedSystemName = originalContract.systemId > 0

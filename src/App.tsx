@@ -24,8 +24,7 @@ import { CorporationManagement } from "./CorporationManagement";
 import { FleetCommand } from "./FleetCommand";
 import { NavigationCommand } from "./NavigationCommand";
 import { WormholeCommand } from "./WormholeCommand";
-import { SystemClock } from "./SystemClock";
-import { DataAgeBadge } from "./DataAgeBadge";
+import { CharacterCommandHeader } from "./CharacterCommandHeader";
 import { AugmentsGuide } from "./AugmentsGuide";
 import { LpStore } from "./LpStore";
 import { ClaudeIntegrationCard } from "./ClaudeIntegrationCard";
@@ -170,6 +169,7 @@ export default function App() {
   }, []);
   const [activeId, setActiveId] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  const [privateRefreshActive, setPrivateRefreshActive] = useState(false);
   const [message, setMessage] = useState("Local systems ready");
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [initialSetupComplete, setInitialSetupComplete] = useState(true);
@@ -227,7 +227,7 @@ export default function App() {
       setView("overview");
       setMessage(result.onlineIdentityError
         ? `${result.characterName} connected locally - ${result.onlineIdentityError}`
-        : `${result.characterName} connected - ready for Sync All`);
+        : `${result.characterName} connected - ready for private data refresh`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "EVE login failed");
     } finally {
@@ -235,26 +235,34 @@ export default function App() {
     }
   }
 
-  async function syncAll() {
+  async function refreshPrivateData() {
+    const selectedCharacterId = activeId || snapshots[0]?.characterId;
+    if (!selectedCharacterId) {
+      setMessage("Add a character before refreshing private data.");
+      return;
+    }
     setBusy(true);
-    setMessage("Syncing and preparing all Sage intelligence\u2026");
+    setPrivateRefreshActive(true);
+    setMessage("Refreshing selected character private EVE data locally...");
     try {
-      const result = await window.sage.runMasterUpdate({ cloneStates }) as { alreadySynced?: boolean; preparationFailures?: unknown[] } | undefined;
+      const result = await window.sage.runMasterUpdate({ cloneStates, characterIds: [selectedCharacterId] }) as { alreadySynced?: boolean; preparationFailures?: unknown[] } | undefined;
       if (result?.alreadySynced) {
         setInitialSetupComplete(true);
-        setMessage("Sage is already current. Sync All will be available again in a few seconds.");
+        setMessage("Private data is already current for this app version.");
         return;
       }
       const nextSnapshots = await window.sage.listSnapshots();
       setSnapshots(nextSnapshots);
       setActiveId((current) => nextSnapshots.some((item) => item.characterId === current) ? current : nextSnapshots[0]?.characterId ?? "");
       setMarketDataRevision((value) => value + 1);
-      setMessage(result?.preparationFailures?.length ? "Update finished with preparation warnings. The affected bars show what needs retrying." : "Everything is synced and prepared.");
+      const refreshedCharacter = nextSnapshots.find((item) => item.characterId === selectedCharacterId);
+      setMessage(result?.preparationFailures?.length ? "Update finished with preparation warnings. The affected bars show what needs retrying." : (refreshedCharacter?.character.name ?? "Selected character") + " private data refreshed.");
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Character sync failed",
       );
     } finally {
+      setPrivateRefreshActive(false);
       setBusy(false);
     }
   }
@@ -262,15 +270,21 @@ export default function App() {
   useEffect(() => window.sage.onMasterUpdateProgress((progress) => {
     setSyncProgress(progress);
     if (progress.running) {
+      setPrivateRefreshActive(true);
       setBusy(true);
       setMessage(progress.message);
     } else {
+      setPrivateRefreshActive(false);
       setBusy(false);
       setMessage(progress.message);
       setInitialSetupComplete(true);
       void window.sage.listSnapshots().then(setSnapshots);
       setMarketDataRevision((value) => value + 1);
     }
+  }), []);
+
+  useEffect(() => window.sage.onPreparedDataUpdated((value) => {
+    if (value.publicDataUpdated) setMarketDataRevision((revision) => revision + 1);
   }), []);
 
   async function removeCharacter(characterId: string) {
@@ -345,33 +359,21 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      {(!initialSetupComplete || syncProgress?.running) && (
+      {(!initialSetupComplete && !syncProgress?.running) && (
         <div className="sync-overlay" role="status" aria-live="polite">
           <div className="sync-dialog">
             <span className="pulse" />
             <p className="eyebrow">SETTING UP NEW EDEN SAGE</p>
-            <h2>{syncProgress?.running ? "Syncing your live intelligence" : "Add your EVE characters"}</h2>
-            <p>{syncProgress?.running ? syncProgress.message : "Add the EVE characters you want Sage to track, then begin one complete sync."}</p>
-            {!syncProgress?.running && !config.primaryCharacterId && (
+            <h2>Add your EVE characters</h2>
+            <p>Add the EVE characters you want Sage to track, then refresh their private data.</p>
+            {!config.primaryCharacterId && (
               <div className="sync-identity-note">
                 <strong>Choose your main character first</strong>
                 <span>The first character you add becomes your main New Eden Sage account identity. Sage keys that account to the character's permanent EVE Character ID. Every character you add afterwards is linked to that Sage account.</span>
               </div>
             )}
-            {syncProgress?.running ? (
-              <>
-                <div className="sync-overall-row"><span>Overall preparation</span><strong>{Math.round(syncProgress.percent)}%</strong></div>
-                <div className="sync-progress-track sync-progress-overall"><i style={{ width: `${Math.max(2, syncProgress.percent)}%` }} /></div>
-                {syncProgress.tracks?.length ? <div className="sync-track-grid">
-                  {syncProgress.tracks.map((track) => <div className={`sync-track-card ${track.status}`} key={track.id} title={track.message}>
-                    <div className="sync-track-head"><span>{track.label}</span><strong>{track.status === "done" ? "Ready" : track.status === "error" ? "Retry" : track.status === "waiting" ? "Waiting" : `${Math.round(track.percent)}%`}</strong></div>
-                    <div className="sync-track-bar"><i style={{ width: `${Math.max(track.status === "waiting" ? 0 : 2, track.percent)}%` }} /></div>
-                    <small>{track.message}</small>
-                  </div>)}
-                </div> : null}
-              </>
-            ) : <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void syncAll()} disabled={!snapshots.length}>Begin Sync{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>}
-            <small className="sync-footnote">{syncProgress?.running ? "Refreshing private character data and checking server-prepared market intelligence." : snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character's data separate and refreshes them together."}</small>
+            <div className="sync-setup-actions"><button className="connect sync-add-character" onClick={connect}>+ Add character</button><button className="sync" onClick={() => void refreshPrivateData()} disabled={!snapshots.length}>REFRESH PRIVATE DATA{snapshots.length ? ` (${snapshots.length})` : ""}</button></div>
+            <small className="sync-footnote">{snapshots.length ? `${snapshots.length} character${snapshots.length === 1 ? "" : "s"} ready. You can add more before starting.` : "You can add more characters at any time. Sage keeps each character's data separate and refreshes them together."}</small>
           </div>
         </div>
       )}
@@ -477,34 +479,25 @@ export default function App() {
         </div>
       </aside>
       <main>
-        <header>
-          <div>
-            <p className="eyebrow">CAPSULEER INTELLIGENCE</p>
-            <h1>{nav.find((item) => item.id === view)?.label}</h1>
-          </div>
-          <div className="header-actions">
-            <DataAgeBadge view={view} snapshot={active} marketDataRevision={marketDataRevision} />
-            <UpdateControl />
-            <SystemClock />
-            <button
-              className="support-developer"
-              onClick={() => void window.sage.openSupportPage()}
-              title="Support New Eden Sage development via PayPal"
-            >
-              Support Developer
-            </button>
-            <button className="sync" onClick={() => void syncAll()} disabled={busy}>
-              {"\u21bb"} {busy ? "Syncing all\u2026" : "Sync All"}
-            </button>
-            <button
-              className="connect"
-              onClick={connect}
-              disabled={busy}
-            >
-              {busy ? "Connecting\u2026" : "+ Add character"}
-            </button>
-          </div>
-        </header>
+        <CharacterCommandHeader
+          title={nav.find((item) => item.id === view)?.label ?? "New Eden Sage"}
+          subtitle={
+            view === "overview"
+              ? "Command and control for your capsuleer assets"
+              : view === "skills"
+                ? "Plan activities, fittings and training for the selected capsuleer"
+                : "Unified public and private data controls for this command workspace"
+          }
+          kicker={view === "overview" ? "COMMAND DECK" : "CAPSULEER INTELLIGENCE"}
+          snapshot={active}
+          busy={busy}
+          privateRefreshing={privateRefreshActive}
+          privateProgress={syncProgress?.running ? syncProgress.percent : privateRefreshActive ? 3 : 0}
+          marketDataRevision={marketDataRevision}
+          onRefreshPrivate={refreshPrivateData}
+          onAddCharacter={connect}
+          onSupportDeveloper={() => window.sage.openSupportPage()}
+        />
         {mountedViews.current.has("overview") && (
           <div className="cached-view" hidden={view !== "overview"}>
             <CharacterCommand
@@ -1487,9 +1480,8 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
   const [summaries, setSummaries] = useState<MarketSummary[]>([]);
   const [activeRegion, setActiveRegion] = useState<number>(10000002);
   const [busy, setBusy] = useState(false);
-  const marketProgressLocked = useRef(false);
   const [progress, setProgress] = useState(
-    "Ready to pull public ESI market data",
+    "Using the installed server-prepared public market generation",
   );
   const [itemSearch, setItemSearch] = useState("");
   const [sideFilter, setSideFilter] = useState<"all" | "sell" | "buy">("all");
@@ -1503,7 +1495,6 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
     | "buyVolume"
     | "sellVolume"
   >("orders");
-  const [includeLowSec, setIncludeLowSec] = useState(false);
   const [selectedItem, setSelectedItem] = useState<MarketItem | null>(null);
   const [storage, setStorage] = useState<{
     path: string;
@@ -1537,9 +1528,7 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
       .then(setRegions)
       .catch(() => undefined);
     return window.sage.onMarketProgress((item) => {
-      if (!marketProgressLocked.current) setProgress(
-        `${item.regionName}: page ${item.pagesDone}/${item.pagesTotal} / regions ${item.regionsDone}/${item.regionsTotal}`,
-      );
+      setProgress(`${item.regionName}: public data ready`);
     });
   }, []);
   async function showRegion(regionId: number) {
@@ -1553,40 +1542,17 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
       return next.sort((a, b) => a.regionName.localeCompare(b.regionName));
     });
   }
-  async function pull(mode: "single" | "all" | "radius" | "contracts") {
-    if (mode === "radius" && !snapshot) {
-      setProgress("Connect and sync a character before using a radius pull.");
-      return;
-    }
-    marketProgressLocked.current = false;
+  async function refreshSharedMarket() {
     setBusy(true);
-    setProgress(
-      mode === "all"
-        ? "Starting all-region pull..."
-        : mode === "contracts"
-          ? "Starting EVE-wide public contract pull..."
-          : mode === "radius"
-            ? "Mapping systems within 20 jumps..."
-            : "Starting regional pull...",
-    );
+    setProgress("Checking for the latest server-prepared public market generation...");
     try {
-      const result = await window.sage.pullMarket({
-        mode,
-        regionId: selected,
-        characterId: snapshot?.characterId,
-        includeLowSec,
-      });
+      const result = await window.sage.pullMarket({ mode: "single", regionId: selected });
       setSummaries(result.summaries);
       onMarketDataUpdated();
       await showRegion(selected);
-      setProgress(
-        `Dataset saved to ${result.storage.path}. ${result.storage.retained} total snapshots retained.`,
-      );
-      marketProgressLocked.current = true;
+      setProgress(`Shared public market ready from ${result.storage.path}.`);
     } catch (error) {
-      setProgress(
-        error instanceof Error ? error.message : "Market pull failed",
-      );
+      setProgress(error instanceof Error ? error.message : "Shared public market reconciliation failed");
     } finally {
       setBusy(false);
     }
@@ -1653,7 +1619,7 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
           <p className="eyebrow">PUBLIC TRANQUILITY DATA</p>
           <h2>Regional market intelligence</h2>
           <p>
-            No character authorization is required. Results are cached locally.
+            No character authorization is required. Server-prepared results are cached locally. Sage checks for a newer generation hourly; install updates from Data Control.
           </p>
         </div>
         <div className="market-controls">
@@ -1671,17 +1637,9 @@ function RegionalMarket({ snapshot, marketDataRevision = 0, onMarketDataUpdated 
               </option>
             ))}
           </select>
-          <button onClick={() => pull("single")} disabled={busy}>
-            Pull region
+          <button onClick={() => void refreshSharedMarket()} disabled={busy}>
+            Reload installed data
           </button>
-          <label className="lowsec-check">
-            <input
-              type="checkbox"
-              checked={includeLowSec}
-              onChange={(event) => setIncludeLowSec(event.target.checked)}
-            />
-            Include low-sec
-          </label>
         </div>
       </div>
       <div className="market-progress">

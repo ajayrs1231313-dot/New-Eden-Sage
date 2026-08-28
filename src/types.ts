@@ -17,6 +17,18 @@ export interface PublicConfig {
   primaryCharacterId: string | null;
 }
 
+export interface PublicDataStatus {
+  installed: boolean;
+  generation: string | null;
+  createdAt: string | null;
+  source: "shared" | null;
+  orderCount: number;
+  regionCount: number;
+  updateAvailable: boolean;
+  availableGeneration: string | null;
+  lastCheckedAt: string | null;
+}
+
 export interface CharacterSnapshot {
   characterId: string;
   snapshotState?: "bootstrap" | "synced";
@@ -1393,8 +1405,8 @@ declare global {
       }): Promise<PveLocationAnalysis>;
       cancelAnalysis(kind?: "opportunity" | "capability" | "trade" | "raw-market" | "regional-filter" | "pve-location"): Promise<boolean>;
       getAnalysisStatus(): Promise<any>;
-      runMasterUpdate(input?: { cloneStates?: Record<string, "alpha" | "omega"> }): Promise<any>;
-      onPreparedDataUpdated(callback: (value: { completedAt: string; characterIds: string[]; preparationFailures: number }) => void): () => void;
+      runMasterUpdate(input?: { cloneStates?: Record<string, "alpha" | "omega">; characterIds?: string[] }): Promise<any>;
+      onPreparedDataUpdated(callback: (value: { completedAt: string; characterIds?: string[]; preparationFailures?: number; publicDataUpdated?: boolean; publicGeneration?: string; publicArtifacts?: string[]; privateDataReady?: boolean }) => void): () => void;
       onMasterUpdateProgress(callback: (progress: { running:boolean; stage:string; message:string; percent:number; startedAt?:string; cpuWorkers?:number; downloadDurationMs?:number; totalDurationMs?:number; completed?:number; total?:number; tracks?: Array<{ id:string; label:string; percent:number; status:"waiting" | "running" | "done" | "error"; message:string }> }) => void): () => void;
       onAnalysisProgress(callback: (progress: AnalysisProgress) => void): () => void;
       exportTopArbitrage(): Promise<string | null>;
@@ -1423,6 +1435,11 @@ declare global {
       }): Promise<RawMarketSearchResult>;
       listMarketSummaries(): Promise<MarketSummary[]>;
       getMarketRegion(regionId: number): Promise<MarketSummary | null>;
+      getPublicDataStatus(): Promise<PublicDataStatus>;
+      checkPublicDataAvailability(): Promise<PublicDataStatus>;
+      checkPublicData(): Promise<PublicDataStatus & { changed: boolean; changedArtifacts: string[] }>;
+      onPublicDataStatus(callback: (value: PublicDataStatus) => void): () => void;
+      onPublicDataProgress(callback: (value: { running: boolean; percent: number; message: string; completed?: number; total?: number; error?: string }) => void): () => void;
       getMarketStorage(): Promise<{
         path: string;
         retainedDatasets: number;

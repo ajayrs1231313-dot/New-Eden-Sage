@@ -4,6 +4,12 @@ import path from "node:path";
 import { app, crashReporter, ipcMain } from "electron";
 import { LOG_ROOT, installProcessErrorLogging, logCrash, logEvent } from "./logger";
 
+const MCP_MODE = process.argv.includes("--mcp");
+const DESKTOP_SINGLE_INSTANCE_LOCK = MCP_MODE ? true : app.requestSingleInstanceLock();
+(globalThis as typeof globalThis & { __sageSingleInstanceLockHeld?: boolean }).__sageSingleInstanceLockHeld = DESKTOP_SINGLE_INSTANCE_LOCK;
+
+if (!DESKTOP_SINGLE_INSTANCE_LOCK) app.quit();
+
 const HEARTBEAT_FILE = path.join(LOG_ROOT, `electron-heartbeat-${process.pid}.json`);
 const HEALTH_LOG_FILE = path.join(LOG_ROOT, "electron-health.jsonl");
 let rendererHeartbeatAt = 0;
@@ -108,7 +114,9 @@ app.on("web-contents-created", (_event, contents) => {
   });
 });
 
-if (process.argv.includes("--mcp")) {
+if (!DESKTOP_SINGLE_INSTANCE_LOCK) {
+  // The existing desktop instance receives Electron's second-instance event.
+} else if (MCP_MODE) {
   void app.whenReady().then(async () => {
     const { startMcpServer } = await import("./mcp-server.js");
     await startMcpServer();

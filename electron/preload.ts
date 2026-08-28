@@ -26,13 +26,43 @@ setInterval(rendererHeartbeat, 2000);
 
 const transientAnalysisError = (error: unknown) => /ANALYSIS_(WATCHDOG|WORKER_CRASH|WORKER_EXIT)|stopped responding|worker crashed|worker exited unexpectedly/i.test(error instanceof Error ? error.message : String(error));
 
-async function invokeAnalysis(channel: string, ...args: unknown[]) {
+// React Strict Mode intentionally re-runs mount effects in development. Coalesce
+// identical analysis IPC calls while one is already in flight so the duplicate
+// consumer shares the same result instead of cancelling and restarting Sage's
+// background worker. Different requests still keep the job manager's latest-wins
+// behaviour.
+const inFlightAnalysisRequests = new Map<string, Promise<unknown>>();
+
+function analysisRequestKey(channel: string, args: unknown[]) {
   try {
-    return await ipcRenderer.invoke(channel, ...args);
-  } catch (error) {
-    if (!transientAnalysisError(error)) throw error;
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    return ipcRenderer.invoke(channel, ...args);
+    return `${channel}:${JSON.stringify(args)}`;
+  } catch {
+    return "";
+  }
+}
+
+async function invokeAnalysis(channel: string, ...args: unknown[]) {
+  const requestKey = analysisRequestKey(channel, args);
+  const existing = requestKey ? inFlightAnalysisRequests.get(requestKey) : undefined;
+  if (existing) return existing;
+
+  const request = (async () => {
+    try {
+      return await ipcRenderer.invoke(channel, ...args);
+    } catch (error) {
+      if (!transientAnalysisError(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      return ipcRenderer.invoke(channel, ...args);
+    }
+  })();
+
+  if (requestKey) inFlightAnalysisRequests.set(requestKey, request);
+  try {
+    return await request;
+  } finally {
+    if (requestKey && inFlightAnalysisRequests.get(requestKey) === request) {
+      inFlightAnalysisRequests.delete(requestKey);
+    }
   }
 }
 
@@ -313,6 +343,19 @@ contextBridge.exposeInMainWorld("sage", {
   listMarketSummaries: () => ipcRenderer.invoke("market:summaries"),
   getMarketRegion: (regionId: number) =>
     ipcRenderer.invoke("market:region", regionId),
+  getPublicDataStatus: () => ipcRenderer.invoke("public-data:status"),
+  checkPublicDataAvailability: () => ipcRenderer.invoke("public-data:check-availability"),
+  checkPublicData: () => ipcRenderer.invoke("public-data:check"),
+  onPublicDataStatus: (callback: (value: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
+    ipcRenderer.on("public-data:status-changed", listener);
+    return () => ipcRenderer.removeListener("public-data:status-changed", listener);
+  },
+  onPublicDataProgress: (callback: (value: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
+    ipcRenderer.on("public-data:progress", listener);
+    return () => ipcRenderer.removeListener("public-data:progress", listener);
+  },
   getMarketStorage: () => ipcRenderer.invoke("market:storage"),
   pullMarket: (input: {
     mode: "single" | "all" | "radius" | "contracts";

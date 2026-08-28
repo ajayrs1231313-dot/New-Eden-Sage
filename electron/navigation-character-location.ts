@@ -1,6 +1,7 @@
 import { decrypt, encrypt, readConfig, writeConfig } from "./config";
 import { getSnapshot } from "./database";
 import { refreshEveToken } from "./eve";
+import { privateEsiJson } from "./private-esi-cache";
 import { getNavigationSystem } from "./universe-route-graph";
 
 const ESI_HEADERS = {
@@ -58,14 +59,7 @@ export async function getNavigationCharacterLocation(characterIdInput: string, f
 
   try {
     const token = await accessToken(characterId);
-    const response = await fetch(`https://esi.evetech.net/characters/${encodeURIComponent(characterId)}/location/`, {
-      headers: { ...ESI_HEADERS, Authorization: `Bearer ${token}` },
-    });
-    if (!response.ok) {
-      if (response.status === 403) throw new Error("EVE denied location access. Reconnect this character in Sage once to refresh its location permission.");
-      throw new Error(`EVE location request failed (${response.status}).`);
-    }
-    const live = await response.json() as { solar_system_id?: number; station_id?: number; structure_id?: number };
+    const live = (await privateEsiJson<{ solar_system_id?: number; station_id?: number; structure_id?: number }>(characterId, `/characters/${encodeURIComponent(characterId)}/location/`, token)).data;
     const systemId = Number(live.solar_system_id ?? 0);
     if (!systemId) throw new Error("EVE did not return a current solar system for this character.");
     const system = await getNavigationSystem(systemId);

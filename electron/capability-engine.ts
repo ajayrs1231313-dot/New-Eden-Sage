@@ -2,6 +2,7 @@ import { analyzeActivityReadiness, type ActivityReadinessResult } from "./activi
 import { analyzeTrainingPlan, type ExplicitSkillTarget, type ShipReadinessSkill, type SnapshotLike } from "./readiness";
 import { listPublishedShips } from "./type-volumes";
 import type { CloneState } from "./skill-training";
+import { loadSharedPublicSource } from "./shared-market-data";
 
 type CapabilityActivityProfile = {
   id: string;
@@ -447,18 +448,9 @@ function ownedShipNames(snapshot: any) {
 
 async function marketPrices() {
   if (marketPriceCache && marketPriceCache.expiresAt > Date.now()) return marketPriceCache.values;
-  const response = await fetch("https://esi.evetech.net/markets/prices/", {
-    headers: {
-      "X-Compatibility-Date": "2026-08-02",
-      "X-User-Agent": "NewEdenSage/0.1.4",
-    },
-    signal: AbortSignal.timeout(8_000),
-  });
+  const source = await loadSharedPublicSource<Array<{ type_id: number; average_price?: number; adjusted_price?: number }>>("markets-prices");
   const values = new Map<number, number>();
-  if (response.ok) {
-    for (const item of (await response.json()) as Array<{ type_id: number; average_price?: number; adjusted_price?: number }>)
-      values.set(item.type_id, item.average_price ?? item.adjusted_price ?? 0);
-  }
+  for (const item of source?.data ?? []) values.set(item.type_id, item.average_price ?? item.adjusted_price ?? 0);
   marketPriceCache = { expiresAt: Date.now() + 30 * 60 * 1000, values };
   return values;
 }

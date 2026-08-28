@@ -4,6 +4,7 @@ import { app, BrowserWindow } from "electron";
 import { getPveStaticIndex } from "./pve-static-index";
 import { decrypt, encrypt, readConfig, writeConfig } from "./config";
 import { refreshEveToken } from "./eve";
+import { loadSharedPublicSource } from "./shared-market-data";
 import {
   SYSTEM_NEWS_ZKILL_BACKFILL_DAYS,
   SYSTEM_NEWS_ZKILL_COOLDOWN_MS,
@@ -400,17 +401,18 @@ async function getSharedActivityFeed(force = false): Promise<SharedActivityFeed>
   if (!force && sharedActivityFeed && parseTime(sharedActivityFeed.fetchedAt) >= Date.now() - ACTIVITY_FEED_CACHE_MS) return sharedActivityFeed;
   if (!force && sharedActivityFeedPromise) return sharedActivityFeedPromise;
   const work = Promise.all([
-    esi<Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>>("https://esi.evetech.net/universe/system_kills/"),
-    esi<Array<{ system_id: number; ship_jumps: number }>>("https://esi.evetech.net/universe/system_jumps/"),
-  ]).then(([kills, jumps]) => {
-    const value: SharedActivityFeed = { fetchedAt: new Date().toISOString(), kills, jumps };
+    loadSharedPublicSource<Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>>("system-kills"),
+    loadSharedPublicSource<Array<{ system_id: number; ship_jumps: number }>>("system-jumps"),
+  ]).then(([killsSource, jumpsSource]) => {
+    if (!killsSource || !jumpsSource) throw new Error("Shared system activity is not installed yet.");
+    const fetchedAt = new Date(Math.min(Date.parse(killsSource.fetchedAt), Date.parse(jumpsSource.fetchedAt))).toISOString();
+    const value: SharedActivityFeed = { fetchedAt, kills: killsSource.data, jumps: jumpsSource.data };
     sharedActivityFeed = value;
     return value;
   }).finally(() => { sharedActivityFeedPromise = null; });
   sharedActivityFeedPromise = work;
   return work;
 }
-
 
 type StructureAccessToken = { characterId: string; accessToken: string };
 

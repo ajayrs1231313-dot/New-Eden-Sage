@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { gzip, gunzip } from "node:zlib";
 import { STATIC_DATA_ROOT } from "./data-paths";
 import { ensureStaticDataArchive, INDUSTRIAL_PREPARED_CACHE, prepareStaticDataForProcess } from "./type-volumes";
-import { loadLatestMarketDatasetByMode } from "./market-storage";
+import { loadSharedFullMarketAnalysisIndex, loadSharedPublicSource } from "./shared-market-data";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const INDUSTRIAL_PREPARED_SCHEMA = 2;
@@ -155,10 +155,10 @@ let esiReferencePriceCache: { expiresAt: number; prices: Map<number, { value: nu
 
 async function esiReferencePrices() {
   if (esiReferencePriceCache && esiReferencePriceCache.expiresAt > Date.now()) return esiReferencePriceCache.prices;
-  const response = await fetch("https://esi.evetech.net/markets/prices/", { headers: { Accept: "application/json" } });
-  if (!response.ok) throw new Error(`ESI market reference prices returned ${response.status}.`);
+  const source = await loadSharedPublicSource<Array<{ type_id: number; average_price?: number; adjusted_price?: number }>>("markets-prices");
+  if (!source) throw new Error("Shared market reference prices are not installed yet.");
   const prices = new Map<number, { value: number; source: string }>();
-  for (const row of await response.json() as Array<{ type_id: number; average_price?: number; adjusted_price?: number }>) {
+  for (const row of source.data) {
     const average = Number(row.average_price);
     const adjusted = Number(row.adjusted_price);
     if (Number.isFinite(average) && average > 0) prices.set(row.type_id, { value: average, source: "ESI average market price" });
@@ -169,35 +169,24 @@ async function esiReferencePrices() {
 }
 
 async function marketPrices(typeIds: number[]) {
-  const dataset = await loadLatestMarketDatasetByMode("all");
+  const dataset = await loadSharedFullMarketAnalysisIndex();
   const wanted = new Set(typeIds);
   const quotes = new Map<number, IndustrialMarketQuote>();
-  for (const region of (dataset?.summaries as any[] | undefined) ?? []) {
-    for (const item of region?.items ?? []) {
-      if (!wanted.has(item.typeId)) continue;
-      const current: IndustrialMarketQuote = quotes.get(item.typeId) ?? { typeId: Number(item.typeId), bestSell: null, bestBuy: null, referencePrice: null };
-      if (typeof item.bestSell === "number" && (current.bestSell == null || item.bestSell < current.bestSell)) {
-        const order = (item.topSellOrders ?? []).find((entry: any) => entry.price === item.bestSell) ?? item.topSellOrders?.[0];
-        current.bestSell = item.bestSell;
-        current.sellRegion = region.regionName;
-        current.sellLocation = order?.locationName;
-      }
-      if (typeof item.bestBuy === "number" && (current.bestBuy == null || item.bestBuy > current.bestBuy)) {
-        const order = (item.topBuyOrders ?? []).find((entry: any) => entry.price === item.bestBuy) ?? item.topBuyOrders?.[0];
-        current.bestBuy = item.bestBuy;
-        current.buyRegion = region.regionName;
-        current.buyLocation = order?.locationName;
-      }
-      quotes.set(item.typeId, current);
-    }
+  for (const typeId of wanted) {
+    const item = dataset?.items.get(typeId);
+    const sell = item?.sells?.[0];
+    const buy = item?.buys?.[0];
+    quotes.set(typeId, {
+      typeId, bestSell: sell?.price ?? null, bestBuy: buy?.price ?? null, referencePrice: null,
+      sellRegion: sell?.regionName, sellLocation: sell?.locationName, buyRegion: buy?.regionName, buyLocation: buy?.locationName,
+    });
   }
   const references = await esiReferencePrices().catch(() => new Map<number, { value: number; source: string }>());
   for (const typeId of wanted) {
-    const current = quotes.get(typeId) ?? { typeId, bestSell: null, bestBuy: null, referencePrice: null };
+    const current = quotes.get(typeId)!;
     const reference = references.get(typeId);
     current.referencePrice = reference?.value ?? null;
     current.referencePriceSource = reference?.source;
-    quotes.set(typeId, current);
   }
   return { createdAt: dataset?.createdAt ?? null, quotes };
 }
@@ -892,11 +881,10 @@ let industrySystemCache: { expiresAt: number; rows: IndustrySystemRow[] } | null
 
 async function industrySystems() {
   if (industrySystemCache && industrySystemCache.expiresAt > Date.now()) return industrySystemCache.rows;
-  const response = await fetch("https://esi.evetech.net/industry/systems/?datasource=tranquility", { headers: { "X-Compatibility-Date": "2026-08-02", "X-User-Agent": "NewEdenSage/0.1.12" } });
-  if (!response.ok) throw new Error(`EVE industry system indices failed (${response.status}).`);
-  const rows = await response.json() as IndustrySystemRow[];
-  industrySystemCache = { rows, expiresAt: Date.now() + 55 * 60 * 1000 };
-  return rows;
+  const source = await loadSharedPublicSource<IndustrySystemRow[]>("industry-systems");
+  if (!source) throw new Error("Shared industry system indices are not installed yet.");
+  industrySystemCache = { rows: source.data, expiresAt: Date.now() + 55 * 60 * 1000 };
+  return source.data;
 }
 
 export async function getIndustrySystemCostIndices(solarSystemId: number) {

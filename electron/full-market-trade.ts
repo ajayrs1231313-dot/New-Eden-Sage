@@ -3,6 +3,7 @@ import { loadSharedPreparedTradeDataset } from "./shared-market-data";
 import { buildFullMarketAnalysisIndex, loadFullMarketMarginSnapshot, type FullMarketOrder } from "./raw-market-analysis";
 import { universeRoute } from "./universe-route-graph";
 import { itemCategoryIds } from "./type-volumes";
+import { getFittingTypeInfoLocal } from "./fitting-dogma";
 import { availableParallelism } from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
@@ -35,12 +36,8 @@ const cargoCapacityCache = new Map<number, Promise<number>>();
 
 async function baseCargoCapacity(typeId: number) {
   if (!cargoCapacityCache.has(typeId)) cargoCapacityCache.set(typeId, (async () => {
-    const response = await fetch(`https://esi.evetech.net/universe/types/${typeId}/`, {
-      headers: { "X-Compatibility-Date": "2026-08-02", "X-User-Agent": "NewEdenSage/0.1.7" },
-    });
-    if (!response.ok) return 0;
-    const detail = await response.json() as { dogma_attributes?: Array<{ attribute_id: number; value: number }> };
-    return Number(detail.dogma_attributes?.find((attribute) => attribute.attribute_id === 38)?.value ?? 0);
+    const detail = await getFittingTypeInfoLocal(typeId).catch(() => null);
+    return Number(detail?.physical?.capacityM3 ?? 0);
   })());
   return cargoCapacityCache.get(typeId)!;
 }

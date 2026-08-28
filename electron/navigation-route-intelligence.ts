@@ -3,6 +3,7 @@ import {
   type KillmailIntel,
   type SystemIntelligence,
 } from "./system-intelligence";
+import { loadSharedPublicSource } from "./shared-market-data";
 import { getNavigationHazardSnapshot } from "./navigation-hazards";
 import { getNavigationStaticMetadata } from "./navigation-static-metadata";
 import {
@@ -12,10 +13,6 @@ import {
 
 export const ROUTE_GATE_KILL_THRESHOLD_METERS = 250_000;
 const SOVEREIGNTY_CACHE_MS = 10 * 60 * 1000;
-const ESI_HEADERS = {
-  "X-Compatibility-Date": "2026-08-02",
-  "X-User-Agent": "NewEdenSage/1.1.7",
-};
 
 export type GateKillConfidence = "high" | "medium" | "low";
 export type GateKillClassification = {
@@ -56,11 +53,24 @@ export type GateDangerAssessment = {
   };
 };
 
-type SovereigntyRow = {
-  system_id: number;
-  alliance_id?: number;
-  corporation_id?: number;
-  faction_id?: number;
+type SovereigntySystemRow = {
+  solar_system_id: number;
+  claim?: {
+    alliance?: {
+      alliance_id?: number;
+      corporation_id?: number;
+      claimed_since?: string;
+      sovereignty_hub?: unknown;
+      is_capital_system?: boolean;
+      development?: unknown;
+    };
+    faction?: { faction_id?: number };
+    unclaimed?: boolean;
+  };
+};
+
+type SovereigntySystemsPayload = {
+  solar_systems?: SovereigntySystemRow[];
 };
 
 export type NavigationRouteSystemIntelligence = {
@@ -116,25 +126,24 @@ export type NavigationRouteIntelligence = {
 
 type Stargate = Awaited<ReturnType<typeof getNavigationStargates>>[number];
 
-let sovereigntyCache: { expiresAt: number; rows: Map<number, SovereigntyRow> } | null = null;
-let sovereigntyPromise: Promise<Map<number, SovereigntyRow>> | null = null;
+let sovereigntyCache: { expiresAt: number; rows: Map<number, SovereigntySystemRow> } | null = null;
+let sovereigntyPromise: Promise<Map<number, SovereigntySystemRow>> | null = null;
 
-async function getSovereigntyMap(): Promise<Map<number, SovereigntyRow>> {
+async function getSovereigntySystemsMap(): Promise<Map<number, SovereigntySystemRow>> {
   if (sovereigntyCache && sovereigntyCache.expiresAt > Date.now()) return sovereigntyCache.rows;
   if (sovereigntyPromise) return sovereigntyPromise;
-  sovereigntyPromise = fetch("https://esi.evetech.net/sovereignty/map/", { headers: ESI_HEADERS })
-    .then(async (response) => {
-      if (!response.ok) throw new Error(`ESI sovereignty returned ${response.status}`);
-      const payload = await response.json() as SovereigntyRow[];
-      const rows = new Map<number, SovereigntyRow>();
-      for (const row of Array.isArray(payload) ? payload : []) {
-        const systemId = Number(row?.system_id ?? 0);
+  sovereigntyPromise = loadSharedPublicSource<SovereigntySystemsPayload>("sovereignty-systems")
+    .then((source) => {
+      if (!source) throw new Error("Shared sovereignty data is not installed yet.");
+      const rows = new Map<number, SovereigntySystemRow>();
+      for (const row of Array.isArray(source.data?.solar_systems) ? source.data.solar_systems : []) {
+        const systemId = Number(row?.solar_system_id ?? 0);
         if (Number.isSafeInteger(systemId) && systemId > 0) rows.set(systemId, row);
       }
       sovereigntyCache = { expiresAt: Date.now() + SOVEREIGNTY_CACHE_MS, rows };
       return rows;
     })
-    .catch(() => new Map<number, SovereigntyRow>())
+    .catch(() => new Map<number, SovereigntySystemRow>())
     .finally(() => { sovereigntyPromise = null; });
   return sovereigntyPromise;
 }
@@ -298,7 +307,7 @@ export async function getNavigationRouteIntelligence(
       discoverStructures: false,
       deepKillmailBackfill: false,
     }),
-    getSovereigntyMap(),
+    getSovereigntySystemsMap(),
     getNavigationHazardSnapshot(false),
     getNavigationStaticMetadata(),
   ]);
@@ -345,9 +354,9 @@ export async function getNavigationRouteIntelligence(
         danger: deriveGateDanger(system.killmails, classifications, routeGate.gateId, activity, now),
       } : null,
       ownership: {
-        allianceId: Number(sov?.alliance_id ?? 0) || null,
-        corporationId: Number(sov?.corporation_id ?? 0) || null,
-        factionId: Number(sov?.faction_id ?? 0) || null,
+        allianceId: Number(sov?.claim?.alliance?.alliance_id ?? 0) || null,
+        corporationId: Number(sov?.claim?.alliance?.corporation_id ?? 0) || null,
+        factionId: Number(sov?.claim?.faction?.faction_id ?? 0) || null,
         source: sov ? "ESI sovereignty" : "unavailable",
       },
       hazards: {

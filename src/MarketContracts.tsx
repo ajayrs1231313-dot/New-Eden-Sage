@@ -61,15 +61,15 @@ export function MarketContracts({characterId,marketDataRevision,onMarketDataUpda
     try{
       const value=await window.sage.getContractMarketIntelligence();
       setData(value);
-      setStatus(value.contractsCreatedAt?`${value.counts.contracts.toLocaleString()} public buy/sell contracts loaded Â· ${value.counts.opportunities.toLocaleString()} strong opportunities.`:"No retained contract snapshot yet. Refresh Contracts to scan EVE-wide public contracts.");
+      setStatus(value.contractsCreatedAt?`${value.counts.contracts.toLocaleString()} public buy/sell contracts loaded Â· ${value.counts.opportunities.toLocaleString()} strong opportunities.`:"No server-prepared public contract snapshot is installed yet. Refresh Contracts checks for the latest published generation.");
       if(selected){const updated=value.contracts.find(row=>row.contractId===selected.contractId);setSelected(updated??null);}
     }catch(error){setData(null);setStatus(error instanceof Error?error.message:"Contract data is unavailable.");}
   }
   useEffect(()=>{void load();},[marketDataRevision]);
-  useEffect(()=>window.sage.onMarketProgress(progress=>{if(progress.mode!=="contracts")return;const complete=progress.regionsTotal>0&&progress.regionsDone>=progress.regionsTotal;contractRefreshActive=!complete;setBusy(!complete);setStatus(complete?"Contract refresh complete. Loading the new snapshotâ€¦":`${progress.regionName} Â· ${progress.regionsDone}/${progress.regionsTotal} regions Â· showing previous snapshot until refresh completes`);if(complete)void load();}),[]);
+  useEffect(()=>window.sage.onMarketProgress(progress=>{if(progress.mode!=="contracts")return;const complete=progress.regionsTotal>0&&progress.regionsDone>=progress.regionsTotal;contractRefreshActive=!complete;setBusy(!complete);setStatus(complete?"Public contract reconciliation complete. Loading the installed snapshotâ€¦":`${progress.regionName} Â· ${progress.regionsDone}/${progress.regionsTotal} regions Â· showing previous snapshot until refresh completes`);if(complete)void load();}),[]);
 
   async function refresh(){
-    contractRefreshActive=true;setBusy(true);setFindStatus("");setStatus("Starting EVE-wide public contract scan. Showing previous snapshot until refresh completes.");
+    contractRefreshActive=true;setBusy(true);setFindStatus("");setStatus("Checking for the latest server-prepared public contracts. Showing the installed snapshot until reconciliation completes.");
     try{await window.sage.pullMarket({mode:"contracts"});onMarketDataUpdated();await load();}
     catch(error){setStatus(error instanceof Error?error.message:"Contract refresh failed.");}
     finally{contractRefreshActive=false;setBusy(false);}

@@ -3,7 +3,6 @@ import { decrypt, encrypt, readConfig, writeConfig } from "./config";
 import { fetchCharacterSnapshot, refreshEveToken } from "./eve";
 import { saveSnapshot } from "./database";
 import { logEvent } from "./logger";
-import { ensureCurrentSharedMarketData } from "./shared-market-data";
 
 export type MasterUpdateProgress = {
   running: boolean;
@@ -30,10 +29,13 @@ type BranchState = {
   total?: number;
 };
 
-async function refreshConnectedCharacters(onProgress: (completed: number, total: number, message: string) => void) {
+async function refreshConnectedCharacters(onProgress: (completed: number, total: number, message: string) => void, requestedCharacterIds?: string[]) {
   const totalStartedAt = Date.now();
   const config = await readConfig();
-  const characterIds = Object.keys(config.encryptedRefreshTokens ?? {});
+  const connectedCharacterIds = Object.keys(config.encryptedRefreshTokens ?? {});
+  const requested = [...new Set((requestedCharacterIds ?? []).map((value) => String(value)).filter(Boolean))];
+  const characterIds = requested.length ? connectedCharacterIds.filter((characterId) => requested.includes(characterId)) : connectedCharacterIds;
+  if (requested.length && !characterIds.length) throw new Error("The selected character is not connected.");
   if (!characterIds.length) {
     onProgress(0, 0, "No connected characters to refresh.");
     void logEvent("info", "character_refresh.total", { durationMs: Date.now() - totalStartedAt, characters: 0, refreshed: 0, failed: 0 });
@@ -86,23 +88,11 @@ async function timed(name: string, work: () => Promise<unknown>): Promise<TimedR
   }
 }
 
-function marketStage(message: string) {
-  const value = message.toLowerCase();
-  if (value.includes("downloading")) return "market-download";
-  if (value.includes("validating")) return "market-validation";
-  if (value.includes("installing")) return "market-install";
-  return "market-check";
-}
-
-export async function runMasterUpdate(onProgress: ProgressCallback) {
+export async function runMasterUpdate(onProgress: ProgressCallback, characterIds?: string[]) {
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
   const cpuWorkers = Math.max(1, availableParallelism());
-  const marketDownloadWorkers = 0;
   const timings: TimedResult[] = [];
-  const characters: BranchState = { active: true, percent: 0, stage: "characters", message: "Refreshing characters" };
-  const market: BranchState = { active: true, percent: 0, stage: "market-check", message: "Checking shared market" };
-
   const emit = (running: boolean, stage: string, message: string, percent: number, extra: Partial<MasterUpdateProgress> = {}) => onProgress({
     running,
     stage,
@@ -113,74 +103,32 @@ export async function runMasterUpdate(onProgress: ProgressCallback) {
     ...extra,
   });
 
-  const emitOwned = () => {
-    const combined = (characters.percent + market.percent) / 2;
-    // Downloads/validation/install are explicit and must never hide behind a completed character message.
-    if (market.active && market.stage !== "market-check") {
-      emit(true, market.stage, market.message, combined, { completed: market.completed, total: market.total });
-      return;
-    }
-    if (characters.active) {
-      emit(true, "characters", characters.message, combined, { completed: characters.completed, total: characters.total });
-      return;
-    }
-    if (market.active) {
-      emit(true, market.stage, market.message, combined, { completed: market.completed, total: market.total });
-      return;
-    }
-    emit(true, "ready", "Ready", 100);
-  };
+  emit(true, "private-starting", "Refreshing private data", 0);
+  await logEvent("info", "private_refresh.started", { cpuWorkers, publicDataSource: "shared-server", privateDataDestination: "local-only" });
 
-  emit(true, "starting", "Refreshing characters and checking shared market", 0);
-  await logEvent("info", "master_update.started", { cpuWorkers, marketDownloadWorkers, publicMarketSource: "shared-server", publicMarketCompute: "server-only" });
-
-  const characterJob = timed("Connected characters", async () => {
+  const characterResult = await timed("Private character data", async () => {
     const result = await refreshConnectedCharacters((completed, total, message) => {
-      characters.completed = completed;
-      characters.total = total;
-      characters.percent = total ? (completed / total) * 100 : 100;
-      characters.message = message;
-      emitOwned();
-    });
-    if (result.failed.length) throw new Error(`${result.failed.length} connected character refresh${result.failed.length === 1 ? "" : "es"} failed: ${result.failed.map((item) => `${item.characterId}: ${item.error}`).join(" | ")}`);
-    return result;
-  }).then((result) => {
-    characters.active = false;
-    characters.percent = 100;
-    timings.push(result);
-    emitOwned();
+      const percent = total ? (completed / total) * 100 : 100;
+      emit(true, "private-characters", message.replace("Refreshing characters", "Refreshing private data"), percent, { completed, total });
+    }, characterIds);
+    if (result.failed.length) throw new Error(result.failed.length + " connected character refresh" + (result.failed.length === 1 ? "" : "es") + " failed: " + result.failed.map((item) => item.characterId + ": " + item.error).join(" | "));
     return result;
   });
+  timings.push(characterResult);
 
-  const marketJob = timed("Shared public market", async () => ensureCurrentSharedMarketData((message, completed, total) => {
-    market.stage = marketStage(message);
-    market.message = message;
-    market.completed = completed;
-    market.total = total;
-    if (total && completed != null) market.percent = Math.max(market.percent, (completed / Math.max(1, total)) * 100);
-    else market.percent = Math.max(market.percent, market.stage === "market-check" ? 10 : 25);
-    emitOwned();
-  })).then((result) => {
-    market.active = false;
-    market.percent = 100;
-    timings.push(result);
-    emitOwned();
-    return result;
-  });
-
-  await Promise.all([characterJob, marketJob]);
   const totalDurationMs = Date.now() - startedAtMs;
   const failures = timings.filter((item) => !item.ok);
   const result = {
     cpuWorkers,
-    marketDownloadWorkers,
-    downloadDurationMs: timings.find((item) => item.name === "Shared public market")?.durationMs ?? 0,
+    marketDownloadWorkers: 0,
+    downloadDurationMs: 0,
     totalDurationMs,
     timings,
     failures,
     publicMarketSource: "shared-server" as const,
+    privateDataOnly: true as const,
   };
-  emit(false, failures.length ? "complete-with-errors" : "ready", failures.length ? `Sync finished with ${failures.length} failed source(s).` : "Ready", 100, { totalDurationMs });
-  await logEvent("info", "master_update.completed", result);
+  emit(false, failures.length ? "complete-with-errors" : "ready", failures.length ? "Private refresh finished with " + failures.length + " failed source(s)." : "Private data refreshed", 100, { totalDurationMs });
+  await logEvent("info", "private_refresh.completed", result);
   return result;
 }

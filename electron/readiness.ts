@@ -7,8 +7,8 @@ import AdmZip from "adm-zip";
 import path from "node:path";
 import { STATIC_DATA_ROOT } from "./data-paths";
 import { ensureStaticDataArchive } from "./type-volumes";
+import { getFittingTypeInfoLocal } from "./fitting-dogma";
 
-const ESI = "https://esi.evetech.net";
 const REQUIREMENT_PAIRS = [
   [182, 277],
   [183, 278],
@@ -22,7 +22,6 @@ const RANK_ATTRIBUTE = 275;
 const PRIMARY_ATTRIBUTE = 180;
 const SECONDARY_ATTRIBUTE = 181;
 const TYPE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const REQUEST_TIMEOUT_MS = 8_000;
 
 type SnapshotSkill = {
   skill_id: number;
@@ -289,11 +288,6 @@ export async function prepareReadinessStaticData() {
   };
 }
 
-const headers = {
-  "X-Compatibility-Date": "2026-08-02",
-  "X-User-Agent": "NewEdenSage/0.1.4",
-};
-
 const typeCache = new Map<number, { expiresAt: number; detail: TypeDetail }>();
 const pendingTypes = new Map<number, Promise<TypeDetail>>();
 
@@ -304,19 +298,17 @@ export async function fetchTypeDetail(typeId: number): Promise<TypeDetail> {
   if (pending) return pending;
 
   const request = (async () => {
-    const response = await fetch(`${ESI}/universe/types/${typeId}/`, {
-      headers,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (!response.ok)
-      throw new Error(
-        `EVE skill requirement lookup failed (${response.status}) for type ${typeId}.`,
-      );
-    const detail = (await response.json()) as TypeDetail;
-    typeCache.set(typeId, {
-      expiresAt: Date.now() + TYPE_CACHE_TTL_MS,
-      detail,
-    });
+    const local = await getFittingTypeInfoLocal(typeId);
+    const detail: TypeDetail = {
+      type_id: local.typeId,
+      name: local.name,
+      group_id: local.group.id,
+      dogma_attributes: local.attributes.map((attribute) => ({
+        attribute_id: attribute.attributeId,
+        value: attribute.value,
+      })),
+    };
+    typeCache.set(typeId, { expiresAt: Date.now() + TYPE_CACHE_TTL_MS, detail });
     return detail;
   })();
   pendingTypes.set(typeId, request);

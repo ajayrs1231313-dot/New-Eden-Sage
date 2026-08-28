@@ -136,7 +136,7 @@ export function IndustrialCommand({
   const [systemCostStatus, setSystemCostStatus] = useState("Current-system cost index not loaded.");
   const [opportunities, setOpportunities] = useState<any[]>([]);
   const [opportunityBusy, setOpportunityBusy] = useState(false);
-  const [opportunityStatus, setOpportunityStatus] = useState("Prepared industrial opportunities load from Sync All.");
+  const [opportunityStatus, setOpportunityStatus] = useState("Industrial opportunities use server-prepared public market data with local character data.");
   const [opportunityPreparedFor, setOpportunityPreparedFor] = useState("");
   const [opportunitySystem, setOpportunitySystem] = useState("");
   const [opportunityJumpRadius, setOpportunityJumpRadius] = useState<5 | 10 | 20 | null>(null);
@@ -283,7 +283,7 @@ export function IndustrialCommand({
         setOpportunities(prepared.opportunities);
         setOpportunityStatus(prepared.opportunityStatus ?? ("Prepared " + prepared.opportunities.length + " industrial opportunities."));
       } else {
-        setOpportunityStatus("No prepared Industrial Opportunities result is available. Run Sync All to prepare it.");
+        setOpportunityStatus("No prepared Industrial Opportunities result is available yet. Open or refresh this workspace after shared public data is installed.");
       }
       if (prepared?.typeNames) setTypeNames((current) => ({ ...current, ...prepared.typeNames }));
       setSystemCostIndex(prepared?.systemCostIndex ?? null);

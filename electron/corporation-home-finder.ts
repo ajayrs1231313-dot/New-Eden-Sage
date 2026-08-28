@@ -6,6 +6,7 @@ import { getMarketTypeIndex } from "./market-static-index";
 import { ensureStaticDataArchive } from "./type-volumes";
 import { displayedSecurityStatus, getNavigationMapData, type NavigationRouteEdge, type NavigationSystemNode } from "./universe-route-graph";
 import { refreshSystemIntelligence } from "./system-intelligence";
+import { loadSharedPublicSource } from "./shared-market-data";
 
 const SDE_ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const KILLMAIL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -278,16 +279,14 @@ export function summarizeHomeRisk(
 async function getActivity(systemIds: number[]) {
   const wanted = new Set(systemIds);
   if (!activityCache || Date.now() - activityCache.fetchedAt > ACTIVITY_CACHE_MS) {
-    const [killsResponse, jumpsResponse] = await Promise.all([
-      fetch("https://esi.evetech.net/universe/system_kills/", { headers: ESI_HEADERS }),
-      fetch("https://esi.evetech.net/universe/system_jumps/", { headers: ESI_HEADERS }),
+    const [killsSource, jumpsSource] = await Promise.all([
+      loadSharedPublicSource<Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>>("system-kills"),
+      loadSharedPublicSource<Array<{ system_id: number; ship_jumps: number }>>("system-jumps"),
     ]);
-    if (!killsResponse.ok || !jumpsResponse.ok) throw new Error("EVE public activity feed is temporarily unavailable.");
-    const kills = await killsResponse.json() as Array<{ system_id: number; ship_kills: number; pod_kills: number; npc_kills: number }>;
-    const jumps = await jumpsResponse.json() as Array<{ system_id: number; ship_jumps: number }>;
+    if (!killsSource || !jumpsSource) throw new Error("Shared EVE public activity feed is not installed yet.");
     const bySystem = new Map<number, ActivityRow>();
-    for (const row of kills) bySystem.set(Number(row.system_id), { shipKills: Number(row.ship_kills ?? 0), podKills: Number(row.pod_kills ?? 0), npcKills: Number(row.npc_kills ?? 0), jumps: 0 });
-    for (const row of jumps) {
+    for (const row of killsSource.data) bySystem.set(Number(row.system_id), { shipKills: Number(row.ship_kills ?? 0), podKills: Number(row.pod_kills ?? 0), npcKills: Number(row.npc_kills ?? 0), jumps: 0 });
+    for (const row of jumpsSource.data) {
       const id = Number(row.system_id);
       const current = bySystem.get(id) ?? { shipKills: 0, podKills: 0, npcKills: 0, jumps: 0 };
       current.jumps = Number(row.ship_jumps ?? 0);

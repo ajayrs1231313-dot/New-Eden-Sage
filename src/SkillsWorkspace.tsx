@@ -55,8 +55,10 @@ export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, ac
   }
 
   return (
-    <section className="skills-workspace">
-      <div className="skills-workspace-head">
+    <section className={`skills-workspace${tab === "activity-planner" ? " activity-command-workspace" : ""}`}>
+      {tab !== "activity-planner" && (
+        <>
+          <div className="skills-workspace-head">
         <div>
           <p className="eyebrow">CAPSULEER DEVELOPMENT</p>
           <h2>{snapshot.character.name}</h2>
@@ -67,6 +69,8 @@ export function SkillsWorkspace({ snapshot, cloneState, confirmationRequired, ac
       </div>
       <ProgressionPriorities snapshot={snapshot} cloneState={cloneState} />
       {(confirmationRequired || !cloneState) && <TrainingTimeNotice cloneState={cloneState} />}
+        </>
+      )}
       <div className="skills-tabs" role="tablist" aria-label="Activity Command sections">
         <button
           className={tab === "activity-planner" ? "active" : ""}

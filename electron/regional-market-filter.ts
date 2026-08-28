@@ -271,7 +271,7 @@ export async function filterRegionalMarket(
   if (!manifest) {
     return {
       available: false,
-      message: "Run Sync All to download the current shared public-market generation first.",
+      message: "Shared public market data is not installed yet. Sage installs server-prepared public data automatically; try again after the public-data update completes.",
       snapshot: null,
       filters,
       ...emptyBase,

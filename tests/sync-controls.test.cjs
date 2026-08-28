@@ -31,14 +31,16 @@ const mainSource = fs.readFileSync(path.join(repoRoot, "electron", "main-task9.t
 const manualHandler = mainSource.match(
   /ipcMain\.handle\("master:update-all"[\s\S]*?return runCompleteSync\([\s\S]*?\n\s*},\s*(true|false),\s*options\);/,
 );
-assert.ok(manualHandler, "manual Sync All handler should call runCompleteSync explicitly");
-assert.equal(manualHandler[1], "false", "manual Sync All must never use the startup version guard");
+assert.ok(manualHandler, "manual private refresh handler should call runCompleteSync explicitly");
+assert.equal(manualHandler[1], "false", "manual REFRESH PRIVATE DATA must never use the startup version guard");
 
-const automaticCall = mainSource.match(
-  /did-finish-load[\s\S]*?runCompleteSync\([\s\S]*?,\s*(true|false),\s*await readSyncPreparationOptions\(\)\);/,
-);
-assert.ok(automaticCall, "automatic startup sync should remain identifiable");
-assert.equal(automaticCall[1], "true", "only automatic startup sync should use the version guard");
+const startupStart = mainSource.indexOf('window?.webContents.once("did-finish-load"');
+const startupEnd = mainSource.indexOf('function makeChatGPTMarkdown', startupStart);
+assert.ok(startupStart >= 0 && startupEnd > startupStart, "startup public-data availability flow should remain identifiable");
+const startupBody = mainSource.slice(startupStart, startupEnd);
+assert.doesNotMatch(startupBody, /runCompleteSync\(/, "startup must not automatically refresh private character data");
+assert.match(startupBody, /refreshPublicDataAvailability\(\)/, "startup should only check whether newer public data exists");
+assert.match(startupBody, /private_refresh\.automatic_disabled/, "the no-auto-private-refresh policy should remain explicit");
 
 const syncStart = mainSource.indexOf("async function runCompleteSync(");
 const syncEnd = mainSource.indexOf('\napp.on("render-process-gone"', syncStart);
@@ -46,11 +48,34 @@ assert.ok(syncStart >= 0 && syncEnd > syncStart, "runCompleteSync should remain 
 const syncBody = mainSource.slice(syncStart, syncEnd);
 assert.doesNotMatch(
   syncBody,
-  /runOpportunityAnalysis|runPveLocationAnalysis|runCapabilityAnalysis|runFeaturePrepProcess|prepareIndustrialCommand|stopAnalysisWorkersForExclusiveTask/,
-  "Sync All must end at character + shared-market readiness",
+  /runOpportunityAnalysis|runPveLocationAnalysis|runCapabilityAnalysis|runFeaturePrepProcess|prepareIndustrialCommand|stopAnalysisWorkersForExclusiveTask|ensureCurrentSharedMarketData/,
+  "REFRESH PRIVATE DATA must end at the local player-data boundary",
 );
-assert.match(syncBody, /sync_all\.total_ms/, "Sync All should log its acceptance timing");
+assert.match(syncBody, /private_refresh\.total_ms/, "private refresh should log its acceptance timing");
 assert.match(syncBody, /Prepared on demand when Invention is opened/);
+
+assert.doesNotMatch(mainSource, /PRIVATE_REFRESH_AFTER_PUBLIC_MS|schedulePrivateRefreshAfterPublic|startWalletReconciliationTimer/, "public updates must not trigger background private refreshes");
+assert.match(mainSource, /startSharedPublicDataListener/);
+assert.match(mainSource, /checkSharedMarketDataAvailability/);
+assert.match(mainSource, /public-data:check-availability/);
+assert.match(mainSource, /PUBLIC_RECONCILE_INTERVAL_MS = 60 \* 60 \* 1000/);
+assert.match(mainSource, /powerMonitor\.on\("resume"/);
+
+const appSource = fs.readFileSync(path.join(repoRoot, "src", "App.tsx"), "utf8");
+assert.doesNotMatch(appSource, /Sync All|Syncing all/i);
+assert.match(appSource, /REFRESH PRIVATE DATA/);
+assert.doesNotMatch(appSource, /Refreshing your private EVE data|Overall preparation|sync-overall-row|sync-track-grid/, "private refresh must not render the obsolete blocking progress modal");
+assert.match(appSource, /!initialSetupComplete && !syncProgress\?\.running/, "first-run setup may remain, but it must disappear while private refresh runs");
+
+const privateCache = fs.readFileSync(path.join(repoRoot, "electron", "private-esi-cache.ts"), "utf8");
+assert.match(privateCache, /If-None-Match/);
+assert.match(privateCache, /If-Modified-Since/);
+assert.match(privateCache, /cache-control/);
+assert.match(privateCache, /expires/);
+assert.match(privateCache, /retry-after/);
+assert.match(privateCache, /x-esi-error-limit-reset/);
+assert.match(privateCache, /status === 304/);
+assert.match(privateCache, /Private ESI Cache/);
 
 const syncResources = require(path.join(repoRoot, "dist-electron", "sync-resources.js"));
 assert.equal(syncResources.recommendedMarketDownloadWorkers(6, 16 * 1024 ** 3), 3);
@@ -69,7 +94,7 @@ const pressuredMemory = syncResources.syncMemoryHeadroom({
 });
 assert.equal(pressuredMemory.ok, false);
 
-assert.doesNotMatch(mainSource, /inventionPrep\(\)/, "Sync All must not launch Invention preparation");
+assert.doesNotMatch(mainSource, /inventionPrep\(\)/, "private refresh must not launch Invention preparation");
 
 const rawMarketStorageSource = fs.readFileSync(path.join(repoRoot, "electron", "raw-market-storage.ts"), "utf8");
 const recentHistoryStart = rawMarketStorageSource.indexOf("export async function loadRecentRawMarketManifests");
@@ -81,4 +106,4 @@ assert.match(recentHistorySource, /ENOENT[\s\S]*?return \[\]/, "missing legacy h
 const iskLabSource = fs.readFileSync(path.join(repoRoot, "src", "IskLab.tsx"), "utf8");
 assert.match(iskLabSource, /setTab\("invention"\)[\s\S]*?scanInvention\(\)/);
 
-console.log("Sync controls and resource policy regression tests passed.");
+console.log("Private refresh controls and resource policy regression tests passed.");
