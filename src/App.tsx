@@ -114,6 +114,7 @@ const RetainedWormholeCommand = memo(WormholeCommand, (a, b) => a.snapshots === 
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
+  const [fitToMonitor, setFitToMonitor] = useState(false);
   const [assetCommandTab, setAssetCommandTab] = useState<AssetCommandTab>("loot");
   const [walletCommandView, setWalletCommandView] = useState<WalletCommandView>("full");
   const [activityCommandTab, setActivityCommandTab] = useState<SkillsTab>("activity-planner");
@@ -136,6 +137,33 @@ export default function App() {
       return next;
     });
   }, [view]);
+  useEffect(() => {
+    document.documentElement.dataset.fitToMonitor = fitToMonitor ? "on" : "off";
+    void window.sage.setDisplayFitEnabled(fitToMonitor);
+  }, [fitToMonitor]);
+
+  useEffect(() => window.sage.onDisplayFitChanged(setFitToMonitor), []);
+
+  useEffect(() => {
+    let timer = 0;
+    const requestFit = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void window.sage.refreshDisplayFit(), 90);
+    };
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(requestFit);
+    const shell = document.querySelector(".app-shell");
+    const main = document.querySelector(".app-shell > main");
+    const aside = document.querySelector(".app-shell > aside");
+    if (shell) observer?.observe(shell);
+    if (main) observer?.observe(main);
+    if (aside) observer?.observe(aside);
+    requestFit();
+    return () => {
+      window.clearTimeout(timer);
+      observer?.disconnect();
+    };
+  }, []);
+
   useEffect(() => {
     const navigateToFittings = () => setView("fittings");
     const navigateToCorpDoctrines = () => setView("fleet");
@@ -470,11 +498,30 @@ export default function App() {
             ))}
           </div>
         )}
-        <div className="local-card">
-          <span className="pulse" />
-          <div>
-            <strong>LOCAL-FIRST</strong>
-            <small>Secrets stay on this PC</small>
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className={`display-fit-toggle ${fitToMonitor ? "active" : ""}`}
+            aria-pressed={fitToMonitor}
+            title="Fit Sage to the current monitor and avoid page scrollbars where practical"
+            onClick={() => setFitToMonitor((enabled) => !enabled)}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="4" y="5" width="16" height="11" rx="1.5" />
+              <path d="M9 20h6M12 16v4M7 9V7h2M17 9V7h-2M7 12v2h2M17 12v2h-2" />
+            </svg>
+            <span>
+              <strong>FIT TO MONITOR</strong>
+              <small>{fitToMonitor ? "Adaptive scale enabled" : "Natural scale"}</small>
+            </span>
+            <b>{fitToMonitor ? "ON" : "OFF"}</b>
+          </button>
+          <div className="local-card">
+            <span className="pulse" />
+            <div>
+              <strong>LOCAL-FIRST</strong>
+              <small>Secrets stay on this PC</small>
+            </div>
           </div>
         </div>
       </aside>

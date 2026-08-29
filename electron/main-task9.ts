@@ -37,7 +37,7 @@ import { listPublishedShips, stageStaticDataRefreshLowImpact } from "./type-volu
 import { runMasterUpdate } from "./master-update";
 import { getSyncMemorySnapshot, syncMemoryHeadroom } from "./sync-resources";
 import { CRASH_LOG_FILE, LOG_FILE, logCrash, logEvent } from "./logger";
-import { responsiveDisplayZoom } from "./display-scale";
+import { DISPLAY_FIT_DEFAULT_ENABLED, fitDisplayZoom, responsiveDisplayZoom } from "./display-scale";
 import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
 import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
@@ -847,22 +847,81 @@ async function loadPlanetaryCorporationLibrary(characterId:string) {
 }
 
 let displayScaleTimer: NodeJS.Timeout | null = null;
+let displayFitEnabled = DISPLAY_FIT_DEFAULT_ENABLED;
 
-function applyResponsiveDisplayScale(target: BrowserWindow) {
-  if (target.isDestroyed() || target.webContents.isDestroyed()) return;
-  const [contentWidth, contentHeight] = target.getContentSize();
-  const nextZoom = responsiveDisplayZoom(contentWidth, contentHeight);
-  if (Math.abs(target.webContents.getZoomFactor() - nextZoom) >= 0.001) {
-    target.webContents.setZoomFactor(nextZoom);
+type DisplayFitMetrics = {
+  viewportWidth: number;
+  viewportHeight: number;
+  contentWidth: number;
+  contentHeight: number;
+};
+
+async function readDisplayFitMetrics(target: BrowserWindow): Promise<DisplayFitMetrics | null> {
+  try {
+    return await target.webContents.executeJavaScript(`(() => {
+      const root = document.documentElement;
+      const shell = document.querySelector(".app-shell");
+      const main = document.querySelector(".app-shell > main");
+      const aside = document.querySelector(".app-shell > aside");
+      const viewportWidth = Math.max(1, root.clientWidth || window.innerWidth || 1);
+      const viewportHeight = Math.max(1, root.clientHeight || window.innerHeight || 1);
+      const asideWidth = aside?.getBoundingClientRect().width || 0;
+      const mainWidth = main?.scrollWidth || main?.getBoundingClientRect().width || 0;
+      const shellOverflowWidth = shell && shell.scrollWidth > viewportWidth + 1 ? shell.scrollWidth : 0;
+      const asideOverflowHeight = aside && aside.scrollHeight > aside.clientHeight + 1 ? aside.scrollHeight : 0;
+      const mainHeight = main?.scrollHeight || main?.getBoundingClientRect().height || 0;
+      return {
+        viewportWidth,
+        viewportHeight,
+        contentWidth: Math.max(1, asideWidth + mainWidth, shellOverflowWidth),
+        contentHeight: Math.max(1, mainHeight, asideOverflowHeight),
+      };
+    })()`, true) as DisplayFitMetrics;
+  } catch {
+    return null;
   }
 }
 
-function scheduleResponsiveDisplayScale(target: BrowserWindow) {
+async function applyResponsiveDisplayScale(target: BrowserWindow) {
+  if (target.isDestroyed() || target.webContents.isDestroyed()) return;
+  const [contentWidth, contentHeight] = target.getContentSize();
+  const baseZoom = responsiveDisplayZoom(contentWidth, contentHeight);
+  const currentZoom = target.webContents.getZoomFactor();
+  let nextZoom = baseZoom;
+
+  if (displayFitEnabled && !target.webContents.isLoadingMainFrame()) {
+    const metrics = await readDisplayFitMetrics(target);
+    if (metrics && !target.isDestroyed() && !target.webContents.isDestroyed()) {
+      nextZoom = fitDisplayZoom(
+        baseZoom,
+        currentZoom,
+        metrics.viewportWidth,
+        metrics.viewportHeight,
+        metrics.contentWidth,
+        metrics.contentHeight,
+      );
+    }
+  }
+
+  if (target.isDestroyed() || target.webContents.isDestroyed()) return;
+  if (Math.abs(target.webContents.getZoomFactor() - nextZoom) >= 0.004) {
+    target.webContents.setZoomFactor(nextZoom);
+    if (displayFitEnabled) scheduleResponsiveDisplayScale(target, 160);
+  }
+}
+
+function scheduleResponsiveDisplayScale(target: BrowserWindow, delay = 120) {
   if (displayScaleTimer) clearTimeout(displayScaleTimer);
   displayScaleTimer = setTimeout(() => {
     displayScaleTimer = null;
-    applyResponsiveDisplayScale(target);
-  }, 120);
+    void applyResponsiveDisplayScale(target);
+  }, delay);
+}
+
+function enableDisplayFitForFullscreen(target: BrowserWindow) {
+  displayFitEnabled = true;
+  if (!target.webContents.isDestroyed()) target.webContents.send("display-fit:changed", true);
+  scheduleResponsiveDisplayScale(target, 20);
 }
 
 function createWindow() {
@@ -882,13 +941,13 @@ function createWindow() {
   });
   window = createdWindow;
 
-  applyResponsiveDisplayScale(createdWindow);
+  void applyResponsiveDisplayScale(createdWindow);
   createdWindow.on("resize", () => scheduleResponsiveDisplayScale(createdWindow));
-  createdWindow.on("maximize", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.on("maximize", () => enableDisplayFitForFullscreen(createdWindow));
   createdWindow.on("unmaximize", () => scheduleResponsiveDisplayScale(createdWindow));
-  createdWindow.on("enter-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.on("enter-full-screen", () => enableDisplayFitForFullscreen(createdWindow));
   createdWindow.on("leave-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
-  createdWindow.webContents.on("did-finish-load", () => applyResponsiveDisplayScale(createdWindow));
+  createdWindow.webContents.on("did-finish-load", () => void applyResponsiveDisplayScale(createdWindow));
 
   if (process.argv.includes("--dev")) createdWindow.loadURL("http://localhost:42814");
   else createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
@@ -917,8 +976,19 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("wormhole:reference-get", (_event, code: unknown) => getWormholeReferenceEntry(code));
   ipcMain.handle("wormhole:system-reference", (_event, systemIds: unknown) => getWormholeSystemReferences(systemIds));
   ipcMain.handle("wormhole:rolling-ship-mass", (_event, input: unknown) => getWormholeRollingShipMass(input));
+  ipcMain.handle("display-fit:set", (_event, value: unknown) => {
+    displayFitEnabled = value !== false;
+    if (window) scheduleResponsiveDisplayScale(window, 20);
+    return { enabled: displayFitEnabled };
+  });
+  ipcMain.handle("display-fit:refresh", () => {
+    if (window && displayFitEnabled) scheduleResponsiveDisplayScale(window);
+    return true;
+  });
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Only the explicit Restart to update action may install a downloaded build.
+  // This keeps the update path deterministic and guarantees the silent + relaunch flags below.
+  autoUpdater.autoInstallOnAppQuit = false;
   const sendUpdateStatus = (status: string, detail?: unknown) => window?.webContents.send("update:status", { status, detail });
   autoUpdater.on("checking-for-update", () => sendUpdateStatus("checking"));
   autoUpdater.on("update-available", (info) => sendUpdateStatus("available", info));

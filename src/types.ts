@@ -1116,6 +1116,9 @@ declare global {
   interface Window {
     sage: {
       bridgeInfo: { version: number; localFittingCatalogue: boolean; localTypeImages: boolean };
+      setDisplayFitEnabled(enabled: boolean): Promise<{ enabled: boolean }>;
+      refreshDisplayFit(): Promise<boolean>;
+      onDisplayFitChanged(callback: (enabled: boolean) => void): () => void;
       getUpdateState(): Promise<{ version: string; packaged: boolean }>;
       checkForUpdates(): Promise<unknown>;
       downloadUpdate(): Promise<unknown>;

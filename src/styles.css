@@ -14,9 +14,18 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #1c4149 #050b11;
   background:
     radial-gradient(circle at 72% 18%, #10384955, transparent 30%), #050b11;
 }
+body::-webkit-scrollbar { width: 6px; height: 6px; }
+body::-webkit-scrollbar-track { background: #050b11; }
+body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #1c4149;
+}
+body::-webkit-scrollbar-thumb:hover { background: #2f646b; }
 button,
 input {
   font: inherit;
@@ -120,8 +129,68 @@ nav button.active {
 nav button.active .nav-icon {
   color: #65e1d2;
 }
-.local-card {
+.sidebar-footer {
   margin-top: auto;
+  display: grid;
+  gap: 8px;
+}
+.characters + .sidebar-footer { margin-top: 0; }
+.display-fit-toggle {
+  width: 100%;
+  min-width: 0;
+  min-height: 50px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #1b3b43;
+  border-radius: 5px;
+  padding: 8px 9px;
+  background: #08161c;
+  color: #66848c;
+  text-align: left;
+}
+.display-fit-toggle:hover { border-color: #315d64; background: #0a1c22; color: #9eb6bb; }
+.display-fit-toggle.active {
+  border-color: #2c6868;
+  background: #0b2024;
+  color: #65e1d2;
+  box-shadow: inset 2px 0 #65e1d2;
+}
+.display-fit-toggle svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.display-fit-toggle span,
+.display-fit-toggle strong,
+.display-fit-toggle small { display: block; min-width: 0; }
+.display-fit-toggle strong {
+  color: #a9c1c5;
+  font-size: 10.5px;
+  letter-spacing: .09em;
+}
+.display-fit-toggle.active strong { color: #74eadc; }
+.display-fit-toggle small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #55737b;
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.display-fit-toggle b {
+  color: #527079;
+  font-size: 9px;
+  letter-spacing: .08em;
+}
+.display-fit-toggle.active b { color: #65e1d2; }
+.local-card {
+  margin-top: 0;
   border: 1px solid #1b3b43;
   background: #0b1a20;
   padding: 10px;

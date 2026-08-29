@@ -5,6 +5,9 @@ export type ResponsiveDisplayProfile = {
   label: string;
 };
 
+export const DISPLAY_FIT_DEFAULT_ENABLED = false;
+export const DISPLAY_FIT_MIN_ZOOM = 0.72;
+
 const widthZoom = (width: number) => {
   if (width >= 7000) return 1.5;
   if (width >= 5000) return 1.4;
@@ -33,6 +36,44 @@ export function responsiveDisplayZoom(width: number, height: number) {
   const safeWidth = Math.max(0, Number.isFinite(width) ? width : 0);
   const safeHeight = Math.max(0, Number.isFinite(height) ? height : 0);
   return Math.min(widthZoom(safeWidth), heightZoom(safeHeight));
+}
+
+/**
+ * Keep Sage inside the current monitor/window without throwing away the larger
+ * typography profiles. Fit mode only moves when there is real overflow (or
+ * generous spare room after a previous shrink), and never shrinks below the
+ * legibility floor. Long workspaces can therefore still scroll when scrolling
+ * is genuinely necessary.
+ */
+export function fitDisplayZoom(
+  baseZoom: number,
+  currentZoom: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  contentWidth: number,
+  contentHeight: number,
+) {
+  const safeBase = Math.max(DISPLAY_FIT_MIN_ZOOM, Number.isFinite(baseZoom) ? baseZoom : 1);
+  const safeCurrent = Math.min(safeBase, Math.max(DISPLAY_FIT_MIN_ZOOM, Number.isFinite(currentZoom) ? currentZoom : safeBase));
+  const safeViewportWidth = Math.max(1, Number.isFinite(viewportWidth) ? viewportWidth : 1);
+  const safeViewportHeight = Math.max(1, Number.isFinite(viewportHeight) ? viewportHeight : 1);
+  const safeContentWidth = Math.max(1, Number.isFinite(contentWidth) ? contentWidth : safeViewportWidth);
+  const safeContentHeight = Math.max(1, Number.isFinite(contentHeight) ? contentHeight : safeViewportHeight);
+  const fitRatio = Math.min(safeViewportWidth / safeContentWidth, safeViewportHeight / safeContentHeight);
+
+  if (fitRatio < 1) {
+    const fitted = safeCurrent * fitRatio * 0.99;
+    return Math.round(Math.max(DISPLAY_FIT_MIN_ZOOM, Math.min(safeBase, fitted)) * 1000) / 1000;
+  }
+
+  // Hysteresis prevents a one-pixel scrollbar from making zoom bounce. Only
+  // grow again when a view change leaves useful headroom.
+  if (safeCurrent < safeBase - 0.001 && fitRatio > 1.04) {
+    const grown = safeCurrent * fitRatio * 0.99;
+    return Math.round(Math.max(DISPLAY_FIT_MIN_ZOOM, Math.min(safeBase, grown)) * 1000) / 1000;
+  }
+
+  return Math.round(safeCurrent * 1000) / 1000;
 }
 
 /** Representative monitor/window matrix used by the smoke test and as living documentation. */

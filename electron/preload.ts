@@ -68,6 +68,13 @@ async function invokeAnalysis(channel: string, ...args: unknown[]) {
 
 contextBridge.exposeInMainWorld("sage", {
   bridgeInfo: { version: 2, localFittingCatalogue: true, localTypeImages: true },
+  setDisplayFitEnabled: (enabled: boolean) => ipcRenderer.invoke("display-fit:set", enabled),
+  refreshDisplayFit: () => ipcRenderer.invoke("display-fit:refresh"),
+  onDisplayFitChanged: (callback: (enabled: boolean) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, enabled: unknown) => callback(enabled === true);
+    ipcRenderer.on("display-fit:changed", listener);
+    return () => ipcRenderer.removeListener("display-fit:changed", listener);
+  },
   getUpdateState: () => ipcRenderer.invoke("update:get-state"),
   checkForUpdates: () => ipcRenderer.invoke("update:check"),
   downloadUpdate: () => ipcRenderer.invoke("update:download"),

@@ -144,6 +144,17 @@ nav button .nav-icon {
   width: clamp(12px, calc(9.6px + .222vmin), 14.4px);
   height: clamp(12px, calc(9.6px + .222vmin), 14.4px);
 }
+.sidebar-footer { gap: clamp(7px, calc(5.6px + .13vmin), 8.4px); }
+.display-fit-toggle {
+  min-height: clamp(50px, calc(40px + .926vmin), 60px);
+  grid-template-columns: clamp(22px, calc(17.6px + .407vmin), 26.4px) minmax(0, 1fr) auto;
+  gap: clamp(9px, calc(7.2px + .167vmin), 10.8px);
+  padding: clamp(8px, calc(6.4px + .148vmin), 9.6px) clamp(9px, calc(7.2px + .167vmin), 10.8px);
+}
+.display-fit-toggle svg { width: clamp(22px, calc(17.6px + .407vmin), 26.4px); height: clamp(22px, calc(17.6px + .407vmin), 26.4px); }
+.display-fit-toggle strong { font-size: clamp(10.5px, calc(8.4px + .194vmin), 12.6px); }
+.display-fit-toggle small { font-size: clamp(9.5px, calc(7.6px + .176vmin), 11.4px); }
+.display-fit-toggle b { font-size: clamp(9px, calc(7.2px + .167vmin), 10.8px); }
 .local-card {
   padding: clamp(10px, calc(8px + .185vmin), 12px);
   gap: clamp(10px, calc(8px + .185vmin), 12px);
