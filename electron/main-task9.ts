@@ -37,6 +37,7 @@ import { listPublishedShips, stageStaticDataRefreshLowImpact } from "./type-volu
 import { runMasterUpdate } from "./master-update";
 import { getSyncMemorySnapshot, syncMemoryHeadroom } from "./sync-resources";
 import { CRASH_LOG_FILE, LOG_FILE, logCrash, logEvent } from "./logger";
+import { responsiveDisplayZoom } from "./display-scale";
 import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
 import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
@@ -823,12 +824,31 @@ async function loadPlanetaryCorporationLibrary(characterId:string) {
   return {workspace,surveys,templates};
 }
 
+let displayScaleTimer: NodeJS.Timeout | null = null;
+
+function applyResponsiveDisplayScale(target: BrowserWindow) {
+  if (target.isDestroyed() || target.webContents.isDestroyed()) return;
+  const [contentWidth, contentHeight] = target.getContentSize();
+  const nextZoom = responsiveDisplayZoom(contentWidth, contentHeight);
+  if (Math.abs(target.webContents.getZoomFactor() - nextZoom) >= 0.001) {
+    target.webContents.setZoomFactor(nextZoom);
+  }
+}
+
+function scheduleResponsiveDisplayScale(target: BrowserWindow) {
+  if (displayScaleTimer) clearTimeout(displayScaleTimer);
+  displayScaleTimer = setTimeout(() => {
+    displayScaleTimer = null;
+    applyResponsiveDisplayScale(target);
+  }, 120);
+}
+
 function createWindow() {
-  window = new BrowserWindow({
+  const createdWindow = new BrowserWindow({
     width: 1360,
     height: 860,
-    minWidth: 1040,
-    minHeight: 700,
+    minWidth: 960,
+    minHeight: 640,
     backgroundColor: "#071018",
     title: "New Eden Sage",
     webPreferences: {
@@ -838,8 +858,18 @@ function createWindow() {
       sandbox: true,
     },
   });
-  if (process.argv.includes("--dev")) window.loadURL("http://localhost:42814");
-  else window.loadFile(path.join(__dirname, "../dist/index.html"));
+  window = createdWindow;
+
+  applyResponsiveDisplayScale(createdWindow);
+  createdWindow.on("resize", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.on("maximize", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.on("unmaximize", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.on("enter-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.on("leave-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
+  createdWindow.webContents.on("did-finish-load", () => applyResponsiveDisplayScale(createdWindow));
+
+  if (process.argv.includes("--dev")) createdWindow.loadURL("http://localhost:42814");
+  else createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
 }
 
 const hasSingleInstanceLock =

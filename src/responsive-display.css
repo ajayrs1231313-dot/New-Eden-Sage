@@ -1,0 +1,123 @@
+/* Responsive display system
+   Geometry is fluid; Electron applies a conservative zoom factor for genuinely
+   high-resolution windows so fixed-pixel legacy controls remain legible. */
+
+:root {
+  --sage-sidebar-width: clamp(190px, 11vw, 258px);
+  --sage-page-pad-x: clamp(18px, 1.65vw, 52px);
+  --sage-page-pad-top: clamp(18px, 1.25vw, 34px);
+  --sage-page-pad-bottom: clamp(10px, .8vw, 22px);
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.app-shell {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  grid-template-columns: var(--sage-sidebar-width) minmax(0, 1fr);
+  border-inline: 0;
+  box-shadow: none;
+}
+
+.app-shell > aside {
+  width: 100%;
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #23444d transparent;
+}
+
+.app-shell > main {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  padding: var(--sage-page-pad-top) var(--sage-page-pad-x) var(--sage-page-pad-bottom);
+}
+
+/* Small desktop / old 4:3 and 5:4 panels. Existing feature breakpoints take
+   over below this point; these rules keep the permanent shell from consuming
+   too much of a 1024-1366px-wide window. */
+@media (max-width: 1180px) {
+  :root {
+    --sage-sidebar-width: 184px;
+    --sage-page-pad-x: 16px;
+    --sage-page-pad-top: 16px;
+  }
+
+  aside {
+    padding-inline: 10px;
+  }
+
+  .brand {
+    gap: 8px;
+    padding-inline: 4px;
+  }
+
+  nav button {
+    padding-inline: 9px;
+  }
+}
+
+/* Short displays need vertical access rather than clipping the lower sidebar. */
+@media (max-height: 740px) {
+  aside {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .brand {
+    padding-bottom: 12px;
+  }
+
+  nav {
+    gap: 2px;
+  }
+
+  nav button {
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+}
+
+/* 1440p / 1600p-class workspaces: use the extra canvas instead of leaving
+   oversized dead gutters. Electron adds a small matching UI scale when height
+   also supports it. */
+@media (min-width: 2200px) {
+  :root {
+    --sage-sidebar-width: clamp(220px, 10vw, 272px);
+    --sage-page-pad-x: clamp(32px, 1.55vw, 58px);
+  }
+}
+
+/* 4K, 5K, super-ultrawide and 8K-class workspaces remain fully fluid. The
+   gutters grow only modestly so the useful command surface keeps the space. */
+@media (min-width: 3200px) {
+  :root {
+    --sage-sidebar-width: clamp(236px, 8vw, 290px);
+    --sage-page-pad-x: clamp(42px, 1.4vw, 68px);
+    --sage-page-pad-top: clamp(26px, 1vw, 42px);
+  }
+}
+
+@media (min-width: 5000px) {
+  :root {
+    --sage-sidebar-width: clamp(252px, 6vw, 310px);
+    --sage-page-pad-x: clamp(52px, 1.15vw, 82px);
+  }
+}

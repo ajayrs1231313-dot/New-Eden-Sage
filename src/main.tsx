@@ -16,6 +16,7 @@ import "./fittings-app-bounds.css";
 import "./corporation-system-news.css";
 import "./corporation-find-home.css";
 import "./killmails-command.css";
+import "./responsive-display.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

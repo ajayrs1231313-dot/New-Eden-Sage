@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "1.1.15",
+  "version": "1.1.16",
   "private": true,
   "license": "MIT",
   "author": "New Eden Sage contributors",
@@ -22,6 +22,7 @@
     "test:navigation": "tsc -p tsconfig.electron.json && node tests/navigation/run-all.cjs",
     "dev:stack": "concurrently -k \"vite --port 42814 --strictPort\" \"npm:dev:electron\" \"npm:dev:app\"",
     "test:system-news": "node --experimental-strip-types tests/system-news/killmail-windows.test.mjs",
+    "test:display": "node --experimental-strip-types tests/display/responsive-display.test.mjs",
     "test:claude-mcpb": "node --experimental-strip-types tests/claude/mcpb.test.mjs",
     "test:mcp-guidance": "node --experimental-strip-types tests/mcp/ai-guidance.test.mjs",
     "test:wormhole": "tsc -p tsconfig.electron.json && node --experimental-strip-types tests/wormhole/run-all.mjs",
