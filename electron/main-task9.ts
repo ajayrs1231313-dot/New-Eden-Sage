@@ -13,7 +13,7 @@ import {
   writeConfig,
   CURRENT_IDENTITY_SCHEMA_VERSION,
 } from "./config";
-import { fetchCharacterCoreSnapshot, fetchCharacterCurrentShipSnapshot, fetchCharacterSnapshot, fetchWalletOnlySnapshot, loginWithEve, refreshEveToken } from "./eve";
+import { createConnectedCharacterBootstrapSnapshot, fetchCharacterCoreSnapshot, fetchCharacterCurrentShipSnapshot, fetchCharacterSnapshot, fetchWalletOnlySnapshot, loginWithEve, refreshEveToken } from "./eve";
 import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
 import {
   addImportedInformation,
@@ -1568,19 +1568,19 @@ if (!hasSingleInstanceLock) {
       ? "Reconnect the primary Sage character to restore the online session before linking additional characters."
       : undefined;
     await writeConfig(config);
-    // EVE authorization is complete. Pull the character ESI snapshot now so the
-    // newly added character is immediately useful; derived/prepared intelligence
-    // remains owned by the local private refresh.
-    const characterSyncStartedAt = Date.now();
-    const snapshot = await fetchCharacterCoreSnapshot(
+    // Add Character is an authentication/registration boundary only. Persist a
+    // usable local bootstrap immediately after SSO succeeds; private ESI refreshes
+    // are explicit and must never make a successful character authorization look
+    // like it failed because one downstream endpoint is slow or temporarily down.
+    const snapshot = createConnectedCharacterBootstrapSnapshot(
       login.characterId,
-      login.accessToken,
+      login.characterName,
       getSnapshot(login.characterId),
     );
     saveSnapshot(snapshot);
-    void logEvent("info", "character.add.core_esi_sync", {
+    void logEvent("info", "character.add.connected", {
       characterId: login.characterId,
-      elapsedMs: Date.now() - characterSyncStartedAt,
+      snapshotState: snapshot.snapshotState,
     });
     // Sage Online linking is useful, but it is not part of the Add Character critical path.
     // The character is already registered locally; finish cloud identity work in the background.
