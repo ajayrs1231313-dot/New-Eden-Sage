@@ -13,6 +13,8 @@ export interface AppConfig {
   sageAccountId?: string;
   primaryCharacterId?: string;
   identityMigratedAt?: string;
+  characterResetMigrationId?: string;
+  characterResetMigratedAt?: string;
 }
 
 const defaults: AppConfig = {
@@ -44,6 +46,8 @@ export async function readConfig(): Promise<AppConfig> {
       sageAccountId: typeof parsed.sageAccountId === "string" ? parsed.sageAccountId : undefined,
       primaryCharacterId: typeof parsed.primaryCharacterId === "string" ? parsed.primaryCharacterId : undefined,
       identityMigratedAt: typeof parsed.identityMigratedAt === "string" ? parsed.identityMigratedAt : undefined,
+      characterResetMigrationId: typeof parsed.characterResetMigrationId === "string" ? parsed.characterResetMigrationId : undefined,
+      characterResetMigratedAt: typeof parsed.characterResetMigratedAt === "string" ? parsed.characterResetMigratedAt : undefined,
     };
     if ("encryptedOpenAIKey" in parsed || "openAIModel" in parsed) {
       await fs.writeFile(configPath(), JSON.stringify(clean, null, 2), {

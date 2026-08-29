@@ -52,15 +52,13 @@ function duration(seconds: number | null | undefined) {
 function CapabilityHudDial({ snapshot, percent }: { snapshot: CharacterSnapshot; percent: number }) {
   const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
   const radius = 49;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - safePercent / 100);
   const complete = safePercent >= 100;
   return (
     <div className={`capability-hud-dial${complete ? " complete" : ""}`} aria-label={`${safePercent}% capability readiness`}>
       <svg viewBox="0 0 124 124" aria-hidden="true">
         <circle className="capability-hud-orbit" cx="62" cy="62" r="55" />
         <circle className="capability-hud-track" cx="62" cy="62" r={radius} />
-        <circle className={`capability-hud-progress${complete ? " complete" : ""}`} cx="62" cy="62" r={radius} strokeDasharray={circumference} strokeDashoffset={dashOffset} transform="rotate(-90 62 62)" style={{ opacity: safePercent === 0 ? 0 : 1 }} />
+        <circle className={`capability-hud-progress${complete ? " complete" : ""}`} cx="62" cy="62" r={radius} pathLength={100} strokeDasharray={`${safePercent} ${100 - safePercent}`} strokeDashoffset={0} transform="rotate(-90 62 62)" style={{ opacity: safePercent === 0 ? 0 : 1 }} />
         <path className="capability-hud-brackets" d="M23 31h10V21M91 21v10h10M23 93h10v10M91 103V93h10" />
         {Array.from({ length: 16 }, (_, index) => {
           const angle = (index / 16) * Math.PI * 2 - Math.PI / 2;

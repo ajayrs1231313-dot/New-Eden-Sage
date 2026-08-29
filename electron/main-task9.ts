@@ -769,6 +769,28 @@ async function ensurePrimaryIdentityMigration() {
   });
 }
 
+const ONE_TIME_CHARACTER_RESET_MIGRATION_ID = "2026-08-29-readd-characters-v1";
+
+async function ensureOneTimeCharacterResetMigration() {
+  if (!app.isPackaged) return;
+  const config = await readConfig();
+  if (config.characterResetMigrationId === ONE_TIME_CHARACTER_RESET_MIGRATION_ID) return;
+
+  const disconnectedCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  config.encryptedRefreshTokens = {};
+  config.encryptedSageSessionToken = undefined;
+  config.sageAccountId = undefined;
+  config.primaryCharacterId = undefined;
+  config.characterResetMigrationId = ONE_TIME_CHARACTER_RESET_MIGRATION_ID;
+  config.characterResetMigratedAt = new Date().toISOString();
+  await writeConfig(config);
+  clearCharacterSnapshots();
+  await logEvent("info", "identity.migration.one-time-character-reset", {
+    migrationId: ONE_TIME_CHARACTER_RESET_MIGRATION_ID,
+    disconnectedCharacters: disconnectedCharacterIds.length,
+  });
+}
+
 async function planetaryCorporationContext(characterId: string) {
   const config = await readConfig();
   if (!config.encryptedSageSessionToken) {
@@ -888,6 +910,7 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     await ensurePrimaryIdentityMigration();
+    await ensureOneTimeCharacterResetMigration();
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
   registerWormholeCommandIpc();
   ipcMain.handle("wormhole:reference-list", () => getWormholeReference());
@@ -911,7 +934,12 @@ if (!hasSingleInstanceLock) {
     return { status: available ? "available" : "current", detail: result?.updateInfo };
   });
   ipcMain.handle("update:download", () => autoUpdater.downloadUpdate());
-  ipcMain.handle("update:install", () => { autoUpdater.quitAndInstall(false, true); return true; });
+  ipcMain.handle("update:install", () => {
+    // In-app updates must be silent: keep the assisted NSIS wizard for first-time installs only.
+    // Force-run reopens Sage automatically after the installer finishes replacing the current build.
+    autoUpdater.quitAndInstall(true, true);
+    return true;
+  });
   ipcMain.handle("external:open-support", () =>
     shell.openExternal("https://www.paypal.com/donate/?hosted_button_id=5ZE4R48W6UWMC"),
   );

@@ -7,7 +7,7 @@ import "./fittings-layout-v2.css";
 import type { FitResolutionIntent, FitRemedyCandidate } from "./types";
 import { FittingShowInfo, type ShowInfoTarget } from "./FittingShowInfo";
 import fittingStaticTree from "./fitting-static-tree.json";
-import { appendShoppingList } from "./shopping-list";
+import { appendShoppingList, OPEN_SHOPPING_LIST_EVENT } from "./shopping-list";
 import { canonicalizeFittingPlacement } from "./fitting-rack-normalization";
 
 type FitMutation = { mutaplasmidTypeId: number; mutaplasmidName: string; resultingTypeId: number; resultingTypeName: string };
@@ -142,6 +142,32 @@ type Fit = {
   instructions: string[];
   source: string;
 };
+
+type FitShoppingEntry = { typeId: number; name: string; quantity: number };
+type FitCostEstimate = { total: number; pricedTypes: number; totalTypes: number; createdAt: string | null };
+
+function fitShoppingEntries(fit: Fit): FitShoppingEntry[] {
+  const raw = [
+    fit.hull,
+    ...fit.high, ...fit.mid, ...fit.low, ...fit.rig, ...fit.subsystem,
+    ...fit.drones, ...fit.fighters, ...fit.cargo, ...fit.implants, ...fit.boosters,
+  ].flatMap((item) => item.typeId ? [{ typeId: item.typeId, name: item.name, quantity: Math.max(1, Math.floor(item.quantity || 1)) }] : []);
+  for (const module of [...fit.high, ...fit.mid, ...fit.low]) {
+    if (module.chargeTypeId && module.charge) raw.push({ typeId: module.chargeTypeId, name: module.charge, quantity: Math.max(1, Math.floor(module.chargeQuantity || 1)) });
+  }
+  const merged = new Map<number, FitShoppingEntry>();
+  for (const entry of raw) {
+    const current = merged.get(entry.typeId);
+    if (current) current.quantity += entry.quantity;
+    else merged.set(entry.typeId, { ...entry });
+  }
+  return [...merged.values()];
+}
+
+function formatFitIsk(value: number) {
+  if (!Number.isFinite(value)) return "Unavailable";
+  return `${new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Math.max(0, value))} ISK`;
+}
 
 const FITTING_APP_INSTRUCTIONS = `NEW EDEN SAGE — UNIVERSAL FIT REQUEST FOR ANY LLM
 
@@ -888,7 +914,7 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
       </div>
       <aside className="fit-v2-browser">
         {sideMode === "build" ? (
-          <FitBuilder fit={active} onCreate={createBuilderFit} onAdd={addBuilderItem} onRemove={removeBuilderItem} onQuantity={setBuilderItemQuantity} onState={setBuilderItemState} onCharge={loadBuilderCharge} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} />
+          <FitBuilder fit={active} characterId={selectedCharacterId} onCreate={createBuilderFit} onAdd={addBuilderItem} onRemove={removeBuilderItem} onQuantity={setBuilderItemQuantity} onState={setBuilderItemState} onCharge={loadBuilderCharge} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} />
         ) : (
           <div className="fit-v2-import"><p className="eyebrow">UNIVERSAL FIT IMPORT</p><h3>Paste a fit from anywhere</h3><button type="button" className="copy-fit-prompt" onClick={() => void copyChatGPTInstructions()}>Copy prompt for any LLM</button><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'Paste PYFA/EFT, XML, ESI JSON, DNA, Sage JSON, or a labelled plain-text fit…'} /><label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.fit,.txt,.json,.xml,.dna" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label><button type="button" onClick={() => void importFit()} disabled={!input.trim()}>Import and display</button><small>{status}</small>{lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}</div>
         )}
@@ -911,11 +937,15 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   );
 }
 
-function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCharge, onShowInfo }: { fit?: Fit; onCreate(ship: ShipChoice, name?: string): void; onAdd(target: BuilderTarget, item: FittingSearchResult, mutation?: { option: MutationOption; values: Record<string, number> }): Promise<boolean>; onRemove(target: BuilderTarget, index: number): void; onQuantity(target: "drones" | "cargo", index: number, quantity: number): void; onState(target: FitModuleRack, index: number, state: ModuleState): void; onCharge(target: FitModuleRack, index: number, item: FittingSearchResult): Promise<boolean>; onShowInfo(typeId:number,name?:string):void; }) {
+function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, onState, onCharge, onShowInfo }: { fit?: Fit; characterId?: string; onCreate(ship: ShipChoice, name?: string): void; onAdd(target: BuilderTarget, item: FittingSearchResult, mutation?: { option: MutationOption; values: Record<string, number> }): Promise<boolean>; onRemove(target: BuilderTarget, index: number): void; onQuantity(target: "drones" | "cargo", index: number, quantity: number): void; onState(target: FitModuleRack, index: number, state: ModuleState): void; onCharge(target: FitModuleRack, index: number, item: FittingSearchResult): Promise<boolean>; onShowInfo(typeId:number,name?:string):void; }) {
   const [ships, setShips] = useState<ShipChoice[]>(STATIC_SHIPS);
   const [browserTab, setBrowserTab] = useState<"catalogue" | "ships">(fit ? "catalogue" : "ships");
   const [hullQuery, setHullQuery] = useState("");
   const [fitName, setFitName] = useState("");
+  const [onlyFlyableShips, setOnlyFlyableShips] = useState(false);
+  const [flyableHullIds, setFlyableHullIds] = useState<Set<number> | null>(null);
+  const [flyablePending, setFlyablePending] = useState(false);
+  const [flyableError, setFlyableError] = useState("");
   const [catalogue, setCatalogue] = useState<FittingCatalogue>(()=>({groups:STATIC_FITTING_TREE.groups,items:[]}));
   const [catalogueSource, setCatalogueSource] = useState<"tree"|"cached"|"live">(sharedPreparationResult?"live":"tree");
   const [catalogueFilter, setCatalogueFilter] = useState("");
@@ -945,6 +975,26 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
   useEffect(() => {
     if (!fit) setBrowserTab("ships");
   }, [fit?.id]);
+  useEffect(() => {
+    if (!onlyFlyableShips) { setFlyableHullIds(null); setFlyablePending(false); setFlyableError(""); return; }
+    if (!characterId) { setFlyableHullIds(new Set()); setFlyablePending(false); setFlyableError("Select a synced character to filter flyable ships."); return; }
+    let cancelled = false;
+    setFlyablePending(true);
+    setFlyableError("");
+    void window.sage.getActivityHullPreviews({ characterId, hullTypeIds: ships.map((ship) => ship.typeId) })
+      .then((previews) => {
+        if (cancelled) return;
+        setFlyableHullIds(new Set(previews.filter((preview) => preview.hullAccessReady).map((preview) => preview.hullTypeId)));
+        setFlyablePending(false);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setFlyableHullIds(new Set());
+        setFlyablePending(false);
+        setFlyableError(error instanceof Error ? error.message : "Could not check hull access for this character.");
+      });
+    return () => { cancelled = true; };
+  }, [onlyFlyableShips, characterId, ships]);
   useEffect(() => {
     localStorage.setItem("new-eden-sage-fitting-recent-types", JSON.stringify(recentTypeIds.slice(0,50)));
   }, [recentTypeIds]);
@@ -988,9 +1038,10 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
 
   const hullMatches = useMemo(() => {
     const query = hullQuery.trim().toLowerCase();
-    if (query.length < 1) return ships.slice(0,80);
-    return ships.filter((ship) => ship.name.toLowerCase().includes(query)).sort((a,b)=>(a.name.toLowerCase().startsWith(query)?0:1)-(b.name.toLowerCase().startsWith(query)?0:1)||a.name.localeCompare(b.name)).slice(0,120);
-  }, [ships, hullQuery]);
+    const candidates = onlyFlyableShips ? (flyableHullIds ? ships.filter((ship) => flyableHullIds.has(ship.typeId)) : []) : ships;
+    if (query.length < 1) return candidates.slice(0,80);
+    return candidates.filter((ship) => ship.name.toLowerCase().includes(query)).sort((a,b)=>(a.name.toLowerCase().startsWith(query)?0:1)-(b.name.toLowerCase().startsWith(query)?0:1)||a.name.localeCompare(b.name)).slice(0,120);
+  }, [ships, hullQuery, onlyFlyableShips, flyableHullIds]);
 
   const childrenByParent=useMemo(()=>{const map=new Map<number,CatalogueGroup[]>();for(const group of catalogue.groups){if(group.parentId==null)continue;const list=map.get(group.parentId)??[];list.push(group);map.set(group.parentId,list);}for(const list of map.values())list.sort((a,b)=>a.name.localeCompare(b.name));return map;},[catalogue.groups]);
   const itemById=useMemo(()=>new Map(catalogue.items.map(item=>[item.id,item])),[catalogue.items]);
@@ -1126,6 +1177,8 @@ function FitBuilder({ fit, onCreate, onAdd, onRemove, onQuantity, onState, onCha
     {browserTab==="ships" ? <div className="fit-ships-tab">
       <input value={fitName} onChange={event=>setFitName(event.target.value)} placeholder="Optional fit name"/>
       <input value={hullQuery} onChange={event=>setHullQuery(event.target.value)} placeholder="Filter ships..."/>
+      <label className="fit-flyable-toggle"><input type="checkbox" checked={onlyFlyableShips} disabled={!characterId} onChange={(event)=>setOnlyFlyableShips(event.target.checked)}/><span>Only ships I can fly</span></label>
+      {onlyFlyableShips && <small className={flyableError ? "fit-flyable-status error" : "fit-flyable-status"}>{flyablePending ? "Checking hull access..." : flyableError || `${flyableHullIds?.size ?? 0} flyable hulls`}</small>}
       <div className="fit-builder-results hull-results">{hullMatches.map(ship=><button type="button" key={ship.typeId} onClick={()=>{onCreate(ship,fitName);setBrowserTab("catalogue");}} onContextMenu={(event)=>{event.preventDefault();onShowInfo(ship.typeId,ship.name);}}><img src={imageUrl(ship.typeId,"icon",64)}/><span><strong>{ship.name}</strong><small>Create fitting - right-click Show Info</small></span></button>)}</div>
     </div> : <div className="fit-catalogue-tab">
       <div className="fit-catalogue-section-row"><strong>Catalogue</strong><small>{catalogueSource==="live"?"Current SDE":catalogueSource==="cached"?"Cached modules":"Navigation ready"}</small></div>
@@ -1186,6 +1239,30 @@ function FitDisplay({
   const [eveExporting, setEveExporting] = useState(false);
   const [eveExportStatus, setEveExportStatus] = useState("");
   const [hullProfile, setHullProfile] = useState<HullFittingProfile | null>(null);
+  const shoppingEntries = useMemo(() => fitShoppingEntries(fit), [fit]);
+  const fitPriceKey = shoppingEntries.map((entry) => `${entry.typeId}:${entry.quantity}`).join("|");
+  const [fitCost, setFitCost] = useState<FitCostEstimate | null>(null);
+  const [fitCostLoading, setFitCostLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!shoppingEntries.length) { setFitCost({ total: 0, pricedTypes: 0, totalTypes: 0, createdAt: null }); setFitCostLoading(false); return; }
+    setFitCostLoading(true);
+    void window.sage.getGlobalMarketQuotes(shoppingEntries.map((entry) => entry.typeId)).then((market) => {
+      if (cancelled) return;
+      const quoteByType = new Map(market.quotes.map((quote) => [quote.typeId, quote]));
+      let total = 0;
+      let pricedTypes = 0;
+      for (const entry of shoppingEntries) {
+        const price = quoteByType.get(entry.typeId)?.bestSell;
+        if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) continue;
+        total += price * entry.quantity;
+        pricedTypes += 1;
+      }
+      setFitCost({ total, pricedTypes, totalTypes: shoppingEntries.length, createdAt: market.createdAt });
+      setFitCostLoading(false);
+    }).catch(() => { if (!cancelled) { setFitCost(null); setFitCostLoading(false); } });
+    return () => { cancelled = true; };
+  }, [fitPriceKey]);
   useEffect(() => {
     let cancelled = false;
     if (!fit.hull.typeId) { setHullProfile(null); return; }
@@ -1347,24 +1424,13 @@ function FitDisplay({
     }
   }
   function exportCurrentFitToShoppingList() {
-    const additions = [
-      fit.hull,
-      ...fit.high,
-      ...fit.mid,
-      ...fit.low,
-      ...fit.rig,
-      ...fit.subsystem,
-      ...fit.drones,
-      ...fit.fighters,
-      ...fit.cargo,
-      ...fit.implants,
-      ...fit.boosters,
-    ].flatMap((item) => item.typeId ? [{ typeId: item.typeId, name: item.name, quantity: Math.max(1, Math.floor(item.quantity || 1)) }] : []);
-    for (const module of [...fit.high, ...fit.mid, ...fit.low]) {
-      if (module.chargeTypeId && module.charge) additions.push({ typeId: module.chargeTypeId, name: module.charge, quantity: Math.max(1, Math.floor(module.chargeQuantity || 1)) });
+    const result = appendShoppingList(shoppingEntries, fit.name + " added to Shopping List.");
+    if (!result.addedLines) {
+      setEveExportStatus("Nothing resolved in this fit could be added to Shopping List.");
+      return;
     }
-    const result = appendShoppingList(additions, fit.name + " exported to Shopping List.");
-    setEveExportStatus(result.addedLines ? (fit.name + " exported: " + result.addedLines + " item types / " + result.addedUnits.toLocaleString() + " units added to Shopping List.") : "Nothing resolved in this fit could be exported to Shopping List.");
+    setEveExportStatus(fit.name + " added: " + result.addedLines + " item types / " + result.addedUnits.toLocaleString() + " units. Opening Shopping List...");
+    window.dispatchEvent(new CustomEvent(OPEN_SHOPPING_LIST_EVENT));
   }
 
   const fitSummary = summarizeFit(fit);
@@ -1396,13 +1462,18 @@ function FitDisplay({
               {eveExporting ? "Exporting..." : "Export to EVE"}
             </button>
             <button className="route-fit" onClick={exportCurrentFitToShoppingList}>
-              Export to Shopping List
+              Add to Shopping List
             </button>
             <button onClick={onRemove}>Delete fit</button>
           </div>
         </div>
         <div className="fit-library-summary">
           <span>{fitSummary.moduleCount} modules</span><span>{fitSummary.droneCount} drones</span><span>{fitSummary.resolvedItems} resolved</span><span>{fitSummary.unresolvedItems} unresolved</span>
+        </div>
+        <div className="fit-total-cost" aria-live="polite">
+          <span>EST. TOTAL FIT COST</span>
+          <strong>{fitCostLoading ? "Pricing..." : fitCost ? formatFitIsk(fitCost.total) : "Market price unavailable"}</strong>
+          <small>{fitCost ? `${fitCost.pricedTypes}/${fitCost.totalTypes} item types priced at current retained best-sell quotes` : "Retained public market quotes unavailable"}</small>
         </div>
         {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
         <div className="fit-tabs">

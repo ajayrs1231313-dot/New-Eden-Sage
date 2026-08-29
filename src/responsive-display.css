@@ -1,12 +1,33 @@
-/* Responsive display system
-   Geometry is fluid; Electron applies a conservative zoom factor for genuinely
-   high-resolution windows so fixed-pixel legacy controls remain legible. */
+/* Responsive desktop display system.
+   1080p is the geometry baseline. vmin keeps scaling height-led, so ultrawide
+   width alone cannot inflate the interface. Typography has its own clamped
+   vmin rules in Character Command; this file scales shell/control geometry. */
 
 :root {
-  --sage-sidebar-width: clamp(190px, 11vw, 258px);
-  --sage-page-pad-x: clamp(18px, 1.65vw, 52px);
-  --sage-page-pad-top: clamp(18px, 1.25vw, 34px);
-  --sage-page-pad-bottom: clamp(10px, .8vw, 22px);
+  --sage-sidebar-width: clamp(220px, calc(176px + 4.074vmin), 264px);
+  --sage-page-pad-x: clamp(30px, calc(24px + .556vmin), 36px);
+  --sage-page-pad-top: clamp(22px, calc(17.6px + .407vmin), 26.4px);
+  --sage-page-pad-bottom: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+
+  --sage-sidebar-pad-y: clamp(20px, calc(16px + .37vmin), 24px);
+  --sage-sidebar-pad-x: clamp(14px, calc(11.2px + .259vmin), 16.8px);
+  --sage-sidebar-brand-mark: clamp(38px, calc(30.4px + .704vmin), 45.6px);
+  --sage-sidebar-nav-icon: clamp(18px, calc(14.4px + .333vmin), 21.6px);
+  --sage-sidebar-avatar: clamp(27px, calc(21.6px + .5vmin), 32.4px);
+  --sage-sidebar-row-pad-y: clamp(10px, calc(8px + .185vmin), 12px);
+  --sage-sidebar-row-pad-x: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+
+  --sage-cc-gap: clamp(8px, calc(6.4px + .148vmin), 9.6px);
+  --sage-cc-panel-pad: clamp(9px, calc(7.2px + .167vmin), 10.8px);
+  --sage-cc-hero-height: clamp(348px, calc(278.4px + 6.444vmin), 417.6px);
+  --sage-cc-portrait-w: clamp(180px, calc(144px + 3.333vmin), 216px);
+  --sage-cc-portrait-h: clamp(196px, calc(156.8px + 3.63vmin), 235.2px);
+  --sage-cc-corp-h: clamp(104px, calc(83.2px + 1.926vmin), 124.8px);
+  --sage-cc-journey-left: clamp(218px, calc(174.4px + 4.037vmin), 261.6px);
+  --sage-cc-panel-height: clamp(232px, calc(185.6px + 4.296vmin), 278.4px);
+  --sage-cc-status-height: clamp(76px, calc(60.8px + 1.407vmin), 91.2px);
+  --sage-cc-quick-row-height: clamp(113px, calc(90.4px + 2.093vmin), 135.6px);
+  --sage-cc-icon-frame: clamp(44px, calc(35.2px + .815vmin), 52.8px);
 }
 
 html,
@@ -37,6 +58,7 @@ body {
   min-width: 0;
   height: 100vh;
   height: 100dvh;
+  padding: var(--sage-sidebar-pad-y) var(--sage-sidebar-pad-x);
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
@@ -50,74 +72,293 @@ body {
   padding: var(--sage-page-pad-top) var(--sage-page-pad-x) var(--sage-page-pad-bottom);
 }
 
-/* Small desktop / old 4:3 and 5:4 panels. Existing feature breakpoints take
-   over below this point; these rules keep the permanent shell from consuming
-   too much of a 1024-1366px-wide window. */
+/* Complete left command rail: geometry and type grow from the 1080p baseline. */
+.brand {
+  gap: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+  padding: 0 clamp(8px, calc(6.4px + .148vmin), 9.6px) clamp(22px, calc(17.6px + .407vmin), 26.4px);
+}
+.brand-glyph {
+  width: var(--sage-sidebar-brand-mark);
+  height: var(--sage-sidebar-brand-mark);
+}
+.brand strong { font-size: clamp(16.8px, calc(13.44px + .311vmin), 20.2px); }
+.brand small { font-size: clamp(12.1px, calc(9.68px + .224vmin), 14.5px); }
+nav { gap: clamp(4px, calc(3.2px + .074vmin), 4.8px); }
+nav button {
+  min-height: clamp(38px, calc(30.4px + .704vmin), 45.6px);
+  padding: var(--sage-sidebar-row-pad-y) var(--sage-sidebar-row-pad-x);
+  gap: clamp(13px, calc(10.4px + .241vmin), 15.6px);
+  border-radius: clamp(5px, calc(4px + .093vmin), 6px);
+  font-size: clamp(16.8px, calc(13.44px + .311vmin), 20.2px);
+}
+nav button .nav-icon {
+  width: var(--sage-sidebar-nav-icon);
+  height: var(--sage-sidebar-nav-icon);
+  flex-basis: var(--sage-sidebar-nav-icon);
+}
+.characters {
+  margin-bottom: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+  padding-top: clamp(10px, calc(8px + .185vmin), 12px);
+}
+.characters > small {
+  margin: 0 clamp(8px, calc(6.4px + .148vmin), 9.6px) clamp(8px, calc(6.4px + .148vmin), 9.6px);
+  font-size: clamp(9.9px, calc(7.92px + .183vmin), 11.9px);
+}
+.characters .character-entry > button:first-child {
+  padding: clamp(6px, calc(4.8px + .111vmin), 7.2px) clamp(8px, calc(6.4px + .148vmin), 9.6px);
+  gap: clamp(9px, calc(7.2px + .167vmin), 10.8px);
+}
+.characters .character-entry > button:first-child > span {
+  width: var(--sage-sidebar-avatar);
+  height: var(--sage-sidebar-avatar);
+  flex: 0 0 var(--sage-sidebar-avatar);
+}
+.characters .character-entry > button:first-child strong {
+  max-width: calc(var(--sage-sidebar-width) - 92px);
+  font-size: clamp(11.6px, calc(9.28px + .215vmin), 13.9px);
+}
+.characters .character-entry > button:first-child small {
+  max-width: calc(var(--sage-sidebar-width) - 92px);
+  margin-top: clamp(3px, calc(2.4px + .056vmin), 3.6px);
+  font-size: clamp(9.9px, calc(7.92px + .183vmin), 11.9px);
+}
+.character-controls {
+  gap: clamp(6px, calc(4.8px + .111vmin), 7.2px);
+  padding: clamp(5px, calc(4px + .093vmin), 6px) clamp(4px, calc(3.2px + .074vmin), 4.8px) 0 clamp(36px, calc(28.8px + .667vmin), 43.2px);
+}
+.clone-switch {
+  padding: clamp(2px, calc(1.6px + .037vmin), 2.4px);
+  border-radius: clamp(7px, calc(5.6px + .13vmin), 8.4px);
+}
+.clone-switch button {
+  padding: clamp(5px, calc(4px + .093vmin), 6px) clamp(7px, calc(5.6px + .13vmin), 8.4px);
+  border-radius: clamp(5px, calc(4px + .093vmin), 6px);
+  font-size: clamp(9.5px, calc(7.6px + .176vmin), 11.4px);
+}
+.character-controls .remove-character {
+  width: clamp(25px, calc(20px + .463vmin), 30px) !important;
+  height: clamp(25px, calc(20px + .463vmin), 30px) !important;
+  min-width: clamp(25px, calc(20px + .463vmin), 30px);
+}
+.remove-character-icon {
+  width: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+  height: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+}
+.local-card {
+  padding: clamp(10px, calc(8px + .185vmin), 12px);
+  gap: clamp(10px, calc(8px + .185vmin), 12px);
+  border-radius: clamp(5px, calc(4px + .093vmin), 6px);
+}
+.local-card strong { font-size: clamp(10.5px, calc(8.4px + .194vmin), 12.6px); }
+.local-card small { font-size: clamp(12.1px, calc(9.68px + .224vmin), 14.5px); }
+.pulse {
+  width: clamp(7px, calc(5.6px + .13vmin), 8.4px);
+  height: clamp(7px, calc(5.6px + .13vmin), 8.4px);
+}
+
+/* Character Command desktop geometry. Existing narrow-window layouts take over
+   below 1240px, so this layer never bulldozes the compact breakpoints. */
+@media (min-width: 1241px) {
+  .character-command { gap: var(--sage-cc-gap); }
+  .character-command > .command-subtabs {
+    min-height: clamp(38px, calc(30.4px + .704vmin), 45.6px);
+    gap: clamp(2px, calc(1.6px + .037vmin), 2.4px);
+    padding: clamp(4px, calc(3.2px + .074vmin), 4.8px);
+  }
+  .character-command > .command-subtabs button {
+    min-width: clamp(132px, calc(105.6px + 2.444vmin), 158.4px);
+    min-height: clamp(29px, calc(23.2px + .537vmin), 34.8px);
+    padding: clamp(5px, calc(4px + .093vmin), 6px) clamp(13px, calc(10.4px + .241vmin), 15.6px);
+  }
+  .character-command .character-overview-dashboard { gap: var(--sage-cc-gap); }
+  .character-command .character-hero-v2 { height: var(--sage-cc-hero-height); }
+  .character-command .character-hero-identity {
+    left: clamp(18px, calc(14.4px + .333vmin), 21.6px);
+    top: clamp(14px, calc(11.2px + .259vmin), 16.8px);
+    gap: clamp(28px, calc(22.4px + .519vmin), 33.6px);
+  }
+  .character-command .character-identity-stack {
+    width: var(--sage-cc-portrait-w);
+    flex-basis: var(--sage-cc-portrait-w);
+    gap: clamp(8px, calc(6.4px + .148vmin), 9.6px);
+  }
+  .character-command .character-hud-portrait {
+    width: var(--sage-cc-portrait-w);
+    height: var(--sage-cc-portrait-h);
+  }
+  .character-command .character-corporation-banner {
+    width: var(--sage-cc-portrait-w);
+    height: var(--sage-cc-corp-h);
+  }
+  .character-command .character-hero-copy {
+    min-width: clamp(270px, calc(216px + 5vmin), 324px);
+    max-width: clamp(480px, calc(384px + 8.889vmin), 576px);
+    padding-top: clamp(20px, calc(16px + .37vmin), 24px);
+  }
+  .character-command .character-journey {
+    left: var(--sage-cc-journey-left);
+    right: clamp(12px, calc(9.6px + .222vmin), 14.4px);
+    bottom: clamp(10px, calc(8px + .185vmin), 12px);
+    height: clamp(87px, calc(69.6px + 1.611vmin), 104.4px);
+    padding: clamp(9px, calc(7.2px + .167vmin), 10.8px) clamp(11px, calc(8.8px + .204vmin), 13.2px) clamp(6px, calc(4.8px + .111vmin), 7.2px);
+  }
+  .character-command .character-journey-node svg {
+    width: clamp(34px, calc(27.2px + .63vmin), 40.8px);
+    height: clamp(34px, calc(27.2px + .63vmin), 40.8px);
+  }
+  .character-command .character-status-strip-v2 { min-height: var(--sage-cc-status-height); }
+  .character-command .character-status-cell {
+    gap: clamp(10px, calc(8px + .185vmin), 12px);
+    padding: var(--sage-cc-panel-pad) clamp(12px, calc(9.6px + .222vmin), 14.4px);
+  }
+  .character-command .character-status-logo,
+  .character-command .character-status-hex {
+    width: clamp(34px, calc(27.2px + .63vmin), 40.8px);
+    height: clamp(34px, calc(27.2px + .63vmin), 40.8px);
+    flex-basis: clamp(34px, calc(27.2px + .63vmin), 40.8px);
+  }
+  .character-command .character-status-ship {
+    width: clamp(38px, calc(30.4px + .704vmin), 45.6px);
+    height: clamp(38px, calc(30.4px + .704vmin), 45.6px);
+    flex-basis: clamp(38px, calc(30.4px + .704vmin), 45.6px);
+  }
+  .character-command .character-reference-grid { gap: var(--sage-cc-gap); }
+  .character-command .character-start-panel,
+  .character-command .character-reference-grid .command-priority-panel,
+  .character-command .character-reference-grid .eve-news-panel,
+  .character-command .character-reference-grid .capability-next-moves {
+    min-height: var(--sage-cc-panel-height);
+    padding: var(--sage-cc-panel-pad);
+  }
+  .character-command .character-quick-panel,
+  .character-command .character-reference-grid .capability-radar-v2 {
+    padding: var(--sage-cc-panel-pad);
+  }
+  .character-command .character-start-panel button,
+  .character-command .character-reference-grid .capability-next-moves li {
+    min-height: clamp(41px, calc(32.8px + .759vmin), 49.2px);
+    padding: clamp(6px, calc(4.8px + .111vmin), 7.2px) clamp(7px, calc(5.6px + .13vmin), 8.4px);
+  }
+  .character-command .character-reference-grid .priority-item {
+    min-height: clamp(29px, calc(23.2px + .537vmin), 34.8px);
+    padding: clamp(4px, calc(3.2px + .074vmin), 4.8px) clamp(5px, calc(4px + .093vmin), 6px);
+  }
+  .character-command .character-reference-grid .news-list a {
+    min-height: clamp(26px, calc(20.8px + .481vmin), 31.2px);
+  }
+  .character-command .character-quick-grid { gap: clamp(4px, calc(3.2px + .074vmin), 4.8px); }
+  .character-command .character-quick-grid button {
+    min-height: var(--sage-cc-quick-row-height);
+    padding: clamp(7px, calc(5.6px + .13vmin), 8.4px) clamp(4px, calc(3.2px + .074vmin), 4.8px);
+  }
+  .character-command .character-quick-grid button > span {
+    width: var(--sage-cc-icon-frame);
+    height: var(--sage-cc-icon-frame);
+    margin-bottom: clamp(7px, calc(5.6px + .13vmin), 8.4px);
+  }
+  .character-command .character-quick-grid .quick-link-glyph {
+    width: clamp(29px, calc(23.2px + .537vmin), 34.8px);
+    height: clamp(29px, calc(23.2px + .537vmin), 34.8px);
+  }
+  .character-command .capability-hud-summary {
+    grid-template-columns: clamp(138px, calc(110.4px + 2.556vmin), 165.6px) minmax(0, 1fr);
+    gap: clamp(11px, calc(8.8px + .204vmin), 13.2px);
+    min-height: clamp(99px, calc(79.2px + 1.833vmin), 118.8px);
+  }
+  .character-command .capability-hud-dial {
+    width: clamp(124px, calc(99.2px + 2.296vmin), 148.8px);
+    height: clamp(110px, calc(88px + 2.037vmin), 132px);
+  }
+  .character-command .character-queue-summary article {
+    min-height: clamp(74px, calc(59.2px + 1.37vmin), 88.8px);
+    padding: clamp(12px, calc(9.6px + .222vmin), 14.4px) clamp(14px, calc(11.2px + .259vmin), 16.8px);
+  }
+  .character-command .character-queue-title {
+    padding: clamp(11px, calc(8.8px + .204vmin), 13.2px) clamp(13px, calc(10.4px + .241vmin), 15.6px);
+  }
+  .character-command .character-queue-row {
+    column-gap: clamp(18px, calc(14.4px + .333vmin), 21.6px);
+    min-height: clamp(58px, calc(46.4px + 1.074vmin), 69.6px);
+    padding: clamp(8px, calc(6.4px + .148vmin), 9.6px) clamp(14px, calc(11.2px + .259vmin), 16.8px);
+  }
+  .character-command .character-start-panel > h3,
+  .character-command .character-reference-grid .command-panel-heading .eyebrow,
+  .character-command .character-reference-grid .capability-next-moves .capability-heading .eyebrow {
+    min-height: clamp(25px, calc(20px + .463vmin), 30px);
+    padding: clamp(4px, calc(3.2px + .074vmin), 4.8px) clamp(30px, calc(24px + .556vmin), 36px);
+  }
+}
+
+/* Top data-control deck uses the same height-led geometry rules. */
+@media (min-width: 1381px) {
+  .cc-utility-rail {
+    height: clamp(34px, calc(27.2px + .63vmin), 40.8px);
+    padding: 0 clamp(14px, calc(11.2px + .259vmin), 16.8px);
+    gap: clamp(18px, calc(14.4px + .333vmin), 21.6px);
+  }
+  .cc-brand-diamond {
+    width: clamp(20px, calc(16px + .37vmin), 24px);
+    height: clamp(20px, calc(16px + .37vmin), 24px);
+    flex-basis: clamp(20px, calc(16px + .37vmin), 24px);
+  }
+  .cc-command-stage {
+    min-height: clamp(167px, calc(133.6px + 3.093vmin), 200.4px);
+    padding: clamp(20px, calc(16px + .37vmin), 24px) clamp(18px, calc(14.4px + .333vmin), 21.6px) clamp(17px, calc(13.6px + .315vmin), 20.4px);
+    gap: clamp(18px, calc(14.4px + .333vmin), 21.6px);
+  }
+  .cc-status-spine { min-height: clamp(61px, calc(48.8px + 1.13vmin), 73.2px); }
+  .cc-freshness-orb {
+    width: clamp(31px, calc(24.8px + .574vmin), 37.2px);
+    height: clamp(31px, calc(24.8px + .574vmin), 37.2px);
+    flex-basis: clamp(31px, calc(24.8px + .574vmin), 37.2px);
+  }
+  .cc-data-control {
+    width: min(100%, clamp(500px, calc(400px + 9.259vmin), 600px));
+    min-height: clamp(48px, calc(38.4px + .889vmin), 57.6px);
+    border-radius: clamp(24px, calc(19.2px + .444vmin), 28.8px);
+  }
+  .cc-data-control > button {
+    padding: clamp(7px, calc(5.6px + .13vmin), 8.4px) clamp(11px, calc(8.8px + .204vmin), 13.2px);
+    gap: clamp(8px, calc(6.4px + .148vmin), 9.6px);
+  }
+  .cc-data-control > button svg {
+    width: clamp(19px, calc(15.2px + .352vmin), 22.8px);
+    height: clamp(19px, calc(15.2px + .352vmin), 22.8px);
+    flex-basis: clamp(19px, calc(15.2px + .352vmin), 22.8px);
+  }
+  .cc-primary-actions { gap: clamp(7px, calc(5.6px + .13vmin), 8.4px); }
+  .cc-primary-actions button {
+    min-height: clamp(36px, calc(28.8px + .667vmin), 43.2px);
+    gap: clamp(7px, calc(5.6px + .13vmin), 8.4px);
+    padding: clamp(7px, calc(5.6px + .13vmin), 8.4px) clamp(9px, calc(7.2px + .167vmin), 10.8px);
+    border-radius: clamp(18px, calc(14.4px + .333vmin), 21.6px);
+  }
+  .cc-update-pod {
+    min-height: clamp(32px, calc(25.6px + .593vmin), 38.4px);
+    gap: clamp(7px, calc(5.6px + .13vmin), 8.4px);
+    padding: 0 clamp(11px, calc(8.8px + .204vmin), 13.2px);
+  }
+}
+
+/* Old 4:3/5:4 and compact desktop windows retain usable navigation without
+   shrinking type below the new baseline. */
 @media (max-width: 1180px) {
   :root {
     --sage-sidebar-width: 184px;
     --sage-page-pad-x: 16px;
     --sage-page-pad-top: 16px;
   }
-
-  aside {
-    padding-inline: 10px;
-  }
-
-  .brand {
-    gap: 8px;
-    padding-inline: 4px;
-  }
-
-  nav button {
-    padding-inline: 9px;
-  }
+  .app-shell > aside { padding-inline: 10px; }
+  .brand { gap: 8px; padding-inline: 4px; }
+  nav button { min-height: 36px; padding-inline: 9px; font-size: 15px; }
+  .characters .character-entry > button:first-child strong,
+  .characters .character-entry > button:first-child small { max-width: 102px; }
 }
 
-/* Short displays need vertical access rather than clipping the lower sidebar. */
+/* Short displays scroll the rail instead of clipping the lower status card. */
 @media (max-height: 740px) {
-  aside {
-    padding-top: 10px;
-    padding-bottom: 10px;
-  }
-
-  .brand {
-    padding-bottom: 12px;
-  }
-
-  nav {
-    gap: 2px;
-  }
-
-  nav button {
-    padding-top: 8px;
-    padding-bottom: 8px;
-  }
-}
-
-/* 1440p / 1600p-class workspaces: use the extra canvas instead of leaving
-   oversized dead gutters. Electron adds a small matching UI scale when height
-   also supports it. */
-@media (min-width: 2200px) {
-  :root {
-    --sage-sidebar-width: clamp(220px, 10vw, 272px);
-    --sage-page-pad-x: clamp(32px, 1.55vw, 58px);
-  }
-}
-
-/* 4K, 5K, super-ultrawide and 8K-class workspaces remain fully fluid. The
-   gutters grow only modestly so the useful command surface keeps the space. */
-@media (min-width: 3200px) {
-  :root {
-    --sage-sidebar-width: clamp(236px, 8vw, 290px);
-    --sage-page-pad-x: clamp(42px, 1.4vw, 68px);
-    --sage-page-pad-top: clamp(26px, 1vw, 42px);
-  }
-}
-
-@media (min-width: 5000px) {
-  :root {
-    --sage-sidebar-width: clamp(252px, 6vw, 310px);
-    --sage-page-pad-x: clamp(52px, 1.15vw, 82px);
-  }
+  .app-shell > aside { padding-top: 10px; padding-bottom: 10px; }
+  .brand { padding-bottom: 12px; }
+  nav { gap: 2px; }
+  nav button { padding-top: 8px; padding-bottom: 8px; }
 }

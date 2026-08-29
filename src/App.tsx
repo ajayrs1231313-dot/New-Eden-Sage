@@ -958,7 +958,7 @@ function UpdateControl() {
       }
     }
   }
-  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Install & restart" : state.status === "checking" ? "Checking\u2026" : state.status === "current" ? `Up to date \u00b7 v${version}` : state.status === "error" ? "Update failed \u00b7 retry" : `Check updates \u00b7 v${version}`;
+  const label = state.status === "available" ? "Download update" : state.status === "downloading" ? `Downloading ${progress}%` : state.status === "downloaded" ? "Restart to update" : state.status === "checking" ? "Checking\u2026" : state.status === "current" ? `Up to date \u00b7 v${version}` : state.status === "error" ? "Update failed \u00b7 retry" : `Check updates \u00b7 v${version}`;
   return <button className="update-control" onClick={act} disabled={state.status === "checking" || state.status === "downloading"} title={state.status === "error" ? String(state.detail) : "Install the latest full Sage release from GitHub"}>{label}</button>;
 }
 

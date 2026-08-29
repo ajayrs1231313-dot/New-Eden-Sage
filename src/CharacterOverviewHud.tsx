@@ -10,6 +10,7 @@ type CloneState = "alpha" | "omega";
 
 const isk = (value: number) => new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
 const HERO_BACKGROUNDS = [hulkCharacterBackground, stationCharacterBackground] as const;
+const DEFAULT_HERO_BACKGROUND_INDEX = 1; // Preserve persisted indexes; station is the default fallback.
 const HERO_BACKGROUND_LOCK_KEY = "new-eden-sage:character-hero-background-lock:v1";
 const HERO_BACKGROUND_CYCLE_MS = 30 * 60 * 1000;
 
@@ -30,7 +31,7 @@ function initialHeroBackgroundState(): HeroBackgroundState {
       if (parsed.locked === true && Number.isInteger(index) && index >= 0 && index < HERO_BACKGROUNDS.length) return { index, locked: true };
     }
   } catch { /* Background preference persistence is non-fatal. */ }
-  return { index: Math.floor(Math.random() * HERO_BACKGROUNDS.length), locked: false };
+  return { index: DEFAULT_HERO_BACKGROUND_INDEX, locked: false };
 }
 
 function HudGlyph({ kind }: { kind: "target" | "scan" | "bell" | "intel" | "route" | "isk" | "fleet" | "fit" }) {
