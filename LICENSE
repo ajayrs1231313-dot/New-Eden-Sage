@@ -1,21 +1,78 @@
-MIT License
+NEW EDEN SAGE SOURCE-AVAILABLE LICENCE
+Version 1.0
 
-Copyright (c) 2026 New Eden Sage contributors
+Copyright (c) 2025-2026 New Eden Sage. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This Licence governs the New Eden Sage software, its source code, documentation, assets, and other materials distributed with it, except for third-party materials that are expressly identified as being governed by separate licence terms (collectively, the "Software").
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. LIMITED PERMISSION TO INSPECT SOURCE CODE
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Subject to the terms of this Licence, you are granted a limited, revocable, non-exclusive, non-transferable, non-sublicensable permission to access, download, and inspect publicly available Source Code solely for the purpose of reviewing, evaluating, understanding, or auditing New Eden Sage.
+
+You may make only those temporary or local copies reasonably necessary for that inspection. This permission does not grant any right to use the Source Code, or any portion of it, in another project, product, service, application, library, repository, dataset, model, or other work.
+
+2. PERMITTED USE OF OFFICIAL SOFTWARE
+
+You may install and use an unmodified official release of New Eden Sage for its intended end-user purpose, subject to any applicable account, subscription, service, or product terms.
+
+This permission to run an official release does not grant permission to modify, adapt, redistribute, republish, reverse engineer Source Code, incorporate Source Code into another work, create derivative works from Source Code, or otherwise exploit the Software or Source Code outside the rights expressly granted by this Licence.
+
+3. PROHIBITED USES
+
+Unless New Eden Sage gives you prior express written permission, you must not, directly or indirectly:
+
+(a) modify, alter, adapt, translate, transform, or create derivative works from the Software or Source Code;
+
+(b) fork, compile, build, package, or distribute a modified or alternative version of the Software or Source Code;
+
+(c) copy, reproduce, redistribute, republish, upload, mirror, sublicense, sell, rent, lease, lend, transfer, or otherwise make the Software or Source Code available to any third party, except for the limited local copying expressly permitted for inspection under Section 1;
+
+(d) incorporate, embed, port, reuse, or otherwise use the Software, Source Code, or any substantial part of either in another project, product, service, application, library, repository, dataset, model, or other work;
+
+(e) use the Software or Source Code, in whole or in part, for commercial exploitation or non-commercial exploitation outside the permitted use of an official New Eden Sage release;
+
+(f) remove, obscure, alter, or misrepresent any copyright, attribution, proprietary, trade mark, or licence notice; or
+
+(g) assist, enable, or encourage another person to do anything prohibited by this Licence.
+
+4. OWNERSHIP AND RESERVATION OF RIGHTS
+
+The Software and Source Code are licensed, not sold. All copyright, ownership, title, interest, and other intellectual property rights in New Eden Sage remain with their respective owners and licensors.
+
+No rights are granted by implication, estoppel, exhaustion, or otherwise. All rights not expressly granted by this Licence are reserved.
+
+5. THIRD-PARTY MATERIALS
+
+New Eden Sage may include or depend on third-party software, data, content, trade marks, names, or other materials. Those materials remain subject to their respective licences, notices, and rights. Nothing in this Licence overrides rights granted under an applicable third-party licence.
+
+EVE Online and related names, logos, designs, and intellectual property belong to CCP hf and are not licensed to you under this Licence.
+
+6. NO TRADE MARK LICENCE
+
+This Licence does not grant permission to use the New Eden Sage name, branding, logos, trade marks, service marks, or other brand identifiers except as reasonably necessary to identify the Software when referring to it truthfully.
+
+7. TERMINATION
+
+Your permissions under this Licence terminate automatically and immediately if you breach any term of this Licence. Upon termination, you must cease all use not independently authorised by law and delete or destroy unauthorised copies in your possession or control, without limiting any rights or remedies available to New Eden Sage or its licensors.
+
+8. DISCLAIMER OF WARRANTY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE SOFTWARE AND SOURCE CODE ARE PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, WHETHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+9. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, NEW EDEN SAGE AND ITS LICENSORS, CONTRIBUTORS, AND DISTRIBUTORS WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, GOODWILL, OR BUSINESS OPPORTUNITY, ARISING OUT OF OR RELATING TO THE SOFTWARE, SOURCE CODE, OR THIS LICENCE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. NOTHING IN THIS LICENCE EXCLUDES OR LIMITS LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED OR LIMITED.
+
+10. ENFORCEMENT OF RIGHTS
+
+New Eden Sage and its licensors reserve all rights not expressly granted under this Licence.
+
+Any unauthorised copying, modification, redistribution, republication, incorporation, adaptation, commercial exploitation, non-commercial exploitation, creation of derivative works, or other use of the Software or Source Code outside the permissions expressly granted by this Licence constitutes a violation of this Licence and may also constitute infringement of applicable intellectual property rights.
+
+New Eden Sage is committed to actively and vigorously protecting its intellectual property. Where unauthorised use, copying, redistribution, modification, or exploitation is identified, New Eden Sage reserves the right to pursue all lawful remedies available, including injunctive relief, recovery of damages, recovery of profits attributable to infringement where permitted, legal costs where recoverable, termination of any licence granted to the infringing party, and any other remedies available under applicable law.
+
+The public availability or accessibility of any portion of the Source Code does not constitute a waiver of copyright, ownership, or any other intellectual property rights and does not imply permission to use the Source Code beyond the limited rights expressly granted by this Licence.
+
+11. SEVERABILITY AND NO WAIVER
+
+If any provision of this Licence is held unenforceable, that provision will be enforced to the maximum extent permitted and the remaining provisions will remain in effect. A failure or delay in enforcing any provision does not waive the right to enforce that provision or any other provision later.

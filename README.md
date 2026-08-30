@@ -76,6 +76,6 @@ To publish an update, change the version in `package.json`, commit and push it, 
 
 ## License and EVE notice
 
-New Eden Sage is released under the MIT License. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+New Eden Sage is source-available under the [New Eden Sage Source-Available Licence](LICENSE). You may inspect the publicly available source code for review, evaluation, understanding, or auditing, but you may not modify, fork, redistribute, republish, incorporate, adapt, commercially or non-commercially exploit, or create derivative works from it except where the Licence expressly permits. Third-party components remain subject to their own licence terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 EVE Online and all related logos and designs are the intellectual property of CCP hf. This project is an independent third-party application and is not affiliated with or endorsed by CCP hf.
