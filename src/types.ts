@@ -406,7 +406,7 @@ export interface PveLocationOpportunity {
 
 export interface PveLocationAnalysis {
   generatedAt: string;
-  character: { characterId: string; name: string; systemId: number; systemName: string; shipName: string | null };
+  character: { characterId: string; name: string; systemId: number; systemName: string; shipName: string | null; shipTypeId: number | null; shipReadiness: null | { percent: number; tier: string; label: string; profile: "pve-combat" } };
   constraints: { maxJumps: number | null; maxMinutes: number | null };
   locations: PveLocationOpportunity[];
   ranked: PersonalOpportunity[];
@@ -1096,6 +1096,18 @@ export interface MarketContractOpportunity {
   pilotRequiredShips:Array<{typeId:number;typeName:string;quantity:number;groupName:string;packagedVolumeM3:number;capital:boolean}>; capitalRouteRequired:boolean; capitalOriginUnverified:boolean; score:number; opportunity:boolean; note:string;
 }
 export interface MarketContractIntelligence { generatedAt:string; contractsCreatedAt:string|null; marketCreatedAt:string|null; contracts:MarketContractOpportunity[]; opportunities:MarketContractOpportunity[]; counts:{contracts:number;opportunities:number} }
+export interface MarketContractSearchQuery {
+  itemSearch?:string; regionId?:string|number; locationSearch?:string; contractType?:string; category?:string; availability?:string; issuerSearch?:string;
+  minPrice?:number|null; maxPrice?:number|null; excludeMultiple?:boolean; exactType?:boolean; cleanOnly?:boolean;
+  security?:Partial<Record<"high"|"low"|"null"|"unknown",boolean>>; limit?:number;
+}
+export interface MarketContractSearchResult { total:number; rows:MarketContractOpportunity[] }
+export interface MarketContractWorkspace {
+  generatedAt:string; contractsCreatedAt:string|null; marketCreatedAt:string|null; counts:{contracts:number;opportunities:number};
+  opportunities:MarketContractOpportunity[];
+  options:{regions:Array<{id:number;name:string}>;categories:string[];contractTypes:string[];availabilities:string[]};
+  topProfit:number; averageRoi:number; search:MarketContractSearchResult;
+}
 export type ProfitLedgerSource = "contract" | "market-opportunity" | "planetary" | "industry" | "lp-store";
 export interface ProfitLedgerItem { typeId:number; name:string; quantity:number; expectedUnitSell?:number|null }
 export interface ProfitLedgerRecord {
@@ -1146,7 +1158,8 @@ declare global {
       getLpCorporations(corporationIds:number[]): Promise<Array<{corporationId:number;corporationName:string}>>;
       getLpStoreOffers(corporationId:number, marketRevision?:number): Promise<any>;
       getLpEarningCandidates(standings:unknown, currentCorporationIds:number[]): Promise<any[]>;
-      getContractMarketIntelligence(): Promise<MarketContractIntelligence>;
+      getContractMarketWorkspace(): Promise<MarketContractWorkspace>;
+      searchMarketContracts(input:MarketContractSearchQuery): Promise<MarketContractSearchResult>;
       getProfitLedger(characterId?:string): Promise<ProfitLedgerRecord[]>;
       completeProfitDeal(input:ProfitLedgerCompleteInput): Promise<ProfitLedgerRecord>;
       reconcileProfitLedger(characterId?:string): Promise<ProfitLedgerRecord[]>;
@@ -1240,7 +1253,7 @@ declare global {
       getIndustrialOpportunities(input: any): Promise<any>;
       getPreparedIndustrialCommand(input: { characterId: string }): Promise<any>;
       getIndustrialOpportunityRouteScope(input: any): Promise<any>;
-      getPreparedIskLab(input: { characterId: string; cloneState?: "alpha" | "omega" }): Promise<{ market: OpportunityAnalysis | null; pve: PveLocationAnalysis | null; invention: any | null }>;
+      getPreparedIskLab(input: { characterId: string; cloneState?: "alpha" | "omega"; modules?: Array<"market" | "pve" | "invention"> }): Promise<{ market: OpportunityAnalysis | null; pve: PveLocationAnalysis | null; invention: any | null }>;
       getShipReadiness(input: {
         characterId: string;
         hullTypeId: number;

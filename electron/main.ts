@@ -8,6 +8,14 @@ const MCP_MODE = process.argv.includes("--mcp");
 const DESKTOP_SINGLE_INSTANCE_LOCK = MCP_MODE ? true : app.requestSingleInstanceLock();
 (globalThis as typeof globalThis & { __sageSingleInstanceLockHeld?: boolean }).__sageSingleInstanceLockHeld = DESKTOP_SINGLE_INSTANCE_LOCK;
 
+const DEV_RUNTIME_USER_DATA = process.argv.includes("--dev")
+  ? process.env.NEW_EDEN_SAGE_USER_DATA?.trim()
+  : undefined;
+if (DESKTOP_SINGLE_INSTANCE_LOCK && DEV_RUNTIME_USER_DATA) {
+  const chromiumProfile = app.getPath("userData");
+  app.setPath("sessionData", chromiumProfile);
+}
+
 if (!DESKTOP_SINGLE_INSTANCE_LOCK) app.quit();
 
 const HEARTBEAT_FILE = path.join(LOG_ROOT, `electron-heartbeat-${process.pid}.json`);

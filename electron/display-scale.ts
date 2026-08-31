@@ -52,6 +52,7 @@ export function fitDisplayZoom(
   viewportHeight: number,
   contentWidth: number,
   contentHeight: number,
+  fitHeight = true,
 ) {
   const safeBase = Math.max(DISPLAY_FIT_MIN_ZOOM, Number.isFinite(baseZoom) ? baseZoom : 1);
   const safeCurrent = Math.min(safeBase, Math.max(DISPLAY_FIT_MIN_ZOOM, Number.isFinite(currentZoom) ? currentZoom : safeBase));
@@ -59,7 +60,17 @@ export function fitDisplayZoom(
   const safeViewportHeight = Math.max(1, Number.isFinite(viewportHeight) ? viewportHeight : 1);
   const safeContentWidth = Math.max(1, Number.isFinite(contentWidth) ? contentWidth : safeViewportWidth);
   const safeContentHeight = Math.max(1, Number.isFinite(contentHeight) ? contentHeight : safeViewportHeight);
-  const fitRatio = Math.min(safeViewportWidth / safeContentWidth, safeViewportHeight / safeContentHeight);
+  const widthFitRatio = safeViewportWidth / safeContentWidth;
+  const heightFitRatio = fitHeight ? safeViewportHeight / safeContentHeight : Number.POSITIVE_INFINITY;
+  const fitRatio = Math.min(widthFitRatio, heightFitRatio);
+
+  // Data-dense workspaces such as ISK Command are intentionally vertically
+  // scrollable. Recover from a previous height-driven shrink before deciding
+  // whether a small width correction is still needed at the responsive base.
+  if (!fitHeight && safeCurrent < safeBase - 0.001 && widthFitRatio >= 0.96) {
+    return Math.round(safeBase * 1000) / 1000;
+  }
+  if (!fitHeight && widthFitRatio >= 1) return Math.round(safeBase * 1000) / 1000;
 
   if (fitRatio < 1) {
     const fitted = safeCurrent * fitRatio * 0.99;

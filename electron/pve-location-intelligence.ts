@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { DATA_ROOT } from "./data-paths";
-import { analyzeCapabilities, type CapabilityAnalysis, type CapabilityResult } from "./capability-engine";
+import { analyzeCapabilities, analyzeCurrentShipUse, type CapabilityAnalysis, type CapabilityResult } from "./capability-engine";
 import { getPveStaticIndex, type PveSystemStatic } from "./pve-static-index";
 import { universeRoute } from "./universe-route-graph";
 import type { CloneState } from "./skill-training";
@@ -98,7 +98,7 @@ export type PvePersonalOpportunity = {
 
 export type PveLocationAnalysis = {
   generatedAt: string;
-  character: { characterId: string; name: string; systemId: number; systemName: string; shipName: string | null };
+  character: { characterId: string; name: string; systemId: number; systemName: string; shipName: string | null; shipTypeId: number | null; shipReadiness: null | { percent: number; tier: string; label: string; profile: "pve-combat" } };
   constraints: { maxJumps: number | null; maxMinutes: number | null };
   locations: PveLocationOpportunity[];
   ranked: PvePersonalOpportunity[];
@@ -367,6 +367,7 @@ export async function analyzePveLocations(input: PveLocationQuery, runtime: PveA
   runtime.progress?.({ stage: "pve-live", message: "Loading current public PvE and system activity signals…", percent: 5 });
   const live = runtime.liveData ?? await loadLivePveData(Boolean(input.forceLive));
   const staticIndex = await getPveStaticIndex();
+  const originName = staticIndex.systems.get(origin)?.name ?? snapshot.location.solar_system_name ?? `System ${origin}`;
   const maps = metricMaps(live);
 
   runtime.progress?.({ stage: "pve-readiness", message: "Matching your current ship and skill capability…", percent: 15 });
@@ -377,6 +378,12 @@ export async function analyzePveLocations(input: PveLocationQuery, runtime: PveA
     } catch {
       capabilities = null;
     }
+  }
+  let currentShipReadiness: CapabilityResult | null = null;
+  try {
+    currentShipReadiness = await analyzeCurrentShipUse(snapshot, "pve-combat", runtime.cloneState ?? "omega");
+  } catch {
+    currentShipReadiness = null;
   }
   const readiness = {
     incursion: capability(capabilities, "incursions"),
@@ -415,7 +422,7 @@ export async function analyzePveLocations(input: PveLocationQuery, runtime: PveA
       incursion: { state: incursion.state, influence: incursion.influence, hasBoss: incursion.has_boss, type: incursion.type },
       reasons: [
         `CCP public data currently lists this incursion with ${Math.round(incursion.influence * 100)}% influence.`,
-        `${route.jumps} jumps from ${snapshot.location.solar_system_name}; ${metrics.shipKills} ship and ${metrics.podKills} pod kills are in the current public system-kill window.`,
+        `${route.jumps} jumps from ${originName}; ${metrics.shipKills} ship and ${metrics.podKills} pod kills are in the current public system-kill window.`,
         readiness.incursion ? `${readiness.incursion.percent}% personal Incursion capability · ${readiness.incursion.bestRoute}.` : "Personal Incursion readiness could not be resolved on this pass.",
       ],
       action: `Travel to ${system.name} as the staging system after confirming the fleet community and doctrine you intend to join.`,
@@ -456,7 +463,7 @@ export async function analyzePveLocations(input: PveLocationQuery, runtime: PveA
       reasons: [
         `CCP static data shows ${candidate.stationCount} ${candidate.corporationName} station${candidate.stationCount === 1 ? "" : "s"} in this high-sec system and classifies the corporation's main activity as military.`,
         standing ? `Your synced ${standing.entityType === "npc_corp" ? "corporation" : "faction"} standing is ${standing.value.toFixed(2)} with ${standing.name}.` : "No direct synced standing with this corporation/faction was found.",
-        `${route.jumps} jumps from ${snapshot.location.solar_system_name}.`,
+        `${route.jumps} jumps from ${originName}.`,
       ],
       action: `Check ${candidate.corporationName} Security agents in ${system.name} before relocating, then compare LP-store value and mission routing.`,
       caveat: "Public CCP data does not provide an enumerable current list of normal mission agents by level/division. This is a staging candidate, not a claim that a Level 4 Security agent is present.",
@@ -571,8 +578,15 @@ export async function analyzePveLocations(input: PveLocationQuery, runtime: PveA
       characterId: String(snapshot.characterId),
       name: String(snapshot.character?.name ?? "Character"),
       systemId: origin,
-      systemName: String(snapshot.location.solar_system_name ?? `System ${origin}`),
+      systemName: String(originName),
       shipName: snapshot.ship?.ship_type_name ?? snapshot.ship?.ship_name ?? null,
+      shipTypeId: Number(snapshot.ship?.ship_type_id ?? 0) || null,
+      shipReadiness: currentShipReadiness ? {
+        percent: clamp(currentShipReadiness.readinessPercent),
+        tier: currentShipReadiness.tier,
+        label: currentShipReadiness.label,
+        profile: "pve-combat",
+      } : null,
     },
     constraints: { maxJumps, maxMinutes },
     locations: enrichedRows,

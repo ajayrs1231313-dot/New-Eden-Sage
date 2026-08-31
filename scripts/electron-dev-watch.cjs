@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
@@ -9,8 +9,60 @@ const electronPath = require('electron');
 const logRoot = path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage', 'Logs');
 const monitorRoot = path.join(logRoot, 'Crash Monitor');
 const monitorScript = path.join(root, 'scripts', 'electron-crash-monitor.cjs');
-const launcherLockFile = path.join(logRoot, 'dev-launcher.lock');
-const launcherCommandFile = path.join(logRoot, 'dev-launcher-command.json');
+const processSessionId = currentWindowsSessionId();
+const launcherLockFile = path.join(logRoot, process.platform === 'win32' && Number.isInteger(processSessionId) ? `dev-launcher-session-${processSessionId}.lock` : 'dev-launcher.lock');
+const launcherCommandFile = path.join(logRoot, process.platform === 'win32' && Number.isInteger(processSessionId) ? `dev-launcher-command-session-${processSessionId}.json` : 'dev-launcher-command.json');
+const defaultDevUserData = path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage-dev');
+const devUserData = process.platform === 'win32' && processSessionId === 0
+  ? path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage-dev-session-0')
+  : defaultDevUserData;
+const sharedUserData = path.dirname(logRoot);
+const sharedLocalState = path.join(sharedUserData, 'Local State');
+const devLocalState = path.join(devUserData, 'Local State');
+
+function currentWindowsSessionId() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const raw = execFileSync('powershell.exe', ['-NoProfile', '-Command', `(Get-Process -Id ${process.pid}).SessionId`], {
+      cwd: root, encoding: 'utf8', windowsHide: true, timeout: 3000,
+    }).trim();
+    const value = Number(raw);
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  } catch { return null; }
+}
+
+// Chromium safeStorage derives its AES key from Local State. The dev stack keeps
+// Chromium session/cache files isolated so it can coexist with an installed Sage
+// build, but settings.json remains shared. Keep only the secure-storage key in sync
+// so refresh tokens encrypted by either build remain readable in both profiles.
+function syncSharedSafeStorageKey() {
+  if (!fs.existsSync(sharedLocalState)) return;
+  try {
+    const sharedState = JSON.parse(fs.readFileSync(sharedLocalState, 'utf8'));
+    const encryptedKey = sharedState?.os_crypt?.encrypted_key;
+    if (typeof encryptedKey !== 'string' || !encryptedKey) return;
+
+    fs.mkdirSync(devUserData, { recursive: true });
+    let devState = {};
+    try { devState = JSON.parse(fs.readFileSync(devLocalState, 'utf8')); } catch {}
+    if (devState?.os_crypt?.encrypted_key === encryptedKey) return;
+
+    const nextState = {
+      ...devState,
+      os_crypt: { ...(devState?.os_crypt || {}), encrypted_key: encryptedKey },
+    };
+    const temp = `${devLocalState}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(nextState), 'utf8');
+    fs.renameSync(temp, devLocalState);
+    console.log('[sage-dev] Synchronized Chromium secure-storage key with shared Sage profile.');
+  } catch (error) {
+    console.error('[sage-dev] Could not synchronize Chromium secure-storage key.', error);
+  }
+}
+
+function electronLaunchArgs(extraArgs = []) {
+  return [`--user-data-dir=${devUserData}`, '.', '--dev', ...extraArgs];
+}
 
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -22,19 +74,40 @@ function pidAlive(pid) {
   }
 }
 
+function pidIsElectronDevWatcher(pid) {
+  if (!pidAlive(pid)) return false;
+  if (process.platform !== 'win32') return true;
+  try {
+    const commandLine = execFileSync('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      '(Get-CimInstance Win32_Process -Filter \"ProcessId = ' + pid + '\").CommandLine',
+    ], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 3000 }).trim().toLowerCase();
+    if (!commandLine) return null;
+    return commandLine.includes('electron-dev-watch.cjs');
+  } catch {
+    // A transient CIM timeout must not make a second launcher steal a live lock.
+    // null means the owner identity could not be proven either way.
+    return null;
+  }
+}
+
 function acquireLauncherLock() {
   fs.mkdirSync(logRoot, { recursive: true });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const fd = fs.openSync(launcherLockFile, 'wx');
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), 'utf8');
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), root, sessionId: processSessionId }), 'utf8');
       fs.closeSync(fd);
       return true;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
       try {
         const owner = JSON.parse(fs.readFileSync(launcherLockFile, 'utf8'));
-        if (pidAlive(Number(owner?.pid))) return false;
+        const ownerPid = Number(owner?.pid);
+        const sameRoot = !owner?.root || path.resolve(String(owner.root)) === root;
+        const watcherStatus = pidIsElectronDevWatcher(ownerPid);
+        if (sameRoot && (watcherStatus === true || (watcherStatus === null && pidAlive(ownerPid)))) return false;
       } catch {}
       try { fs.unlinkSync(launcherLockFile); } catch {}
     }
@@ -98,15 +171,17 @@ function tee(stream, target, destination) {
 
 function launch() {
   if (stopping) return;
+  syncSharedSafeStorageKey();
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   fs.mkdirSync(monitorRoot, { recursive: true });
-  child = spawn(electronPath, ['.', '--dev'], {
+  child = spawn(electronPath, electronLaunchArgs(), {
     cwd: root,
     stdio: ['inherit', 'pipe', 'pipe'],
     windowsHide: false,
     env: {
       ...process.env,
       ELECTRON_ENABLE_LOGGING: '1',
+      NEW_EDEN_SAGE_USER_DATA: sharedUserData,
     },
   });
   const sessionId = `${stamp}-${child.pid}`;
@@ -116,6 +191,13 @@ function launch() {
   const exitFile = path.join(sessionRoot, 'electron-exit.json');
   const controlFile = path.join(sessionRoot, 'control.json');
   activeSession = { sessionId, sessionRoot, ioLog, exitFile, controlFile, pid: child.pid };
+  let singletonCollision = false;
+  child.stderr?.on('data', (chunk) => {
+    const text = String(chunk || '').toLowerCase();
+    if (text.includes('process_singleton_win.cc') || text.includes('lock file can not be created!')) {
+      singletonCollision = true;
+    }
+  });
   tee(child.stdout, ioLog, process.stdout);
   tee(child.stderr, ioLog, process.stderr);
 
@@ -150,6 +232,13 @@ function launch() {
     child = null;
     if (activeSession?.sessionId === sessionId) activeSession = null;
     if (stopping || restartQueued) return;
+    if (singletonCollision) {
+      console.error('[sage-dev] Chromium profile lock collision detected. Releasing the launcher lock so the next dev start can reconcile the existing Sage process.');
+      stopping = true;
+      releaseLauncherLock();
+      setImmediate(() => process.exit(1));
+      return;
+    }
     console.log(`[sage-dev] Electron exited (${code ?? signal ?? 'unknown'}). Crash monitor is collecting the evidence bundle.`);
   });
 }
@@ -259,7 +348,7 @@ async function handleLauncherCommand() {
     return;
   }
   console.log('[sage-dev] Open request received; asking the running Sage instance to show/focus itself.');
-  const pulse = spawn(electronPath, ['.', '--dev', '--focus-existing'], { cwd: root, stdio: 'ignore', windowsHide: true, env: process.env });
+  const pulse = spawn(electronPath, electronLaunchArgs(['--focus-existing']), { cwd: root, stdio: 'ignore', windowsHide: true, env: { ...process.env, NEW_EDEN_SAGE_USER_DATA: sharedUserData } });
   pulse.unref();
 }
 

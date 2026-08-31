@@ -269,7 +269,6 @@ export default function App() {
       setMessage("Add a character before refreshing private data.");
       return;
     }
-    setBusy(true);
     setPrivateRefreshActive(true);
     setMessage("Refreshing selected character private EVE data locally...");
     try {
@@ -291,7 +290,6 @@ export default function App() {
       );
     } finally {
       setPrivateRefreshActive(false);
-      setBusy(false);
     }
   }
 
@@ -299,20 +297,14 @@ export default function App() {
     setSyncProgress(progress);
     if (progress.running) {
       setPrivateRefreshActive(true);
-      setBusy(true);
       setMessage(progress.message);
     } else {
       setPrivateRefreshActive(false);
-      setBusy(false);
       setMessage(progress.message);
       setInitialSetupComplete(true);
       void window.sage.listSnapshots().then(setSnapshots);
       setMarketDataRevision((value) => value + 1);
     }
-  }), []);
-
-  useEffect(() => window.sage.onPreparedDataUpdated((value) => {
-    if (value.publicDataUpdated) setMarketDataRevision((revision) => revision + 1);
   }), []);
 
   async function removeCharacter(characterId: string) {
@@ -551,6 +543,7 @@ export default function App() {
               snapshot={active}
               snapshots={snapshots}
               onConnect={connect}
+              active={view === "overview"}
               cloneState={active ? cloneStates[active.characterId] : undefined}
               marketDataRevision={marketDataRevision}
               allCommandTabsVisited={allCommandTabsVisited}
@@ -578,6 +571,7 @@ export default function App() {
           <div className="cached-view" hidden={view !== "isk"}>
             <RetainedIskLab
               snapshot={active}
+              active={view === "isk"}
               cloneState={active ? cloneStates[active.characterId] : undefined}
               marketDataRevision={marketDataRevision}
               onMarketDataUpdated={() => setMarketDataRevision((value) => value + 1)}
@@ -639,6 +633,7 @@ function CharacterCommand({
   snapshot,
   snapshots,
   onConnect,
+  active,
   cloneState,
   onNavigate,
   marketDataRevision,
@@ -647,6 +642,7 @@ function CharacterCommand({
   snapshot?: CharacterSnapshot;
   snapshots: CharacterSnapshot[];
   onConnect(): void;
+  active: boolean;
   cloneState?: CloneState;
   onNavigate(target: CharacterNavigateTarget): void;
   marketDataRevision: number;
@@ -655,6 +651,25 @@ function CharacterCommand({
   const [tab, setTab] = useState<CharacterCommandTab>("overview");
   const mountedTabs = useRef(new Set<CharacterCommandTab>(["overview"]));
   mountedTabs.current.add(tab);
+  const [publicDataRevision, setPublicDataRevision] = useState(0);
+  const publicDataDirty = useRef(false);
+  const consumesPublicMarket = active && (tab === "augments" || tab === "lp-store");
+  useEffect(() => window.sage.onPreparedDataUpdated((value) => {
+    if (!value.publicDataUpdated) return;
+    if (consumesPublicMarket) {
+      publicDataDirty.current = false;
+      setPublicDataRevision((revision) => revision + 1);
+    } else {
+      publicDataDirty.current = true;
+    }
+  }), [consumesPublicMarket]);
+  const pendingPublicRevision = consumesPublicMarket && publicDataDirty.current ? 1 : 0;
+  const effectiveMarketDataRevision = marketDataRevision + publicDataRevision + pendingPublicRevision;
+  useEffect(() => {
+    if (!pendingPublicRevision) return;
+    publicDataDirty.current = false;
+    setPublicDataRevision((revision) => revision + 1);
+  }, [pendingPublicRevision]);
   return (
     <section className="command-workspace character-command">
       <div className="command-subtabs" role="tablist" aria-label="Character Command sections">
@@ -668,7 +683,7 @@ function CharacterCommand({
         <div className="cached-view" hidden={tab !== "lp-store"}>
           <LpStore
             snapshot={snapshot}
-            marketDataRevision={marketDataRevision}
+            marketDataRevision={effectiveMarketDataRevision}
             onOpenShoppingList={() => onNavigate("asset-market")}
             onOpenIndustry={() => onNavigate("industrial")}
           />
@@ -684,7 +699,7 @@ function CharacterCommand({
       )}
       {mountedTabs.current.has("augments") && (
         <div className="cached-view" hidden={tab !== "augments"}>
-          <AugmentsGuide snapshot={snapshot} marketDataRevision={marketDataRevision} />
+          <AugmentsGuide snapshot={snapshot} marketDataRevision={effectiveMarketDataRevision} />
         </div>
       )}
       {mountedTabs.current.has("killmails") && (

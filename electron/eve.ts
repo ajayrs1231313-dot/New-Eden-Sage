@@ -1,6 +1,5 @@
 ﻿import crypto from "node:crypto";
 import http from "node:http";
-import { shell } from "electron";
 
 import { itemCategoryIds, itemVolumes } from "./type-volumes";
 import { trainingTimesToLevels } from "./skill-training";
@@ -195,6 +194,7 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
     code_challenge: challenge,
     code_challenge_method: "S256",
   }).toString();
+  const { shell } = await import("electron");
   await shell.openExternal(authorize.toString());
   return result;
 }
@@ -363,6 +363,30 @@ export async function fetchCharacterCoreSnapshot(
   };
 }
 
+export async function fetchCharacterCurrentLocationSnapshot(
+  characterId: string,
+  accessToken: string,
+  existingSnapshot: any,
+) {
+  if (!existingSnapshot) throw new Error("Sync this character before refreshing live location.");
+  const location = (await privateEsiJson<{ solar_system_id: number; station_id?: number; structure_id?: number }>(
+    characterId,
+    `/characters/${characterId}/location/`,
+    accessToken,
+  )).data;
+  const previousSystemId = Number(existingSnapshot.location?.solar_system_id ?? 0);
+  const sameSystem = previousSystemId === Number(location.solar_system_id);
+  return {
+    ...existingSnapshot,
+    location: {
+      ...existingSnapshot.location,
+      ...location,
+      solar_system_name: sameSystem ? existingSnapshot.location?.solar_system_name : undefined,
+      place_name: sameSystem ? existingSnapshot.location?.place_name : undefined,
+    },
+  };
+}
+
 export async function fetchCharacterCurrentShipSnapshot(
   characterId: string,
   accessToken: string,
@@ -446,10 +470,15 @@ export async function fetchWalletOnlySnapshot(
   };
 }
 
+export type CharacterSnapshotProgress = { stage: string; percent: number; message: string };
+
 export async function fetchCharacterSnapshot(
   characterId: string,
   accessToken: string,
+  onProgress?: (progress: CharacterSnapshotProgress) => void,
 ) {
+  const report = (stage: string, percent: number, message: string) => onProgress?.({ stage, percent, message });
+  report("core", 3, "Loading core character data.");
   const headers = {
     Authorization: `Bearer ${accessToken}`,
     "X-Compatibility-Date": "2026-08-02",
@@ -510,6 +539,7 @@ export async function fetchCharacterSnapshot(
         willpower: number;
       }>(`/characters/${characterId}/attributes/`),
     ]);
+  report("core", 18, "Core character data loaded.");
 
   const publicGet = async <T>(path: string): Promise<T> => {
     const response = await fetch(`https://esi.evetech.net${path}`, {
@@ -544,6 +574,7 @@ export async function fetchCharacterSnapshot(
             )
           : Promise.resolve(null),
     ]);
+  report("context", 30, "Character location and corporation context loaded.");
 
   const nameResponse = await fetch("https://esi.evetech.net/universe/names/", {
     method: "POST",
@@ -589,6 +620,7 @@ export async function fetchCharacterSnapshot(
       ),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
+  report("skills", 42, "Skill metadata prepared.");
 
   const [
     assets,
@@ -671,6 +703,7 @@ export async function fetchCharacterSnapshot(
     capture(`/corporations/${character.corporation_id}/orders/`, true),
     capture(`/corporations/${character.corporation_id}/wallets/`),
   ]);
+  report("private-endpoints", 70, "Private ESI datasets loaded.");
   const corporationAssetNames = Array.isArray(corporationAssets)
     ? (await mapLimited(
         chunk((corporationAssets as AssetRecord[]).filter((asset) => asset.is_singleton).map((asset) => asset.item_id), 1000),
@@ -760,7 +793,9 @@ export async function fetchCharacterSnapshot(
         }),
       )
     : corporationWallets;
+  report("details", 84, "Contract, colony, killmail and wallet details loaded.");
 
+  report("enrichment", 86, "Preparing local asset enrichment.");
   const enrichedAssets = Array.isArray(assets)
     ? await enrichAssets(assets as AssetRecord[], headers)
     : assets;
@@ -808,6 +843,7 @@ export async function fetchCharacterSnapshot(
         }
       })()
     : implants;
+  report("enrichment", 96, "Private snapshot prepared for local storage.");
 
   return {
     characterId,

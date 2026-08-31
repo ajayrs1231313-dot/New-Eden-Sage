@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { app, safeStorage } from "electron";
 import { createHash, generateKeyPairSync, randomBytes, sign as nodeSign } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -11,7 +12,7 @@ type DiscordDeviceFile={
   createdAt:string;
 };
 
-function devicePath(){return path.join(app.getPath("userData"),"discord-device.json");}
+function devicePath(){return path.join(USER_DATA_ROOT,"discord-device.json");}
 function nonce(){return randomBytes(24).toString("base64url");}
 
 async function readDevice():Promise<DiscordDeviceFile|null>{

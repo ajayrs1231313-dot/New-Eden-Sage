@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { app, BrowserWindow, ipcMain } from "electron";
 import { reconcileWormholeScan } from "./wormhole-scan-reconcile";
 import { promises as fs } from "node:fs";
@@ -142,7 +143,7 @@ const SCHEMA_VERSION = 1 as const;
 const MAX_SCAN_HISTORY = 5000;
 
 function nowIso() { return new Date().toISOString(); }
-function storePath() { return path.join(app.getPath("userData"), "wormhole-command-store-v1.json"); }
+function storePath() { return path.join(USER_DATA_ROOT, "wormhole-command-store-v1.json"); }
 function signatureKey(systemId: number, id: string) { return `${systemId}:${id.toUpperCase()}`; }
 
 function emptyStore(): WormholeCommandStore {

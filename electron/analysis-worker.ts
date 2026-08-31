@@ -1,6 +1,7 @@
 import { parentPort } from "node:worker_threads";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { ANALYSIS_CACHE_ROOT } from "./data-paths";
 import { createHash, randomUUID } from "node:crypto";
 import { gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
@@ -51,7 +52,7 @@ function rememberResult(key: string, result: unknown, ttlMs: number) {
 }
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
-const PERSISTED_ANALYSIS_ROOT = path.join(process.env.NEW_EDEN_SAGE_USER_DATA ?? process.cwd(), "Analysis Cache");
+const PERSISTED_ANALYSIS_ROOT = ANALYSIS_CACHE_ROOT;
 
 function persistedResultPath(kind: string, key: string) {
   return path.join(PERSISTED_ANALYSIS_ROOT, `${kind}-${createHash("sha256").update(key).digest("hex")}.json.gz`);
@@ -141,7 +142,20 @@ async function loadCompatiblePreparedOpportunity(input: OpportunityQuery, snapsh
       try { return { file, mtimeMs: (await fs.stat(file)).mtimeMs }; } catch { return null; }
     }));
   const selectedUpdatedAt = Date.parse(String(selected.updatedAt ?? ""));
-  for (const candidate of candidates.filter(Boolean).sort((a: any,b: any)=>b.mtimeMs-a.mtimeMs).slice(0, 80) as Array<{file:string;mtimeMs:number}>) {
+  const marketCreatedAt = Date.parse(String(manifest.createdAt ?? ""));
+  const freshnessFloor = Math.max(
+    Number.isFinite(selectedUpdatedAt) ? selectedUpdatedAt : 0,
+    Number.isFinite(marketCreatedAt) ? marketCreatedAt : 0,
+  );
+  // A persisted result cannot have been generated from a character/market
+  // revision newer than the cache file itself. Reject obviously stale files by
+  // mtime before reading and gunzipping potentially large opportunity payloads.
+  const freshCandidates = candidates
+    .filter((candidate): candidate is { file: string; mtimeMs: number } => Boolean(candidate))
+    .filter((candidate) => freshnessFloor <= 0 || candidate.mtimeMs >= freshnessFloor)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, 80);
+  for (const candidate of freshCandidates) {
     let value: any;
     try { value = JSON.parse((await gunzipAsync(await fs.readFile(candidate.file))).toString("utf8")); } catch { continue; }
     if (String(value?.character?.characterId ?? "") !== String(input.characterId)) continue;

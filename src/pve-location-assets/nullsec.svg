@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid slice">
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#080203"/><stop offset=".5" stop-color="#31080d"/><stop offset="1" stop-color="#030609"/></linearGradient>
+ <radialGradient id="red"><stop stop-color="#ff5a4f" stop-opacity=".75"/><stop offset=".18" stop-color="#df292c" stop-opacity=".48"/><stop offset=".5" stop-color="#7e1018" stop-opacity=".19"/><stop offset="1" stop-color="#1a0306" stop-opacity="0"/></radialGradient>
+ <radialGradient id="blast"><stop stop-color="#fff8d5"/><stop offset=".09" stop-color="#ffba55"/><stop offset=".28" stop-color="#ff553c" stop-opacity=".74"/><stop offset="1" stop-color="#8d111c" stop-opacity="0"/></radialGradient>
+ <linearGradient id="metal" x2="1" y2="1"><stop stop-color="#6d3537"/><stop offset=".28" stop-color="#351c20"/><stop offset=".72" stop-color="#151216"/><stop offset="1" stop-color="#07090b"/></linearGradient>
+ <linearGradient id="wreck" x2="1"><stop stop-color="#442023"/><stop offset="1" stop-color="#100d10"/></linearGradient>
+ <linearGradient id="beam" x2="1"><stop stop-color="#fff4e6"/><stop offset=".16" stop-color="#ff8d6d"/><stop offset=".58" stop-color="#ff4038"/><stop offset="1" stop-color="#ff312f" stop-opacity="0"/></linearGradient>
+ <pattern id="stars" width="97" height="83" patternUnits="userSpaceOnUse"><circle cx="14" cy="18" r=".8" fill="#ffd8d2" opacity=".55"/><circle cx="52" cy="39" r=".6" fill="#fff" opacity=".44"/><circle cx="86" cy="13" r=".7" fill="#ffaaa5" opacity=".48"/></pattern>
+ <filter id="glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+ <filter id="soft"><feGaussianBlur stdDeviation="19"/></filter>
+</defs>
+<rect width="640" height="320" fill="url(#bg)"/><rect width="640" height="320" fill="url(#stars)"/>
+<ellipse cx="423" cy="113" rx="300" ry="201" fill="url(#red)"/>
+<path d="M0 85c94 25 160 7 229 31 77 27 127 71 210 61 72-9 120-52 201-48v84c-78 9-145 1-211 9-97 12-171 41-263 17C91 220 44 180 0 176Z" fill="#9d2229" opacity=".08"/>
+<!-- shattered null outpost -->
+<g transform="translate(403 165)">
+ <path d="M-138 95 -109 25 -98-57 -76-92 -54-65 -44 7 -14-102 12-132 34-98 39-13 70-78 93-93 111-59 105 6 142-23 178 2 165 39 128 61 169 86 141 111 72 95 25 116 -41 98 -93 115Z" fill="url(#metal)"/>
+ <path d="M-107 18 -190-27 -220-6 -161 42 -104 54Z" fill="#271317"/><path d="M135 18 207-32 239-11 182 47 128 60Z" fill="#231215"/>
+ <path d="M-58-63 -70-138 -54-164 -34-136 -43 8M9-123 16-182 32-200 48-172 34-98" fill="#241317" stroke="#aa3438" stroke-opacity=".55"/>
+ <path d="M-89 24H116M-76 51H134M-43 79H102" stroke="#ef4e49" stroke-opacity=".34"/>
+ <path d="M-31 1 19-27 66 5 31 44 -28 39Z" fill="#32151b" stroke="#bd3338" stroke-opacity=".6"/>
+ <g fill="#ff8a78" opacity=".75"><rect x="-81" y="18" width="9" height="2"/><rect x="-45" y="35" width="11" height="2"/><rect x="7" y="14" width="8" height="2"/><rect x="50" y="36" width="10" height="2"/><rect x="92" y="24" width="8" height="2"/></g>
+</g>
+<!-- wrecked capital hull -->
+<g transform="translate(132 210) rotate(-6)"><path d="M-102 43 -53-17 27-32 96 2 137 47 84 70 15 58 -57 76Z" fill="url(#wreck)"/><path d="M-29-25 0-84 23-74 28-19M37-17 96-40 125-21 92 16" fill="#2b171b"/><path d="M-63 24H71M-31 48H90" stroke="#b52f37" stroke-opacity=".45"/></g>
+<g fill="#2a1114" stroke="#ff544a" stroke-opacity=".85"><path d="M72 111 111 99 145 112 109 126Z"/><path d="M280 105 312 95 341 106 310 119Z"/><path d="M520 108 561 96 597 109 558 123Z"/><path d="M510 218 543 208 574 220 541 231Z"/></g>
+<g filter="url(#glow)" fill="none"><path d="M110 112 269 157" stroke="url(#beam)" stroke-width="2.3"/><path d="M311 106 387 143" stroke="#ff6456" stroke-width="1.8"/><path d="M559 109 472 148" stroke="#ff4b42" stroke-width="1.8"/><path d="M542 219 457 191" stroke="#ff765e" stroke-width="1.6"/></g>
+<g filter="url(#glow)"><ellipse cx="271" cy="158" rx="26" ry="18" fill="url(#blast)"/><circle cx="271" cy="158" r="3" fill="#fff8df"/><ellipse cx="458" cy="191" rx="18" ry="12" fill="url(#blast)"/></g>
+<path d="M0 259 62 238 113 249 171 224 226 248 289 229 349 255 410 233 473 254 529 229 589 245 640 225V320H0Z" fill="#09090a"/>
+<path d="M0 290 78 273 137 282 189 259 245 279 309 262 376 288 438 267 500 283 558 264 640 275V320H0Z" fill="#020304"/>
+<g fill="#b92b32" opacity=".48"><path d="M56 250 80 239 94 249 76 260Z"/><path d="M210 242 231 233 248 243 227 254Z"/><path d="M578 239 596 231 616 241 595 250Z"/></g>
+<ellipse cx="413" cy="225" rx="255" ry="48" fill="#ff342e" opacity=".1" filter="url(#soft)"/>
+<rect width="640" height="320" fill="none" stroke="#ff5b52" stroke-opacity=".09"/>
+</svg>

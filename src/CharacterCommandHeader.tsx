@@ -51,14 +51,16 @@ function FreshnessNode({ tone, label, value, title }: { tone: "public" | "privat
   );
 }
 
-function AppUpdatePod() {
+function AppUpdateAction() {
   const [state, setState] = useState<{ status: string; detail?: any }>({ status: "idle" });
   const [version, setVersion] = useState("");
   useEffect(() => {
     void window.sage.getUpdateState().then((value) => setVersion(value.version));
     return window.sage.onUpdateStatus(setState);
   }, []);
-  const progress = state.status === "downloading" ? Math.round(state.detail?.percent ?? 0) : 0;
+  const progress = state.status === "downloading" ? Math.max(0, Math.min(100, Math.round(state.detail?.percent ?? 0))) : 0;
+  const targetVersion = String(state.detail?.version ?? "").trim();
+  const shownVersion = targetVersion || version;
   async function act() {
     if (state.status === "available") await window.sage.downloadUpdate();
     else if (state.status === "downloaded") await window.sage.installUpdate();
@@ -75,28 +77,28 @@ function AppUpdatePod() {
       }
     }
   }
-  const statusLabel = state.status === "available" ? "Update available"
-    : state.status === "downloading" ? `${progress}%`
-      : state.status === "downloaded" ? "Restart to update"
-        : state.status === "checking" ? "Checking app"
-          : state.status === "current" ? "Latest"
-            : state.status === "error" ? "Update error"
-              : "App update";
+  const label = state.status === "available" ? `Update Sage${shownVersion ? ` \u00b7 v${shownVersion}` : ""}`
+    : state.status === "downloading" ? `Updating Sage \u00b7 ${progress}%`
+      : state.status === "downloaded" ? `Restart Sage${shownVersion ? ` \u00b7 v${shownVersion}` : ""}`
+        : state.status === "checking" ? `Checking Sage${version ? ` \u00b7 v${version}` : ""}`
+          : state.status === "error" ? "Update failed"
+            : `Up to date${version ? ` \u00b7 v${version}` : ""}`;
+  const updateStyle = { "--cc-update-progress": `${progress}%` } as CSSProperties;
   return (
     <button
       type="button"
-      className={`cc-update-pod ${state.status}`}
+      className={`cc-header-action cc-app-update-action ${state.status}`}
+      style={updateStyle}
       onClick={() => void act()}
       disabled={state.status === "checking" || state.status === "downloading"}
       title={state.status === "error" ? String(state.detail) : "Application version and GitHub release update status"}
     >
-      <span className="cc-update-dot" aria-hidden="true" />
-      <strong>{version ? `v${version}` : "v--"}</strong>
-      <span>{statusLabel}</span>
+      <span className="cc-update-progress-fill" aria-hidden="true" />
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 11l4 4 4-4" /><path d="M5 19h14" /></svg>
+      <span>{label}</span>
     </button>
   );
 }
-
 function DataActionIcon({ kind }: { kind: "public" | "private" }) {
   if (kind === "public") {
     return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h3l2-5 4 10 2-5h5" /><path d="M4 5v14M20 5v14" /></svg>;
@@ -163,7 +165,7 @@ export function CharacterCommandHeader({ title = "Character Command", subtitle =
   const privateTimestamp = snapshot?.snapshotState === "bootstrap" ? null : snapshot?.updatedAt;
   const privateAge = ageText(privateTimestamp, now);
   const publicTitle = publicStatus?.createdAt
-    ? `Loaded server-prepared public generation ${publicStatus.generation ?? "unknown"} · source data ${new Date(publicStatus.createdAt).toLocaleString()}`
+    ? `Loaded server-prepared public generation ${publicStatus.generation ?? "unknown"} \u00b7 source data ${new Date(publicStatus.createdAt).toLocaleString()}`
     : "No server-prepared public dataset is currently loaded.";
   const privateTitle = privateTimestamp
     ? `${snapshot?.character.name ?? "Selected character"} private ESI data refreshed ${new Date(privateTimestamp).toLocaleString()}`
@@ -223,17 +225,19 @@ export function CharacterCommandHeader({ title = "Character Command", subtitle =
         </div>
 
         <div className="cc-action-sector">
-          <div className="cc-primary-actions">
-            <button type="button" className="cc-support-action" onClick={() => void onSupportDeveloper()} title="Support New Eden Sage development via PayPal">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 7v5c0 4.5-2.8 7.3-7 9-4.2-1.7-7-4.5-7-9V7l7-4Z" /><path d="M9 12h6M12 9v6" /></svg>
-              <span>Support Developer</span>
-            </button>
-            <button type="button" className="cc-add-action" onClick={() => void onAddCharacter()} disabled={busy}>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              <span>Add character</span>
-            </button>
-          </div>
-          <AppUpdatePod />
+          <button type="button" className="cc-header-action cc-support-action" onClick={() => void onSupportDeveloper()} title="Support New Eden Sage development via PayPal">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 19 7v5c0 4.5-2.8 7.3-7 9-4.2-1.7-7-4.5-7-9V7l7-4Z" /><path d="M9 12h6M12 9v6" /></svg>
+            <span>Support Developer</span>
+          </button>
+          <button type="button" className="cc-header-action cc-add-action" onClick={() => void onAddCharacter()} disabled={busy}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            <span>Add character</span>
+          </button>
+          <button type="button" className="cc-header-action cc-reserved-action" disabled title="Reserved for a future Sage action">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z" /><path d="M9 12h6" /></svg>
+            <span>Reserved</span>
+          </button>
+          <AppUpdateAction />
         </div>
       </div>
     </header>

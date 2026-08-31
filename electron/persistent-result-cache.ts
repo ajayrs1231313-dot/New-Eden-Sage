@@ -3,10 +3,11 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { gzip, gunzip } from "node:zlib";
 import { promisify } from "node:util";
+import { ANALYSIS_CACHE_ROOT } from "./data-paths";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
-const root = path.join(process.env.NEW_EDEN_SAGE_USER_DATA ?? process.cwd(), "Analysis Cache");
+const root = ANALYSIS_CACHE_ROOT;
 
 function file(kind: string, key: unknown) {
   const hash = createHash("sha256").update(JSON.stringify(key)).digest("hex");

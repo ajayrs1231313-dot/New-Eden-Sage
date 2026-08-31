@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { app, safeStorage } from "electron";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -27,7 +28,7 @@ const defaults: AppConfig = {
 };
 
 function configPath() {
-  return path.join(app.getPath("userData"), "settings.json");
+  return path.join(USER_DATA_ROOT, "settings.json");
 }
 
 export async function readConfig(): Promise<AppConfig> {

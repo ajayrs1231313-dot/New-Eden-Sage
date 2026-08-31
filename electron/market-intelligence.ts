@@ -1,5 +1,4 @@
-﻿import { loadLatestMarketDatasetByMode } from "./market-storage";
-import { buildFullMarketAnalysisIndex } from "./raw-market-analysis";
+﻿import { buildFullMarketAnalysisIndex } from "./raw-market-analysis";
 import { loadSharedPublicContractsDataset } from "./shared-market-data";
 import type { PublicContract } from "./market";
 import {
@@ -337,9 +336,8 @@ export async function getContractMarketIntelligence() {
     getMarketSystemIndex(),
     getMarketTypeIndex(),
   ]);
-  const contractsDataset = sharedContracts
-    ? { schemaVersion: 1 as const, mode: "contracts" as const, createdAt: sharedContracts.createdAt, summaries: sharedContracts.regions }
-    : await loadLatestMarketDatasetByMode("contracts");
+  if (!sharedContracts) throw new Error("The installed server generation does not contain public contracts. Install the latest shared public data generation first.");
+  const contractsDataset = { schemaVersion: 1 as const, mode: "contracts" as const, createdAt: sharedContracts.createdAt, summaries: sharedContracts.regions };
 
   const quoteById = new Map(market.quotes.map((quote) => [quote.typeId, quote]));
   // Public contract ESI does not resolve player structures without character

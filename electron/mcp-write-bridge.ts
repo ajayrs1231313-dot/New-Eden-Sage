@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import crypto from "node:crypto";
 import http from "node:http";
 import { app, type BrowserWindow } from "electron";
@@ -19,8 +20,8 @@ type RendererData = { savedFits: Array<Record<string, unknown>>; fitLibraryMeta:
 type RendererFitUpdate = RendererData & { selectedFitId?: string };
 let server: http.Server | null = null;
 
-function bridgePath() { return path.join(app.getPath("userData"), "mcp-write-bridge.json"); }
-function rendererPath() { return path.join(app.getPath("userData"), "mcp-renderer-data.json"); }
+function bridgePath() { return path.join(USER_DATA_ROOT, "mcp-write-bridge.json"); }
+function rendererPath() { return path.join(USER_DATA_ROOT, "mcp-renderer-data.json"); }
 
 async function readRendererData(): Promise<RendererData> {
   try {

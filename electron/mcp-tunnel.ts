@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { app, safeStorage } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
@@ -8,11 +9,11 @@ type TunnelConfig = { tunnelId: string; encryptedRuntimeKey: string };
 let tunnelProcess: ChildProcess | null = null;
 
 function runtimeRoot() {
-  return path.join(process.env.LOCALAPPDATA || app.getPath("userData"), "NewEdenSageMcp");
+  return path.join(process.env.LOCALAPPDATA || USER_DATA_ROOT, "NewEdenSageMcp");
 }
 
 function configPath() {
-  return path.join(app.getPath("userData"), "mcp-tunnel.json");
+  return path.join(USER_DATA_ROOT, "mcp-tunnel.json");
 }
 
 function tunnelExecutable() {

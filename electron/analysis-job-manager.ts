@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
@@ -156,7 +157,7 @@ function ensureWorker(lane: AnalysisLane) {
     name: `new-eden-sage-${lane}-analysis`,
     env: {
       ...process.env,
-      NEW_EDEN_SAGE_USER_DATA: app.getPath("userData"),
+      NEW_EDEN_SAGE_USER_DATA: USER_DATA_ROOT,
     },
     resourceLimits: {
       maxOldGenerationSizeMb: workerHeapLimitMb(lane),
@@ -213,15 +214,6 @@ type RunJobOptions = {
   skipWhenBusy?: boolean;
 };
 
-async function waitForLaneIdle(lane: AnalysisLane, timeoutMs = 15 * 60_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (lanes[lane].active) {
-    if (disposed) throw analysisError("Analysis service is shutting down.", "ANALYSIS_SHUTDOWN");
-    if (Date.now() >= deadline) throw analysisError("Prepared intelligence lookup waited too long for the active analysis lane.", "ANALYSIS_PEEK_TIMEOUT");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
 async function runJob(
   kind: AnalysisKind,
   payload: Record<string, unknown>,
@@ -231,10 +223,10 @@ async function runJob(
   const lane = laneFor(kind);
   const state = lanes[lane];
   if (state.active) {
-    if (options.skipWhenBusy) {
-      await waitForLaneIdle(lane);
-      return runJob(kind, payload, onProgress, options);
-    }
+    // Prepared/cache-only probes must never queue behind real analysis. Hidden or
+    // newly-visible pages can retry on the next data revision; blocking here
+    // turns a cache read into a multi-minute navigation stall.
+    if (options.skipWhenBusy) return null;
     await cancelLane(lane, "Replaced by a newer analysis request.");
   }
   const jobId = randomUUID();

@@ -168,6 +168,11 @@ export async function loadCurrentSharedMarketManifest(): Promise<SharedMarketMan
   return manifestMemory;
 }
 
+export function adoptInstalledSharedMarketManifest(value: SharedMarketManifest) {
+  manifestMemory = validateSharedMarketManifest(value);
+  return manifestMemory;
+}
+
 async function request(url: string, timeoutMs: number, attempts = 2) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {

@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
@@ -13,7 +14,7 @@ import {
   writeConfig,
   CURRENT_IDENTITY_SCHEMA_VERSION,
 } from "./config";
-import { createConnectedCharacterBootstrapSnapshot, fetchCharacterCoreSnapshot, fetchCharacterCurrentShipSnapshot, fetchCharacterSnapshot, fetchWalletOnlySnapshot, loginWithEve, refreshEveToken } from "./eve";
+import { createConnectedCharacterBootstrapSnapshot, fetchCharacterCoreSnapshot, fetchCharacterCurrentLocationSnapshot, fetchCharacterCurrentShipSnapshot, fetchCharacterSnapshot, fetchWalletOnlySnapshot, loginWithEve, refreshEveToken } from "./eve";
 import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
 import {
   addImportedInformation,
@@ -34,7 +35,7 @@ import {
   saveSnapshot,
 } from "./database";
 import { listPublishedShips, stageStaticDataRefreshLowImpact } from "./type-volumes";
-import { runMasterUpdate } from "./master-update";
+import { disposePrivateRefreshProcess, runMasterUpdate } from "./master-update";
 import { getSyncMemorySnapshot, syncMemoryHeadroom } from "./sync-resources";
 import { CRASH_LOG_FILE, LOG_FILE, logCrash, logEvent } from "./logger";
 import { DISPLAY_FIT_DEFAULT_ENABLED, fitDisplayZoom, responsiveDisplayZoom } from "./display-scale";
@@ -51,7 +52,9 @@ import { analyzeActivityReadiness } from "./activity-readiness";
 import { analyzeCurrentShipUse, type CurrentShipUseProfileId } from "./capability-engine";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { checkSharedMarketDataAvailability, ensureCurrentSharedMarketData, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
+import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
+import { disposePublicDataRefreshProcess, runPublicDataRefresh } from "./public-data-refresh-manager";
+import { disposeContractIntelligenceProcess, getContractMarketWorkspace, searchContractMarketWorkspace } from "./contract-intelligence-manager";
 import { loadSharedMarketBrowserDataset, loadSharedMarketBrowserRegion, loadSharedMarketBrowserRegions, loadSharedMarketBrowserSummaries } from "./shared-market-browser";
 import {
   runOpportunityAnalysis,
@@ -81,7 +84,7 @@ import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
 import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility, repairClaudeDesktopDirectConfig, showClaudeDesktopBundle } from "./claude-integration";
 import { typeImageProtocolResponse } from "./eve-assets";
 import { getHostClockInfo, setHostClock, syncHostClock } from "./system-time";
-import { getContractMarketIntelligence, loadGlobalMarketQuotes } from "./market-intelligence";
+import { loadGlobalMarketQuotes } from "./market-intelligence";
 import { analyzeLpCorporation, getLpEarningCandidates, resolveLpCorporations } from "./lp-store";
 import { applyProfitBulkBookkeeping, completeProfitDeal, getProfitLedger, getProfitPurchaseReview, getProfitReconciliationReview, reconcileProfitLedger, removeProfitLedgerRecord, setProfitMatchDecision, setProfitMaterialProvenance, setProfitPurchaseTransactionOverride, setProfitTransactionOverride } from "./profit-ledger";
 import { analyzePlanetaryRevenue, buildPlanetaryPlan, type PlanetaryPlanInput, type PlanetaryRevenueSettings } from "./planetary-revenue";
@@ -167,9 +170,10 @@ function publicInstallPercent(message: string, completed?: number, total?: numbe
 async function installSharedPublicData() {
   window?.webContents.send("public-data:progress", { running: true, percent: 2, message: "Checking server generation..." });
   try {
-    const result = await ensureCurrentSharedMarketData((message, completed, total) => {
+    const result = await runPublicDataRefresh((message, completed, total) => {
       window?.webContents.send("public-data:progress", { running: true, percent: publicInstallPercent(message, completed, total), message, completed, total });
     });
+    adoptInstalledSharedMarketManifest(result.manifest);
     if (result.changed.length) announceInstalledPublicData(result);
     publicAvailability = { updateAvailable: false, availableGeneration: result.manifest.generation, lastCheckedAt: new Date().toISOString() };
     const status = await loadPublicDataStatus();
@@ -196,11 +200,11 @@ function startSharedPublicDataFlow() {
 }
 
 function automaticSyncStatePath() {
-  return path.join(app.getPath("userData"), "automatic-sync-state.json");
+  return path.join(USER_DATA_ROOT, "automatic-sync-state.json");
 }
 
 function syncPreparationPreferencesPath() {
-  return path.join(app.getPath("userData"), "sync-preparation-preferences.json");
+  return path.join(USER_DATA_ROOT, "sync-preparation-preferences.json");
 }
 
 async function readSyncPreparationOptions(): Promise<CompleteSyncOptions> {
@@ -323,7 +327,7 @@ async function runFeaturePrepProcessNow<T = unknown>(
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
-          NEW_EDEN_SAGE_USER_DATA: app.getPath("userData"),
+          NEW_EDEN_SAGE_USER_DATA: USER_DATA_ROOT,
         },
         stdio: ["ignore", "ignore", "pipe", "ipc"],
         execArgv: ["--max-old-space-size=1536"],
@@ -498,7 +502,7 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
       ...extra,
       running,
       message,
-      percent: running ? completeSyncPercent(tracks) : 100,
+      percent: running ? prepTrack(tracks, "core").percent : 100,
       tracks: tracks.map((item) => ({ ...item })),
     });
   };
@@ -854,6 +858,7 @@ type DisplayFitMetrics = {
   viewportHeight: number;
   contentWidth: number;
   contentHeight: number;
+  fitHeight: boolean;
 };
 
 async function readDisplayFitMetrics(target: BrowserWindow): Promise<DisplayFitMetrics | null> {
@@ -870,11 +875,13 @@ async function readDisplayFitMetrics(target: BrowserWindow): Promise<DisplayFitM
       const shellOverflowWidth = shell && shell.scrollWidth > viewportWidth + 1 ? shell.scrollWidth : 0;
       const asideOverflowHeight = aside && aside.scrollHeight > aside.clientHeight + 1 ? aside.scrollHeight : 0;
       const mainHeight = main?.scrollHeight || main?.getBoundingClientRect().height || 0;
+      const activeIskWorkspace = Boolean(document.querySelector(".cached-view:not([hidden]) .isk-lab-v2"));
       return {
         viewportWidth,
         viewportHeight,
         contentWidth: Math.max(1, asideWidth + mainWidth, shellOverflowWidth),
         contentHeight: Math.max(1, mainHeight, asideOverflowHeight),
+        fitHeight: !activeIskWorkspace,
       };
     })()`, true) as DisplayFitMetrics;
   } catch {
@@ -899,6 +906,7 @@ async function applyResponsiveDisplayScale(target: BrowserWindow) {
         metrics.viewportHeight,
         metrics.contentWidth,
         metrics.contentHeight,
+        metrics.fitHeight,
       );
     }
   }
@@ -1052,7 +1060,7 @@ if (!hasSingleInstanceLock) {
     .then((status) => void logEvent("info", "mcp.claude_compatibility", { desktop: status.desktop, code: status.code }))
     .catch((error) => void logEvent("warn", "mcp.claude_compatibility_failed", { error }));
   ipcMain.handle("mcp:sync-renderer-data", async (_event, value: unknown) => {
-    const target = path.join(app.getPath("userData"), "mcp-renderer-data.json");
+    const target = path.join(USER_DATA_ROOT, "mcp-renderer-data.json");
     await fs.writeFile(target, JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
     return true;
   });
@@ -1158,7 +1166,17 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("lp-store:corporations", (_event, corporationIds:number[]) => resolveLpCorporations(Array.isArray(corporationIds) ? corporationIds : []));
   ipcMain.handle("lp-store:offers", (_event, corporationId:number, marketRevision:number) => analyzeLpCorporation(Number(corporationId), Number(marketRevision)));
   ipcMain.handle("lp-store:earning-candidates", (_event, standings:unknown, currentCorporationIds:unknown) => getLpEarningCandidates(standings, currentCorporationIds));
-  ipcMain.handle("market:contract-intelligence", () => getContractMarketIntelligence());
+  ipcMain.handle("market:contract-workspace", () => getContractMarketWorkspace((progress) => {
+    window?.webContents.send("market:progress", {
+      mode: "contracts",
+      regionName: String(progress.message ?? "Preparing Contracts in the background"),
+      pagesDone: Math.max(0, Math.min(100, Number(progress.percent ?? 0))),
+      pagesTotal: 100,
+      regionsDone: Math.max(0, Math.min(100, Number(progress.percent ?? 0))),
+      regionsTotal: 100,
+    });
+  }));
+  ipcMain.handle("market:contract-search", (_event, input: unknown) => searchContractMarketWorkspace(input));
   ipcMain.handle("profit-ledger:list", (_event, characterId?:string) => getProfitLedger(characterId ? String(characterId) : undefined));
   ipcMain.handle("profit-ledger:complete", (_event, input: any) => completeProfitDeal(input));
   ipcMain.handle("profit-ledger:reconcile", (_event, characterId?:string) => reconcileProfitLedger(characterId ? String(characterId) : undefined));
@@ -2008,8 +2026,12 @@ if (!hasSingleInstanceLock) {
     );
   });
   ipcMain.handle("pve:locations", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega"; maxJumps?: number | null; maxMinutes?: number | null; forceLive?: boolean }) => {
-    const snapshot = getSnapshot(input.characterId) as any;
+    let snapshot = getSnapshot(input.characterId) as any;
     if (!snapshot) throw new Error("Select and sync a connected character.");
+    if (input.forceLive) {
+      const accessToken = await eveWriteAccessToken(input.characterId);
+      snapshot = await fetchCharacterCurrentLocationSnapshot(input.characterId, accessToken, snapshot);
+    }
     return runPveLocationAnalysis(
       { characterId: input.characterId, maxJumps: input.maxJumps, maxMinutes: input.maxMinutes, forceLive: input.forceLive },
       snapshot,
@@ -2017,10 +2039,10 @@ if (!hasSingleInstanceLock) {
       (progress) => window?.webContents.send("analysis:progress", progress),
     );
   });
-  ipcMain.handle("prepared:isk-lab", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega" }) => {
+  ipcMain.handle("prepared:isk-lab", async (_event, input: { characterId: string; cloneState?: "alpha" | "omega"; modules?: Array<"market" | "pve" | "invention"> }) => {
     const snapshot = getSnapshot(input.characterId) as any;
     if (!snapshot) throw new Error("Select and sync a connected character.");
-    const snapshots = listSnapshots() as any[];
+    const requested = new Set(input.modules?.length ? input.modules : ["market", "pve", "invention"]);
     const marketInput = {
       characterId: String(snapshot.characterId),
       maxCapital: null,
@@ -2029,15 +2051,20 @@ if (!hasSingleInstanceLock) {
       maxMinutes: null,
     };
     const pveInput = { characterId: String(snapshot.characterId), maxJumps: null, maxMinutes: null, forceLive: false };
-    const [market, pve, preparedInvention] = await Promise.all([
-      loadPreparedOpportunityAnalysis(marketInput, snapshots),
-      loadPreparedPveLocationAnalysis(pveInput, snapshot, input.cloneState ?? "omega"),
-      loadPreparedInventionResult({ characterId: String(snapshot.characterId), decryptorTypeId: null }, snapshot),
-    ]);
+    const marketPromise = requested.has("market")
+      ? loadPreparedOpportunityAnalysis(marketInput, listSnapshots() as any[])
+      : Promise.resolve(null);
+    const pvePromise = requested.has("pve")
+      ? loadPreparedPveLocationAnalysis(pveInput, snapshot, input.cloneState ?? "omega")
+      : Promise.resolve(null);
+    const inventionPromise = requested.has("invention")
+      ? loadPreparedInventionResult({ characterId: String(snapshot.characterId), decryptorTypeId: null }, snapshot)
+      : Promise.resolve({ result: null });
+    const [market, pve, preparedInvention] = await Promise.all([marketPromise, pvePromise, inventionPromise]);
     const invention = preparedInvention.result;
-    // Prepared reads never launch heavyweight Invention work. Cache misses remain empty
-    // until the Invention tab requests the isolated feature worker on demand.
-    await releaseIdleMarketAnalysisWorker().catch(() => undefined);
+    // Prepared reads never launch heavyweight work. Only the visible requested
+    // module is probed; cache misses are built by that module's isolated path.
+    if (requested.has("market")) await releaseIdleMarketAnalysisWorker().catch(() => undefined);
     return { market: market ?? null, pve: pve ?? null, invention: invention ?? null };
   });
   ipcMain.handle("analysis:cancel", async (_event, kind) => cancelAnalysis("Analysis cancelled.", kind));
@@ -2795,10 +2822,19 @@ function makeRadiusChatGPTMarkdown(data: {
   return `# New Eden Sage - 20-Jump Market Strategy Pack\n\nDataset created: ${data.createdAt}\n\n## Instructions for ChatGPT\n\nAct as my EVE Online trade-route strategist. This dataset contains market orders filtered to the newest 20-jump radius pull from my synced character, with low-sec included only if selected during that pull. Compare buy and sell opportunities, but account for taxes, fees, cargo capacity, route risk, available volume, and the difference between listed volume and realistic traded volume. Treat prices as a timestamped snapshot, not guaranteed executions. Ask for my available capital, cargo capacity, tax skills, and risk tolerance when missing.\n\n${sections}\n`;
 }
 
+app.on("before-quit", () => {
+  disposePrivateRefreshProcess();
+  disposePublicDataRefreshProcess();
+  disposeContractIntelligenceProcess();
+});
+
 app.on("window-all-closed", () => {
   stopSharedPublicListener?.(); stopSharedPublicListener = undefined;
   if (publicReconcileTimer) { clearInterval(publicReconcileTimer); publicReconcileTimer = undefined; }
   void logEvent("info", "app.window_all_closed");
+  disposePrivateRefreshProcess();
+  disposePublicDataRefreshProcess();
+  disposeContractIntelligenceProcess();
   void disposeAnalysisWorker();
   void disposeFittingWorker();
   void stopMcpWriteBridge();

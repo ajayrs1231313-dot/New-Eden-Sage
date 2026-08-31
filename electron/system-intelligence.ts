@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 ﻿import { promises as fs } from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow } from "electron";
@@ -243,15 +244,15 @@ let killmailQueueTimer: NodeJS.Timeout | null = null;
 let killmailQueueRunning = false;
 
 function historyPath() {
-  return path.join(app.getPath("userData"), "system-intelligence-history.json");
+  return path.join(USER_DATA_ROOT, "system-intelligence-history.json");
 }
 
 function killmailStatePath() {
-  return path.join(app.getPath("userData"), "system-intelligence-killmails.json");
+  return path.join(USER_DATA_ROOT, "system-intelligence-killmails.json");
 }
 
 function structureDiscoveryStatePath() {
-  return path.join(app.getPath("userData"), "system-intelligence-structures.json");
+  return path.join(USER_DATA_ROOT, "system-intelligence-structures.json");
 }
 
 function normalizeStructureDiscoveryState(value: any): StructureDiscoveryState {

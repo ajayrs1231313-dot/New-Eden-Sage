@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 320" preserveAspectRatio="xMidYMid slice">
+<defs>
+ <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#080603"/><stop offset=".5" stop-color="#3a1708"/><stop offset="1" stop-color="#090607"/></linearGradient>
+ <radialGradient id="fire"><stop stop-color="#fff0a3" stop-opacity=".95"/><stop offset=".12" stop-color="#ffb32f" stop-opacity=".78"/><stop offset=".38" stop-color="#f26917" stop-opacity=".42"/><stop offset="1" stop-color="#421006" stop-opacity="0"/></radialGradient>
+ <linearGradient id="smoke"><stop stop-color="#e49645" stop-opacity=".18"/><stop offset=".45" stop-color="#7f3d24" stop-opacity=".12"/><stop offset="1" stop-color="#0a0808" stop-opacity="0"/></linearGradient>
+ <linearGradient id="steel" x2="1" y2="1"><stop stop-color="#775d48"/><stop offset=".34" stop-color="#33251d"/><stop offset="1" stop-color="#0c0b0b"/></linearGradient>
+ <linearGradient id="rust" x2="1"><stop stop-color="#7c3216"/><stop offset="1" stop-color="#21100b"/></linearGradient>
+ <pattern id="stars" width="91" height="79" patternUnits="userSpaceOnUse"><circle cx="15" cy="14" r=".7" fill="#ffe1a6" opacity=".45"/><circle cx="59" cy="47" r=".6" fill="#fff" opacity=".35"/><circle cx="82" cy="19" r=".8" fill="#ffbd76" opacity=".38"/></pattern>
+ <filter id="glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+ <filter id="soft"><feGaussianBlur stdDeviation="20"/></filter>
+</defs>
+<rect width="640" height="320" fill="url(#bg)"/><rect width="640" height="320" fill="url(#stars)"/>
+<ellipse cx="463" cy="171" rx="240" ry="158" fill="url(#fire)" opacity=".62"/>
+<path d="M0 91c100 25 159 4 234 25 72 20 122 63 210 48 68-11 117-46 196-42v87c-72 13-139 2-199 9-92 10-165 42-255 18C112 216 56 169 0 171Z" fill="url(#smoke)"/>
+<!-- outlaw refinery -->
+<g transform="translate(350 175)">
+ <path d="M-188 77 -165 9 -118-10 -75 9 -31-25 5 6 50-5 84 20 132 13 176 58 160 91 90 88 32 102 -42 91 -112 100Z" fill="url(#steel)"/>
+ <path d="M-158 13 -154-87 -137-112 -121-84 -119-3Z" fill="#2b1c16"/><path d="M-92 3 -88-121 -69-151 -52-117 -48 12Z" fill="#2b1b15"/>
+ <path d="M77 20 82-83 101-109 118-79 119 39Z" fill="#281a14"/><path d="M137 32 143-51 159-71 174-44 175 58Z" fill="#241812"/>
+ <path d="M-164 48H148M-139 68H163" stroke="#dd7132" stroke-opacity=".34"/>
+ <path d="M-126 26h41l15 23h-73ZM25 29h47l22 22H8Z" fill="url(#rust)"/>
+ <g fill="#ffc764" opacity=".83"><rect x="-139" y="43" width="8" height="3"/><rect x="-107" y="53" width="10" height="3"/><rect x="-49" y="37" width="7" height="3"/><rect x="3" y="58" width="8" height="3"/><rect x="52" y="42" width="10" height="3"/><rect x="112" y="55" width="8" height="3"/></g>
+</g>
+<g filter="url(#glow)"><ellipse cx="451" cy="226" rx="33" ry="12" fill="#ffad31" opacity=".45"/><circle cx="452" cy="219" r="5" fill="#fff0a1"/><path d="M452 219 424 164M453 219 479 173" stroke="#ffb740" stroke-width="2" opacity=".8"/></g>
+<g fill="#100d0b" stroke="#7c351b" stroke-opacity=".48"><path d="M31 235 82 206 142 212 177 240 137 253 72 246Z"/><path d="M480 245 526 225 578 235 607 256 553 265 507 257Z"/></g>
+<g fill="#1b100b" stroke="#db6b2b"><path d="M96 155 128 145 157 156 128 167Z"/><path d="M523 135 553 126 582 137 552 148Z"/></g>
+<g filter="url(#glow)"><path d="M128 156 256 184" stroke="#ff8c2c" stroke-width="1.7"/><path d="M553 136 468 177" stroke="#ffb145" stroke-width="1.4"/></g>
+<path d="M0 265c83-24 142-13 209-31 67-19 112-49 180-39 66 10 107 54 157 49 35-4 62-17 94-20v96H0Z" fill="#080908"/>
+<path d="M0 294c71-17 126-8 194-25 69-18 125-29 196-15 65 13 115 29 163 19 34-7 61-17 87-16v63H0Z" fill="#030505"/>
+<g fill="#ffbd54" opacity=".65" filter="url(#glow)"><circle cx="205" cy="248" r="2"/><circle cx="234" cy="240" r="1.6"/><circle cx="409" cy="239" r="2.2"/><circle cx="447" cy="245" r="1.4"/><circle cx="500" cy="231" r="1.8"/></g>
+<ellipse cx="420" cy="235" rx="250" ry="42" fill="#ff7b21" opacity=".1" filter="url(#soft)"/>
+<rect width="640" height="320" fill="none" stroke="#f19a42" stroke-opacity=".08"/>
+</svg>

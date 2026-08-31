@@ -9,7 +9,56 @@ const TYPE_IMAGE_ROOT = path.join(STATIC_DATA_ROOT, "Type Images");
 const IMAGE_SERVER = "https://images.evetech.net/types";
 const allowedSizes = new Set([32, 64, 128, 256, 512, 1024]);
 const inflight = new Map<string, Promise<string>>();
+const MAX_CONCURRENT_IMAGE_DOWNLOADS = 8;
+const IMAGE_DOWNLOAD_ATTEMPTS = 3;
+let activeImageDownloads = 0;
+const imageDownloadWaiters: Array<() => void> = [];
 let prefetchStarted = false;
+
+async function acquireImageDownloadSlot() {
+  if (activeImageDownloads < MAX_CONCURRENT_IMAGE_DOWNLOADS) {
+    activeImageDownloads += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => imageDownloadWaiters.push(resolve));
+}
+
+function releaseImageDownloadSlot() {
+  const next = imageDownloadWaiters.shift();
+  if (next) next();
+  else activeImageDownloads = Math.max(0, activeImageDownloads - 1);
+}
+
+const imageRetryDelay = (attempt: number) => new Promise((resolve) => setTimeout(resolve, 150 * attempt * attempt));
+
+async function downloadTypeImage(typeId: number, variation: TypeImageVariation, size: number) {
+  await acquireImageDownloadSlot();
+  try {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await fetch(`${IMAGE_SERVER}/${typeId}/${variation}?size=${size}`, {
+          headers: { "X-User-Agent": "NewEdenSage/0.1.14" },
+        });
+        if (!response.ok) {
+          const error = new Error(`EVE type image ${typeId} failed (${response.status}).`);
+          if (response.status === 400 || response.status === 404) {
+            error.name = "PermanentTypeImageError";
+          }
+          throw error;
+        }
+        return Buffer.from(await response.arrayBuffer());
+      } catch (error) {
+        if (error instanceof Error && error.name === "PermanentTypeImageError") throw error;
+        lastError = error;
+        if (attempt < IMAGE_DOWNLOAD_ATTEMPTS) await imageRetryDelay(attempt);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`EVE type image ${typeId} could not be downloaded.`);
+  } finally {
+    releaseImageDownloadSlot();
+  }
+}
 
 function safeTypeId(value: unknown) {
   const typeId = Number(value);
@@ -57,12 +106,9 @@ export async function ensureTypeImageLocal(
 
   const task = (async () => {
     await fs.mkdir(path.dirname(target), { recursive: true });
-    const response = await fetch(`${IMAGE_SERVER}/${typeId}/${variation}?size=${size}`, {
-      headers: { "X-User-Agent": "NewEdenSage/0.1.14" },
-    });
-    if (!response.ok) throw new Error(`EVE type image ${typeId} failed (${response.status}).`);
+    const data = await downloadTypeImage(typeId, variation, size);
     const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-    await fs.writeFile(temp, Buffer.from(await response.arrayBuffer()));
+    await fs.writeFile(temp, data);
     await fs.rename(temp, target).catch(async () => {
       await fs.rm(temp, { force: true }).catch(() => undefined);
       if (!(await exists(target))) throw new Error(`Could not cache EVE type image ${typeId}.`);
@@ -74,8 +120,8 @@ export async function ensureTypeImageLocal(
   return task;
 }
 
-function placeholderSvg(typeId: number) {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#08171d"/><rect x="1" y="1" width="62" height="62" fill="none" stroke="#31515a"/><text x="32" y="37" text-anchor="middle" font-family="sans-serif" font-size="17" fill="#6f929a">${typeId}</text></svg>`;
+function placeholderSvg() {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><rect width="64" height="64" fill="#08171d"/><rect x="1" y="1" width="62" height="62" fill="none" stroke="#31515a"/><path d="M18 24 32 16l14 8v16L32 48 18 40V24Z" fill="#0b252d" stroke="#4e7e88" stroke-width="2"/><path d="m18 24 14 8 14-8M32 32v16" fill="none" stroke="#4e7e88" stroke-width="2"/></svg>`;
 }
 
 function imageContentType(data: Buffer) {
@@ -102,9 +148,7 @@ export async function typeImageProtocolResponse(requestUrl: string) {
       },
     });
   } catch (error) {
-    const match = requestUrl.match(/\/([0-9]+)\//);
-    const typeId = match ? Number(match[1]) : 0;
-    const svg = placeholderSvg(typeId);
+    const svg = placeholderSvg();
     return new Response(svg, {
       status: 200,
       headers: { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" },

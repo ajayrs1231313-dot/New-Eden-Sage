@@ -1,0 +1,236 @@
+/* Contracts — reference implementation 2026-08-30
+   Isolated overrides for Contract Search and Profit Opportunities. */
+.contracts-reference{display:grid;gap:7px;min-width:0;color:#c8d9dc}
+.contracts-reference *{box-sizing:border-box}
+.contracts-reference button:focus-visible,.contracts-reference summary:focus-visible,.contracts-reference input:focus-visible,.contracts-reference select:focus-visible{outline:1px solid #20d7d1;outline-offset:1px}
+
+/* Shared page hero */
+.contracts-reference-hero{position:relative;isolation:isolate;min-height:108px;display:grid;grid-template-columns:60px minmax(320px,1fr) auto;align-items:center;gap:15px;padding:12px 18px;border:1px solid #17444e;border-radius:8px;overflow:hidden;background:linear-gradient(100deg,#061820 0%,#05151c 46%,#06131a 100%);box-shadow:inset 0 1px 0 rgba(82,220,215,.03),0 8px 24px rgba(0,0,0,.12)}
+.contracts-reference-hero::before{content:"";position:absolute;z-index:-2;inset:0;pointer-events:none;background:radial-gradient(circle at 64% 22%,rgba(48,190,199,.15) 0 1px,transparent 2px),radial-gradient(circle at 72% 58%,rgba(126,225,230,.12) 0 1px,transparent 2px),radial-gradient(circle at 86% 19%,rgba(93,201,211,.13) 0 1px,transparent 2px),radial-gradient(circle at 92% 70%,rgba(55,171,183,.1) 0 1px,transparent 2px),linear-gradient(155deg,transparent 0 55%,rgba(10,76,86,.18) 55.3% 56%,transparent 56.3%),linear-gradient(25deg,transparent 0 64%,rgba(15,96,104,.12) 64.2% 65%,transparent 65.2%)}
+.contracts-reference-hero.search::after{content:"";position:absolute;z-index:-1;right:6%;top:-42px;width:350px;height:165px;border-radius:50%;opacity:.62;background:radial-gradient(ellipse at 52% 56%,transparent 0 43%,rgba(70,180,193,.23) 44% 45%,transparent 46%),radial-gradient(ellipse at 55% 48%,rgba(32,93,107,.18),rgba(6,20,27,0) 66%);transform:rotate(-9deg)}
+.contracts-reference-hero.profit{grid-template-columns:60px minmax(330px,.92fr) minmax(650px,1.42fr);min-height:98px;background:linear-gradient(100deg,#061820 0%,#07171c 42%,#0a1818 100%)}
+.contracts-reference-hero.profit::after{content:"";position:absolute;z-index:-1;left:38%;right:0;bottom:-34px;height:94px;opacity:.48;background:radial-gradient(ellipse at 50% 100%,rgba(203,135,42,.18),transparent 63%),linear-gradient(178deg,transparent 0 49%,rgba(176,115,34,.16) 50%,transparent 52%)}
+.contracts-hero-mark{width:52px;height:58px;display:grid;place-items:center;color:#d8f7f5;background:linear-gradient(180deg,#12313a,#081c23);clip-path:polygon(50% 0,94% 24%,94% 76%,50% 100%,6% 76%,6% 24%);filter:drop-shadow(0 0 7px rgba(15,211,205,.17))}
+.contracts-hero-mark::before{content:"";position:absolute;width:42px;height:48px;clip-path:inherit;background:#07171d;z-index:-1}
+.contracts-hero-mark svg{width:26px;height:26px;color:#d7eeee;stroke-width:1.65}
+.contracts-reference-hero.profit .contracts-hero-mark svg{color:#e4f2f1}
+.contracts-hero-copy{min-width:0}
+.contracts-hero-copy .eyebrow{margin:0 0 4px;color:#8ba4aa;font-size:9.5px;font-weight:700;letter-spacing:.12em;line-height:1}
+.contracts-reference-hero.profit .contracts-hero-copy .eyebrow{color:#24cec8}
+.contracts-hero-copy h2{margin:0;color:#eef6f7;font-size:24px;font-weight:620;letter-spacing:-.012em;line-height:1.05;text-transform:uppercase}
+.contracts-hero-copy p:last-child{max-width:720px;margin:5px 0 0;color:#829aa1;font-size:11px;line-height:1.4}
+.contracts-refresh-block{justify-self:end;display:grid;justify-items:end;gap:7px;min-width:205px}
+.contracts-refresh-button{min-width:185px;min-height:34px;display:flex;align-items:center;justify-content:center;gap:8px;border:1px solid #087b82;border-radius:4px;background:linear-gradient(180deg,#08717a,#07515b);color:#dcffff;font-size:9.7px;font-weight:750;letter-spacing:.04em}
+.contracts-refresh-button:hover:not(:disabled){border-color:#20b9b4;background:linear-gradient(180deg,#08838a,#07646b)}
+.contracts-refresh-button:disabled{opacity:.58}
+.contracts-refresh-button svg{width:14px;height:14px;color:#31e2dc}
+.contracts-refresh-block>small{display:flex;align-items:center;gap:6px;color:#6d878e;font-size:9.5px}
+.contracts-refresh-block>small i{width:5px;height:5px;border-radius:50%;background:#1bd477;box-shadow:0 0 5px rgba(27,212,119,.42)}
+
+.contracts-profit-kpis{min-width:0;display:grid;grid-template-columns:1fr 1fr 1fr .95fr;gap:8px}
+.contracts-profit-kpis article,.contracts-update-kpi{min-width:0;min-height:61px;display:grid;align-content:center;padding:8px 11px;border:1px solid #194852;border-radius:4px;background:linear-gradient(180deg,rgba(6,28,35,.95),rgba(5,20,27,.95));text-align:left}
+.contracts-profit-kpis span,.contracts-profit-kpis strong,.contracts-profit-kpis small{display:block;min-width:0}
+.contracts-profit-kpis span{color:#78939a;font-size:8.5px;font-weight:750;letter-spacing:.075em;white-space:nowrap}
+.contracts-profit-kpis strong{margin-top:3px;color:#edf6f7;font-size:21px;font-weight:520;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.contracts-profit-kpis small{margin-top:3px;color:#26cd88;font-size:8.7px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.contracts-update-kpi{appearance:none;color:inherit;cursor:pointer}
+.contracts-update-kpi:hover:not(:disabled){border-color:#258077;background:#08272c}
+.contracts-update-kpi strong{font-size:16px}
+.contracts-update-kpi small{display:flex;align-items:center;gap:5px;color:#68a8a6}
+.contracts-update-kpi small svg{width:12px;height:12px;color:#1bd4cc}
+
+.contracts-reference .contracts-status-compact{min-height:31px;margin:0;padding:6px 9px;border-color:#23464e;border-radius:3px;background:#07171d;color:#88a3a9;font-size:10.5px}
+.contracts-reference .contracts-status-compact.busy{border-color:#6b5922;color:#c7b36d}
+
+/* Two large internal contract workspaces */
+.contracts-reference .contract-subtabs-reference{display:grid;grid-template-columns:230px 230px;gap:6px;padding:6px;border:1px solid #173b44;border-radius:5px;background:#05151b}
+.contracts-reference .contract-subtabs-reference button{min-width:0;min-height:43px;display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:8px;padding:5px 9px;border:1px solid #18434c;border-radius:3px;background:#06171d;color:#788f96;text-align:left;box-shadow:none}
+.contracts-reference .contract-subtabs-reference button:hover{border-color:#2c6868;background:#082027}
+.contracts-reference .contract-subtabs-reference button.active{border-color:#0e8a8b;background:linear-gradient(180deg,#083039,#072128);box-shadow:inset 0 0 16px rgba(23,211,204,.045)}
+.contract-subtab-icon{width:34px;height:32px;display:grid!important;place-items:center;border:1px solid #155b63;border-radius:3px;background:#08242b;color:#22d6d0}
+.contract-subtab-icon svg{width:17px;height:17px}
+.contracts-reference .contract-subtabs-reference button>span:last-child{min-width:0}
+.contracts-reference .contract-subtabs-reference button strong,.contracts-reference .contract-subtabs-reference button small{display:block}
+.contracts-reference .contract-subtabs-reference button strong{color:#b8c9cc;font-size:9.5px;font-weight:720;letter-spacing:.03em}
+.contracts-reference .contract-subtabs-reference button small{margin-top:2px;color:#607980;font-size:9px;line-height:1.2}
+.contracts-reference .contract-subtabs-reference button.active strong{color:#e7f4f4}
+.contracts-reference .contract-subtabs-reference button.active small{color:#35beb9}
+
+/* Contract Search */
+.contracts-reference .contract-search-reference{display:grid;grid-template-columns:292px minmax(0,1fr);gap:8px;min-height:515px}
+.contracts-reference .contract-filter-reference,.contracts-reference .contract-results-reference{border:1px solid #173b44;border-radius:5px;background:#06151b;box-shadow:inset 0 1px 0 rgba(55,182,181,.02)}
+.contracts-reference .contract-filter-reference{position:static;align-self:start;display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:10px}
+.contracts-reference .contract-filter-heading{grid-column:1/-1;align-items:center;padding:0 0 1px}
+.contracts-reference .contract-filter-heading .eyebrow{display:flex;align-items:center;gap:5px;margin:0;color:#28cec9;font-size:9px;font-weight:750;letter-spacing:.07em}
+.contracts-reference .contract-filter-heading .eyebrow svg{width:12px;height:12px}
+.contracts-reference .contract-filter-heading h3{margin:5px 0 0;color:#cbdadd;font-size:10.7px;font-weight:550}
+.contracts-reference .contract-filter-heading button{display:flex;align-items:center;gap:5px;padding:5px 7px;border-color:#263f46;border-radius:3px;background:#071920;color:#718c92;font-size:9px}
+.contracts-reference .contract-filter-heading button svg{width:12px;height:12px}
+.contracts-reference .contract-filter-panel label,.contracts-reference .contract-profit-toolbar label{gap:4px;color:#748d94;font-size:8.7px;font-weight:600;letter-spacing:.04em}
+.contracts-reference .contract-filter-panel label>input,.contracts-reference .contract-filter-panel label>select,.contracts-reference .contract-profit-toolbar label>input,.contracts-reference .contract-profit-toolbar label>select{min-height:31px;padding:6px 8px;border:1px solid #1c3e47;border-radius:3px;background:#051219;color:#d3e2e4;font-size:10px}
+.contracts-reference .contract-filter-panel label>input:focus,.contracts-reference .contract-filter-panel label>select:focus,.contracts-reference .contract-profit-toolbar label>input:focus,.contracts-reference .contract-profit-toolbar label>select:focus{border-color:#267b79}
+.contract-filter-search{min-height:31px;display:flex;align-items:center;gap:6px;padding:0 8px;border:1px solid #1c3e47;border-radius:3px;background:#051219;color:#536e76}
+.contract-filter-search:focus-within{border-color:#267b79;color:#17c9c3}
+.contract-filter-search svg{flex:0 0 13px;width:13px;height:13px}
+.contract-filter-search input{width:100%;min-width:0;border:0;outline:0;background:transparent;color:#d3e2e4;font-size:10px}
+.contract-filter-search input::placeholder{color:#4d656c}
+.contracts-reference .contract-price-filter,.contracts-reference .contract-security-filter{grid-column:1/-1;margin:0;padding:6px;border:1px solid #173740;border-radius:3px;background:#06161c}
+.contracts-reference .contract-price-filter legend,.contracts-reference .contract-security-filter legend{padding:0 4px;color:#6e898f;font-size:8.5px;font-weight:650;letter-spacing:.04em}
+.contracts-reference .contract-price-filter input{height:29px;padding:5px 7px;border:1px solid #1b3d46;border-radius:2px;background:#051219;color:#d4e2e4;font-size:9.5px}
+.contracts-reference .contract-security-filter>div{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.contracts-reference .contract-security-filter button{min-width:0;min-height:25px;padding:4px 3px;border:1px solid #223d44;border-radius:2px;background:#06151b;color:#687f85;font-size:8.5px}
+.contracts-reference .contract-security-filter button.active{background:#0a2a30;border-color:#1e7475;color:#42d8d2}
+.contracts-reference .contract-security-filter button.active.high{background:#0c2720;border-color:#286044;color:#61ca85}
+.contracts-reference .contract-security-filter button.active.low{background:#211d0d;border-color:#6b551e;color:#d9ae3f}
+.contracts-reference .contract-security-filter button.active.null{background:#241215;border-color:#68353c;color:#d7747c}
+.contracts-reference .contract-security-filter button.active.unknown{background:#10191e;border-color:#46555a;color:#a0afb3}
+.contracts-reference .contract-filter-check{grid-column:1/-1!important;min-height:27px;padding:5px 6px!important;border-color:#173740;background:#06171d;font-size:9px!important;color:#718b91!important}
+.contracts-reference .contract-filter-check input{accent-color:#14a6a2}
+.contracts-reference .contract-filter-check.sage small{font-size:7px}
+.contract-search-advanced{grid-column:1/-1;border:1px solid #173740;border-radius:3px;background:#06161c;overflow:hidden}
+.contract-search-advanced>summary{min-height:28px;display:flex;align-items:center;justify-content:space-between;gap:6px;padding:5px 7px;list-style:none;cursor:pointer;color:#6e898f;font-size:8.8px;font-weight:650;text-transform:uppercase;letter-spacing:.05em}
+.contract-search-advanced>summary::-webkit-details-marker{display:none}
+.contract-search-advanced>summary::after{content:"+";color:#22c9c3;font-size:12px}
+.contract-search-advanced[open]>summary::after{content:"−"}
+.contract-search-advanced>summary small{margin-left:auto;color:#536c73;font-size:8px;text-transform:none;letter-spacing:0;font-weight:400}
+.contract-search-advanced>div{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:7px;border-top:1px solid #173740}
+.contract-search-advanced .wide{grid-column:1/-1}
+
+.contracts-reference .contract-results-reference{display:grid;grid-template-rows:auto minmax(320px,1fr);overflow:hidden}
+.contracts-reference .contract-results-head{min-height:45px;padding:7px 10px;border-bottom:1px solid #183d46;background:#06171d}
+.contracts-reference .contract-results-head .eyebrow{margin:0;color:#607a81;font-size:8px;letter-spacing:.09em}
+.contracts-reference .contract-results-head h3{margin:3px 0 0;color:#e0e9eb;font-size:14px;font-weight:550;text-transform:uppercase}
+.contract-results-actions{display:flex;align-items:center;gap:8px}
+.contract-results-actions>small{color:#657f86;font-size:8.7px}
+.contract-density-toggle{display:flex;gap:3px}
+.contract-density-toggle button{width:26px;height:25px;display:grid;place-items:center;border:1px solid #1d414a;border-radius:2px;background:#071920;color:#637e84}
+.contract-density-toggle button.active{border-color:#176b70;background:#092a31;color:#35d4cf}
+.contract-density-toggle svg{width:12px;height:12px}
+.contracts-reference .contract-list-reference{max-height:520px;overflow:auto;background:#05151b;scrollbar-color:#1c4952 #07151b;scrollbar-width:thin}
+.contracts-reference .contract-list-reference>.contract-search-row{width:100%;min-height:66px;display:grid;grid-template-columns:38px minmax(280px,1fr) 96px 94px 155px 25px;gap:9px;align-items:center;padding:7px 9px;border:0;border-bottom:1px solid #14323a;background:#06171d;color:inherit;text-align:left;box-shadow:none}
+.contracts-reference .contract-list-reference>.contract-search-row:nth-of-type(even){background:#07191f}
+.contracts-reference .contract-list-reference>.contract-search-row:hover{background:#08222a}
+.contracts-reference .contract-list-reference>.contract-search-row.selected{background:#08272d;box-shadow:inset 2px 0 0 #16cbc5}
+.contracts-reference .density-compact>.contract-search-row{min-height:51px;padding-top:5px;padding-bottom:5px}
+.contract-row-icon{width:34px;height:34px;display:grid!important;place-items:center;border:1px solid #213f47;border-radius:3px;background:linear-gradient(180deg,#14272d,#0b1b21);color:#a8b8bc}
+.contract-row-icon svg{width:19px;height:19px}
+.contract-row-copy{display:block!important;min-width:0}
+.contract-row-title{display:flex!important;align-items:center;gap:6px;min-width:0}
+.contract-row-title>strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e1e9eb!important;font-size:10.8px!important;font-weight:600!important}
+.contract-row-title>em{flex:0 0 auto;padding:1px 5px;border:1px solid #715719;border-radius:2px;background:#211b0a;color:#daa934!important;font-size:7px!important;font-style:normal!important;line-height:1.3;text-transform:uppercase}
+.contract-row-copy>small{margin-top:2px!important;color:#748c92!important;font-size:9.5px!important;line-height:1.28!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important}
+.contract-row-issued{display:block!important;margin-top:2px;color:#526d74!important;font-size:8.5px!important;letter-spacing:0!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.contract-row-metric,.contract-row-price{min-width:0;display:block!important;text-align:left}
+.contract-row-metric small,.contract-row-metric strong,.contract-row-price small,.contract-row-price strong{display:block!important}
+.contract-row-metric small{color:#59737a!important;font-size:7.5px!important;letter-spacing:.05em!important}
+.contract-row-metric strong{margin-top:3px;color:#c8d8db!important;font-size:9.8px!important;font-weight:550!important;white-space:nowrap}
+.contract-row-metric.expiry.warning strong{color:#dea93d!important}.contract-row-metric.expiry.urgent strong{color:#f16f75!important}
+.contract-row-price{text-align:right}
+.contract-row-price strong{color:#efbe3e!important;font-size:12px!important;font-weight:650!important;white-space:nowrap}
+.contract-row-price small{margin-top:3px!important;color:#617b82!important;font-size:8px!important;white-space:nowrap!important}
+.contract-row-chevron{width:22px;height:22px;display:grid!important;place-items:center;color:#1bc8c3}
+.contract-row-chevron svg{width:13px;height:13px;transition:transform .16s ease}
+.contract-search-row.selected .contract-row-chevron svg,.contract-opportunity-row.selected .contract-row-chevron svg{transform:rotate(90deg)}
+
+/* Profit opportunities state */
+.contracts-reference .contract-profit-reference{display:grid;grid-template-rows:auto minmax(340px,1fr);min-height:485px;border:1px solid #173b44;border-radius:5px;background:#06151b;overflow:hidden}
+.contracts-reference .contract-profit-filterbar{display:grid;grid-template-columns:auto auto minmax(125px,.75fr) minmax(95px,.55fr) minmax(125px,.7fr) minmax(190px,1.1fr) minmax(110px,.62fr) auto;gap:7px;align-items:end;padding:7px 9px;border:0;border-bottom:1px solid #173b44;background:#06171d}
+.contract-filterbar-title{align-self:center;display:flex;align-items:center;gap:5px;padding-right:4px;color:#6d878e;font-size:8.5px;font-weight:750;letter-spacing:.07em;white-space:nowrap}
+.contract-filterbar-title svg{width:12px;height:12px;color:#19c9c3}
+.contracts-reference .contract-profit-filterbar .contract-security-filter.compact{grid-column:auto;align-self:end;padding:0;border:0;background:transparent}
+.contracts-reference .contract-profit-filterbar .contract-security-filter.compact legend{margin-bottom:4px;padding:0;color:#718b92;font-size:8.3px}
+.contracts-reference .contract-profit-filterbar .contract-security-filter.compact>div{display:flex;gap:3px}
+.contracts-reference .contract-profit-filterbar .contract-security-filter.compact button{min-width:41px;height:30px;padding:4px 7px}
+.contracts-reference .contract-profit-filterbar label>input,.contracts-reference .contract-profit-filterbar label>select{height:30px;min-height:30px}
+.contracts-reference .contract-profit-filterbar .contract-filter-search{height:30px;min-height:30px}
+.contracts-reference .contract-profit-filterbar .contract-reset-filter{height:30px;min-height:30px;display:flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid #273e45;border-radius:3px;background:#071920;color:#718b91;font-size:8.7px;white-space:nowrap}
+.contracts-reference .contract-profit-filterbar .contract-reset-filter:hover{border-color:#634047;color:#d7878d}
+.contracts-reference .contract-profit-filterbar .contract-reset-filter svg{width:12px;height:12px}
+
+.contracts-reference .contract-opportunity-reference{max-height:555px;overflow:auto;background:#05151b;scrollbar-color:#1c4952 #07151b;scrollbar-width:thin}
+.contracts-reference .contract-opportunity-reference>.contract-opportunity-row{width:100%;min-height:72px;display:grid;grid-template-columns:92px minmax(300px,1.75fr) 118px 92px 94px 52px minmax(230px,1.05fr) 24px;gap:8px;align-items:center;padding:7px 8px;border:0;border-bottom:1px solid #15343c;border-left:3px solid #2f7252;background:#06171d;color:inherit;text-align:left;box-shadow:none}
+.contracts-reference .contract-opportunity-reference>.contract-opportunity-row:nth-of-type(even){background:#07191f}
+.contracts-reference .contract-opportunity-reference>.contract-opportunity-row:hover{background:#08222a}
+.contracts-reference .contract-opportunity-reference>.contract-opportunity-row.selected{background:#08272d;outline:1px solid #1b5b62;outline-offset:-1px}
+.contracts-reference .contract-opportunity-reference>.contract-opportunity-row.score-excellent{border-left-color:#37be69}.contracts-reference .contract-opportunity-reference>.contract-opportunity-row.score-good{border-left-color:#87b64e}.contracts-reference .contract-opportunity-reference>.contract-opportunity-row.score-steady{border-left-color:#d09d35}.contracts-reference .contract-opportunity-reference>.contract-opportunity-row.score-watch{border-left-color:#b7654f}
+.contract-opportunity-score{align-self:stretch;min-width:0;display:grid!important;align-content:center;justify-items:center;padding:4px;border:1px solid #193e36;border-radius:2px;background:linear-gradient(180deg,#0a261a,#0a2018);text-align:center}
+.contract-opportunity-score small,.contract-opportunity-score em,.contract-opportunity-score strong{display:block!important}
+.contract-opportunity-score small{color:#d9c950!important;font-size:8.7px!important;font-weight:800!important;line-height:1.05}.contract-opportunity-score em{margin-top:2px;color:#5fa26f!important;font-size:7px!important;font-style:normal!important;font-weight:750!important;letter-spacing:.07em!important}.contract-opportunity-score strong{margin-top:3px;color:#e5cd37!important;font-size:15px!important;font-weight:560!important;line-height:1!important}
+.score-excellent .contract-opportunity-score{border-color:#256842;background:#0a2619}.score-excellent .contract-opportunity-score small,.score-excellent .contract-opportunity-score strong{color:#cde644!important}.score-good .contract-opportunity-score{border-color:#536323;background:#171f0d}.score-steady .contract-opportunity-score{border-color:#725821;background:#241d0c}.score-watch .contract-opportunity-score{border-color:#6b3c38;background:#211315}
+.contract-opportunity-copy{display:block!important;min-width:0}
+.contract-opportunity-titleline{display:flex!important;align-items:center;gap:6px;min-width:0}
+.contract-opportunity-titleline strong{min-width:0;color:#e1e9eb!important;font-size:11px!important;font-weight:600!important;line-height:1.2!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.contract-opportunity-titleline em{flex:0 0 auto;padding:1px 4px;border:1px solid #705719;border-radius:2px;background:#211b0a;color:#d7a72e!important;font-size:7px!important;font-style:normal!important;text-transform:uppercase}
+.contract-opportunity-copy>small{margin-top:2px!important;color:#718b91!important;font-size:9px!important;line-height:1.28!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.contract-opportunity-tags{display:flex!important;gap:4px;align-items:center;margin-top:3px}
+.contract-opportunity-tags i{display:inline-flex!important;min-height:15px;align-items:center;padding:1px 4px;border:1px solid #1e515a;border-radius:2px;background:#082027;color:#53bdc0!important;font-size:7px!important;font-style:normal!important;line-height:1;text-transform:uppercase;letter-spacing:.03em}
+.contract-opportunity-tags i.warning{border-color:#715722;background:#211b0c;color:#d9ab43!important}
+.contract-opportunity-copy .contract-opportunity-expiry{margin-top:3px!important;color:#657e85!important;font-size:8.2px!important}.contract-opportunity-copy .contract-opportunity-expiry.warning{color:#cda445!important}.contract-opportunity-copy .contract-opportunity-expiry.urgent{color:#df767d!important}
+.contract-opportunity-metric{display:block!important;min-width:0}
+.contract-opportunity-metric small,.contract-opportunity-metric strong,.contract-opportunity-metric em{display:block!important}
+.contract-opportunity-metric small{color:#5f7980!important;font-size:7.5px!important;letter-spacing:.04em!important}.contract-opportunity-metric strong{margin-top:3px;color:#dce8ea!important;font-size:12px!important;font-weight:560!important;line-height:1.05!important;white-space:nowrap}.contract-opportunity-metric em{margin-top:3px;color:#657e85!important;font-size:7.8px!important;font-style:normal!important}
+.contract-opportunity-metric.positive strong,.contract-opportunity-metric.roi strong{color:#55d787!important}.contract-opportunity-metric.reliability strong{color:#d7ba48!important}
+.contract-signal-bars{height:31px;display:flex!important;align-items:flex-end;justify-content:center;gap:3px}
+.contract-signal-bars i{width:4px;display:block;background:#15343c;border-radius:1px}.contract-signal-bars i:nth-child(1){height:7px}.contract-signal-bars i:nth-child(2){height:11px}.contract-signal-bars i:nth-child(3){height:15px}.contract-signal-bars i:nth-child(4){height:20px}.contract-signal-bars i:nth-child(5){height:25px}.contract-signal-bars i.active{background:#167d86;box-shadow:0 0 3px rgba(20,173,181,.25)}
+.contract-opportunity-note{display:block!important;min-width:0}
+.contract-opportunity-note strong,.contract-opportunity-note small{display:block!important}.contract-opportunity-note strong{color:#c9dadd!important;font-size:9.5px!important;font-weight:550!important;white-space:nowrap}.contract-opportunity-note small{margin-top:2px!important;color:#657e85!important;font-size:8.2px!important;line-height:1.28!important;display:-webkit-box!important;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+/* Expanded contract detail: keep functionality, lift readability to the reference. */
+.contracts-reference .contract-detail{padding:10px 12px;border-top:1px solid #1b4650;background:#07191f}
+.contracts-reference .contract-detail-head h3{color:#e3edef;font-size:14px}
+.contracts-reference .contract-detail-head small,.contracts-reference .contract-detail-note{font-size:9.5px;line-height:1.4}
+.contracts-reference .contract-detail-meta span{font-size:8px}
+.contracts-reference .contract-detail-actions{display:grid;justify-items:end;gap:6px}
+.contracts-reference .contract-detail-actions>strong{color:#e8c254;font-size:14px}
+.contracts-reference .contract-detail-actions button{min-height:28px;padding:4px 8px;border-radius:2px;font-size:9px}
+.contracts-reference .contract-value-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
+.contracts-reference .contract-value-grid span{min-width:0;padding:7px}
+.contracts-reference .contract-value-grid small{font-size:7.5px}.contracts-reference .contract-value-grid strong{font-size:9.5px;overflow-wrap:anywhere}
+.contracts-reference .contract-item-row{font-size:8.5px}.contracts-reference .contract-item-row.heading{font-size:7.5px}
+.contracts-reference .contract-find-status,.contracts-reference .contract-completion-status{font-size:9.5px}
+
+/* Fit-to-monitor readability floors */
+html[data-fit-to-monitor="on"] .contracts-reference .contracts-hero-copy .eyebrow{font-size:10px}
+html[data-fit-to-monitor="on"] .contracts-reference .contracts-hero-copy h2{font-size:25px}
+html[data-fit-to-monitor="on"] .contracts-reference .contracts-hero-copy p:last-child{font-size:11.5px}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-subtabs-reference button strong{font-size:10px}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-subtabs-reference button small{font-size:9.5px}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-filter-panel label,html[data-fit-to-monitor="on"] .contracts-reference .contract-profit-toolbar label{font-size:9px}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-filter-panel label>input,html[data-fit-to-monitor="on"] .contracts-reference .contract-filter-panel label>select,html[data-fit-to-monitor="on"] .contracts-reference .contract-profit-toolbar label>input,html[data-fit-to-monitor="on"] .contracts-reference .contract-profit-toolbar label>select,html[data-fit-to-monitor="on"] .contracts-reference .contract-filter-search input{font-size:10.5px}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-row-title>strong,html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-titleline strong{font-size:11.5px!important}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-row-copy>small,html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-copy>small{font-size:9.8px!important}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-row-issued,html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-note small{font-size:9px!important}
+html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-metric strong{font-size:12.5px!important}
+
+@media(max-width:1500px){
+  .contracts-reference-hero.profit{grid-template-columns:55px minmax(300px,.8fr) minmax(590px,1.35fr)}
+  .contracts-profit-kpis{gap:5px}.contracts-profit-kpis article,.contracts-update-kpi{padding:7px 8px}.contracts-profit-kpis strong{font-size:18px}
+  .contracts-reference .contract-list-reference>.contract-search-row{grid-template-columns:36px minmax(240px,1fr) 84px 86px 136px 22px;gap:7px}
+  .contracts-reference .contract-opportunity-reference>.contract-opportunity-row{grid-template-columns:80px minmax(260px,1.55fr) 105px 82px 82px 42px minmax(180px,.92fr) 22px;gap:6px}
+  .contracts-reference .contract-profit-filterbar{grid-template-columns:auto auto minmax(105px,.7fr) 88px minmax(110px,.65fr) minmax(160px,1fr) 100px auto}
+}
+@media(max-width:1250px){
+  .contracts-reference-hero.profit{grid-template-columns:55px 1fr;grid-template-rows:auto auto}.contracts-reference-hero.profit .contracts-profit-kpis{grid-column:1/-1}
+  .contracts-reference .contract-search-reference{grid-template-columns:250px minmax(0,1fr)}
+  .contracts-reference .contract-list-reference>.contract-search-row{grid-template-columns:34px minmax(220px,1fr) 80px 82px 120px 20px}.contract-row-issued{display:none!important}
+  .contracts-reference .contract-profit-filterbar{grid-template-columns:repeat(4,minmax(0,1fr))}.contract-filterbar-title{grid-column:1/-1}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact{grid-column:span 2}.contracts-reference .contract-profit-filterbar .profit-system-search{grid-column:span 2}
+  .contracts-reference .contract-opportunity-reference>.contract-opportunity-row{grid-template-columns:78px minmax(240px,1.4fr) 100px 78px 80px minmax(170px,.9fr) 20px}.contract-signal-bars{display:none!important}
+  .contracts-reference .contract-value-grid{grid-template-columns:repeat(3,1fr)}
+}
+@media(max-width:920px){
+  .contracts-reference-hero,.contracts-reference-hero.profit{grid-template-columns:52px 1fr}.contracts-reference-hero.search .contracts-refresh-block{grid-column:1/-1;justify-self:stretch;justify-items:stretch}.contracts-refresh-block>small{justify-content:flex-end}
+  .contracts-profit-kpis{grid-column:1/-1;grid-template-columns:1fr 1fr}
+  .contracts-reference .contract-subtabs-reference{grid-template-columns:1fr 1fr}
+  .contracts-reference .contract-search-reference{grid-template-columns:1fr}.contracts-reference .contract-filter-reference{grid-template-columns:repeat(2,1fr)}
+  .contracts-reference .contract-list-reference>.contract-search-row{grid-template-columns:34px minmax(200px,1fr) 90px 100px 20px}.contract-row-metric.volume{display:none!important}
+  .contracts-reference .contract-profit-filterbar{grid-template-columns:1fr 1fr}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact,.contracts-reference .contract-profit-filterbar .profit-system-search{grid-column:1/-1}
+  .contracts-reference .contract-opportunity-reference>.contract-opportunity-row{grid-template-columns:74px minmax(220px,1.4fr) 95px 80px 20px}.contract-opportunity-metric.reliability,.contract-opportunity-note{display:none!important}
+}
+@media(max-width:650px){
+  .contracts-reference-hero,.contracts-reference-hero.profit{padding:10px;grid-template-columns:45px 1fr}.contracts-hero-mark{width:44px;height:50px}.contracts-hero-copy h2{font-size:20px}.contracts-profit-kpis{grid-template-columns:1fr}
+  .contracts-reference .contract-subtabs-reference{grid-template-columns:1fr}.contracts-reference .contract-filter-reference{grid-template-columns:1fr}.contracts-reference .contract-filter-wide,.contracts-reference .contract-filter-heading,.contracts-reference .contract-price-filter,.contracts-reference .contract-security-filter,.contracts-reference .contract-filter-check,.contract-search-advanced{grid-column:auto!important}.contract-search-advanced>div{grid-template-columns:1fr}.contract-search-advanced .wide{grid-column:auto}
+  .contracts-reference .contract-list-reference>.contract-search-row{grid-template-columns:32px minmax(0,1fr) 20px}.contract-row-metric,.contract-row-price{display:none!important}
+  .contracts-reference .contract-profit-filterbar{grid-template-columns:1fr}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact,.contracts-reference .contract-profit-filterbar .profit-system-search{grid-column:auto}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact>div{display:grid;grid-template-columns:repeat(4,1fr)}
+  .contracts-reference .contract-opportunity-reference>.contract-opportunity-row{grid-template-columns:68px minmax(0,1fr) 20px}.contract-opportunity-metric{display:none!important}.contract-opportunity-score{min-height:52px}
+  .contracts-reference .contract-value-grid{grid-template-columns:1fr}
+}

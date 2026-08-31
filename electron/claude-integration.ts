@@ -1,3 +1,4 @@
+import { USER_DATA_ROOT } from "./data-paths";
 import { app, shell } from "electron";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -100,7 +101,7 @@ async function preferredDesktopConfigDirectory() {
   return directories[0] ?? legacyDesktopConfigDirectory();
 }
 
-function desktopBundleDirectory() { return path.join(app.getPath("userData"), "mcp", "claude"); }
+function desktopBundleDirectory() { return path.join(USER_DATA_ROOT, "mcp", "claude"); }
 function desktopBundlePath() { return path.join(desktopBundleDirectory(), BUNDLE_NAME); }
 
 async function prepareClaudeDesktopBundle() {
