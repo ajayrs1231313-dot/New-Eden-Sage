@@ -1526,6 +1526,7 @@ if (!hasSingleInstanceLock) {
         itemTypeIds: number[];
         items?: Array<{ typeId: number; quantity?: number; rack?: string; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated" }>;
         targetProfile?: { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number };
+        targetTypeId?: number;
         damageProfile?: { em: number; thermal: number; kinetic: number; explosive: number };
         implantTypeIds?: number[];
         boosterTypeIds?: number[];
@@ -1533,6 +1534,7 @@ if (!hasSingleInstanceLock) {
         projectedItems?: Array<{ typeId: number; quantity?: number; rack?: string; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated"; effectiveness?: number }>;
         commandBurstItems?: Array<{ typeId: number; quantity?: number; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated"; effectiveness?: number }>;
         environmentTypeIds?: number[];
+        abyssProfile?: { tier: 0 | 1 | 2 | 3 | 4 | 5 | 6; weather: "electrical" | "exotic" | "firestorm" | "gamma" | "dark"; penalty?: number; roomKey?: string };
       },
     ) => {
       const snapshot = getSnapshot(input.characterId) as any;
@@ -1543,6 +1545,7 @@ if (!hasSingleInstanceLock) {
           items: input.items ?? input.itemTypeIds.map((typeId) => ({ typeId })),
           snapshot,
           targetProfile: input.targetProfile,
+          targetTypeId: input.targetTypeId,
           damageProfile: input.damageProfile,
           implantTypeIds: input.implantTypeIds,
           boosterTypeIds: input.boosterTypeIds,
@@ -1550,6 +1553,7 @@ if (!hasSingleInstanceLock) {
           projectedItems: input.projectedItems,
           commandBurstItems: input.commandBurstItems,
           environmentTypeIds: input.environmentTypeIds,
+          abyssProfile: input.abyssProfile,
         });
       }
       const typeIds = [

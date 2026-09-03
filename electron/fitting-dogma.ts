@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 import { gzip, gunzip } from "node:zlib";
 import { STATIC_DATA_ROOT } from "./data-paths";
 import { ensureStaticDataArchive, FITTING_CATALOGUE_CACHE, FITTING_PREPARED_CACHE, prepareStaticDataForProcess } from "./type-volumes";
+import { ABYSS_DATASET_PROVENANCE, abyssEncountersForTier, applyAbyssWeatherHp, applyAbyssWeatherResists, normalizeAbyssPenalty, validAbyssPenalties, type AbyssTier, type AbyssWeather } from "./abyss-encounters";
+import { PVE_CLEAR_TIME_CAVEAT, aggregatePveSiteClearTime, calculatePveRoomClearTime, estimateClusteredPveGeometry } from "./pve-clear-time";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const REQUIREMENTS = [
@@ -69,6 +71,23 @@ type EffectDefinition = {
   fittingUsageChanceAttributeID?: number;
 };
 type DamageProfile = { em: number; thermal: number; kinetic: number; explosive: number };
+type DamageVector = [number, number, number, number];
+type NpcCombatProfile = {
+  abyssal: boolean;
+  outgoingDamage: DamageProfile;
+  outgoingDamageTotal: number;
+  outgoingDps: DamageProfile;
+  outgoingDpsTotal: number;
+  outgoingDpsMax: DamageProfile;
+  outgoingDpsMaxTotal: number;
+  shieldHp: number;
+  armorHp: number;
+  structureHp: number;
+  shieldResists: DamageVector;
+  armorResists: DamageVector;
+  hullResists: DamageVector;
+  signatureRadiusM: number;
+};
 
 type TargetProfile = { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number };
 
@@ -386,6 +405,51 @@ function index() {
 
 const attr = (dogma: Dogma | undefined, attributeId: number) =>
   dogma?.attributes.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
+
+const ABYSSAL_ENTITY_GROUP_IDS = new Set([1982, 1997]);
+const NPC_DAMAGE_ATTRIBUTE_IDS = [114, 118, 117, 116] as const;
+const NPC_SHIELD_RESONANCE_IDS = [271, 274, 273, 272] as const;
+const NPC_ARMOR_RESONANCE_IDS = [267, 270, 269, 268] as const;
+const NPC_HULL_RESONANCE_IDS = [113, 110, 109, 111] as const;
+const damageVectorFor = (value: Dogma | undefined): DamageVector => NPC_DAMAGE_ATTRIBUTE_IDS.map((id) => Math.max(0, attr(value, id))) as DamageVector;
+const resistanceVectorFor = (value: Dogma | undefined, ids: readonly number[]): DamageVector => ids.map((id) => Math.max(0, Math.min(1, 1 - attr(value, id)))) as DamageVector;
+const hasNpcCombatProfile = (value: Dogma | undefined) => Boolean(value) && (
+  NPC_DAMAGE_ATTRIBUTE_IDS.some((id) => Number(value!.attributes.get(id) ?? 0) > 0) ||
+  [...NPC_SHIELD_RESONANCE_IDS, ...NPC_ARMOR_RESONANCE_IDS, ...NPC_HULL_RESONANCE_IDS].some((id) => value!.attributes.has(id))
+);
+function npcCombatProfileFor(typeId: number, groupId: number, value: Dogma | undefined, dogmaIndex?: Map<number, Dogma>): NpcCombatProfile | undefined {
+  if (!value || !hasNpcCombatProfile(value)) return undefined;
+  const outgoing = damageVectorFor(value);
+  const turretCycleSeconds = Math.max(0, attr(value, 51) / 1000);
+  const turretMultiplier = attr(value, 64) || 1;
+  const rampBonusMax = Math.max(0, attr(value, 2734));
+  const turretDps = outgoing.map((amount) => turretCycleSeconds > 0 ? amount * turretMultiplier / turretCycleSeconds : 0) as DamageVector;
+  const turretMaxDps = outgoing.map((amount) => turretCycleSeconds > 0 ? amount * turretMultiplier * (1 + rampBonusMax) / turretCycleSeconds : 0) as DamageVector;
+  const missileTypeId = Math.trunc(attr(value, 507));
+  const missile = missileTypeId > 0 ? dogmaIndex?.get(missileTypeId) : undefined;
+  const missileDamage = damageVectorFor(missile);
+  const missileCycleSeconds = Math.max(0, attr(value, 506) / 1000);
+  const missileMultiplier = attr(value, 212) || 1;
+  const missileDps = missileDamage.map((amount) => missileCycleSeconds > 0 ? amount * missileMultiplier / missileCycleSeconds : 0) as DamageVector;
+  const outgoingDps = turretDps.map((amount,index) => amount + missileDps[index]) as DamageVector;
+  const outgoingDpsMax = turretMaxDps.map((amount,index) => amount + missileDps[index]) as DamageVector;
+  return {
+    abyssal: ABYSSAL_ENTITY_GROUP_IDS.has(groupId),
+    outgoingDamage: { em: outgoing[0], thermal: outgoing[1], kinetic: outgoing[2], explosive: outgoing[3] },
+    outgoingDamageTotal: outgoing.reduce((sum, amount) => sum + amount, 0),
+    outgoingDps: { em: outgoingDps[0], thermal: outgoingDps[1], kinetic: outgoingDps[2], explosive: outgoingDps[3] },
+    outgoingDpsTotal: outgoingDps.reduce((sum, amount) => sum + amount, 0),
+    outgoingDpsMax: { em: outgoingDpsMax[0], thermal: outgoingDpsMax[1], kinetic: outgoingDpsMax[2], explosive: outgoingDpsMax[3] },
+    outgoingDpsMaxTotal: outgoingDpsMax.reduce((sum, amount) => sum + amount, 0),
+    shieldHp: Math.max(0, attr(value, 263)),
+    armorHp: Math.max(0, attr(value, 265)),
+    structureHp: Math.max(0, attr(value, 9)),
+    shieldResists: resistanceVectorFor(value, NPC_SHIELD_RESONANCE_IDS),
+    armorResists: resistanceVectorFor(value, NPC_ARMOR_RESONANCE_IDS),
+    hullResists: resistanceVectorFor(value, NPC_HULL_RESONANCE_IDS),
+    signatureRadiusM: Math.max(0, attr(value, 552)),
+  };
+}
 
 const DOGMA_OPERATION_ORDER = [-1, 0, 2, 3, 4, 5, 6, 7, 9] as const;
 
@@ -896,21 +960,42 @@ export async function checkFittingChargeCompatibilityLocal(moduleTypeId:number, 
   return { compatible:true, reason:`${names.get(chargeTypeId) ?? chargeTypeId} can be loaded into ${names.get(moduleTypeId) ?? moduleTypeId}.` };
 }
 
-export async function checkFittingItemCompatibilityLocal(input: { hullTypeId:number; itemTypeId:number; placement?:string; fitted?:Array<{typeId:number; rack?:string}> }) {
+export async function checkFittingItemCompatibilityLocal(input: { hullTypeId:number; itemTypeId:number; placement?:string; fitted?:Array<{typeId:number; rack?:string; quantity?:number}> }) {
   const hullTypeId=Number(input?.hullTypeId); const itemTypeId=Number(input?.itemTypeId);
-  const { dogma, names, groups } = await index(); const hull=dogma.get(hullTypeId); const item=dogma.get(itemTypeId);
+  const { dogma, names, groups, modifiers } = await index(); const hull=dogma.get(hullTypeId); const item=dogma.get(itemTypeId);
   const hullName=names.get(hullTypeId) ?? String(hullTypeId); const itemName=names.get(itemTypeId) ?? String(itemTypeId);
   if(!hull) return {compatible:false,code:'hull-missing',reason:`${hullName} is not present in local CCP DOGMA data.`};
   if(!item) return {compatible:false,code:'item-missing',reason:`${itemName} is not present in local CCP DOGMA data.`};
+  const fitted=(input?.fitted ?? []).filter(entry=>Number(entry?.typeId)>0);
+  const subsystemLegacySourceByTarget = new Map<number, number>([[14,1374],[13,1375],[12,1376],[102,1368],[101,1369]]);
+  const effectiveHullValue = (attributeId:number) => {
+    let current = attr(hull, attributeId);
+    for (const entry of fitted) {
+      if (entry.rack !== 'subsystem') continue;
+      const source = dogma.get(Number(entry.typeId));
+      if (!source) continue;
+      const quantity = Math.max(1, Number(entry.quantity ?? 1));
+      const legacySourceAttribute = subsystemLegacySourceByTarget.get(attributeId);
+      if (legacySourceAttribute) current += attr(source, legacySourceAttribute) * quantity;
+      for (const effectId of source.effects) {
+        const effect = modifiers.get(effectId);
+        if (!effect || effect.category !== 0) continue;
+        for (const modifier of effect.modifiers) {
+          if (modifier.domain !== 'shipID' || modifier.func !== 'ItemModifier' || modifier.modifiedAttributeID !== attributeId || modifier.modifyingAttributeID == null) continue;
+          for (let count=0; count<quantity; count+=1) current = applyVerifiedOperation(current, attr(source, modifier.modifyingAttributeID), modifier.operation ?? 0);
+        }
+      }
+    }
+    return current;
+  };
   const placement=String(input?.placement ?? ''); const rack=Object.entries(RACK_EFFECT).find(([,effectId])=>item.effects.has(effectId))?.[0];
   const rackSlots:Record<string,number>={low:12,mid:13,high:14,rig:1137,subsystem:1367};
-  if(placement in rackSlots){ if(rack!==placement)return {compatible:false,code:'wrong-rack',reason:`${itemName} is not a ${placement}-slot item.`}; if(attr(hull,rackSlots[placement])<=0)return {compatible:false,code:'rack-unavailable',reason:`${hullName} has no ${placement} slots.`}; }
+  if(placement in rackSlots){ if(rack!==placement)return {compatible:false,code:'wrong-rack',reason:`${itemName} is not a ${placement}-slot item.`}; if(effectiveHullValue(rackSlots[placement])<=0 && placement!=='subsystem')return {compatible:false,code:'rack-unavailable',reason:`${hullName} has no ${placement} slots.`}; }
   const hullGroup=groups.get(hullTypeId) ?? 0;
   const allowedGroups=[1298,1299,1300,1301,1872,1879,1880,1881,2065,2396,2463,2476,2477,2478,2479,2480,2481,2482,2483,2484,2485].map(id=>attr(item,id)).filter(Boolean);
   const allowedTypes=[1302,1303,1304,1305,1380,1944,2103,2463,2486,2487,2488,2758,5948].map(id=>attr(item,id)).filter(Boolean);
   if((allowedGroups.length||allowedTypes.length)&&!allowedGroups.includes(hullGroup)&&!allowedTypes.includes(hullTypeId))return {compatible:false,code:'ship-restriction',reason:`${itemName} cannot be fitted to ${hullName}.`};
   if(placement==='rig'&&attr(item,1547)&&attr(hull,1547)&&attr(item,1547)!==attr(hull,1547))return {compatible:false,code:'rig-size',reason:`${itemName} has the wrong rig size for ${hullName}.`};
-  const fitted=(input?.fitted ?? []).filter(entry=>Number(entry?.typeId)>0);
   if(placement==='subsystem'){
     const requiredHull=attr(item,1380);
     if(requiredHull&&requiredHull!==hullTypeId)return {compatible:false,code:'subsystem-hull',reason:`${itemName} belongs to ${names.get(requiredHull) ?? requiredHull}, not ${hullName}.`};
@@ -925,13 +1010,12 @@ export async function checkFittingItemCompatibilityLocal(input: { hullTypeId:num
     const boosterSlot=attr(item,1087);
     if(boosterSlot&&fitted.some(entry=>entry.rack==='booster'&&attr(dogma.get(Number(entry.typeId)),1087)===boosterSlot))return {compatible:false,code:'booster-slot-occupied',reason:`Booster slot ${boosterSlot} is already occupied. Remove the existing booster before adding ${itemName}.`};
   }
-
-  if(placement==='fighter'&&attr(hull,2055)<=0)return {compatible:false,code:'fighter-bay-unavailable',reason:`${hullName} has no fighter hangar and cannot carry fitting fighters.`};
-  if(placement==='drone'&&attr(hull,283)<=0)return {compatible:false,code:'drone-bay-unavailable',reason:`${hullName} has no drone bay.`};
-
-  if(rack==='high'&&item.effects.has(42)){const count=fitted.filter(entry=>entry.rack==='high'&&dogma.get(Number(entry.typeId))?.effects.has(42)).length;if(count>=attr(hull,102))return {compatible:false,code:'turret-hardpoints',reason:`${hullName} has no free turret hardpoints for ${itemName}.`};}
-  if(rack==='high'&&item.effects.has(40)){const count=fitted.filter(entry=>entry.rack==='high'&&dogma.get(Number(entry.typeId))?.effects.has(40)).length;if(count>=attr(hull,101))return {compatible:false,code:'launcher-hardpoints',reason:`${hullName} has no free launcher hardpoints for ${itemName}.`};}
-  const itemGroup=groups.get(itemTypeId) ?? 0; const maxFitted=attr(item,1544); if(maxFitted>0){const count=fitted.filter(entry=>(groups.get(Number(entry.typeId)) ?? 0)===itemGroup).length;if(count>=maxFitted)return {compatible:false,code:'max-group-fitted',reason:`Only ${maxFitted} module(s) from ${itemName}'s fitting group may be fitted.`};}
+  if(placement==='fighter'&&effectiveHullValue(2055)<=0)return {compatible:false,code:'fighter-bay-unavailable',reason:`${hullName} has no fighter hangar and cannot carry fitting fighters.`};
+  if(placement==='drone'&&effectiveHullValue(283)<=0)return {compatible:false,code:'drone-bay-unavailable',reason:`${hullName} has no drone bay.`};
+  const fittedCount = (predicate:(entry:{typeId:number;rack?:string;quantity?:number})=>boolean) => fitted.filter(predicate).reduce((sum,entry)=>sum+Math.max(1,Number(entry.quantity ?? 1)),0);
+  if(rack==='high'&&item.effects.has(42)){const count=fittedCount(entry=>entry.rack==='high'&&Boolean(dogma.get(Number(entry.typeId))?.effects.has(42)));if(count>=effectiveHullValue(102))return {compatible:false,code:'turret-hardpoints',reason:`${hullName} has no free turret hardpoints for ${itemName}.`};}
+  if(rack==='high'&&item.effects.has(40)){const count=fittedCount(entry=>entry.rack==='high'&&Boolean(dogma.get(Number(entry.typeId))?.effects.has(40)));if(count>=effectiveHullValue(101))return {compatible:false,code:'launcher-hardpoints',reason:`${hullName} has no free launcher hardpoints for ${itemName}.`};}
+  const itemGroup=groups.get(itemTypeId) ?? 0; const maxFitted=attr(item,1544); if(maxFitted>0){const count=fittedCount(entry=>(groups.get(Number(entry.typeId)) ?? 0)===itemGroup);if(count>=maxFitted)return {compatible:false,code:'max-group-fitted',reason:`Only ${maxFitted} module(s) from ${itemName}'s fitting group may be fitted.`};}
   return {compatible:true,code:'ok',reason:`${itemName} can be fitted to ${hullName}.`};
 }
 
@@ -952,6 +1036,32 @@ export async function getHullFittingProfileLocal(typeId:number) {
 export async function searchFittingTypesLocal(query: string, limit = 60) {
   const { dogma, names, groups, groupCategories, categoryNames } = await index();
   const term = query.trim().toLowerCase();
+  const npcMode = term.startsWith("@npc:");
+  if (npcMode) {
+    const requested = term.slice(5).trim();
+    const abyssOnly = requested === "abyss" || requested === "abyssal";
+    const allNpc = requested === "*" || requested === "all";
+    const npcTerm = abyssOnly || allNpc ? "" : requested;
+    const cap = Math.max(1, Math.min(7000, Math.floor(limit)));
+    return [...names.entries()]
+      .flatMap(([id, name]) => {
+        const groupId = groups.get(id) ?? 0;
+        const categoryId = groupCategories.get(groupId) ?? 0;
+        if (categoryId !== 11) return [];
+        const combatProfile = npcCombatProfileFor(id, groupId, dogma.get(id), dogma);
+        if (!combatProfile) return [];
+        if (abyssOnly && !combatProfile.abyssal) return [];
+        if (npcTerm && !name.toLowerCase().includes(npcTerm)) return [];
+        return [{ id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Entity", combatProfile }];
+      })
+      .sort((a, b) => {
+        if (!npcTerm) return a.name.localeCompare(b.name);
+        const ae = a.name.toLowerCase() === npcTerm ? 0 : a.name.toLowerCase().startsWith(npcTerm) ? 1 : 2;
+        const be = b.name.toLowerCase() === npcTerm ? 0 : b.name.toLowerCase().startsWith(npcTerm) ? 1 : 2;
+        return ae - be || a.name.localeCompare(b.name);
+      })
+      .slice(0, cap);
+  }
   const browseRack = term.startsWith("@rack:") ? term.slice(6) : "";
   const browseCategory = term.startsWith("@category:") ? Number(term.slice(10)) : 0;
   if (!browseRack && !browseCategory && term.length < 2) return [];
@@ -1006,6 +1116,7 @@ export async function analyzeFittingDogma(input: {
   items: FittingItem[];
   snapshot: any;
   targetProfile?: TargetProfile;
+  targetTypeId?: number;
   damageProfile?: DamageProfile;
   implantTypeIds?: number[];
   boosterTypeIds?: number[];
@@ -1014,10 +1125,17 @@ export async function analyzeFittingDogma(input: {
   projectedItems?: Array<FittingItem & { effectiveness?: number }>;
   commandBurstItems?: Array<FittingItem & { effectiveness?: number }>;
   environmentTypeIds?: number[];
+  abyssProfile?: { tier: AbyssTier; weather: AbyssWeather; penalty?: number; roomKey?: string };
 }) {
   const { dogma, names, groups, volumes, masses, capacities, modifiers, penalized, dbuffs } = await index();
   const targetProfile = input.targetProfile ?? { rangeM: 10_000, signatureRadiusM: 125, transverseVelocityMps: 0, velocityMps: 0 };
-  const rawDamageProfile = input.damageProfile ?? { em: 0.25, thermal: 0.25, kinetic: 0.25, explosive: 0.25 };
+  const abyssTier = Math.max(0, Math.min(6, Math.trunc(Number(input.abyssProfile?.tier ?? 0)))) as AbyssTier;
+  const abyssConfig = input.abyssProfile ? { tier: abyssTier, weather: input.abyssProfile.weather, penalty: normalizeAbyssPenalty(abyssTier, input.abyssProfile.penalty), roomKey: input.abyssProfile.roomKey ?? "all" } : undefined;
+  const targetTypeId = Number(input.targetTypeId ?? 0);
+  const targetDogma = targetTypeId > 0 ? dogma.get(targetTypeId) : undefined;
+  const targetGroupId = targetTypeId > 0 ? (groups.get(targetTypeId) ?? 0) : 0;
+  const targetCombatProfile = targetTypeId > 0 ? npcCombatProfileFor(targetTypeId, targetGroupId, targetDogma, dogma) : undefined;
+  const rawDamageProfile = targetCombatProfile && targetCombatProfile.outgoingDpsTotal > 0 ? targetCombatProfile.outgoingDps : targetCombatProfile && targetCombatProfile.outgoingDamageTotal > 0 ? targetCombatProfile.outgoingDamage : (input.damageProfile ?? { em: 0.25, thermal: 0.25, kinetic: 0.25, explosive: 0.25 });
   const damageProfileTotal = Math.max(1e-12, rawDamageProfile.em + rawDamageProfile.thermal + rawDamageProfile.kinetic + rawDamageProfile.explosive);
   const damageProfile = [rawDamageProfile.em, rawDamageProfile.thermal, rawDamageProfile.kinetic, rawDamageProfile.explosive].map((value) => Math.max(0, value) / damageProfileTotal);
   const hull = dogma.get(input.hullTypeId);
@@ -1163,6 +1281,37 @@ export async function analyzeFittingDogma(input: {
 
   const fitted = input.items.filter((item) => RACK_EFFECT[item.rack ?? ""]);
   const online = fitted.filter((item) => item.state !== "offline");
+  // LocationGroupModifier skills can scale attributes on fitted modules/subsystems
+  // before those items use the scaled attribute as the source of a ship/owner
+  // modifier. T3 subsystem skills use exactly this two-stage DOGMA pattern.
+  const skillScaledSourceFor = (source: Dogma | undefined, typeId: number) => {
+    if (!source) return undefined;
+    const groupId = groups.get(typeId) ?? 0;
+    if (!groupId) return source;
+    let attributes: Map<number, number> | undefined;
+    for (const skillSource of skillSources.values()) {
+      for (const effectId of skillSource.effects) {
+        const effect = modifiers.get(effectId);
+        if (!effect) continue;
+        for (const modifier of effect.modifiers) {
+          if (
+            modifier.domain !== "shipID" ||
+            modifier.func !== "LocationGroupModifier" ||
+            modifier.groupID !== groupId ||
+            modifier.modifiedAttributeID == null ||
+            modifier.modifyingAttributeID == null
+          ) continue;
+          attributes ??= new Map(source.attributes);
+          const current = attributes.get(modifier.modifiedAttributeID) ?? attributeDefaults.get(modifier.modifiedAttributeID) ?? 0;
+          attributes.set(
+            modifier.modifiedAttributeID,
+            applyVerifiedOperation(current, attr(skillSource, modifier.modifyingAttributeID), modifier.operation ?? 0),
+          );
+        }
+      }
+    }
+    return attributes ? { attributes, effects: source.effects } : source;
+  };
   const used = { cpu: 0, powergrid: 0, calibration: 0 };
   const shipAttributes = new Map(hull.attributes);
   // CCP stores a ship's base cargo hold in the type physical capacity field,
@@ -1172,6 +1321,28 @@ export async function analyzeFittingDogma(input: {
   const baseCargoCapacityM3 = Number(capacities.get(input.hullTypeId) ?? 0);
   if (baseCargoCapacityM3 > 0 && !(Number(shipAttributes.get(38) ?? 0) > 0)) {
     shipAttributes.set(38, baseCargoCapacityM3);
+  }
+  // Strategic-cruiser slot and weapon-hardpoint counts are carried by legacy
+  // subsystem attributes rather than modifierInfo. The base T3 hull has zero
+  // regular slots/hardpoints, so these values must be folded into the fitted
+  // hull before legality and display calculations.
+  const subsystemLegacyAdds: Array<[number, number]> = [
+    [14, 1374], // high slots
+    [13, 1375], // mid slots
+    [12, 1376], // low slots
+    [102, 1368], // turret hardpoints
+    [101, 1369], // launcher hardpoints
+  ];
+  for (const item of online.filter((entry) => entry.rack === "subsystem")) {
+    const source = dogma.get(item.typeId);
+    if (!source) continue;
+    const quantity = Math.max(1, item.quantity ?? 1);
+    for (const [targetAttributeId, sourceAttributeId] of subsystemLegacyAdds) {
+      const delta = attr(source, sourceAttributeId) * quantity;
+      if (!delta) continue;
+      const current = shipAttributes.get(targetAttributeId) ?? attributeDefaults.get(targetAttributeId) ?? 0;
+      shipAttributes.set(targetAttributeId, current + delta);
+    }
   }
 
   // Skills can modify the ship directly. This covers generic support skills such
@@ -1222,7 +1393,7 @@ export async function analyzeFittingDogma(input: {
   const projectedItemChanges = new Map<number, Array<{ value: number; operation: number }>>();
   const projectedSources: Array<{ typeId: number; name: string; effectiveness: number; effects: string[] }> = [];
   for (const item of online) {
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!module) continue;
     for (const effectId of module.effects) {
       const effect = modifiers.get(effectId);
@@ -1301,7 +1472,7 @@ export async function analyzeFittingDogma(input: {
   const operationFromName = (name: string) => name === "PreAssignment" ? -1 : name === "PreMul" ? 0 : name === "Add" ? 2 : name === "Subtract" ? 3 : name === "PostMul" ? 4 : name === "PostDiv" ? 5 : name === "PostAssignment" ? 7 : 6;
   for (const burst of input.commandBurstItems ?? []) {
     if (burst.state === "offline" || burst.state === "online") continue;
-    const source = moduleDogmaFor(burst);
+    const source = skillScaledSourceFor(moduleDogmaFor(burst), burst.typeId);
     if (!source) continue;
     const effectiveness = Math.max(0, Math.min(1, Number(burst.effectiveness ?? 1)));
     const buffs: Array<{ buffId: number; description: string; value: number }> = [];
@@ -1439,10 +1610,31 @@ export async function analyzeFittingDogma(input: {
   // The modifier skillTypeID describes the skill required by the target item.
   // The level/value comes from the trained source skill above. Do not use the
   // target required-skill level as the modifier source level.
-  for (const source of skillSources.values()) {
+  for (const [skillTypeId, source] of skillSources) {
     collectRequiredModifiers(source, "LocationRequiredSkillModifier", false);
     collectRequiredModifiers(source, "OwnerRequiredSkillModifier", false);
     collectLocationItemModifiers(source);
+
+    // Some long-lived CCP skill effects are represented only by an effect ID,
+    // with no modifierInfo. Preserve their DOGMA semantics explicitly so those
+    // trained bonuses are not silently omitted from fitting calculations.
+    if (source.effects.has(1730)) { // droneDmgBonus
+      ownerModifiers.push({ skillTypeId, attributeId: 64, value: attr(source, 292), operation: 6, stacking: false });
+    }
+    const legacyMissileDamageAttributes: Array<[number, number]> = [
+      [660, 114], // missileEMDmgBonus
+      [661, 116], // missileExplosiveDmgBonus
+      [662, 118], // missileThermalDmgBonus
+      [668, 117], // missileKineticDmgBonus2
+    ];
+    for (const [effectId, attributeId] of legacyMissileDamageAttributes) {
+      if (source.effects.has(effectId)) {
+        ownerModifiers.push({ skillTypeId, attributeId, value: attr(source, 292), operation: 6, stacking: false });
+      }
+    }
+    if (source.effects.has(1851)) { // selfRof (missile specialization skills)
+      locationSkillModifiers.push({ skillTypeId, attributeId: 51, value: attr(source, 293), operation: 6, stacking: false });
+    }
   }
 
   for (const enhancement of enhancementSources) {
@@ -1455,7 +1647,7 @@ export async function analyzeFittingDogma(input: {
   // Active fitted modules can project required-skill modifiers onto other fitted
   // items. Loaded scripts have already changed the source module attributes.
   for (const item of online) {
-    const source = moduleDogmaFor(item);
+    const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!source) continue;
     collectRequiredModifiers(source, "LocationRequiredSkillModifier", true, item.state ?? "active");
   }
@@ -1468,7 +1660,7 @@ export async function analyzeFittingDogma(input: {
 
   // Fitted module owner modifiers remain stacking-penalty candidates.
   for (const item of online) {
-    const source = moduleDogmaFor(item);
+    const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!source) continue;
     for (let count = 0; count < (item.quantity ?? 1); count += 1) {
       collectRequiredModifiers(source, "OwnerRequiredSkillModifier", true);
@@ -1555,11 +1747,11 @@ export async function analyzeFittingDogma(input: {
   }
 
   const limits: Record<string, number> = {
-    low: attr(hull, 12),
-    mid: attr(hull, 13),
-    high: attr(hull, 14),
-    rig: attr(hull, 1137),
-    subsystem: attr(hull, 1367),
+    low: shipAttr(12),
+    mid: shipAttr(13),
+    high: shipAttr(14),
+    rig: shipAttr(1137),
+    subsystem: shipAttr(1367),
   };
   for (const [rack, limit] of Object.entries(limits)) {
     const rackItems = input.items.filter((item) => item.rack === rack);
@@ -1674,7 +1866,7 @@ export async function analyzeFittingDogma(input: {
 
   for (const item of fitted) {
     if (!item.chargeTypeId) continue;
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     const charge = dogma.get(item.chargeTypeId);
     const chargeGroup = groups.get(item.chargeTypeId) ?? 0;
     const allowed = [604, 605, 606, 609, 610]
@@ -1700,24 +1892,24 @@ export async function analyzeFittingDogma(input: {
     }
   }
 
-  const turret = input.items.filter(
-    (item) => item.rack === "high" && dogma.get(item.typeId)?.effects.has(42),
-  ).length;
-  const launcher = input.items.filter(
-    (item) => item.rack === "high" && dogma.get(item.typeId)?.effects.has(40),
-  ).length;
-  if (turret > attr(hull, 102)) {
+  const turret = input.items
+    .filter((item) => item.rack === "high" && dogma.get(item.typeId)?.effects.has(42))
+    .reduce((sum, item) => sum + (item.quantity ?? 1), 0);
+  const launcher = input.items
+    .filter((item) => item.rack === "high" && dogma.get(item.typeId)?.effects.has(40))
+    .reduce((sum, item) => sum + (item.quantity ?? 1), 0);
+  if (turret > shipAttr(102)) {
     issues.push({
       level: "error",
       code: "turret-hardpoints",
-      message: `${turret} turrets exceed ${attr(hull, 102)} hardpoints.`,
+      message: `${turret} turrets exceed ${shipAttr(102)} hardpoints.`,
     });
   }
-  if (launcher > attr(hull, 101)) {
+  if (launcher > shipAttr(101)) {
     issues.push({
       level: "error",
       code: "launcher-hardpoints",
-      message: `${launcher} launchers exceed ${attr(hull, 101)} hardpoints.`,
+      message: `${launcher} launchers exceed ${shipAttr(101)} hardpoints.`,
     });
   }
 
@@ -1752,11 +1944,11 @@ export async function analyzeFittingDogma(input: {
       (total, item) => total + (volumes.get(item.typeId) ?? 0) * (item.quantity ?? 1),
       0,
     );
-  if (droneVolume > attr(hull, 283)) {
+  if (droneVolume > shipAttr(283)) {
     issues.push({
       level: "error",
       code: "drone-capacity",
-      message: `Drone volume ${droneVolume} mÂ³ exceeds the ${attr(hull, 283)} mÂ³ drone bay.`,
+      message: `Drone volume ${droneVolume} mÂ³ exceeds the ${shipAttr(283)} mÂ³ drone bay.`,
     });
   }
 
@@ -1797,19 +1989,19 @@ export async function analyzeFittingDogma(input: {
   };
   for (const item of fitted) {
     if (!item.chargeTypeId || item.chargeQuantity == null) continue;
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     const magazine = magazineFor(item, module);
     if (magazine && magazine.rawCharges > 0 && magazine.loadedCharges > magazine.rawCharges) issues.push({ level: "error", code: "charge-capacity", item: names.get(item.typeId), message: `${names.get(item.typeId) ?? item.typeId} can load at most ${magazine.rawCharges} of ${names.get(item.chargeTypeId) ?? item.chargeTypeId}; ${magazine.loadedCharges} were requested.` });
   }
   const magazines = online.flatMap((item) => {
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     const magazine = magazineFor(item, module);
     if (!magazine || !item.chargeTypeId) return [];
     return [{ typeId: item.typeId, name: names.get(item.typeId) ?? `Type ${item.typeId}`, chargeTypeId: item.chargeTypeId, charge: names.get(item.chargeTypeId) ?? `Type ${item.chargeTypeId}`, quantity: item.quantity ?? 1, ...magazine }];
   });
 
   const capacitorCapacity = shipAttr(482);
-  const rechargeSeconds = shipAttr(55) / 1000;
+  const rechargeSeconds = (shipAttr(55) / 1000) * (abyssConfig?.weather === "electrical" ? 0.5 : 1);
   const demandGjPerSecond = online
     .filter((item) => item.state === "active" || item.state === "overheated")
     .reduce((total, item) => {
@@ -1824,13 +2016,13 @@ export async function analyzeFittingDogma(input: {
     }, 0);
   const capacitorInjectors = online.flatMap((item) => {
     if (item.state !== "active" && item.state !== "overheated") return [];
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!module?.effects.has(48) || !item.chargeTypeId) return [];
     const charge = dogma.get(item.chargeTypeId);
     const magazine = magazineFor(item, module);
     if (!charge || !magazine || magazine.cycleSeconds <= 0) return [];
     const quantity = item.quantity ?? 1;
-    const injectionPerCycleGj = attr(charge, 67) * Math.max(1, magazine.chargesPerCycle);
+    const injectionPerCycleGj = effectiveItemAttr(charge, 67, item.chargeTypeId) * Math.max(1, magazine.chargesPerCycle);
     const burstGjPerSecond = injectionPerCycleGj / magazine.cycleSeconds * quantity;
     const sustainedGjPerSecond = burstGjPerSecond * magazine.sustainedDutyCycle;
     return [{ typeId: item.typeId, name: names.get(item.typeId) ?? `Type ${item.typeId}`, charge: names.get(item.chargeTypeId) ?? `Type ${item.chargeTypeId}`, injectionPerCycleGj, burstGjPerSecond, sustainedGjPerSecond, ...magazine }];
@@ -1868,11 +2060,8 @@ export async function analyzeFittingDogma(input: {
     }
   }
 
-  const damageOf = (itemDogma: Dogma | undefined) =>
-    attr(itemDogma, 114) +
-    attr(itemDogma, 116) +
-    attr(itemDogma, 117) +
-    attr(itemDogma, 118);
+  const effectiveDamageVectorFor = (itemDogma: Dogma | undefined, typeId?: number): DamageVector =>
+    NPC_DAMAGE_ATTRIBUTE_IDS.map((attributeId) => Math.max(0, effectiveItemAttr(itemDogma, attributeId, typeId))) as DamageVector;
 
   let weaponVolley = 0;
   let weaponDps = 0;
@@ -1883,11 +2072,13 @@ export async function analyzeFittingDogma(input: {
       candidate.chargeTypeId &&
       (candidate.state === "active" || candidate.state === "overheated"),
   )) {
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     const charge = dogma.get(item.chargeTypeId!);
     const quantity = item.quantity ?? 1;
     const multiplier = effectiveItemAttr(module, 64, item.typeId) || effectiveItemAttr(module, 212, item.typeId) || 1;
-    const volley = damageOf(charge) * multiplier * quantity;
+    const rawDamageVector = effectiveDamageVectorFor(charge, item.chargeTypeId!);
+    const damageVector = rawDamageVector.map((amount) => amount * multiplier * quantity) as DamageVector;
+    const volley = damageVector.reduce((sum, amount) => sum + amount, 0);
     const cycleSeconds = effectiveItemAttr(module, 51, item.typeId) / 1000;
     weaponVolley += volley;
     if (cycleSeconds > 0) weaponDps += volley / cycleSeconds;
@@ -1899,6 +2090,7 @@ export async function analyzeFittingDogma(input: {
       quantity,
       cycleSeconds,
       volley,
+      damageVector,
       paperDps: cycleSeconds > 0 ? volley / cycleSeconds : 0,
     };
     if (module?.effects.has(42)) {
@@ -1906,24 +2098,26 @@ export async function analyzeFittingDogma(input: {
         ...common,
         kind: "turret",
         optimalM: effectiveItemAttr(module, 54, item.typeId),
-        falloffM: effectiveItemAttr(module, 158, item.typeId) * (attr(charge, 779) || 1),
+        falloffM: effectiveItemAttr(module, 158, item.typeId),
         tracking: effectiveItemAttr(module, 160, item.typeId),
-        signatureResolutionM: attr(module, 620) / 1000,
+        signatureResolutionM: effectiveItemAttr(module, 620, item.typeId) / 1000,
       });
     } else if (module?.effects.has(40)) {
       weaponProfiles.push({
         ...common,
         kind: "missile",
-        maximumRangeM: attr(charge, 37) * (attr(charge, 281) / 1000) * attr(charge, 646),
-        explosionRadiusM: attr(charge, 654),
-        explosionVelocity: attr(charge, 653),
-        damageReductionFactor: attr(charge, 1353),
+        maximumRangeM: effectiveItemAttr(charge, 37, item.chargeTypeId!) * (effectiveItemAttr(charge, 281, item.chargeTypeId!) / 1000) * effectiveItemAttr(charge, 646, item.chargeTypeId!),
+        explosionRadiusM: effectiveItemAttr(charge, 654, item.chargeTypeId!),
+        explosionVelocity: effectiveItemAttr(charge, 653, item.chargeTypeId!),
+        damageReductionFactor: effectiveItemAttr(charge, 1353, item.chargeTypeId!),
       });
     }
   }
   for (const profile of weaponProfiles) {
     if (profile.kind !== "turret") continue;
-    profile.falloffM = effectiveItemAttr(dogma.get(profile.typeId as number), 158, profile.typeId as number);
+    const darkRangeMultiplier = abyssConfig?.weather === "dark" ? 1 - abyssConfig.penalty : 1;
+    profile.optimalM = Number(profile.optimalM ?? 0) * darkRangeMultiplier;
+    profile.falloffM = Number(profile.falloffM ?? 0) * darkRangeMultiplier;
     profile.tracking = (profile.tracking as number) / 1000;
   }
 
@@ -1958,10 +2152,22 @@ export async function analyzeFittingDogma(input: {
   const droneCandidates = droneItems
     .flatMap((item) => {
       const itemDogma = moduleDogmaFor(item);
-      const bandwidth = attr(itemDogma, 1272);
+      const bandwidth = effectiveItemAttr(itemDogma, 1272, item.typeId);
       const cycle = effectiveItemAttr(itemDogma, 51, item.typeId) / 1000;
-      const volley = damageOf(itemDogma) * (effectiveItemAttr(itemDogma, 64, item.typeId) || 1);
+      const multiplier = effectiveItemAttr(itemDogma, 64, item.typeId) || 1;
+      const damageVector = effectiveDamageVectorFor(itemDogma, item.typeId).map((amount) => amount * multiplier) as DamageVector;
+      const volley = damageVector.reduce((sum, amount) => sum + amount, 0);
       const dps = cycle > 0 ? volley / cycle : 0;
+      const optimalM = effectiveItemAttr(itemDogma, 54, item.typeId);
+      const falloffM = effectiveItemAttr(itemDogma, 158, item.typeId);
+      const tracking = effectiveItemAttr(itemDogma, 160, item.typeId);
+      // Drone tracking/signature-resolution values are already in drone-scale
+      // units in CCP DOGMA (unlike ship turret attributes, which use milli-units).
+      const signatureResolutionM = effectiveItemAttr(itemDogma, 620, item.typeId);
+      const maximumVelocityMps = effectiveItemAttr(itemDogma, 37, item.typeId);
+      const orbitVelocityMps = effectiveItemAttr(itemDogma, 508, item.typeId);
+      const orbitRangeM = effectiveItemAttr(itemDogma, 154, item.typeId);
+      const sentry = maximumVelocityMps <= 0.01 && orbitVelocityMps <= 0;
       const candidateQuantity = explicitDroneSelection ? Math.max(0, Math.min(item.quantity ?? 1, Math.floor(item.activeQuantity ?? 0))) : Math.min(item.quantity ?? 1, 50);
       return Array.from({ length: candidateQuantity }, () => ({
         typeId: item.typeId,
@@ -1969,6 +2175,15 @@ export async function analyzeFittingDogma(input: {
         bandwidth,
         volley,
         dps,
+        damageVector,
+        optimalM,
+        falloffM,
+        tracking,
+        signatureResolutionM,
+        maximumVelocityMps,
+        orbitVelocityMps,
+        orbitRangeM,
+        sentry,
       }));
     })
     .sort((left, right) => right.dps - left.dps);
@@ -1992,17 +2207,172 @@ export async function analyzeFittingDogma(input: {
   const droneVolley = activeDrones.reduce((sum, drone) => sum + drone.volley, 0);
   const droneDps = activeDrones.reduce((sum, drone) => sum + drone.dps, 0);
 
+  // Drone control distance is a character attribute. CCP gives every pilot a
+  // 20 km default (attribute 458), then Drone Avionics / Advanced Drone
+  // Avionics and any other charID ItemModifier effects add their trained value.
+  let droneControlDistanceM = shipAttr(458);
+  for (const source of skillSources.values()) {
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect) continue;
+      for (const modifier of effect.modifiers) {
+        if (
+          modifier.domain !== "charID" ||
+          modifier.func !== "ItemModifier" ||
+          modifier.modifiedAttributeID !== 458 ||
+          modifier.modifyingAttributeID == null
+        ) continue;
+        droneControlDistanceM = applyVerifiedOperation(
+          droneControlDistanceM,
+          attr(source, modifier.modifyingAttributeID),
+          modifier.operation ?? 0,
+        );
+      }
+    }
+  }
+
+  const resistAdjustedSourceDps = (sourceDps: number, vector: DamageVector, resists: DamageVector) => {
+    const total = vector.reduce((sum, amount) => sum + Math.max(0, amount), 0);
+    if (!(sourceDps > 0) || !(total > 0)) return 0;
+    return sourceDps * vector.reduce((sum, amount, index) => sum + (Math.max(0, amount) / total) * (1 - (resists[index] ?? 0)), 0);
+  };
+
+  const weaponApplicationAtSignature = (profile: Record<string, unknown>, signatureRadiusM: number) => {
+    const paperDps = Number(profile.paperDps ?? 0);
+    let hitChance = 0;
+    let applicationFactor = 0;
+    if (profile.kind === "turret") {
+      const rangeM = Math.max(1, targetProfile.rangeM);
+      const tracking = Math.max(1e-12, Number(profile.tracking));
+      const signatureResolutionM = Math.max(1e-12, Number(profile.signatureResolutionM));
+      const angular = Math.abs(targetProfile.transverseVelocityMps) / rangeM;
+      const trackingTerm = angular * signatureResolutionM / (tracking * Math.max(1e-12, signatureRadiusM));
+      const falloff = Math.max(1e-12, Number(profile.falloffM));
+      const rangeTerm = Math.max(0, rangeM - Number(profile.optimalM)) / falloff;
+      hitChance = Math.pow(0.5, trackingTerm * trackingTerm + rangeTerm * rangeTerm);
+      applicationFactor = turretExpectedDamageFactor(hitChance);
+    } else if (profile.kind === "missile") {
+      if (targetProfile.rangeM <= Number(profile.maximumRangeM)) {
+        const explosionRadius = Math.max(1e-12, Number(profile.explosionRadiusM));
+        const explosionVelocity = Math.max(1e-12, Number(profile.explosionVelocity));
+        const drf = Math.max(1e-12, Number(profile.damageReductionFactor));
+        const signatureRatio = Math.max(0, signatureRadiusM) / explosionRadius;
+        const speed = Math.max(0, targetProfile.velocityMps);
+        const velocityTerm = speed <= 0 ? 1 : Math.pow(Math.max(0, signatureRatio * explosionVelocity / speed), drf);
+        hitChance = 1;
+        applicationFactor = Math.min(1, signatureRatio, velocityTerm);
+      }
+    }
+    return { hitChance, applicationFactor, appliedDps: paperDps * applicationFactor };
+  };
+
+  const droneApplicationAtSignature = (drone: typeof activeDrones[number], signatureRadiusM: number) => {
+    const signature = Math.max(1e-12, signatureRadiusM);
+    const sentry = Boolean(drone.sentry);
+    const maximumVelocityMps = Math.max(0, Number(drone.maximumVelocityMps));
+    const orbitVelocityMps = Math.max(0, Number(drone.orbitVelocityMps));
+    const orbitRangeM = Math.max(1, Number(drone.orbitRangeM) || Number(drone.optimalM) || 1);
+    const engagementDistanceM = sentry ? Math.max(1, targetProfile.rangeM) : orbitRangeM;
+    const targetAngular = Math.abs(targetProfile.transverseVelocityMps) / Math.max(1, targetProfile.rangeM);
+    const orbitAngular = sentry ? 0 : orbitVelocityMps / engagementDistanceM;
+    // A mobile drone's exact server-side orbit geometry is not exposed by the
+    // SDE. RMS-combining target transversal with the drone's own orbit angular
+    // rate is a deterministic physical approximation; sentries use the normal
+    // turret equation without this approximation.
+    const angular = sentry ? targetAngular : Math.hypot(targetAngular, orbitAngular);
+    const tracking = Math.max(1e-12, Number(drone.tracking));
+    const signatureResolutionM = Math.max(1e-12, Number(drone.signatureResolutionM));
+    const trackingTerm = angular * signatureResolutionM / (tracking * signature);
+    const falloff = Math.max(1e-12, Number(drone.falloffM));
+    const rangeTerm = Math.max(0, engagementDistanceM - Number(drone.optimalM)) / falloff;
+    const hitChance = Math.pow(0.5, trackingTerm * trackingTerm + rangeTerm * rangeTerm);
+    const weaponApplicationFactor = turretExpectedDamageFactor(hitChance);
+    const targetSpeed = Math.max(0, targetProfile.velocityMps);
+    const pursuitFactor = sentry || targetSpeed <= maximumVelocityMps || targetSpeed <= 0
+      ? 1
+      : Math.max(0, Math.min(1, maximumVelocityMps / targetSpeed));
+    const controlFactor = targetProfile.rangeM <= droneControlDistanceM ? 1 : 0;
+    const applicationFactor = weaponApplicationFactor * pursuitFactor * controlFactor;
+    const travelSeconds = sentry || maximumVelocityMps <= 0
+      ? 0
+      : Math.max(0, targetProfile.rangeM - engagementDistanceM) / maximumVelocityMps;
+    return {
+      model: sentry ? "sentry-turret" : "mobile-orbit-pursuit-approximation",
+      exactPhysics: sentry,
+      hitChance,
+      weaponApplicationFactor,
+      pursuitFactor,
+      controlFactor,
+      applicationFactor,
+      appliedDps: drone.dps * applicationFactor,
+      angularVelocityRadPerSecond: angular,
+      targetAngularVelocityRadPerSecond: targetAngular,
+      orbitAngularVelocityRadPerSecond: orbitAngular,
+      engagementDistanceM,
+      droneControlDistanceM,
+      travelSeconds,
+    };
+  };
+
+  const targetApplicationAgainstSignature = (signatureRadiusM: number) => {
+    const signature = Math.max(1e-12, signatureRadiusM || targetProfile.signatureRadiusM);
+    let weaponApplied = 0;
+    let droneApplied = 0;
+    const weaponAppliedSources = weaponProfiles.map((profile) => {
+      const application = weaponApplicationAtSignature(profile, signature);
+      weaponApplied += application.appliedDps;
+      return { appliedDps: application.appliedDps, vector: (profile.damageVector as DamageVector | undefined) ?? [0,0,0,0] as DamageVector };
+    });
+    const droneAppliedSources = activeDrones.map((drone) => {
+      const application = droneApplicationAtSignature(drone, signature);
+      droneApplied += application.appliedDps;
+      return { drone, application };
+    });
+    const beforeResists = weaponApplied + droneApplied;
+    const layer = (resists: DamageVector) =>
+      weaponAppliedSources.reduce((sum, source) => sum + resistAdjustedSourceDps(source.appliedDps, source.vector, resists), 0) +
+      droneAppliedSources.reduce((sum, source) => sum + resistAdjustedSourceDps(source.application.appliedDps, source.drone.damageVector, resists), 0);
+    return { beforeResists, layer, weaponApplied, droneApplied, droneAppliedSources };
+  };
+
+  const currentTargetApplication = targetApplicationAgainstSignature(targetProfile.signatureRadiusM);
+  const appliedWeaponDps = currentTargetApplication.weaponApplied;
+  const appliedDroneDps = currentTargetApplication.droneApplied;
+  const weatherTargetCombatProfile = targetCombatProfile && abyssConfig ? (() => {
+    const weatherHp = applyAbyssWeatherHp(targetCombatProfile, abyssConfig.weather);
+    return { ...targetCombatProfile, ...weatherHp, shieldResists: applyAbyssWeatherResists(targetCombatProfile.shieldResists, abyssConfig.weather, abyssConfig.penalty), armorResists: applyAbyssWeatherResists(targetCombatProfile.armorResists, abyssConfig.weather, abyssConfig.penalty), hullResists: applyAbyssWeatherResists(targetCombatProfile.hullResists, abyssConfig.weather, abyssConfig.penalty) };
+  })() : targetCombatProfile;
+  const exactTargetApplication = weatherTargetCombatProfile ? targetApplicationAgainstSignature(weatherTargetCombatProfile.signatureRadiusM) : undefined;
+  const appliedDpsBeforeTargetResists = exactTargetApplication?.beforeResists ?? currentTargetApplication.beforeResists;
+  const exactTargetDamage = weatherTargetCombatProfile && exactTargetApplication ? {
+    typeId: targetTypeId,
+    name: names.get(targetTypeId) ?? `Type ${targetTypeId}`,
+    profile: weatherTargetCombatProfile,
+    appliedDpsBeforeResists: exactTargetApplication.beforeResists,
+    shieldDps: exactTargetApplication.layer(weatherTargetCombatProfile.shieldResists),
+    armorDps: exactTargetApplication.layer(weatherTargetCombatProfile.armorResists),
+    structureDps: exactTargetApplication.layer(weatherTargetCombatProfile.hullResists),
+  } : undefined;
+  const layerSeconds = (hp: number, dps: number) => hp <= 0 ? 0 : dps > 0 ? hp / dps : Infinity;
+  const targetTimeToKillSeconds = exactTargetDamage ? layerSeconds(weatherTargetCombatProfile!.shieldHp, exactTargetDamage.shieldDps) + layerSeconds(weatherTargetCombatProfile!.armorHp, exactTargetDamage.armorDps) + layerSeconds(weatherTargetCombatProfile!.structureHp, exactTargetDamage.structureDps) : undefined;
+  const targetTotalHp = weatherTargetCombatProfile ? weatherTargetCombatProfile.shieldHp + weatherTargetCombatProfile.armorHp + weatherTargetCombatProfile.structureHp : 0;
+  const targetTrueDps = exactTargetDamage && targetTimeToKillSeconds != null && Number.isFinite(targetTimeToKillSeconds) && targetTimeToKillSeconds > 0 ? targetTotalHp / targetTimeToKillSeconds : exactTargetDamage ? 0 : undefined;
+
   const resistance = (attributeIds: number[]) =>
     attributeIds.map((attributeId) => (shipAttributes.has(attributeId) ? 1 - shipAttr(attributeId) : 0));
-  const shieldResists = resistance([271, 274, 273, 272]);
-  const armorResists = resistance([267, 270, 269, 268]);
-  const hullResists = resistance([113, 110, 109, 111]);
+  const baseShieldResists = resistance([271, 274, 273, 272]);
+  const baseArmorResists = resistance([267, 270, 269, 268]);
+  const baseHullResists = resistance([113, 110, 109, 111]);
+  const shieldResists = abyssConfig ? applyAbyssWeatherResists(baseShieldResists, abyssConfig.weather, abyssConfig.penalty) : baseShieldResists;
+  const armorResists = abyssConfig ? applyAbyssWeatherResists(baseArmorResists, abyssConfig.weather, abyssConfig.penalty) : baseArmorResists;
+  const hullResists = abyssConfig ? applyAbyssWeatherResists(baseHullResists, abyssConfig.weather, abyssConfig.penalty) : baseHullResists;
   const incomingDamageFraction = (resists: number[]) => damageProfile.reduce((sum, weight, index) => sum + weight * (1 - (resists[index] ?? 0)), 0);
   const layerEhp = (hp: number, resists: number[]) => hp / Math.max(1e-12, incomingDamageFraction(resists));
   const effectiveRepair = (rawRepair: number, resists: number[]) => rawRepair / Math.max(1e-12, incomingDamageFraction(resists));
-  const shieldHp = shipAttr(263);
-  const armorHp = shipAttr(265);
-  const structureHp = shipAttr(9);
+  const weatherShipHp = abyssConfig ? applyAbyssWeatherHp({ shieldHp:shipAttr(263), armorHp:shipAttr(265), structureHp:shipAttr(9) }, abyssConfig.weather) : { shieldHp:shipAttr(263), armorHp:shipAttr(265), structureHp:shipAttr(9) };
+  const shieldHp = weatherShipHp.shieldHp;
+  const armorHp = weatherShipHp.armorHp;
+  const structureHp = weatherShipHp.structureHp;
 
   let shieldRepair = 0;
   let armorRepair = 0;
@@ -2029,10 +2399,159 @@ export async function analyzeFittingDogma(input: {
   const shieldRechargeSeconds = shipAttr(479) / 1000;
   const passiveShieldPeak =
     shieldRechargeSeconds > 0 ? (2.5 * shieldHp) / shieldRechargeSeconds : 0;
+
+  const applicationAgainstSignature = targetApplicationAgainstSignature;
+  const mobileTravelDrones = activeDrones.filter((drone) => !drone.sentry && drone.dps > 0 && drone.maximumVelocityMps > 0);
+  const droneTravelMode: "none" | "sentry" | "mobile" = activeDrones.length === 0 ? "none" : mobileTravelDrones.length > 0 ? "mobile" : "sentry";
+  const effectiveDroneTravelVelocityMps = mobileTravelDrones.length ? Math.min(...mobileTravelDrones.map((drone) => drone.maximumVelocityMps)) : 0;
+  const droneEngagementRangeM = mobileTravelDrones.length ? Math.min(...mobileTravelDrones.map((drone) => Math.max(0, drone.orbitRangeM || drone.optimalM || 0))) : 0;
+
+  const abyssAnalysis = abyssConfig ? (() => {
+    const encounterDefinitions = abyssEncountersForTier(abyssConfig.tier);
+    const roomProfile = (weights: DamageVector) => {
+      const total = weights.reduce((sum, value) => sum + Math.max(0,value), 0);
+      return total > 0 ? weights.map((value) => Math.max(0,value) / total) as DamageVector : [0.25,0.25,0.25,0.25] as DamageVector;
+    };
+    const fitTankAgainst = (incoming: DamageVector) => {
+      const profile = roomProfile(incoming);
+      const fraction = (resists: number[]) => profile.reduce((sum, weight, index) => sum + weight * (1 - (resists[index] ?? 0)), 0);
+      const ehp = (hp:number,resists:number[]) => hp / Math.max(1e-12,fraction(resists));
+      const rep = (raw:number,resists:number[]) => raw / Math.max(1e-12,fraction(resists));
+      return {
+        damageProfile:{em:profile[0],thermal:profile[1],kinetic:profile[2],explosive:profile[3]},
+        shieldEhp:ehp(shieldHp,shieldResists), armorEhp:ehp(armorHp,armorResists), structureEhp:ehp(structureHp,hullResists),
+        totalEhp:ehp(shieldHp,shieldResists)+ehp(armorHp,armorResists)+ehp(structureHp,hullResists),
+        effectiveShieldRepairPerSecond:rep(shieldRepair,shieldResists), effectiveArmorRepairPerSecond:rep(armorRepair,armorResists), effectiveStructureRepairPerSecond:rep(structureRepair,hullResists),
+        effectivePassiveShieldPeak:rep(passiveShieldPeak,shieldResists),
+      };
+    };
+    const buildTarget = (typeId:number, count:number, minCount:number, maxCount:number, alternatives:number[], requiredForClear:boolean) => {
+      const base = npcCombatProfileFor(typeId, groups.get(typeId) ?? 0, dogma.get(typeId), dogma);
+      if (!base) return undefined;
+      const weatherHp = applyAbyssWeatherHp(base, abyssConfig.weather);
+      const weather = { ...base, ...weatherHp, shieldResists:applyAbyssWeatherResists(base.shieldResists,abyssConfig.weather,abyssConfig.penalty), armorResists:applyAbyssWeatherResists(base.armorResists,abyssConfig.weather,abyssConfig.penalty), hullResists:applyAbyssWeatherResists(base.hullResists,abyssConfig.weather,abyssConfig.penalty) };
+      const application = applicationAgainstSignature(weather.signatureRadiusM);
+      const shieldDps = application.layer(weather.shieldResists);
+      const armorDps = application.layer(weather.armorResists);
+      const structureDps = application.layer(weather.hullResists);
+      const ttkSeconds = layerSeconds(weather.shieldHp,shieldDps)+layerSeconds(weather.armorHp,armorDps)+layerSeconds(weather.structureHp,structureDps);
+      const totalHp = weather.shieldHp+weather.armorHp+weather.structureHp;
+      const trueDps = Number.isFinite(ttkSeconds) && ttkSeconds > 0 ? totalHp / ttkSeconds : 0;
+      const effectiveHpAgainstFit = Number.isFinite(ttkSeconds) ? ttkSeconds * application.beforeResists : Infinity;
+      return {
+        typeId, name:names.get(typeId) ?? `Type ${typeId}`, count, minCount, maxCount, requiredForClear,
+        alternatives:alternatives.map(id=>({typeId:id,name:names.get(id)??`Type ${id}`})),
+        baseHp:{shield:base.shieldHp,armor:base.armorHp,hull:base.structureHp,total:base.shieldHp+base.armorHp+base.structureHp},
+        weatherHp:{shield:weather.shieldHp,armor:weather.armorHp,hull:weather.structureHp,total:totalHp},
+        baseResists:{shield:base.shieldResists,armor:base.armorResists,hull:base.hullResists},
+        weatherResists:{shield:weather.shieldResists,armor:weather.armorResists,hull:weather.hullResists},
+        outgoingDamage:base.outgoingDamage, outgoingDps:base.outgoingDps, outgoingDpsTotal:base.outgoingDpsTotal, outgoingDpsMax:base.outgoingDpsMax, outgoingDpsMaxTotal:base.outgoingDpsMaxTotal,
+        appliedDpsBeforeResists:application.beforeResists, appliedWeaponDpsBeforeResists:application.weaponApplied, appliedDroneDpsBeforeResists:application.droneApplied, appliedMobileDroneDpsBeforeResists:application.droneAppliedSources.filter((source)=>!source.drone.sentry).reduce((sum,source)=>sum+source.application.appliedDps,0), shieldDps, armorDps, structureDps, trueDps, ttkSeconds, effectiveHpAgainstFit, signatureRadiusM:base.signatureRadiusM,
+      };
+    };
+    const rooms = encounterDefinitions.map((encounter) => {
+      const preparedMembers = encounter.members.flatMap((member) => {
+        const candidates = member.typeIds.flatMap((id) => {
+          const profile = npcCombatProfileFor(id, groups.get(id) ?? 0, dogma.get(id), dogma);
+          return profile ? [{ id, profile }] : [];
+        });
+        if (!candidates.length || member.maxCount <= 0) return [];
+        candidates.sort((a, b) =>
+          b.profile.outgoingDpsMaxTotal - a.profile.outgoingDpsMaxTotal ||
+          (b.profile.shieldHp + b.profile.armorHp + b.profile.structureHp) - (a.profile.shieldHp + a.profile.armorHp + a.profile.structureHp),
+        );
+        return [{ member, chosen: candidates[0] }];
+      });
+      const selectedCounts = preparedMembers.map(({ member }) => Math.max(0, member.minCount));
+      if (encounter.maxHostiles != null) {
+        let remaining = Math.max(0, encounter.maxHostiles - selectedCounts.reduce((sum, count) => sum + count, 0));
+        const order = preparedMembers
+          .map((entry, index) => ({ index, threat: entry.chosen.profile.outgoingDpsMaxTotal }))
+          .sort((a, b) => b.threat - a.threat);
+        for (const { index } of order) {
+          if (remaining <= 0) break;
+          const member = preparedMembers[index].member;
+          const room = Math.max(0, member.maxCount - selectedCounts[index]);
+          const add = Math.min(room, remaining);
+          selectedCounts[index] += add;
+          remaining -= add;
+        }
+      } else {
+        preparedMembers.forEach(({ member }, index) => { selectedCounts[index] = Math.max(0, member.maxCount); });
+      }
+      const targets = preparedMembers.flatMap(({ member, chosen }, index) => {
+        const count = selectedCounts[index] ?? 0;
+        if (count <= 0) return [];
+        const target = buildTarget(chosen.id, count, member.minCount, member.maxCount, member.typeIds, member.requiredForClear !== false);
+        return target ? [target] : [];
+      });
+      const incoming = targets.reduce((vector,target)=>{vector[0]+=target.outgoingDps.em*target.count;vector[1]+=target.outgoingDps.thermal*target.count;vector[2]+=target.outgoingDps.kinetic*target.count;vector[3]+=target.outgoingDps.explosive*target.count;return vector;},[0,0,0,0] as DamageVector);
+      const incomingMax = targets.reduce((vector,target)=>{vector[0]+=target.outgoingDpsMax.em*target.count;vector[1]+=target.outgoingDpsMax.thermal*target.count;vector[2]+=target.outgoingDpsMax.kinetic*target.count;vector[3]+=target.outgoingDpsMax.explosive*target.count;return vector;},[0,0,0,0] as DamageVector);
+      const totalDps=incoming.reduce((sum,value)=>sum+value,0); const maxRampTotalDps=incomingMax.reduce((sum,value)=>sum+value,0);
+      const requiredTargets = targets.filter((target) => target.requiredForClear);
+      const maxTargetThreat = requiredTargets.reduce((maximum, target) => Math.max(maximum, target.outgoingDpsMaxTotal), 0);
+      const timingTargets = estimateClusteredPveGeometry(requiredTargets.map((target) => {
+        const threatRatio = maxTargetThreat > 0 ? target.outgoingDpsMaxTotal / maxTargetThreat : 0;
+        const priority = threatRatio >= 0.66 ? 0 : threatRatio >= 0.33 ? 1 : 2;
+        return {
+          id:String(target.typeId), label:target.name, count:target.count, priority, ttkSeconds:target.ttkSeconds, requiredForClear:true,
+          requiresDroneTravel:droneTravelMode === "mobile" && target.appliedMobileDroneDpsBeforeResists > 0,
+        };
+      }), { initialTargetRangeM:Math.max(0,targetProfile.rangeM), engagementRangeM:droneEngagementRangeM });
+      const clearTiming = calculatePveRoomClearTime({
+        targets:timingTargets, geometry:"estimated",
+        droneTravel:{ mode:droneTravelMode, effectiveVelocityMps:effectiveDroneTravelVelocityMps, engagementRangeM:droneEngagementRangeM },
+      });
+      const clearSeconds=clearTiming.estimatedClearSeconds;
+      return {
+        key:encounter.key,name:encounter.name,family:encounter.family,notes:encounter.notes,maxHostiles:encounter.maxHostiles,variable:encounter.maxHostiles != null || encounter.members.some(member=>member.minCount!==member.maxCount||member.typeIds.length>1),
+        totalHostiles:targets.reduce((sum,target)=>sum+target.count,0), targets, clearSeconds, combatSeconds:clearTiming.combatSeconds, droneNavigationSeconds:clearTiming.droneNavigationSeconds,
+        droneNavigation:{mode:droneTravelMode,effectiveMaxVelocityMps:clearTiming.effectiveDroneVelocityMps,engagementRangeM:droneEngagementRangeM,distanceM:clearTiming.droneNavigationDistanceM,route:clearTiming.route}, timingGeometry:clearTiming.geometry,
+        incoming:{em:incoming[0],thermal:incoming[1],kinetic:incoming[2],explosive:incoming[3],totalDps,maxRamp:{em:incomingMax[0],thermal:incomingMax[1],kinetic:incomingMax[2],explosive:incomingMax[3],totalDps:maxRampTotalDps},shares:{em:totalDps?incoming[0]/totalDps:0,thermal:totalDps?incoming[1]/totalDps:0,kinetic:totalDps?incoming[2]/totalDps:0,explosive:totalDps?incoming[3]/totalDps:0}},
+        playerTank:fitTankAgainst(incoming),
+      };
+    });
+    const by=(selector:(room:any)=>number)=>rooms.length?[...rooms].sort((a,b)=>selector(b)-selector(a))[0]:undefined;
+    const allTargets=rooms.flatMap(room=>room.targets.map(target=>({...target,roomKey:room.key,roomName:room.name})));
+    const finiteTargets=allTargets.filter(target=>Number.isFinite(target.ttkSeconds));
+    const hardestTarget=finiteTargets.length?[...finiteTargets].sort((a,b)=>a.trueDps-b.trueDps||b.ttkSeconds-a.ttkSeconds)[0]:undefined;
+    const highestEhpTarget=finiteTargets.length?[...finiteTargets].sort((a,b)=>b.effectiveHpAgainstFit-a.effectiveHpAgainstFit)[0]:undefined;
+    const selectedRoom=abyssConfig.roomKey !== "all" ? rooms.find(room=>room.key===abyssConfig.roomKey) : undefined;
+    const finiteRooms = rooms.filter((room) => Number.isFinite(room.clearSeconds));
+    const unclearableRooms = rooms.filter((room) => !Number.isFinite(room.clearSeconds));
+    const mean = (selector:(room:any)=>number) => finiteRooms.length ? finiteRooms.reduce((sum,room)=>sum+selector(room),0)/finiteRooms.length : Infinity;
+    const representativeRoom = unclearableRooms.length ? { combatSeconds:Infinity, droneNavigationSeconds:mean((room)=>room.droneNavigationSeconds), estimatedClearSeconds:Infinity } : { combatSeconds:mean((room)=>room.combatSeconds), droneNavigationSeconds:mean((room)=>room.droneNavigationSeconds), estimatedClearSeconds:mean((room)=>room.clearSeconds) };
+    const longestKnownRoom = unclearableRooms[0] ?? by(room=>room.clearSeconds);
+    const heavyRoom = longestKnownRoom ? { combatSeconds:longestKnownRoom.combatSeconds, droneNavigationSeconds:longestKnownRoom.droneNavigationSeconds, estimatedClearSeconds:longestKnownRoom.clearSeconds } : representativeRoom;
+    const representativeSite = aggregatePveSiteClearTime(Array.from({length:3},()=>representativeRoom));
+    const heavyKnownSite = aggregatePveSiteClearTime(Array.from({length:3},()=>heavyRoom));
+    const abyssTimerSeconds = 20*60;
+    return {
+      tier:abyssConfig.tier,weather:abyssConfig.weather,penalty:abyssConfig.penalty,validPenalties:validAbyssPenalties(abyssConfig.tier),mode:abyssConfig.roomKey,rooms,selectedRoom,
+      summary:{roomCount:rooms.length,unclearableRoomCount:unclearableRooms.length,worstIncoming:by(room=>room.incoming.totalDps),worstMaxRamp:by(room=>room.incoming.maxRamp.totalDps),worstEm:by(room=>room.incoming.em),worstThermal:by(room=>room.incoming.thermal),worstKinetic:by(room=>room.incoming.kinetic),worstExplosive:by(room=>room.incoming.explosive),longestClear:longestKnownRoom,hardestTarget,highestEhpTarget},
+      siteEstimate:{
+        roomCount:3,timerSeconds:abyssTimerSeconds,
+        representative:{...representativeSite,timerMarginSeconds:abyssTimerSeconds-representativeSite.estimatedClearSeconds,basis:"Simple mean of Sage current known room catalogue; not spawn-weighted and not guaranteed."},
+        heavyKnown:{...heavyKnownSite,timerMarginSeconds:abyssTimerSeconds-heavyKnownSite.estimatedClearSeconds,basis:"Three times the longest current known room; conservative known-room envelope, not a probability claim."},
+      },
+      clearTimeCaveat:PVE_CLEAR_TIME_CAVEAT,
+      provenance:ABYSS_DATASET_PROVENANCE,
+      limitations:[
+        "Room counts with documented ranges/alternatives are evaluated as a deterministic threat envelope, while documented whole-room hostile caps are enforced.",
+        "NPC incoming turret/missile range, tracking and movement application are not simulated; incoming DPS is raw SDE weapon DPS. Triglavian max-ramp DPS is also reported separately.",
+        "Outgoing room TTK reuses the fitter current target range/transversal/velocity assumptions per NPC signature. Sentry drones use turret-style tracking/range application; mobile drones use effective DOGMA velocity, orbit, tracking, optimal, falloff and signature resolution.",
+        "Abyss target coordinates are not present in Sage current room catalogue. Clear-time geometry is therefore estimated: targets are clustered around the selected range, dangerous targets are routed in SDE max-DPS priority bands, then nearest-neighbour within each band. Drone travel is target-to-target and does not reset to the ship after every kill.",
+        "Sentries add zero navigation time. Sage does not invent scoop/redeploy or ship movement when a sentry target is outside useful range/control range.",
+        PVE_CLEAR_TIME_CAVEAT,
+        "The representative 3-room site estimate is a simple mean across Sage current known room catalogue, not a spawn-frequency-weighted guarantee. The heavy estimate is a conservative known-room envelope.",
+        ...(abyssConfig.tier===6?[ABYSS_DATASET_PROVENANCE.limitation]:[]),
+      ],
+    };
+  })() : undefined;
   const baseMassKg = masses.get(input.hullTypeId) ?? 0;
   const activePropulsion = online.flatMap((item) => {
     if (item.state !== "active" && item.state !== "overheated") return [];
-    const module = moduleDogmaFor(item);
+    const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!module || (!module.effects.has(6730) && !module.effects.has(6731))) return [];
     const speedFactorPercent = effectiveItemAttr(module, 20, item.typeId);
     return [{
@@ -2050,7 +2569,7 @@ export async function analyzeFittingDogma(input: {
   const massKg = baseMassKg + propMassAdditionKg;
   const agility = shipAttr(70);
   const alignSeconds = massKg && agility ? (Math.log(4) * massKg * agility) / 1_000_000 : 0;
-  const baseMaximumVelocity = shipAttr(37);
+  const baseMaximumVelocity = shipAttr(37) * (abyssConfig?.weather === "dark" ? 1.5 : 1);
   const propulsionSpeeds = activePropulsion.map((prop) => ({
     ...prop,
     maximumVelocity: baseMaximumVelocity * (1 + (prop.speedFactorPercent / 100) * (prop.thrust / Math.max(1, massKg))),
@@ -2070,7 +2589,7 @@ export async function analyzeFittingDogma(input: {
   const mwdSignatureMultiplier = activePropulsion.filter((prop) => prop.kind === "mwd").reduce((current, prop) => current * (1 + prop.signatureRadiusBonusPercent / 100), 1);
   const targeting = {
     maximumRangeM: shipAttr(76),
-    scanResolution: shipAttr(564),
+    scanResolution: shipAttr(564) * (abyssConfig?.weather === "exotic" ? 1.5 : 1),
     signatureRadiusM: shipAttr(552) * mwdSignatureMultiplier,
     maximumLockedTargets: shipAttr(192),
     sensorStrength:
@@ -2102,7 +2621,7 @@ export async function analyzeFittingDogma(input: {
       .filter((item) => item.rack === rack)
       .flatMap((item) => Array.from({ length: Math.max(0, item.quantity ?? 1) }, () => item))
       .map((item, position) => {
-        const module = moduleDogmaFor(item);
+        const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
         const cycleSeconds = (effectiveItemAttr(module, 73, item.typeId) || effectiveItemAttr(module, 51, item.typeId)) / 1000;
         return {
           position,
@@ -2218,6 +2737,10 @@ export async function analyzeFittingDogma(input: {
         .map((skill) => ({ item: requirement.item, ...skill })),
     ),
     resources: { used, capacity },
+    fitting: {
+      slots: { high: shipAttr(14), mid: shipAttr(13), low: shipAttr(12), rig: shipAttr(1137), subsystem: shipAttr(1367) },
+      hardpoints: { turret: shipAttr(102), launcher: shipAttr(101) },
+    },
     storage: { cargoCapacityM3: shipAttr(38), cargoUsedM3: cargoVolume, droneBayCapacityM3: shipAttr(283), droneBayUsedM3: droneVolume, droneBandwidthCapacity: shipAttr(1271), droneBandwidthUsed: activeDrones.reduce((sum, drone) => sum + drone.bandwidth, 0) },
     capacitor: {
       capacityGj: capacitorCapacity,
@@ -2241,10 +2764,26 @@ export async function analyzeFittingDogma(input: {
       totalDps: weaponDps + droneDps,
       totalVolley: weaponVolley + droneVolley,
       weaponProfiles,
+      appliedDpsBeforeTargetResists,
+      target: exactTargetDamage ? { ...exactTargetDamage, trueDps: targetTrueDps, timeToKillSeconds: targetTimeToKillSeconds, totalHp: targetTotalHp } : undefined,
+      appliedWeaponDps,
+      appliedDroneDps,
+      droneControlDistanceM,
       activeDrones: activeDrones.map((drone) => ({
         typeId: drone.typeId,
         name: drone.name,
         bandwidth: drone.bandwidth,
+        damageVector: drone.damageVector,
+        dps: drone.dps,
+        optimalM: drone.optimalM,
+        falloffM: drone.falloffM,
+        tracking: drone.tracking,
+        signatureResolutionM: drone.signatureResolutionM,
+        maximumVelocityMps: drone.maximumVelocityMps,
+        orbitVelocityMps: drone.orbitVelocityMps,
+        orbitRangeM: drone.orbitRangeM,
+        sentry: drone.sentry,
+        targetApplication: droneApplicationAtSignature(drone, weatherTargetCombatProfile?.signatureRadiusM ?? targetProfile.signatureRadiusM),
       })),
       explicitDroneSelection,
     },
@@ -2280,6 +2819,7 @@ export async function analyzeFittingDogma(input: {
     projectedSources,
     commandBurstSources,
     environmentSources: environmentSources.map((environment) => ({ typeId: environment.typeId, name: environment.name })),
+    abyss: abyssAnalysis,
     source: "CCP EVE static data (offline)",
   };
 }

@@ -1222,7 +1222,7 @@ declare global {
       resolveFittingTypeIdsLocal(
         typeIds: number[],
       ): Promise<Array<{ id: number; name: string; groupId?: number; categoryId?: number; categoryName?: string; rack?: "low" | "mid" | "high" | "rig" | "subsystem" }>>;
-      searchFittingTypesLocal(query: string, limit?: number): Promise<Array<{ id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: "low" | "mid" | "high" | "rig" | "subsystem" }>>;
+      searchFittingTypesLocal(query: string, limit?: number): Promise<Array<{ id: number; name: string; groupId: number; categoryId: number; categoryName: string; rack?: "low" | "mid" | "high" | "rig" | "subsystem"; combatProfile?: { abyssal:boolean; outgoingDamage:{em:number;thermal:number;kinetic:number;explosive:number}; outgoingDamageTotal:number; shieldHp:number; armorHp:number; structureHp:number; shieldResists:[number,number,number,number]; armorResists:[number,number,number,number]; hullResists:[number,number,number,number]; signatureRadiusM:number } }>>;
       prepareFittingDataLocal(): Promise<{ catalogue:{ groups:Array<{id:number;name:string;parentId?:number;iconId?:number}>; items:Array<any> }; preparedAt:string; itemCount:number; groupCount:number; durationMs:number }>;
       onFittingPreparationProgress(callback:(value:{percent:number;stage:string;message:string})=>void): () => void;
       filterFittingItemsForHullLocal(input:{hullTypeId:number;candidates:Array<{typeId:number;placement?:string}>;fitted?:Array<{typeId:number;rack?:string}>}): Promise<{compatibleTypeIds:number[];checked:number}>;
@@ -1276,6 +1276,7 @@ declare global {
         itemTypeIds: number[];
         items?: Array<{ typeId: number; quantity?: number; rack?: string; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated" }>;
         targetProfile?: { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number };
+        targetTypeId?: number;
         damageProfile?: { em: number; thermal: number; kinetic: number; explosive: number };
         implantTypeIds?: number[];
         boosterTypeIds?: number[];
@@ -1284,6 +1285,7 @@ declare global {
         projectedItems?: Array<{ typeId: number; chargeTypeId?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated"; effectiveness?: number }>;
         commandBurstItems?: Array<{ typeId: number; quantity?: number; chargeTypeId?: number; chargeQuantity?: number; activeQuantity?: number; attributeOverrides?: Record<string, number>; state?: "offline" | "online" | "active" | "overheated"; effectiveness?: number }>;
         environmentTypeIds?: number[];
+        abyssProfile?: { tier: 0 | 1 | 2 | 3 | 4 | 5 | 6; weather: "electrical" | "exotic" | "firestorm" | "gamma" | "dark"; penalty?: number; roomKey?: string };
       }): Promise<any>;
       getCapabilities(input: {
         characterId: string;
