@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
+const { isRepoElectronMain } = require('./dev-process-detection.cjs');
 
 const root = path.resolve(__dirname, '..');
 const logRoot = path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage', 'Logs');
@@ -79,7 +80,6 @@ function windowsProcessSnapshot() {
 function findLocklessDevStacks(lockOwnerPid) {
   const processes = windowsProcessSnapshot();
   if (!processes?.length) return [];
-  const rootLower = root.toLowerCase();
   const watchers = new Map();
   for (const entry of processes) {
     const pid = Number(entry?.ProcessId);
@@ -94,11 +94,8 @@ function findLocklessDevStacks(lockOwnerPid) {
     const pid = Number(entry?.ProcessId);
     const parentPid = Number(entry?.ParentProcessId);
     const sessionId = Number(entry?.SessionId);
-    const name = String(entry?.Name || '').toLowerCase();
     if (Number.isInteger(processSessionId) && sessionId !== processSessionId) continue;
-    const commandLine = String(entry?.CommandLine || '').toLowerCase();
-    if (name !== 'electron.exe' || !Number.isInteger(pid)) continue;
-    if (!commandLine.includes(rootLower) || !/(?:^|\s)--dev(?:\s|$)/.test(commandLine)) continue;
+    if (!isRepoElectronMain(entry, root)) continue;
     const stack = watchers.get(parentPid);
     if (stack) stack.electronPids.push(pid);
   }
@@ -110,18 +107,13 @@ function findLocklessDevStacks(lockOwnerPid) {
 function findOrphanDevElectronMains() {
   const processes = windowsProcessSnapshot();
   if (!processes?.length) return [];
-  const rootLower = root.toLowerCase();
   const byPid = new Map(processes.map((entry) => [Number(entry?.ProcessId), entry]));
   const orphanPids = [];
 
   for (const entry of processes) {
     const pid = Number(entry?.ProcessId);
     const parentPid = Number(entry?.ParentProcessId);
-    const name = String(entry?.Name || '').toLowerCase();
-    const commandLine = String(entry?.CommandLine || '').toLowerCase();
-    if (name !== 'electron.exe' || !Number.isInteger(pid)) continue;
-    if (!commandLine.includes(rootLower) || !/(?:^|\s)--dev(?:\s|$)/.test(commandLine)) continue;
-    if (/(?:^|\s)--type=/.test(commandLine)) continue;
+    if (!isRepoElectronMain(entry, root)) continue;
 
     const parent = byPid.get(parentPid);
     const parentName = String(parent?.Name || '').toLowerCase();
