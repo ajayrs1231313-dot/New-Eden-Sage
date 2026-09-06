@@ -183,6 +183,11 @@
 .contracts-reference .contract-detail-actions{display:grid;justify-items:end;gap:6px}
 .contracts-reference .contract-detail-actions>strong{color:#e8c254;font-size:14px}
 .contracts-reference .contract-detail-actions button{min-height:28px;padding:4px 8px;border-radius:2px;font-size:9px}
+.contracts-reference .contract-value-grid.character-net{grid-template-columns:repeat(6,minmax(0,1fr))}
+.contract-fee-value strong{color:#d9b15d!important}.contract-net-profit strong{color:#55d787!important}
+.contract-sell-order-projection{margin:7px 0;padding:8px;border:1px solid #244752;border-radius:3px;background:#06161c}
+.contract-sell-order-heading{display:flex;align-items:end;justify-content:space-between;gap:12px;margin-bottom:6px}.contract-sell-order-heading small,.contract-sell-order-heading strong{display:block}.contract-sell-order-heading small{color:#31c8c2;font-size:7.5px;letter-spacing:.08em}.contract-sell-order-heading strong{margin-top:2px;color:#d8e6e8;font-size:9.5px}.contract-sell-order-heading>span{color:#738e95;font-size:8px;text-align:right}
+.contracts-reference .contract-value-grid.sell-order{grid-template-columns:repeat(5,minmax(0,1fr));margin:0}
 .contracts-reference .contract-value-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
 .contracts-reference .contract-value-grid span{min-width:0;padding:7px}
 .contracts-reference .contract-value-grid small{font-size:7.5px}.contracts-reference .contract-value-grid strong{font-size:9.5px;overflow-wrap:anywhere}
@@ -215,7 +220,7 @@ html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-metric
   .contracts-reference .contract-list-reference>.contract-search-row{grid-template-columns:34px minmax(220px,1fr) 80px 82px 120px 20px}.contract-row-issued{display:none!important}
   .contracts-reference .contract-profit-filterbar{grid-template-columns:repeat(4,minmax(0,1fr))}.contract-filterbar-title{grid-column:1/-1}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact{grid-column:span 2}.contracts-reference .contract-profit-filterbar .profit-system-search{grid-column:span 2}
   .contracts-reference .contract-opportunity-reference>.contract-opportunity-row{grid-template-columns:78px minmax(240px,1.4fr) 100px 78px 80px minmax(170px,.9fr) 20px}.contract-signal-bars{display:none!important}
-  .contracts-reference .contract-value-grid{grid-template-columns:repeat(3,1fr)}
+  .contracts-reference .contract-value-grid,.contracts-reference .contract-value-grid.character-net,.contracts-reference .contract-value-grid.sell-order{grid-template-columns:repeat(3,1fr)}
 }
 @media(max-width:920px){
   .contracts-reference-hero,.contracts-reference-hero.profit{grid-template-columns:52px 1fr}.contracts-reference-hero.search .contracts-refresh-block{grid-column:1/-1;justify-self:stretch;justify-items:stretch}.contracts-refresh-block>small{justify-content:flex-end}
@@ -232,5 +237,6 @@ html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-metric
   .contracts-reference .contract-list-reference>.contract-search-row{grid-template-columns:32px minmax(0,1fr) 20px}.contract-row-metric,.contract-row-price{display:none!important}
   .contracts-reference .contract-profit-filterbar{grid-template-columns:1fr}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact,.contracts-reference .contract-profit-filterbar .profit-system-search{grid-column:auto}.contracts-reference .contract-profit-filterbar .contract-security-filter.compact>div{display:grid;grid-template-columns:repeat(4,1fr)}
   .contracts-reference .contract-opportunity-reference>.contract-opportunity-row{grid-template-columns:68px minmax(0,1fr) 20px}.contract-opportunity-metric{display:none!important}.contract-opportunity-score{min-height:52px}
-  .contracts-reference .contract-value-grid{grid-template-columns:1fr}
+  .contracts-reference .contract-value-grid,.contracts-reference .contract-value-grid.character-net,.contracts-reference .contract-value-grid.sell-order{grid-template-columns:1fr}
+  .contract-sell-order-heading{align-items:flex-start;flex-direction:column}.contract-sell-order-heading>span{text-align:left}
 }

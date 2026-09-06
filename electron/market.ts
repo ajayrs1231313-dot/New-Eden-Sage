@@ -499,6 +499,30 @@ async function resolveNames(ids: number[], attempts = 5): Promise<Array<{ id: nu
   }
 }
 
+const marketLocationNameCache = new Map<number, string>();
+
+export async function resolveMarketLocationNames(locationIds: number[]): Promise<Map<number, string>> {
+  const stationIds = [...new Set(locationIds
+    .map(Number)
+    .filter((id) => Number.isSafeInteger(id) && id >= 60_000_000 && id < 64_000_000))];
+  const unresolved = stationIds.filter((id) => !marketLocationNameCache.has(id));
+  for (const ids of chunk(unresolved, 1000)) {
+    try {
+      for (const row of await resolveNames(ids)) {
+        if (row.name) marketLocationNameCache.set(row.id, row.name);
+      }
+    } catch (error) {
+      void logEvent("warn", "market.location_names_unavailable", {
+        ids: ids.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return new Map(stationIds.flatMap((id) => {
+    const name = marketLocationNameCache.get(id);
+    return name ? [[id, name] as const] : [];
+  }));
+}
 async function marketPriceMap() {
   if (!marketPricesPromise)
     marketPricesPromise = (async () => {

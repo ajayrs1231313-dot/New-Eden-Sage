@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { PveLocationAnalysis, PveLocationKind, PveLocationOpportunity } from "./types";
 import { IskGlyph } from "./IskIcons";
@@ -33,6 +33,18 @@ const archetypeIconUrls: Record<LocationArchetype, string> = {
   abyssal: new URL("./pve-location-assets/archetype-icons/abyssal-star.png", import.meta.url).href,
 };
 const archetypeThumbSprite = new URL("./pve-location-assets/archetypes/thumbs-sprite.webp", import.meta.url).href;
+const cinematicSpaceBackgrounds = {
+  emagrerian: {
+    ultrawide: new URL("./pve-location-assets/cinematic-backgrounds/responsive/emagrerian-ultrawide.png", import.meta.url).href,
+    widescreen: new URL("./pve-location-assets/cinematic-backgrounds/responsive/emagrerian-widescreen.png", import.meta.url).href,
+    standard: new URL("./pve-location-assets/cinematic-backgrounds/responsive/emagrerian-standard.png", import.meta.url).href,
+  },
+  frontier: {
+    ultrawide: new URL("./pve-location-assets/cinematic-backgrounds/responsive/new-eden-frontier-ultrawide.png", import.meta.url).href,
+    widescreen: new URL("./pve-location-assets/cinematic-backgrounds/responsive/new-eden-frontier-widescreen.png", import.meta.url).href,
+    standard: new URL("./pve-location-assets/cinematic-backgrounds/responsive/new-eden-frontier-standard.png", import.meta.url).href,
+  },
+} as const;
 
 const archetypeVisuals: Record<LocationArchetype, { label: string; accent: string; thumbPosition: string }> = {
   highsec: { label: "High Sec", accent: "#35cfff", thumbPosition: "0%" },
@@ -169,7 +181,21 @@ function MapArchetypeNode({ archetype, x, y, count }: { archetype: Exclude<Locat
   </g>;
 }
 
-function PveIntelMap({ analysis, busy }: { analysis: PveLocationAnalysis; busy: boolean }) {
+type MapAssetVariant = "standard" | "widescreen" | "ultrawide";
+
+function CinematicSpaceLayer({ scene, className, variant }: { scene: keyof typeof cinematicSpaceBackgrounds; className: string; variant: MapAssetVariant }) {
+  return <img
+    className={`pve-cinematic-bg ${className}`}
+    src={cinematicSpaceBackgrounds[scene][variant]}
+    alt=""
+    aria-hidden="true"
+    draggable={false}
+  />;
+}
+
+const PveIntelMap = memo(function PveIntelMap({ analysis, busy }: { analysis: PveLocationAnalysis; busy: boolean }) {
+  const mapRef = useRef<HTMLDivElement>(null);
+  const [assetVariant, setAssetVariant] = useState<MapAssetVariant>("widescreen");
   const systemName = analysis.character.systemName;
   const current = systemName.length > 16 ? systemName.slice(0, 15) + "..." : systemName;
   const archetypeCounts = analysis.locations.reduce<Record<LocationArchetype, number>>((counts, row) => {
@@ -188,8 +214,31 @@ function PveIntelMap({ analysis, busy }: { analysis: PveLocationAnalysis; busy: 
     [90, 218], [124, 249], [166, 206], [221, 274], [302, 257], [672, 269], [727, 281], [847, 268],
   ] as const;
 
-  return <div className="pve-star-map pve-star-map-redesign" aria-label={"Current location " + systemName}>
-    <svg viewBox="0 0 960 320" preserveAspectRatio="xMidYMid slice" role="presentation" aria-hidden="true">
+  useEffect(() => {
+    const element = mapRef.current;
+    if (!element) return;
+    const updateVariant = () => {
+      const rect = element.getBoundingClientRect();
+      const ratio = rect.height > 0 ? rect.width / rect.height : 0;
+      const next: MapAssetVariant = rect.width >= 1700 || ratio >= 3.15
+        ? "ultrawide"
+        : rect.width >= 900 || ratio >= 1.7
+          ? "widescreen"
+          : "standard";
+      setAssetVariant((currentVariant) => currentVariant === next ? currentVariant : next);
+    };
+    updateVariant();
+    const observer = new ResizeObserver(updateVariant);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const mapViewBox = assetVariant === "ultrawide" ? "-120 0 1200 320" : "0 0 960 320";
+
+  return <div ref={mapRef} className="pve-star-map pve-star-map-redesign" data-map-variant={assetVariant} aria-label={"Current location " + systemName}>
+    <CinematicSpaceLayer scene="emagrerian" className="pve-cinematic-bg-emagrerian" variant={assetVariant} />
+    <CinematicSpaceLayer scene="frontier" className="pve-cinematic-bg-frontier" variant={assetVariant} />
+    <svg viewBox={mapViewBox} preserveAspectRatio="xMidYMid meet" role="presentation" aria-hidden="true">
       <defs>
         <linearGradient id="pveRouteBlueGold" x1="0" y1="0" x2="1" y2="0"><stop stopColor="#39ceff"/><stop offset=".64" stopColor="#46c8e9"/><stop offset="1" stopColor="#ffd16b"/></linearGradient>
         <linearGradient id="pveRouteTealGold" x1="0" y1="0" x2="1" y2="0"><stop stopColor="#23dfd3"/><stop offset=".7" stopColor="#30c9c4"/><stop offset="1" stopColor="#ffd16b"/></linearGradient>
@@ -273,7 +322,7 @@ function PveIntelMap({ analysis, busy }: { analysis: PveLocationAnalysis; busy: 
       <MapArchetypeNode archetype="wormhole" x={806} y={244} count={archetypeCounts.wormhole} />
     </svg>
   </div>;
-}
+});
 export function PveLocationIntel({ analysis, busy = false, onRefresh }: { analysis: PveLocationAnalysis; busy?: boolean; onRefresh?: () => void }) {
   const [kind, setKind] = useState<KindFilter>("all");
   const [security, setSecurity] = useState<SecurityFilter>("all");
@@ -306,45 +355,50 @@ export function PveLocationIntel({ analysis, busy = false, onRefresh }: { analys
   const selected = selectedId ? analysis.locations.find((row) => row.id === selectedId) ?? null : null;
 
   return <section className="pve-intel pve-reference">
-    <header className="pve-hero">
-      <div className="pve-hero-copy">
+    <div className="pve-page-intro">
+      <div>
         <p className="eyebrow">PVE &nbsp; LOCATIONS</p>
         <h2>Where should I go?</h2>
         <p>Ranked locations and system intelligence to plan your next expedition. Filter by security, activity, readiness and travel distance from your live position.</p>
-        <div className="pve-current-ship">
-          <div className="pve-ship-art">
-            <IskGlyph name="pve" className="pve-ship-fallback" />
-            {currentShipImage && <img src={currentShipImage} alt="" onLoad={(event) => event.currentTarget.parentElement?.classList.add("has-ship-render")} onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.classList.remove("has-ship-render"); }} />}
-          </div>
-          <div className="pve-ship-copy">
-            <span>CURRENT SHIP</span>
-            <strong>{analysis.character.shipName ?? "Unknown ship"}</strong>
-            <small>{currentShipTier} | PvE combat profile</small>
-          </div>
-          <div className={`pve-readiness-ring ${currentShipReadiness == null ? "unresolved" : ""}`} style={currentShipReadiness == null ? undefined : { background: `conic-gradient(#27e2d4 ${currentShipReadiness}%, #15343d 0)` }}>
-            <span><strong>{currentShipReadiness == null ? "--" : `${currentShipReadiness}%`}</strong><small>READY</small></span>
-          </div>
-          <ul>
-            <li>{currentShipReadiness == null ? "Readiness not resolved" : currentShipAssessment.title}</li>
-            <li>{analysis.character.shipReadiness ? "Skills matched to current hull" : "Hull capability unavailable"}</li>
-            <li>Current position | {analysis.character.systemName}</li>
-          </ul>
+      </div>
+      <div className={`pve-intel-state ${freshTone}`}>
+        <span>{analysis.dataStatus.stale ? "CACHED / PARTIAL INTEL" : "PUBLIC INTEL ONLINE"}</span>
+        <small>{analysis.dataStatus.source}</small>
+      </div>
+    </div>
+
+    <header className="pve-hero">
+      <PveIntelMap analysis={analysis} busy={busy} />
+    </header>
+
+    <div className="pve-command-strip">
+      <div className="pve-compact-ship">
+        <div className="pve-compact-ship-art">
+          <IskGlyph name="pve" className="pve-ship-fallback" />
+          {currentShipImage && <img src={currentShipImage} alt="" onLoad={(event) => event.currentTarget.parentElement?.classList.add("has-ship-render")} onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.classList.remove("has-ship-render"); }} />}
+        </div>
+        <div className="pve-compact-ship-copy">
+          <span>CURRENT SHIP</span>
+          <strong>{analysis.character.shipName ?? "Unknown ship"}</strong>
+          <small>{currentShipTier} | {analysis.character.systemName}</small>
+        </div>
+        <div className={`pve-compact-readiness ${currentShipReadiness == null ? "unresolved" : ""}`}>
+          <strong>{currentShipReadiness == null ? "--" : `${currentShipReadiness}%`}</strong>
+          <small>{currentShipAssessment.title}</small>
         </div>
       </div>
 
-      <PveIntelMap analysis={analysis} busy={busy} />
+      <nav className="pve-kind-tabs" aria-label="PvE location types">
+        <button type="button" className={kind === "all" ? "active all" : "all"} onClick={() => setKind("all")}><IskGlyph name="bars" /><span>All</span><b>{analysis.locations.length}</b></button>
+        {(Object.keys(kindShortLabels) as PveLocationKind[]).map((value) => <button type="button" key={value} className={`${kind === value ? "active " : ""}kind-${value}`} onClick={() => setKind(value)}><i aria-hidden="true" /><span>{kindShortLabels[value]}</span><b>{analysis.counts[value]}</b></button>)}
+      </nav>
 
-      <aside className="pve-load-card">
-        <button type="button" onClick={onRefresh} disabled={busy}><IskGlyph name="route" />{busy ? "LOADING LIVE INTELLIGENCE..." : "LOAD PVE INTELLIGENCE"}</button>
-        <div className="pve-cache-meta"><span>{analysis.dataStatus.stale ? "SCANNING / PARTIAL INTEL" : "PUBLIC INTEL ONLINE"}</span><small>{ageLabel(analysis.dataStatus.ageMinutes)}</small></div>
-        <div className="pve-freshness"><div><span>Intel freshness</span><strong className={freshTone}>{analysis.dataStatus.stale ? "CHECK" : "GOOD"}</strong></div><i><b style={{ width: `${Math.max(8, 100 - Math.min(90, analysis.dataStatus.ageMinutes * 4))}%`} } /></i><small>{analysis.dataStatus.source}</small></div>
-      </aside>
-    </header>
-
-    <nav className="pve-kind-tabs" aria-label="PvE location types">
-      <button type="button" className={kind === "all" ? "active all" : "all"} onClick={() => setKind("all")}><IskGlyph name="bars" /><span>All</span><b>{analysis.locations.length}</b></button>
-      {(Object.keys(kindShortLabels) as PveLocationKind[]).map((value) => <button type="button" key={value} className={`${kind === value ? "active " : ""}kind-${value}`} onClick={() => setKind(value)}><i aria-hidden="true" /><span>{kindShortLabels[value]}</span><b>{analysis.counts[value]}</b></button>)}
-    </nav>
+      <button type="button" className="pve-refresh-compact" onClick={onRefresh} disabled={busy} title={analysis.dataStatus.source}>
+        <IskGlyph name="route" />
+        <span>{busy ? "Refreshing" : "Refresh intel"}</span>
+        <small>{ageLabel(analysis.dataStatus.ageMinutes)}</small>
+      </button>
+    </div>
 
     <div className="pve-search-toolbar">
       <label className="pve-search"><span>SEARCH</span><div><IskGlyph name="search" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search systems, regions, corporations..." /></div></label>

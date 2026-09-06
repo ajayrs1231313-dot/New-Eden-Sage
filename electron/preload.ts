@@ -210,6 +210,7 @@ contextBridge.exposeInMainWorld("sage", {
   getIndustrySystemCostIndex: (input: unknown) => ipcRenderer.invoke("industrial:system-cost-index", input),
   getIndustrialOpportunities: (input: unknown) => ipcRenderer.invoke("industrial:opportunities", input),
   getPreparedIndustrialCommand: (input: unknown) => ipcRenderer.invoke("industrial:prepared-state", input),
+  prepareIndustrialCommand: (input: unknown) => ipcRenderer.invoke("industrial:prepare-command", input),
   getIndustrialOpportunityRouteScope: (input: unknown) => ipcRenderer.invoke("industrial:opportunity-route-scope", input),
   getPreparedIskLab: (input: unknown) => ipcRenderer.invoke("prepared:isk-lab", input),
   getShipReadiness: (input: unknown) =>

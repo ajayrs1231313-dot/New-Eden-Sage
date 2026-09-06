@@ -10,6 +10,13 @@ import { getMarketSystemIndex } from "./market-static-index";
 import { universeRoute } from "./universe-route-graph";
 import { loadCurrentMarketRevision } from "./shared-market-data";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
+import {
+  exactPreparedPageState,
+  lastKnownGoodPreparedPageState,
+  loadLastKnownGoodPageState,
+  saveLastKnownGoodPageState,
+  type PageStateSource,
+} from "./page-state-persistence";
 
 type SecurityBand = "high" | "low" | "null";
 
@@ -33,6 +40,28 @@ export type IndustrialOpportunityInput = {
   includeConnectedStock?: boolean;
   sharedCharacterIds?: string[];
 };
+
+const INDUSTRIAL_PAGE_MODULE = "industrial.command";
+const INDUSTRIAL_PAGE_MODEL_VERSION = 1;
+
+function defaultIndustrialOpportunityInput(characterId: string): IndustrialOpportunityInput {
+  return {
+    characterId: String(characterId),
+    systemQuery: "",
+    maxJumps: null,
+    security: ["high", "low", "null"],
+    includeConnectedStock: false,
+    sharedCharacterIds: [],
+  };
+}
+
+function isDefaultIndustrialOpportunityInput(input: ReturnType<typeof normalizeOpportunityInput>) {
+  return input.systemQuery === ""
+    && input.maxJumps == null
+    && input.security.join("|") === "high|low|null"
+    && !input.includeConnectedStock
+    && input.sharedCharacterIds.length === 0;
+}
 
 function requireSnapshot(characterId: string) {
   const snapshot = getSnapshot(String(characterId)) as any;
@@ -300,6 +329,7 @@ export async function getIndustrialOpportunitiesPrepared(
       scope: normalized,
     };
     await savePersistedResult("industrial-opportunities", key, empty);
+    if (isDefaultIndustrialOpportunityInput(normalized)) await saveIndustrialLastKnownGood(normalized.characterId);
     return empty;
   }
 
@@ -447,35 +477,45 @@ export async function getIndustrialOpportunitiesPrepared(
     scope: normalized,
   };
   await savePersistedResult("industrial-opportunities", key, result);
+  if (isDefaultIndustrialOpportunityInput(normalized)) await saveIndustrialLastKnownGood(normalized.characterId);
   options.onProgress?.(100, status);
   return result;
 }
 
-export async function loadIndustrialPreparedState(characterId: string) {
+type IndustrialPreparedPage = {
+  characterId: string;
+  opportunities: any[];
+  opportunityStatus: string | null;
+  opportunityGeneratedAt: string | null;
+  systemCostIndex: any;
+  typeNames: Record<string, string>;
+};
+
+function isIndustrialPreparedPage(value: unknown, characterId: string): value is IndustrialPreparedPage {
+  const candidate = value as IndustrialPreparedPage | null;
+  return Boolean(
+    candidate
+    && String(candidate.characterId ?? "") === String(characterId)
+    && Array.isArray(candidate.opportunities)
+    && (candidate.opportunityStatus == null || typeof candidate.opportunityStatus === "string")
+    && candidate.typeNames && typeof candidate.typeNames === "object" && !Array.isArray(candidate.typeNames)
+  );
+}
+
+async function buildIndustrialPreparedState(characterId: string) {
   const snapshot = requireSnapshot(characterId);
-  const defaultInput: IndustrialOpportunityInput = {
-    characterId: String(characterId),
-    systemQuery: "",
-    maxJumps: null,
-    security: ["high", "low", "null"],
-    includeConnectedStock: false,
-    sharedCharacterIds: [],
-  };
-  const opportunities = await loadPreparedIndustrialOpportunities(defaultInput);
-  const allSnapshots = listSnapshots() as any[];
-  const typeIds = [...new Set(allSnapshots.flatMap((item) => {
-    const extended = item.extended as any;
-    const blueprints = Array.isArray(extended?.blueprints) ? extended.blueprints : [];
-    const corpBlueprints = Array.isArray(extended?.corporation?.blueprints) ? extended.corporation.blueprints : [];
-    const jobs = Array.isArray(extended?.industryJobs) ? extended.industryJobs : [];
-    const corpJobs = Array.isArray(extended?.corporation?.industryJobs) ? extended.corporation.industryJobs : [];
-    return [
-      ...blueprints.map((blueprint: any) => Number(blueprint.type_id ?? 0)),
-      ...corpBlueprints.map((blueprint: any) => Number(blueprint.type_id ?? 0)),
-      ...jobs.flatMap((job: any) => [Number(job.blueprint_type_id ?? 0), Number(job.product_type_id ?? 0)]),
-      ...corpJobs.flatMap((job: any) => [Number(job.blueprint_type_id ?? 0), Number(job.product_type_id ?? 0)]),
-    ];
-  }).filter((typeId: number) => typeId > 0))];
+  const opportunities = await loadPreparedIndustrialOpportunities(defaultIndustrialOpportunityInput(characterId));
+  const extended = snapshot.extended as any;
+  const blueprints = Array.isArray(extended?.blueprints) ? extended.blueprints : [];
+  const corpBlueprints = Array.isArray(extended?.corporation?.blueprints) ? extended.corporation.blueprints : [];
+  const jobs = Array.isArray(extended?.industryJobs) ? extended.industryJobs : [];
+  const corpJobs = Array.isArray(extended?.corporation?.industryJobs) ? extended.corporation.industryJobs : [];
+  const typeIds = [...new Set([
+    ...blueprints.map((blueprint: any) => Number(blueprint.type_id ?? 0)),
+    ...corpBlueprints.map((blueprint: any) => Number(blueprint.type_id ?? 0)),
+    ...jobs.flatMap((job: any) => [Number(job.blueprint_type_id ?? 0), Number(job.product_type_id ?? 0)]),
+    ...corpJobs.flatMap((job: any) => [Number(job.blueprint_type_id ?? 0), Number(job.product_type_id ?? 0)]),
+  ].filter((typeId: number) => typeId > 0))];
   const typeNames = await getIndustrialTypeNames(typeIds);
   let systemCostIndex: any = null;
   try {
@@ -487,9 +527,53 @@ export async function loadIndustrialPreparedState(characterId: string) {
     characterId: String(characterId),
     opportunities: opportunities?.opportunities ?? null,
     opportunityStatus: opportunities?.status ?? null,
+    opportunityGeneratedAt: opportunities?.generatedAt ?? null,
     systemCostIndex,
     typeNames,
   };
+}
+
+async function industrialPageSource(characterId: string, state: IndustrialPreparedPage): Promise<PageStateSource> {
+  const snapshot = requireSnapshot(characterId);
+  const market = await loadCurrentMarketRevision();
+  return {
+    industrialModelVersion: INDUSTRIAL_PAGE_MODEL_VERSION,
+    characterSnapshotUpdatedAt: String(snapshot.updatedAt ?? "none"),
+    marketSnapshotId: market?.id ?? "none",
+    marketCreatedAt: market?.createdAt ?? null,
+    connectedStockScope: "self",
+    opportunityGeneratedAt: state.opportunityGeneratedAt,
+  };
+}
+
+async function saveIndustrialLastKnownGood(characterId: string) {
+  const state = await buildIndustrialPreparedState(characterId);
+  if (!isIndustrialPreparedPage(state, characterId)) return false;
+  return saveLastKnownGoodPageState({
+    moduleId: INDUSTRIAL_PAGE_MODULE,
+    scope: { kind: "character", id: String(characterId) },
+    source: await industrialPageSource(characterId, state),
+    payload: state,
+    validatePayload: (value): value is IndustrialPreparedPage => isIndustrialPreparedPage(value, characterId),
+    savedAt: state.opportunityGeneratedAt ?? undefined,
+  });
+}
+
+export async function loadIndustrialPreparedState(characterId: string) {
+  const exact = await buildIndustrialPreparedState(characterId);
+  if (isIndustrialPreparedPage(exact, characterId)) {
+    return {
+      ...exact,
+      pageState: exactPreparedPageState(exact.opportunityGeneratedAt, await industrialPageSource(characterId, exact)),
+    };
+  }
+  const previous = await loadLastKnownGoodPageState<IndustrialPreparedPage>({
+    moduleId: INDUSTRIAL_PAGE_MODULE,
+    scope: { kind: "character", id: String(characterId) },
+    validatePayload: (value): value is IndustrialPreparedPage => isIndustrialPreparedPage(value, characterId),
+  });
+  if (previous) return { ...previous.payload, pageState: lastKnownGoodPreparedPageState(previous) };
+  return { ...exact, pageState: null };
 }
 
 export async function prepareIndustrialCommand(

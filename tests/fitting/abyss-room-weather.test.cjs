@@ -42,6 +42,7 @@ const snapshot = {
   const ids = new Map((await dogma.resolveFittingTypeNamesLocal([
     'Ishtar',
     'Ogre II',
+    'Drones',
     '200mm Railgun II',
     'Antimatter Charge S',
   ])).map(item => [item.name, item.id]));
@@ -57,7 +58,7 @@ const snapshot = {
   const analyze = abyssProfile => dogma.analyzeFittingDogma({
     hullTypeId: id('Ishtar'),
     items: fitItems,
-    snapshot,
+    snapshot: { ...snapshot, skills: { total_sp: 0, skills: [{ skill_id: id('Drones'), trained_skill_level: 5 }] } },
     targetProfile: { rangeM: 10000, signatureRadiusM: 125, transverseVelocityMps: 0, velocityMps: 0 },
     ...(abyssProfile ? { abyssProfile } : {}),
   });

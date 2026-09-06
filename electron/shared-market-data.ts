@@ -41,6 +41,13 @@ export type SharedMarketManifest = {
   regionCount: number;
   itemCount: number;
   regionalRowCount: number;
+  tradeCandidateCount?: number;
+  shortageSignalCount?: number;
+  contractCount?: number;
+  contractPendingDetailCount?: number;
+  marketChanged?: boolean;
+  contractsChanged?: boolean;
+  publicChanged?: boolean;
   files: Record<string, SharedMarketArtifact>;
 };
 
@@ -113,7 +120,7 @@ const shortageGenerationCache = new Map<string, Promise<SharedPreparedShortageDa
 const publicSharedGenerationCache = new Map<string, Promise<SharedPreparedPublicDataset | null>>();
 const contractGenerationCache = new Map<string, Promise<SharedPublicContractsDataset | null>>();
 
-function baseUrl() {
+export function sharedMarketServerBaseUrl() {
   return String(process.env.NEW_EDEN_SAGE_SHARED_MARKET_URL || DEFAULT_SHARED_MARKET_BASE_URL).trim().replace(/\/$/, "");
 }
 
@@ -140,7 +147,8 @@ function validateArtifact(key: string, value: unknown): SharedMarketArtifact {
   if (!artifact.path || typeof artifact.path !== "string") throw new Error(`Shared market artifact ${key} has no path.`);
   if (!Number.isFinite(artifact.bytes) || artifact.bytes <= 0) throw new Error(`Shared market artifact ${key} has invalid byte size.`);
   if (!/^[a-f0-9]{64}$/i.test(String(artifact.sha256))) throw new Error(`Shared market artifact ${key} has invalid SHA-256.`);
-  if (artifact.schemaVersion !== 1) throw new Error(`Shared market artifact ${key} schema ${artifact.schemaVersion} is unsupported.`);
+  const supportedSchemas = key === "market-global" ? new Set([1, 2]) : new Set([1]);
+  if (!supportedSchemas.has(artifact.schemaVersion)) throw new Error(`Shared market artifact ${key} schema ${artifact.schemaVersion} is unsupported.`);
   safeArtifactName(key, artifact);
   return artifact;
 }
@@ -193,7 +201,7 @@ async function request(url: string, timeoutMs: number, attempts = 2) {
 }
 
 async function fetchLatestCompleteManifestFromServer() {
-  const root = baseUrl();
+  const root = sharedMarketServerBaseUrl();
   if (!root) throw new Error("Shared market service URL is not configured.");
   const startedAt = Date.now();
   let payload: any;
@@ -280,7 +288,8 @@ async function parseGlobalArtifact(manifest: SharedMarketManifest, root: string)
     schemaVersion: number; dataset: string; snapshotId: string; createdAt: string; orderCount: number; regionCount: number;
     sourceOrdersInspected: number; candidateDepthPerSide: number; items: FullMarketItem[];
   };
-  if (payload.schemaVersion !== 1 || payload.dataset !== "market-global" || payload.snapshotId !== validateArtifact("market-global", manifest.files["market-global"]).version) throw new Error("Shared market-global payload identity is invalid.");
+  const globalArtifact = validateArtifact("market-global", manifest.files["market-global"]);
+  if (payload.schemaVersion !== globalArtifact.schemaVersion || payload.dataset !== "market-global" || payload.snapshotId !== globalArtifact.version) throw new Error("Shared market-global payload identity is invalid.");
   if (payload.orderCount !== manifest.orderCount || payload.regionCount !== manifest.regionCount || payload.items.length !== manifest.itemCount) throw new Error("Shared market-global payload counts do not match its manifest.");
   return {
     snapshotId: payload.snapshotId,
@@ -427,7 +436,7 @@ export async function ensureCurrentSharedMarketData(
     return { manifest, changed: [], reused: Object.keys(manifest.files), usedLocalFallback: false };
   }
 
-  const root = baseUrl();
+  const root = sharedMarketServerBaseUrl();
   const finalRoot = generationRoot(manifest.generation);
   const stageRoot = `${finalRoot}.partial-${process.pid}-${randomUUID()}`;
   const changed: string[] = [];
@@ -563,7 +572,7 @@ export function startSharedPublicDataListener(onAvailable?: (notice: { generatio
       try {
         const current = await loadCurrentSharedMarketManifest();
         controller = new AbortController();
-        const url = new URL(baseUrl() + "/events");
+        const url = new URL(sharedMarketServerBaseUrl() + "/events");
         if (current?.generation) url.searchParams.set("generation", current.generation);
         const response = await fetch(url, { headers: { Accept: "text/event-stream", "X-New-Eden-Sage-Client": "desktop" }, signal: controller.signal });
         if (!response.ok || !response.body) throw new Error("Shared public event stream returned HTTP " + response.status + ".");

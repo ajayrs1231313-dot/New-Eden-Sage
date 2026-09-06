@@ -15,6 +15,17 @@ type AssetRow={
   locationId:number;
   totalVolume:number;
   estimatedValue:number;
+  blueprintKind?:string;
+  blueprintRuns?:number;
+  blueprintME?:number;
+  blueprintTE?:number;
+  valuationSource?:string;
+  valuationConfidence?:string;
+  valuationSampleCount?:number;
+  valuationResearchMatch?:string;
+  valuationLookbackDays?:number;
+  valuationEvidenceBasis?:string;
+  valuationCacheStatus?:string;
 };
 
 const money=(value:number)=>new Intl.NumberFormat("en-GB",{maximumFractionDigits:0}).format(value||0);
@@ -40,17 +51,30 @@ export function AssetsCommand({snapshots}:{snapshots:CharacterSnapshot[]}){
       locationId:Number(asset?.root_location_id??asset?.location_id??0),
       totalVolume:Number(asset?.total_volume_m3??0)||0,
       estimatedValue:Number(asset?.estimatedValue??0)||0,
+      blueprintKind:asset?.blueprint_kind?String(asset.blueprint_kind):undefined,
+      blueprintRuns:asset?.blueprint_runs==null?undefined:Number(asset.blueprint_runs),
+      blueprintME:asset?.blueprint_material_efficiency==null?undefined:Number(asset.blueprint_material_efficiency),
+      blueprintTE:asset?.blueprint_time_efficiency==null?undefined:Number(asset.blueprint_time_efficiency),
+      valuationSource:asset?.valuation_source?String(asset.valuation_source):undefined,
+      valuationConfidence:asset?.valuation_confidence?String(asset.valuation_confidence):undefined,
+      valuationSampleCount:asset?.valuation_sample_count==null?undefined:Number(asset.valuation_sample_count),
+      valuationResearchMatch:asset?.valuation_research_match?String(asset.valuation_research_match):undefined,
+      valuationLookbackDays:asset?.valuation_lookback_days==null?undefined:Number(asset.valuation_lookback_days),
+      valuationEvidenceBasis:asset?.valuation_evidence_basis?String(asset.valuation_evidence_basis):undefined,
+      valuationCacheStatus:asset?.valuation_cache_status?String(asset.valuation_cache_status):undefined,
     }));
   }),[snapshots]);
 
   const scoped=useMemo(()=>characterId==="all"?source:source.filter(row=>row.ownerId===characterId),[source,characterId]);
   const rows=useMemo<AssetRow[]>(()=>{
-    const raw:AssetRow[]=scoped.map((row,index)=>({key:`${row.ownerId}:${row.typeId}:${row.locationId}:${row.locationFlag}:${index}`,typeId:row.typeId,item:row.item,quantity:row.quantity,owners:[row.owner],ownerIds:[row.ownerId],station:row.station,system:row.system,locationFlag:row.locationFlag,locationId:row.locationId,totalVolume:row.totalVolume,estimatedValue:row.estimatedValue}));
+    const raw:AssetRow[]=scoped.map((row,index)=>({key:`${row.ownerId}:${row.typeId}:${row.locationId}:${row.locationFlag}:${index}`,typeId:row.typeId,item:row.item,quantity:row.quantity,owners:[row.owner],ownerIds:[row.ownerId],station:row.station,system:row.system,locationFlag:row.locationFlag,locationId:row.locationId,totalVolume:row.totalVolume,estimatedValue:row.estimatedValue,blueprintKind:row.blueprintKind,blueprintRuns:row.blueprintRuns,blueprintME:row.blueprintME,blueprintTE:row.blueprintTE,valuationSource:row.valuationSource,valuationConfidence:row.valuationConfidence,valuationSampleCount:row.valuationSampleCount,valuationResearchMatch:row.valuationResearchMatch,valuationLookbackDays:row.valuationLookbackDays,valuationEvidenceBasis:row.valuationEvidenceBasis,valuationCacheStatus:row.valuationCacheStatus}));
     if(!merge)return raw;
     const grouped=new Map<string,AssetRow>();
     for(const row of raw){
       const location=row.station||row.system||String(row.locationId);
-      const key=`${row.typeId}|${location}|${row.locationFlag}`;
+      const blueprintIdentity=row.blueprintKind?`|${row.blueprintKind}|ME${row.blueprintME??0}|TE${row.blueprintTE??0}|R${row.blueprintRuns??-1}`:"";
+      const valuationIdentity=row.blueprintKind?`|${row.valuationSource??""}|${row.valuationConfidence??""}|${row.valuationSampleCount??0}|${row.valuationResearchMatch??""}`:"";
+      const key=`${row.typeId}|${location}|${row.locationFlag}${blueprintIdentity}${valuationIdentity}`;
       const current=grouped.get(key);
       if(!current){grouped.set(key,{...row,key,owners:[...row.owners],ownerIds:[...row.ownerIds]});continue;}
       current.quantity+=row.quantity;
@@ -74,7 +98,7 @@ export function AssetsCommand({snapshots}:{snapshots:CharacterSnapshot[]}){
 
   return <section className="assets-command-page">
     <header className="assets-command-head">
-      <div><p className="eyebrow">SYNCED ASSET INTELLIGENCE</p><h2>Assets</h2><p>Search every connected character's retained EVE assets without triggering another sync.</p></div>
+      <div><p className="eyebrow">SYNCED ASSET INTELLIGENCE</p><h2>Assets</h2><p>Search every connected character&apos;s retained EVE assets without triggering another sync.</p></div>
       <span>{filtered.length.toLocaleString()} STACKS</span>
     </header>
     <div className="assets-command-summary">
@@ -91,11 +115,11 @@ export function AssetsCommand({snapshots}:{snapshots:CharacterSnapshot[]}){
     <div className="assets-table">
       <div className="assets-table-head"><span>Asset</span><span>Character</span><span>Location</span><span>Qty</span><span>Est. value</span></div>
       <div className="assets-table-body">{visible.map(row=><article key={row.key}>
-        <div className="assets-item">{row.typeId>0&&<img src={icon(row.typeId)} alt="" loading="lazy"/>}<span><strong>{row.item}</strong><small>{row.locationFlag||"Asset"} · Type {row.typeId}</small></span></div>
+        <div className="assets-item">{row.typeId>0&&<img src={icon(row.typeId)} alt="" loading="lazy"/>}<span><strong>{row.item}</strong><small>{row.blueprintKind?`${row.blueprintKind} · ME ${row.blueprintME??0}% · TE ${row.blueprintTE??0}%${row.blueprintKind==="BPC"?` · ${row.blueprintRuns??0} runs`:""}`:`${row.locationFlag||"Asset"} · Type ${row.typeId}`}</small></span></div>
         <div className="assets-owner"><strong>{row.owners.length===1?row.owners[0]:`${row.owners.length} characters`}</strong><small>{row.owners.length>1?row.owners.join(", "):merge?"Merged view":"Individual stack"}</small></div>
         <div className="assets-location"><strong>{row.station||row.system||`Location ${row.locationId}`}</strong><small>{row.station&&row.system?row.system:row.locationFlag||"Unknown location"}</small></div>
         <div className="assets-number"><strong>{row.quantity.toLocaleString()}</strong><small>{compact(row.totalVolume)} m³</small></div>
-        <div className="assets-number value"><strong>{money(row.estimatedValue)} ISK</strong><small>{row.quantity>0&&row.estimatedValue>0?`${money(row.estimatedValue/row.quantity)} / unit`:"No retained price"}</small></div>
+        <div className="assets-number value"><strong>{row.valuationSource==="bpc-unpriced"?"Unpriced BPC":row.valuationSource==="blueprint-identity-unavailable"?"Unpriced blueprint":`${money(row.estimatedValue)} ISK`}</strong><small>{row.valuationSource==="bpc-unpriced"?"No defensible same-run/research contract evidence":row.valuationSource==="bpo-base-fallback"?"Base BPO price fallback · no retained research match":row.valuationSource?.includes("contract-history")?`${row.valuationResearchMatch??"contract"} · ${row.valuationConfidence??"low"} confidence · ${row.valuationSampleCount??0} samples · ${row.valuationLookbackDays??120}d${row.valuationCacheStatus==="last-known-good"?" · cached":""}`:row.quantity>0&&row.estimatedValue>0?`${money(row.estimatedValue/row.quantity)} / unit`:"No retained price"}</small></div>
       </article>)}
       {!filtered.length&&<div className="assets-empty"><strong>No matching assets</strong><span>{source.length?"Change the character or search filter.":"Sync character assets to populate this view."}</span></div>}</div>
     </div>

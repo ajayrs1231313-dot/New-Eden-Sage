@@ -33,6 +33,7 @@ import "./asset-command-polish.css";
 import "./character-command.css";
 import { MarketWorkspaceV2 } from "./MarketWorkspaceV2";
 import { OPEN_SHOPPING_LIST_EVENT, OPEN_SHOPPING_LIST_PENDING_KEY } from "./shopping-list";
+import { OPEN_NAVIGATION_ROUTE_EVENT } from "./navigation-intent";
 
 type View =
   | "overview"
@@ -108,7 +109,7 @@ const RetainedIskLab = memo(IskLab);
 const RetainedFittingsWorkspace = memo(FittingsWorkspace, (a, b) => a.activeCharacterId === b.activeCharacterId);
 const RetainedLoot = memo(Loot, () => true);
 const RetainedAssetsCommand = memo(AssetsCommand, (a, b) => a.snapshots === b.snapshots);
-const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
+const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId && a.active === b.active);
 const RetainedNavigationCommand = memo(NavigationCommand, () => true);
 const RetainedWormholeCommand = memo(WormholeCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
 
@@ -168,13 +169,16 @@ export default function App() {
     const navigateToFittings = () => setView("fittings");
     const navigateToCorpDoctrines = () => setView("fleet");
     const navigateToShoppingList = () => { sessionStorage.setItem(OPEN_SHOPPING_LIST_PENDING_KEY, "1"); setAssetCommandTab("market"); setView("loot"); };
+    const navigateToRoutePlanner = () => setView("navigation");
     window.addEventListener("sage:navigate-fittings", navigateToFittings);
     window.addEventListener("sage:navigate-corp-doctrines", navigateToCorpDoctrines);
     window.addEventListener(OPEN_SHOPPING_LIST_EVENT, navigateToShoppingList);
+    window.addEventListener(OPEN_NAVIGATION_ROUTE_EVENT, navigateToRoutePlanner);
     return () => {
       window.removeEventListener("sage:navigate-fittings", navigateToFittings);
       window.removeEventListener("sage:navigate-corp-doctrines", navigateToCorpDoctrines);
       window.removeEventListener(OPEN_SHOPPING_LIST_EVENT, navigateToShoppingList);
+      window.removeEventListener(OPEN_NAVIGATION_ROUTE_EVENT, navigateToRoutePlanner);
     };
   }, []);
   const [marketDataRevision, setMarketDataRevision] = useState(0);
@@ -612,6 +616,7 @@ export default function App() {
             <RetainedIndustrialCommand
               snapshots={snapshots}
               activeCharacterId={active?.characterId}
+              active={view === "industrial"}
               onSelectCharacter={selectCharacter}
             />
           </div>

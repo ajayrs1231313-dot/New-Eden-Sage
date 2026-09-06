@@ -27,17 +27,18 @@ const approx = (actual, expected, epsilon = 1e-9) => assert.ok(Math.abs(actual -
     assert.ok(allCombat.some(item => Number(item.combatProfile?.outgoingDamage?.[channel] ?? 0) > 0), `missing ${channel} NPC damage coverage`);
   }
 
-  const ids = new Map((await dogma.resolveFittingTypeNamesLocal(['Ishtar', 'Ogre II'])).map(item => [item.name, item.id]));
+  const ids = new Map((await dogma.resolveFittingTypeNamesLocal(['Ishtar', 'Ogre II', 'Drones'])).map(item => [item.name, item.id]));
   const ishtar = ids.get('Ishtar');
   const ogre = ids.get('Ogre II');
-  assert.ok(ishtar && ogre, 'required fitting types missing from SDE');
+  const drones = ids.get('Drones');
+  assert.ok(ishtar && ogre && drones, 'required fitting types missing from SDE');
   const spark = byName.get('Sparkneedle Tessella');
   assert.ok(spark?.combatProfile, 'Sparkneedle target missing');
 
   const result = await dogma.analyzeFittingDogma({
     hullTypeId: ishtar,
     items: [{ typeId: ogre, quantity: 5, activeQuantity: 5, rack: 'drone' }],
-    snapshot: { character: { name: 'NPC DPS Test' }, skills: { total_sp: 0, skills: [] }, extended: { implants: [] } },
+    snapshot: { character: { name: 'NPC DPS Test' }, skills: { total_sp: 0, skills: [{ skill_id: drones, trained_skill_level: 5 }] }, extended: { implants: [] } },
     targetTypeId: spark.id,
     damageProfile: { em: 0, thermal: 0, kinetic: 0, explosive: 1 },
     targetProfile: { rangeM: 10000, signatureRadiusM: spark.combatProfile.signatureRadiusM, transverseVelocityMps: 0, velocityMps: 0 },

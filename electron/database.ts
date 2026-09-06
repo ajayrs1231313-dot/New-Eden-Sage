@@ -1,6 +1,7 @@
 ﻿import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { USER_DATA_ROOT } from "./data-paths";
+import { normalizeSnapshotBlueprintAssetValuation } from "./asset-valuation";
 
 let database: DatabaseSync | undefined;
 
@@ -81,6 +82,7 @@ export function saveSnapshot(snapshot: {
   character: { name: string };
   updatedAt: string;
 }) {
+  const normalized = normalizeSnapshotBlueprintAssetValuation(snapshot);
   db()
     .prepare(
       `
@@ -93,10 +95,10 @@ export function saveSnapshot(snapshot: {
   `,
     )
     .run(
-      snapshot.characterId,
-      snapshot.character.name,
-      JSON.stringify(snapshot),
-      snapshot.updatedAt,
+      normalized.characterId,
+      normalized.character.name,
+      JSON.stringify(normalized),
+      normalized.updatedAt,
     );
 }
 
@@ -104,7 +106,7 @@ export function listSnapshots() {
   const rows = db()
     .prepare("SELECT payload FROM character_snapshots ORDER BY updated_at DESC")
     .all() as Array<{ payload: string }>;
-  return rows.map((row) => JSON.parse(row.payload) as unknown);
+  return rows.map((row) => normalizeSnapshotBlueprintAssetValuation(JSON.parse(row.payload) as unknown));
 }
 
 export function getSnapshot(characterId?: string) {
@@ -120,7 +122,7 @@ export function getSnapshot(characterId?: string) {
         )
         .get();
   return row
-    ? (JSON.parse((row as { payload: string }).payload) as unknown)
+    ? normalizeSnapshotBlueprintAssetValuation(JSON.parse((row as { payload: string }).payload) as unknown)
     : null;
 }
 

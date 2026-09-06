@@ -52,6 +52,7 @@ import { analyzeActivityReadiness } from "./activity-readiness";
 import { analyzeCurrentShipUse, type CurrentShipUseProfileId } from "./capability-engine";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
+import { searchMcpMarketOrders } from "./mcp-market-search";
 import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
 import { disposePublicDataRefreshProcess, runPublicDataRefresh } from "./public-data-refresh-manager";
 import { disposeContractIntelligenceProcess, getContractMarketWorkspace, searchContractMarketWorkspace } from "./contract-intelligence-manager";
@@ -957,8 +958,22 @@ function createWindow() {
   createdWindow.on("leave-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
   createdWindow.webContents.on("did-finish-load", () => void applyResponsiveDisplayScale(createdWindow));
 
-  if (process.argv.includes("--dev")) createdWindow.loadURL("http://localhost:42814");
-  else createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+  if (process.argv.includes("--dev")) {
+    const devSession = createdWindow.webContents.session;
+    void (async () => {
+      try {
+        await Promise.all([
+          devSession.clearCache(),
+          devSession.clearCodeCaches({ urls: [] }),
+        ]);
+      } catch {
+        // Development cache cleanup is best-effort; Vite can still serve a fresh page.
+      }
+      if (!createdWindow.isDestroyed()) {
+        await createdWindow.loadURL(`http://localhost:42814/?electron=${Date.now()}`);
+      }
+    })();
+  } else createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
 }
 
 const hasSingleInstanceLock =
@@ -1433,6 +1448,12 @@ if (!hasSingleInstanceLock) {
     getIndustrialOpportunitiesPrepared(input, { force: Boolean(input?.force) }));
   ipcMain.handle("industrial:prepared-state", async (_event, input: { characterId: string }) =>
     loadIndustrialPreparedState(String(input.characterId)));
+  ipcMain.handle("industrial:prepare-command", async (_event, input: { characterId: string }) => {
+    const characterId = String(input?.characterId ?? "");
+    if (!characterId) throw new Error("Select and sync a connected character.");
+    await runFeaturePrepProcess({ task: "industrial-command", characterId });
+    return loadIndustrialPreparedState(characterId);
+  });
   ipcMain.handle("universe:ships", () => listPublishedShips());
   ipcMain.handle(
     "skills:ship-readiness",
@@ -2069,7 +2090,13 @@ if (!hasSingleInstanceLock) {
     // Prepared reads never launch heavyweight work. Only the visible requested
     // module is probed; cache misses are built by that module's isolated path.
     if (requested.has("market")) await releaseIdleMarketAnalysisWorker().catch(() => undefined);
-    return { market: market ?? null, pve: pve ?? null, invention: invention ?? null };
+    return {
+      market: market?.payload ?? null,
+      marketState: market?.state ?? null,
+      pve: pve?.payload ?? null,
+      pveState: pve?.state ?? null,
+      invention: invention ?? null,
+    };
   });
   ipcMain.handle("analysis:cancel", async (_event, kind) => cancelAnalysis("Analysis cancelled.", kind));
   ipcMain.handle("analysis:status", () => analysisStatus());
@@ -2132,12 +2159,14 @@ if (!hasSingleInstanceLock) {
     });
     return result.filePath;
   });
-  ipcMain.handle("market:raw-search", async (_event, input) =>
-    runRawMarketSearch(
-      input ?? { query: "" },
+  ipcMain.handle("market:raw-search", async (_event, input) => {
+    const searchInput = input ?? { query: "" };
+    const exact = await runRawMarketSearch(
+      searchInput,
       (progress) => window?.webContents.send("analysis:progress", progress),
-    ),
-  );
+    );
+    return exact?.available ? exact : searchMcpMarketOrders(searchInput);
+  });
   ipcMain.handle("market:regional-filter", async (_event, input) =>
     runRegionalMarketFilter(
       input ?? {},

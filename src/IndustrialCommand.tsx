@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CharacterSnapshot } from "./types";
 import { IndustrialProjectFoundry } from "./IndustrialProjectFoundry";
 import "./industrial-command.css";
@@ -111,10 +111,12 @@ function loadAssetSharingPreferences(): AssetSharingPreferences {
 export function IndustrialCommand({
   snapshots,
   activeCharacterId,
+  active: workspaceActive,
   onSelectCharacter,
 }: {
   snapshots: CharacterSnapshot[];
   activeCharacterId?: string;
+  active: boolean;
   onSelectCharacter(characterId: string): void;
 }) {
   const [tab, setTab] = useState<IndustrialTab>("overview");
@@ -132,6 +134,8 @@ export function IndustrialCommand({
   const [manufacturingStatus, setManufacturingStatus] = useState("Choose a blueprint and output quantity.");
   const [blueprintActivities, setBlueprintActivities] = useState<any>(null);
   const [activityStatus, setActivityStatus] = useState("Choose an owned blueprint to inspect CCP activity data.");
+  const preparedCharacterRef = useRef<string | null>(null);
+  const industrialBuildKeyRef = useRef<string | null>(null);
   const [systemCostIndex, setSystemCostIndex] = useState<any>(null);
   const [systemCostStatus, setSystemCostStatus] = useState("Current-system cost index not loaded.");
   const [opportunities, setOpportunities] = useState<any[]>([]);
@@ -266,39 +270,64 @@ export function IndustrialCommand({
 
   useEffect(() => {
     let cancelled = false;
-    setSelectedBlueprintIndex(0);
-    setManufacturingPlan(null);
-    setManufacturingStatus("Choose a blueprint and output quantity.");
-    setBlueprintActivities(null);
-    setActivityStatus("Choose an owned blueprint to inspect CCP activity data.");
-    setOpportunitySystem("");
-    setOpportunityJumpRadius(null);
-    setOpportunityPreparedFor("");
-    setOpportunities([]);
-    setSystemCostIndex(null);
-    if (!active?.characterId) return () => { cancelled = true; };
-    void window.sage.getPreparedIndustrialCommand({ characterId: active.characterId }).then((prepared) => {
-      if (cancelled) return;
+    if (!workspaceActive || !active?.characterId) return () => { cancelled = true; };
+    const characterChanged = preparedCharacterRef.current !== active.characterId;
+    if (characterChanged) {
+      preparedCharacterRef.current = active.characterId;
+      industrialBuildKeyRef.current = null;
+      setSelectedBlueprintIndex(0);
+      setManufacturingPlan(null);
+      setManufacturingStatus("Choose a blueprint and output quantity.");
+      setBlueprintActivities(null);
+      setActivityStatus("Choose an owned blueprint to inspect CCP activity data.");
+      setOpportunitySystem("");
+      setOpportunityJumpRadius(null);
+      setOpportunityPreparedFor("");
+      setOpportunities([]);
+      setSystemCostIndex(null);
+    }
+    const buildKey = `${active.characterId}|${active.updatedAt ?? ""}`;
+    const applyPrepared = (prepared: any) => {
+      const previous = prepared?.pageState?.source === "last-known-good";
       if (Array.isArray(prepared?.opportunities)) {
         setOpportunities(prepared.opportunities);
-        setOpportunityStatus(prepared.opportunityStatus ?? ("Prepared " + prepared.opportunities.length + " industrial opportunities."));
+        setOpportunityStatus(previous
+          ? `${prepared.opportunities.length} previous coherent industrial opportunities are shown while Sage prepares the current character/market revision.`
+          : prepared.opportunityStatus ?? ("Prepared " + prepared.opportunities.length + " industrial opportunities."));
       } else {
-        setOpportunityStatus("No prepared Industrial Opportunities result is available yet. Open or refresh this workspace after shared public data is installed.");
+        setOpportunityStatus("No prepared Industrial Opportunities result is available yet. Building the current workspace from local character data and the installed market generation...");
       }
       if (prepared?.typeNames) setTypeNames((current) => ({ ...current, ...prepared.typeNames }));
-      setSystemCostIndex(prepared?.systemCostIndex ?? null);
+      if (prepared?.systemCostIndex !== undefined) setSystemCostIndex(prepared.systemCostIndex ?? null);
       setSystemCostStatus(prepared?.systemCostIndex?.available
-        ? "Current-system industry indices are prepared."
+        ? (previous ? "Previous current-system industry indices are shown while the current revision prepares." : "Current-system industry indices are prepared.")
         : "No prepared current-system cost index is available.");
-      if (prepared?.preparedActivityCount === prepared?.blueprintActivityCount && prepared?.blueprintActivityCount > 0) {
-        setActivityStatus(prepared.blueprintActivityCount + " owned blueprint activity maps are prepared.");
+      return previous;
+    };
+    void window.sage.getPreparedIndustrialCommand({ characterId: active.characterId }).then((prepared) => {
+      if (cancelled) return;
+      const previous = applyPrepared(prepared);
+      if ((previous || !Array.isArray(prepared?.opportunities)) && industrialBuildKeyRef.current !== buildKey) {
+        industrialBuildKeyRef.current = buildKey;
+        void window.sage.prepareIndustrialCommand({ characterId: active.characterId }).then((current) => {
+          if (cancelled) return;
+          applyPrepared(current);
+        }).catch((error) => {
+          if (cancelled) return;
+          industrialBuildKeyRef.current = null;
+          const message = error instanceof Error ? error.message : "Current Industrial Command preparation failed.";
+          setOpportunityStatus((current) => `${current} ${message}`.trim());
+        });
+      } else if (!previous && Array.isArray(prepared?.opportunities)) {
+        industrialBuildKeyRef.current = buildKey;
       }
     }).catch((error) => {
       if (cancelled) return;
+      industrialBuildKeyRef.current = null;
       setOpportunityStatus(error instanceof Error ? error.message : "Prepared Industrial Command data could not be read.");
     });
     return () => { cancelled = true; };
-  }, [active?.characterId, active?.updatedAt]);
+  }, [workspaceActive, active?.characterId, active?.updatedAt]);
 
   useEffect(() => {
     if (!active?.characterId) return;

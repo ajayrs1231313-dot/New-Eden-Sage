@@ -559,7 +559,7 @@ export async function getContractMarketIntelligence() {
         ? `${capitalOriginUnverified ? "Capital origin is unresolved, so the jump route cannot be validated yet. " : ""}Capital exits are restricted to low/null K-space destinations; jump fuel, cyno logistics and pilot skills are not deducted from profit. `
         : "";
       const preTaxWarning = (immediateProfit != null || bestBuyProfit != null)
-        ? "Profit is before character sales tax and logistics costs. "
+        ? "Public gross profit excludes character market fees; Profit Opportunities applies those in its character projection. Logistics costs remain excluded. "
         : "";
       const recommendedExitKind = immediateProfit != null && immediateProfit > 0
         ? "immediate"

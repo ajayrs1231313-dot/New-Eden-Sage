@@ -9,17 +9,18 @@ const snapshot = (skills = []) => ({
 });
 
 (async () => {
-  const wanted = ['Ishtar', 'Ogre II', 'Garde II', 'Drone Navigation', 'Drone Sharpshooting', 'Drone Avionics', 'Advanced Drone Avionics', 'Omnidirectional Tracking Link II', 'Tracking Speed Script', 'Optimal Range Script', 'Proteus', 'Proteus Offensive - Drone Synthesis Projector', 'Gallente Offensive Systems', '200mm Railgun II'];
+  const wanted = ['Ishtar', 'Ogre II', 'Garde II', 'Drones', 'Drone Navigation', 'Drone Sharpshooting', 'Drone Avionics', 'Advanced Drone Avionics', 'Omnidirectional Tracking Link II', 'Tracking Speed Script', 'Optimal Range Script', 'Proteus', 'Proteus Offensive - Drone Synthesis Projector', 'Gallente Offensive Systems', '200mm Railgun II'];
   const resolved = new Map((await dogma.resolveFittingTypeNamesLocal(wanted)).map(item => [item.name, item.id]));
   for (const name of wanted) assert.ok(resolved.get(name), `missing ${name}`);
 
   const ishtar = resolved.get('Ishtar');
+  const dronesId = resolved.get('Drones');
   const ogre = resolved.get('Ogre II');
   const garde = resolved.get('Garde II');
   const analyze = (drone, skills, targetProfile, extras = []) => dogma.analyzeFittingDogma({
     hullTypeId: ishtar,
     items: [{ typeId: drone, quantity: 5, activeQuantity: 5, rack: 'drone' }, ...extras],
-    snapshot: snapshot(skills),
+    snapshot: snapshot([[dronesId, 5], ...skills]),
     targetProfile,
   });
 
@@ -89,7 +90,7 @@ const snapshot = (skills = []) => ({
       { typeId: projectorId, quantity: 1, rack: 'subsystem' },
       { typeId: ogre, quantity: 5, activeQuantity: 5, rack: 'drone' },
     ],
-    snapshot: snapshot(level ? [[offensiveId, level]] : []),
+    snapshot: snapshot([[dronesId, 5], ...(level ? [[offensiveId, level]] : [])]),
     targetProfile: { rangeM: 10000, signatureRadiusM: 400, transverseVelocityMps: 0, velocityMps: 0 },
     abyssProfile: { tier: 5, weather: 'exotic', penalty: 0.5, roomKey: 't5-overmind' },
   });

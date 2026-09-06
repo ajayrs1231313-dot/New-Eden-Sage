@@ -506,22 +506,25 @@ async function contractStaticLookups() {
   })();
   return contractStaticLookupsPromise;
 }
-let npcStationSystemPromise;
-async function npcStationSystems() {
-  if (!npcStationSystemPromise) npcStationSystemPromise = (async () => {
+let npcStationMetadataPromise;
+async function npcStationMetadata() {
+  if (!npcStationMetadataPromise) npcStationMetadataPromise = (async () => {
     const zip = new AdmZip(CONTRACT_SDE_ARCHIVE);
     const entry = zip.getEntry('npcStations.jsonl');
     if (!entry) throw new Error('Authoritative SDE is missing npcStations.jsonl.');
-    const result = new Map();
+    const systems = new Map();
     for (const line of entry.getData().toString('utf8').split(/\r?\n/)) {
       if (!line) continue;
       const row = JSON.parse(line);
-      result.set(Number(row._key), Number(row.solarSystemID || 0));
+      const stationId = Number(row._key);
+      systems.set(stationId, Number(row.solarSystemID || 0));
+
     }
-    return result;
+    return { systems };
   })();
-  return npcStationSystemPromise;
+  return npcStationMetadataPromise;
 }
+async function npcStationSystems() { return (await npcStationMetadata()).systems; }
 async function resolveContractPublicNames(ids) {
   const cache = await readJson(CONTRACT_NAME_CACHE, { schemaVersion: 1, values: {} });
   cache.values ||= {};
@@ -697,25 +700,93 @@ async function contractBundle(contracts, previousManifest, generationRoot) {
   return { changed: true, files: { 'public-contracts': { version: contracts.snapshot.snapshotId, path: `generations/${path.basename(generationRoot)}/public-contracts-v1.json.gz`, bytes: stat.size, sha256: await sha256File(target), schemaVersion: 1 } } };
 }
 
+function mergeRetainedMarketOrders(globalOrders = [], hubOrders = [], buy) {
+  const byOrderId = new Map();
+  for (const order of [...globalOrders, ...hubOrders]) byOrderId.set(Number(order.orderId), order);
+  return [...byOrderId.values()].sort((left, right) => {
+    const priceOrder = buy ? Number(right.price) - Number(left.price) : Number(left.price) - Number(right.price);
+    if (priceOrder) return priceOrder;
+    const volumeOrder = Number(right.volumeRemain) - Number(left.volumeRemain);
+    if (volumeOrder) return volumeOrder;
+    return Number(left.orderId) - Number(right.orderId);
+  });
+}
+
+async function resolveMarketNpcStationNames(index) {
+  const stationSystems = await npcStationSystems();
+  const needed = new Set();
+  const add = value => {
+    const id = Number(value);
+    if (Number.isSafeInteger(id) && stationSystems.has(id)) needed.add(id);
+  };
+  for (const item of index.items.values()) {
+    for (const order of [...(item.buys || []), ...(item.sells || []), ...(item.majorHubBuys || []), ...(item.majorHubSells || [])]) add(order.locationId);
+    for (const region of Object.values(item.regions || {})) {
+      add(region.bestBuyLocationId); add(region.bestSellLocationId);
+      for (const band of Object.values(region.security || {})) { add(band?.bestBuyLocationId); add(band?.bestSellLocationId); }
+    }
+  }
+  if (!needed.size) return new Map();
+  const resolved = await resolveContractPublicNames([...needed]);
+  const names = new Map();
+  for (const [id, value] of resolved) {
+    const name = typeof value?.name === 'string' ? value.name.trim() : '';
+    if (name) names.set(Number(id), name);
+  }
+  return names;
+}
+
+function withNpcStationName(order, stationNames) {
+  if (!order || !Number.isFinite(Number(order.locationId))) return order;
+  const resolved = stationNames.get(Number(order.locationId));
+  return resolved ? { ...order, locationName: resolved } : order;
+}
+function withRegionalNpcStationNames(region, stationNames) {
+  const resolveBand = band => {
+    if (!band) return band;
+    const buyName = stationNames.get(Number(band.bestBuyLocationId));
+    const sellName = stationNames.get(Number(band.bestSellLocationId));
+    return {
+      ...band,
+      bestBuyLocationName: buyName || band.bestBuyLocationName || null,
+      bestSellLocationName: sellName || band.bestSellLocationName || null,
+    };
+  };
+  return {
+    ...resolveBand(region),
+    security: region.security ? Object.fromEntries(Object.entries(region.security).map(([key, band]) => [key, resolveBand(band)])) : region.security,
+  };
+}
+function sharedMarketItem(item, stationNames) {
+  const { majorHubBuys = [], majorHubSells = [], ...base } = item;
+  return {
+    ...base,
+    buys: mergeRetainedMarketOrders(item.buys, majorHubBuys, true).map(order => withNpcStationName(order, stationNames)),
+    sells: mergeRetainedMarketOrders(item.sells, majorHubSells, false).map(order => withNpcStationName(order, stationNames)),
+    regions: Object.fromEntries(Object.entries(item.regions || {}).map(([key, region]) => [key, withRegionalNpcStationNames(region, stationNames)])),
+  };
+}
+
 async function writeMarketArtifacts(generationRoot, snapshot) {
   const computeStarted = performance.now();
   const { buildFullMarketAnalysisIndex } = await import('/app/dist-electron/raw-market-analysis.js');
   const { buildRegionalMarketAggregateIndexFromFull } = await import('/app/dist-electron/regional-market-index.js');
   const { buildPreparedPublicTradeDataset, buildPreparedPublicShortageDataset } = await import('/app/dist-electron/public-market-intelligence.js');
   const index = await buildFullMarketAnalysisIndex(snapshot, { bypassCache: true, skipPersist: true, retainHistoricalCache: false });
+  const stationNames = await resolveMarketNpcStationNames(index);
   const regional = await buildRegionalMarketAggregateIndexFromFull(index, { progress: () => {} });
   const trades = await buildPreparedPublicTradeDataset(index);
   const shortages = await buildPreparedPublicShortageDataset(index);
   if (index.orderCount !== snapshot.orderCount || index.regionCount !== snapshot.regionCount || index.sourceOrdersInspected !== snapshot.orderCount) throw new Error('Prepared market counts do not match the authoritative current source snapshot.');
 
   const files = {};
-  const globalPath = path.join(generationRoot, 'market-global-v1.json.gz');
+  const globalPath = path.join(generationRoot, 'market-global-v2.json.gz');
   const globalPartial = `${globalPath}.${process.pid}.partial`;
-  const header = { schemaVersion: 1, dataset: 'market-global', snapshotId: index.snapshotId, createdAt: index.createdAt, orderCount: index.orderCount, regionCount: index.regionCount, sourceOrdersInspected: index.sourceOrdersInspected, candidateDepthPerSide: index.candidateDepthPerSide, itemCount: index.items.size };
+  const header = { schemaVersion: 2, dataset: 'market-global', snapshotId: index.snapshotId, createdAt: index.createdAt, orderCount: index.orderCount, regionCount: index.regionCount, sourceOrdersInspected: index.sourceOrdersInspected, candidateDepthPerSide: index.candidateDepthPerSide, itemCount: index.items.size };
   async function* globalPayload() {
     yield `${JSON.stringify(header).slice(0, -1)},\"items\":[`;
     let first = true;
-    for (const item of index.items.values()) { yield `${first ? '' : ','}${JSON.stringify(item)}`; first = false; }
+    for (const item of index.items.values()) { yield `${first ? '' : ','}${JSON.stringify(sharedMarketItem(item, stationNames))}`; first = false; }
     yield ']}';
   }
   await pipeline(Readable.from(globalPayload()), createGzip({ level: 6 }), createWriteStream(globalPartial));
@@ -736,7 +807,7 @@ async function writeMarketArtifacts(generationRoot, snapshot) {
 
   for (const [key, file] of [['market-global', globalPath], ['market-regional', regionalPath], ['market-trades', tradesPath], ['market-shortages', shortagesPath]]) {
     const stat = await fs.stat(file);
-    files[key] = { version: snapshot.id, path: `generations/${path.basename(generationRoot)}/${path.basename(file)}`, bytes: stat.size, sha256: await sha256File(file), schemaVersion: 1 };
+    files[key] = { version: snapshot.id, path: `generations/${path.basename(generationRoot)}/${path.basename(file)}`, bytes: stat.size, sha256: await sha256File(file), schemaVersion: key === 'market-global' ? 2 : 1 };
   }
   return { files, index, regional, trades, shortages, computeMs: Math.round(performance.now() - computeStarted) };
 }
@@ -881,7 +952,8 @@ async function main() {
   const market = await refreshMarketOrders(regions);
   const contracts = await refreshPublicContracts(regions);
   const publicChanged = publicResults.some(item => item.changed);
-  const materialChanged = market.changed || contracts.changed || publicChanged || !previousManifest || !previousManifest.files?.['public-contracts'];
+  const marketSchemaUpgradeRequired = Number(previousManifest?.files?.['market-global']?.schemaVersion || 0) < 2;
+  const materialChanged = market.changed || contracts.changed || publicChanged || marketSchemaUpgradeRequired || !previousManifest || !previousManifest.files?.['public-contracts'];
   const pruning = await pruneHistory();
 
   if (!materialChanged) {
@@ -896,7 +968,7 @@ async function main() {
   const generationRoot = path.join(PUBLISH_ROOT, 'generations', generation);
   await fs.mkdir(generationRoot, { recursive: true });
   let marketPrepared;
-  if (market.changed || !previousManifest) marketPrepared = await writeMarketArtifacts(generationRoot, market.snapshot);
+  if (market.changed || !previousManifest || marketSchemaUpgradeRequired) marketPrepared = await writeMarketArtifacts(generationRoot, market.snapshot);
   else {
     const files = await copyPreviousArtifacts(previousManifest, generationRoot, ['market-global', 'market-regional', 'market-trades', 'market-shortages']);
     marketPrepared = { files, index: null, regional: null, trades: null, shortages: null, computeMs: 0 };

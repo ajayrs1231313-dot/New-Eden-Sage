@@ -533,7 +533,7 @@ export interface RawMarketSearchResult {
     locationQuery: string;
     originSystemId: number | null;
     maxJumps: number | null;
-    sort: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest";
+    sort: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest" | "distance";
   };
   regionOptions: Array<{ regionId: number; regionName: string }>;
   totalOrders: number;
@@ -545,6 +545,8 @@ export interface RawMarketSearchResult {
   offset: number;
   limit: number;
   orders: RawMarketSearchOrder[];
+  coverage?: { source: "raw-complete" | "shared-prepared" | "unavailable"; completeOrderCoverage: boolean; sourceOrders: number; candidateDepthPerSide: number | null; note: string };
+  regionalBest?: Array<{ kind: "regional-best"; side: "buy" | "sell"; price: number; volumeRemain: number; orderId: number | null; locationId: number | null; locationName: string; locationResolved: boolean; regionId: number; regionName: string; systemId: number; systemName: string; securityStatus: number | null; securityBand: "high" | "low" | "null" | "unknown"; jumpsFromOrigin: number | null; sourceOrderCount: number; sourceVolume: number }>;
 }
 
 export type FitRemedyCandidate = {
@@ -1094,6 +1096,10 @@ export interface MarketContractOpportunity {
   bestBuyGross:number; bestBuyProfit:number|null; bestBuyRoiPercent:number|null; bestBuySystemId:number|null; bestBuySystem:string|null; bestBuySecurityBand:"high"|"low"|"null"|null; bestBuyUsesPlayerStructure:boolean; bestBuyLocationCount:number; sellOrderGross:number; sellOrderProfit:number|null; sellOrderRoiPercent:number|null;
   requestedItemCost:number; requestedItemsFullyPriced:boolean; nonRecoverableRigCount:number; haulVolumeM3:number; haulCargoVolumeM3:number;
   pilotRequiredShips:Array<{typeId:number;typeName:string;quantity:number;groupName:string;packagedVolumeM3:number;capital:boolean}>; capitalRouteRequired:boolean; capitalOriginUnverified:boolean; score:number; opportunity:boolean; note:string;
+  grossScore?:number; grossOpportunity?:boolean; characterProjection?:{characterId:string;characterName:string;accountingLevel:number;brokerRelationsLevel:number;salesTaxRate:number;brokerFeeRate:number};
+  immediateSalesTaxAmount?:number|null; immediateSalesTaxRate?:number|null; immediateBrokerFeeAmount?:number|null; immediateBrokerFeeRate?:number|null; immediateNetRevenue?:number|null; immediateNetProfit?:number|null; immediateNetRoiPercent?:number|null;
+  bestBuySalesTaxAmount?:number|null; bestBuySalesTaxRate?:number|null; bestBuyBrokerFeeAmount?:number|null; bestBuyBrokerFeeRate?:number|null; bestBuyNetRevenue?:number|null; bestBuyNetProfit?:number|null; bestBuyNetRoiPercent?:number|null;
+  sellOrderSalesTaxAmount?:number|null; sellOrderSalesTaxRate?:number|null; sellOrderBrokerFeeAmount?:number|null; sellOrderBrokerFeeRate?:number|null; sellOrderNetRevenue?:number|null; sellOrderNetProfit?:number|null; sellOrderNetRoiPercent?:number|null;
 }
 export interface MarketContractIntelligence { generatedAt:string; contractsCreatedAt:string|null; marketCreatedAt:string|null; contracts:MarketContractOpportunity[]; opportunities:MarketContractOpportunity[]; counts:{contracts:number;opportunities:number} }
 export interface MarketContractSearchQuery {
@@ -1252,8 +1258,15 @@ declare global {
       getIndustrySystemCostIndex(input: any): Promise<any>;
       getIndustrialOpportunities(input: any): Promise<any>;
       getPreparedIndustrialCommand(input: { characterId: string }): Promise<any>;
+      prepareIndustrialCommand(input: { characterId: string }): Promise<any>;
       getIndustrialOpportunityRouteScope(input: any): Promise<any>;
-      getPreparedIskLab(input: { characterId: string; cloneState?: "alpha" | "omega"; modules?: Array<"market" | "pve" | "invention"> }): Promise<{ market: OpportunityAnalysis | null; pve: PveLocationAnalysis | null; invention: any | null }>;
+      getPreparedIskLab(input: { characterId: string; cloneState?: "alpha" | "omega"; modules?: Array<"market" | "pve" | "invention"> }): Promise<{
+        market: OpportunityAnalysis | null;
+        marketState: { source: "exact" | "last-known-good"; savedAt: string; sourceRevision: Record<string, string | number | boolean | null> } | null;
+        pve: PveLocationAnalysis | null;
+        pveState: { source: "exact" | "last-known-good"; savedAt: string; sourceRevision: Record<string, string | number | boolean | null> } | null;
+        invention: any | null;
+      }>;
       getShipReadiness(input: {
         characterId: string;
         hullTypeId: number;
@@ -1447,7 +1460,7 @@ declare global {
         locationQuery?: string;
         originSystemId?: number | null;
         maxJumps?: number | null;
-        sort?: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest";
+        sort?: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest" | "distance";
         offset?: number;
         limit?: number;
       }): Promise<RawMarketSearchResult>;

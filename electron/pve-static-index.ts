@@ -1,9 +1,20 @@
 import AdmZip from "adm-zip";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { STATIC_DATA_ROOT } from "./data-paths";
 import { ensureStaticDataArchive } from "./type-volumes";
 
 const SDE_ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
+const PVE_STATIC_MODEL_VERSION = "pve-static-v1";
+
+export async function loadPveStaticRevision() {
+  try {
+    const stat = await fs.stat(SDE_ARCHIVE);
+    return `${PVE_STATIC_MODEL_VERSION}:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+  } catch {
+    return `${PVE_STATIC_MODEL_VERSION}:missing`;
+  }
+}
 
 export type PveSystemStatic = {
   systemId: number;

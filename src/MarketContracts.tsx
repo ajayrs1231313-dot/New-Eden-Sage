@@ -1,17 +1,20 @@
 ﻿import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { MarketContractOpportunity, MarketContractSearchResult, MarketContractWorkspace } from "./types";
+import type { CharacterSnapshot, MarketContractOpportunity, MarketContractSearchResult, MarketContractWorkspace } from "./types";
+import { accountingTaxPercentFromLevel, brokerEstimatePercentFromLevel } from "./market-day-trader";
+import { projectContractOpportunities, type ContractFeeProfile } from "./contract-profit-projection";
 import { IskGlyph } from "./IskIcons";
 import "./market-contracts-polish.css";
 
 const money=(value:number|null|undefined)=>value==null?"â€”":new Intl.NumberFormat("en-GB",{maximumFractionDigits:0}).format(value);
 const percent=(value:number|null|undefined)=>value==null?"â€”":`${value.toFixed(1)}%`;
 const cargoVolume=(value:number|null|undefined)=>value==null||!Number.isFinite(value)?"â€”":new Intl.NumberFormat("en-GB",{maximumFractionDigits:2}).format(value);
-type RecommendedExit={kind:"immediate"|"haul";profit:number;roi:number|null;revenue:number;system:string|null};
+type RecommendedExit={kind:"immediate"|"haul";profit:number;roi:number|null;revenue:number;netRevenue:number;salesTaxAmount:number;salesTaxRate:number;brokerFeeAmount:number;brokerFeeRate:number;system:string|null};
 const recommendedExitFor=(row:MarketContractOpportunity):RecommendedExit|null=>{
-  const immediate=row.immediateProfit==null?null:{kind:"immediate" as const,profit:row.immediateProfit,roi:row.immediateRoiPercent,revenue:row.immediateGross,system:row.systemName};
-  const haul=row.bestBuyProfit==null?null:{kind:"haul" as const,profit:row.bestBuyProfit,roi:row.bestBuyRoiPercent,revenue:row.bestBuyGross,system:row.bestBuySystem};
-  // Immediate means the contract can be liquidated profitably from its own location now.
-  // A slightly better remote buy order must not turn an immediate arbitrage into a haul-only signal.
+  const immediateProfit=row.characterProjection?row.immediateNetProfit:row.immediateProfit;
+  const haulProfit=row.characterProjection?row.bestBuyNetProfit:row.bestBuyProfit;
+  const immediate=immediateProfit==null?null:{kind:"immediate" as const,profit:immediateProfit,roi:row.characterProjection?(row.immediateNetRoiPercent??null):row.immediateRoiPercent,revenue:row.immediateGross,netRevenue:row.characterProjection?(row.immediateNetRevenue??row.immediateGross):row.immediateGross,salesTaxAmount:row.characterProjection?(row.immediateSalesTaxAmount??0):0,salesTaxRate:row.characterProjection?(row.immediateSalesTaxRate??0):0,brokerFeeAmount:0,brokerFeeRate:0,system:row.systemName};
+  const haul=haulProfit==null?null:{kind:"haul" as const,profit:haulProfit,roi:row.characterProjection?(row.bestBuyNetRoiPercent??null):row.bestBuyRoiPercent,revenue:row.bestBuyGross,netRevenue:row.characterProjection?(row.bestBuyNetRevenue??row.bestBuyGross):row.bestBuyGross,salesTaxAmount:row.characterProjection?(row.bestBuySalesTaxAmount??0):0,salesTaxRate:row.characterProjection?(row.bestBuySalesTaxRate??0):0,brokerFeeAmount:0,brokerFeeRate:0,system:row.bestBuySystem};
+  // Existing buy orders are executable exits: tax applies, but there is no listing/broker fee.
   if(immediate && immediate.profit>0)return immediate;
   if(haul && haul.profit>0)return haul;
   return immediate ?? haul;
@@ -27,6 +30,13 @@ function contractTypeLabel(value:string){return value==="item_exchange"?"Item Ex
 function availabilityLabel(value:string){return value.replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase());}
 function securityKey(row:MarketContractOpportunity):SecurityKey{return row.securityBand??"unknown";}
 function million(value:string){if(!value.trim())return null;const parsed=Number(value);return Number.isFinite(parsed)&&parsed>=0?parsed*1_000_000:null;}
+function selectedSkillLevel(snapshot:CharacterSnapshot|undefined,name:string){return Number(snapshot?.skills?.skills?.find(skill=>skill.name===name)?.trained_skill_level??0);}
+function contractFeeProfile(snapshot?:CharacterSnapshot):ContractFeeProfile|null{
+  if(!snapshot)return null;
+  const accountingLevel=selectedSkillLevel(snapshot,"Accounting");
+  const brokerRelationsLevel=selectedSkillLevel(snapshot,"Broker Relations");
+  return {characterId:snapshot.characterId,characterName:snapshot.character.name,accountingLevel,brokerRelationsLevel,salesTaxRate:accountingTaxPercentFromLevel(accountingLevel),brokerFeeRate:brokerEstimatePercentFromLevel(brokerRelationsLevel)};
+}
 
 const clamp=(value:number,min:number,max:number)=>Math.max(min,Math.min(max,value));
 function compactIsk(value:number|null|undefined){
@@ -63,7 +73,8 @@ function itemSummary(row:MarketContractOpportunity){
   return names.join(" + ")+(row.receivedItemCount>2?" + "+(row.receivedItemCount-2)+" more":"");
 }
 
-export function MarketContracts({characterId,marketDataRevision}:{characterId?:string;marketDataRevision:number}){
+export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:CharacterSnapshot;marketDataRevision:number}){
+  const characterId=snapshot?.characterId;
   const [data,setData]=useState<MarketContractWorkspace|null>(null);
   const [searchResult,setSearchResult]=useState<MarketContractSearchResult>({total:0,rows:[]});
   const searchSequence=useRef(0);
@@ -103,7 +114,7 @@ export function MarketContracts({characterId,marketDataRevision}:{characterId?:s
       const value=await window.sage.getContractMarketWorkspace();
       setData(value);
       setSearchResult(value.search);
-      setStatus(value.contractsCreatedAt?`${value.counts.contracts.toLocaleString()} public buy/sell contracts loaded · ${value.counts.opportunities.toLocaleString()} strong opportunities.`:"No server-prepared public contract snapshot is installed yet. Refresh Contracts checks for the latest published generation.");
+      setStatus(value.contractsCreatedAt?`${value.counts.contracts.toLocaleString()} public buy/sell contracts loaded. Character-adjusted opportunity ranking is ready.`:"No server-prepared public contract snapshot is installed yet. Refresh Contracts checks for the latest published generation.");
       setSelected(current=>current?(value.search.rows.find(row=>row.contractId===current.contractId)??value.opportunities.find(row=>row.contractId===current.contractId)??null):null);
     }catch(error){setData(null);setSearchResult({total:0,rows:[]});setStatus(error instanceof Error?error.message:"Contract data is unavailable.");}
     finally{setBusy(false);contractRefreshActive=false;}
@@ -141,6 +152,8 @@ export function MarketContracts({characterId,marketDataRevision}:{characterId?:s
   const categories=data?.options.categories??[];
   const contractTypes=data?.options.contractTypes??["auction","item_exchange"];
   const availabilities=data?.options.availabilities??[];
+  const feeProfile=useMemo(()=>contractFeeProfile(snapshot),[snapshot?.characterId,snapshot?.updatedAt]);
+  const projectedOpportunities=useMemo(()=>feeProfile?projectContractOpportunities(data?.opportunities??[],feeProfile):(data?.opportunities??[]),[data?.opportunities,feeProfile]);
 
   useEffect(()=>{
     if(!data)return;
@@ -160,25 +173,27 @@ export function MarketContracts({characterId,marketDataRevision}:{characterId?:s
     const needle=opportunitySystem.trim().toLowerCase();
     const minProfit= million(minOpportunityProfit);
     const parsedRoi=Number(minOpportunityRoi);const minRoi=Number.isFinite(parsedRoi)&&minOpportunityRoi.trim()!==""?parsedRoi:null;
-    const rows=(data?.opportunities??[]).filter(row=>{
+    const rows=projectedOpportunities.filter(row=>{
       const recommended=recommendedExitFor(row);
       const modeMatch=opportunityMode==="all"||recommended?.kind===opportunityMode;
       const systemMatch=!needle||`${row.systemName} ${row.regionName} ${row.station}`.toLowerCase().includes(needle);
       return modeMatch&&systemMatch&&opportunitySecurity[securityKey(row)]&&(minProfit==null||profitFor(row)>=minProfit)&&(minRoi==null||roiFor(row)>=minRoi);
     });
     return [...rows].sort((a,b)=>opportunitySort==="roi"?roiFor(b)-roiFor(a)||profitFor(b)-profitFor(a):profitFor(b)-profitFor(a)||roiFor(b)-roiFor(a));
-  },[data,opportunityMode,opportunitySort,opportunitySystem,opportunitySecurity,minOpportunityProfit,minOpportunityRoi]);
+  },[projectedOpportunities,opportunityMode,opportunitySort,opportunitySystem,opportunitySecurity,minOpportunityProfit,minOpportunityRoi]);
 
   const resetSearch=()=>{setItemSearch("");setRegionId("all");setLocationSearch("");setContractType("all");setCategory("all");setAvailability("all");setIssuerSearch("");setMinPrice("");setMaxPrice("");setExcludeMultiple(false);setExactType(false);setCleanOnly(false);setSearchSecurity({...ALL_SECURITY});};
   const resetProfit=()=>{setOpportunityMode("all");setOpportunitySort("profit");setOpportunitySystem("");setOpportunitySecurity({...ALL_SECURITY});setMinOpportunityProfit("");setMinOpportunityRoi("");};
 
-  const topProfit=data?.topProfit??0;
-  const averageRoi=data?.averageRoi??0;
+  const topProfit=Math.max(0,...projectedOpportunities.map(row=>Math.max(0,profitFor(row))));
+  const positiveRois=projectedOpportunities.map(row=>roiFor(row)).filter((value):value is number=>Number.isFinite(value)&&value>0);
+  const averageRoi=positiveRois.length?positiveRois.reduce((sum,value)=>sum+value,0)/positiveRois.length:0;
+  const opportunityCount=projectedOpportunities.length;
   const refreshedAt=data?.generatedAt||data?.contractsCreatedAt;
   const showStatus=busy||!data||/failed|unavailable|no server-prepared/i.test(status);
 
   return <section className={`contracts-page contracts-page-v2 contracts-reference workspace-${workspace}`}>
-    <ContractsHero workspace={workspace} data={data} busy={busy} refreshedAt={refreshedAt} topProfit={topProfit} averageRoi={averageRoi} onRefresh={()=>void refresh()}/>
+    <ContractsHero workspace={workspace} data={data} busy={busy} refreshedAt={refreshedAt} opportunityCount={opportunityCount} topProfit={topProfit} averageRoi={averageRoi} onRefresh={()=>void refresh()}/>
     {showStatus&&<div className={`contracts-status contracts-status-compact ${busy?"busy":""}`}><span className={busy?"pulse":""}/><div>{status}</div></div>}
 
     <div className="contract-subtabs contract-subtabs-reference" role="tablist" aria-label="Contract workspace">
@@ -229,19 +244,19 @@ export function MarketContracts({characterId,marketDataRevision}:{characterId?:s
   </section>;
 }
 
-function ContractsHero({workspace,data,busy,refreshedAt,topProfit,averageRoi,onRefresh}:{workspace:WorkspaceTab;data:MarketContractWorkspace|null;busy:boolean;refreshedAt:string|null|undefined;topProfit:number;averageRoi:number;onRefresh():void}){
+function ContractsHero({workspace,data,busy,refreshedAt,opportunityCount,topProfit,averageRoi,onRefresh}:{workspace:WorkspaceTab;data:MarketContractWorkspace|null;busy:boolean;refreshedAt:string|null|undefined;opportunityCount:number;topProfit:number;averageRoi:number;onRefresh():void}){
   const profit=workspace==="profit";
   return <header className={`contracts-reference-hero ${profit?"profit":"search"}`}>
     <div className="contracts-hero-mark"><IskGlyph name={profit?"target":"contract"}/></div>
     <div className="contracts-hero-copy">
       <p className="eyebrow">{profit?"PROFIT OPPORTUNITIES INTELLIGENCE":"PUBLIC CONTRACT INTELLIGENCE"}</p>
       <h2>{profit?"OPPORTUNITIES & SIGNALS":"CONTRACTS"}</h2>
-      <p>{profit?"Real-time profit opportunities ranked by potential and signal quality. Updated from the retained public contract book.":"Search the retained public contract book or switch to profit opportunities for Sage-ranked arbitrage."}</p>
+      <p>{profit?"Character-adjusted profit opportunities ranked by net profit and signal quality over the retained public contract book.":"Search the retained public contract book or switch to profit opportunities for Sage-ranked arbitrage."}</p>
     </div>
     {profit?<div className="contracts-profit-kpis">
-      <article><span>TOTAL OPPORTUNITIES</span><strong>{data?.counts.opportunities.toLocaleString()??"—"}</strong><small>ranked signals</small></article>
-      <article><span>TOP PROFIT (ISK)</span><strong>{topProfit>0?compactIsk(topProfit):"—"}</strong><small>best current exit</small></article>
-      <article><span>AVG ROI</span><strong>{averageRoi>0?averageRoi.toFixed(1)+"%":"—"}</strong><small>positive signals</small></article>
+      <article><span>TOTAL OPPORTUNITIES</span><strong>{data?opportunityCount.toLocaleString():"—"}</strong><small>character-adjusted ranked signals</small></article>
+      <article><span>TOP PROFIT (ISK)</span><strong>{topProfit>0?compactIsk(topProfit):"—"}</strong><small>best character-adjusted exit</small></article>
+      <article><span>AVG ROI</span><strong>{averageRoi>0?averageRoi.toFixed(1)+"%":"—"}</strong><small>net positive signals</small></article>
       <button type="button" className="contracts-update-kpi" disabled={busy} onClick={onRefresh}><span>LAST UPDATE</span><strong>{ageLabel(refreshedAt)}</strong><small><IskGlyph name="reset"/>{busy?"Refreshing…":"Refresh data"}</small></button>
     </div>:<div className="contracts-refresh-block"><button type="button" className="contracts-refresh-button" disabled={busy} onClick={onRefresh}><IskGlyph name="reset"/>{busy?"REFRESHING CONTRACTS…":"REFRESH CONTRACTS"}</button><small><i/> Last refreshed: {ageLabel(refreshedAt)}</small></div>}
   </header>;
@@ -276,7 +291,7 @@ function OpportunityRow({row,selected,onSelect}:{row:MarketContractOpportunity;s
   return <button type="button" className={`contract-opportunity-row ${kind} score-${tone} ${selected?"selected":""}`} onClick={onSelect}>
     <span className="contract-opportunity-score"><small>{signalLabel(score)}</small><em>{kind==="immediate"?"PROFIT":"SIGNAL"}</em><strong>{score}%</strong></span>
     <span className="contract-opportunity-copy"><span className="contract-opportunity-titleline"><strong>{row.title||`Contract ${row.contractId}`}</strong><em>{contractTypeLabel(row.contractType||"item_exchange")}</em></span><small>{row.systemName}{recommended?.system&&recommended.system!==row.systemName?" → "+recommended.system:""} · {row.station}</small><span className="contract-opportunity-tags"><i>{kind==="immediate"?"Immediate":"Haul"}</i>{row.cleanSale&&<i>Clean sale</i>}{row.securityBand&&<i>{row.securityBand.toUpperCase()} SEC</i>}{!row.originResolved&&<i className="warning">Origin unverified</i>}{row.bestBuyUsesPlayerStructure&&kind==="haul"&&<i className="warning">Structure access</i>}</span><small className={`contract-opportunity-expiry ${expiry.tone}`}>Expires in {expiry.label}{itemText?" · "+itemText:""}</small></span>
-    <span className="contract-opportunity-metric positive"><small>PROFIT</small><strong>{recommended?compactIsk(recommended.profit)+" ISK":"—"}</strong><em>Potential</em></span>
+    <span className="contract-opportunity-metric positive"><small>PROFIT</small><strong>{recommended?compactIsk(recommended.profit)+" ISK":"—"}</strong><em>{row.characterProjection?"After fees":"Potential"}</em></span>
     <span className="contract-opportunity-metric roi"><small>ROI</small><strong>{recommended?.roi==null?"—":recommended.roi.toFixed(1)+"%"}</strong><em>{recommended?.roi!=null&&recommended.roi>=50?"Very High":recommended?.roi!=null&&recommended.roi>=25?"Good":"Moderate"}</em></span>
     <span className="contract-opportunity-metric reliability"><small>RELIABILITY</small><strong>{score}%</strong><em>{tone==="excellent"?"Excellent":tone==="good"?"Very Good":tone==="steady"?"Good":"Watch"}</em></span>
     <span className="contract-signal-bars" aria-label={`Signal score ${score} percent`}>{[1,2,3,4,5].map(value=><i className={score>=value*20?"active":""} key={value}/>)}</span>
@@ -289,14 +304,35 @@ function SecurityBadge({band}:{band:"low"|"null"}){return <span className={`cont
 
 function ContractDetail({row,finding,findStatus,completionStatus,onFind,onComplete}:{row:MarketContractOpportunity;finding:boolean;findStatus:string;completionStatus:string;onFind():void;onComplete():void}){
   const recommended=recommendedExitFor(row);
-  const exit = recommended;
-  const contractCost = row.price + (row.requestedItemsFullyPriced ? row.requestedItemCost : 0);
-  const haulRequired = recommended?.kind === "haul";
+  const exit=recommended;
+  const contractCost=row.price+(row.requestedItemsFullyPriced?row.requestedItemCost:0);
+  const haulRequired=recommended?.kind==="haul";
   const hasCapitalPilot=row.pilotRequiredShips.some(ship=>ship.capital);
-  const pilotLabel=hasCapitalPilot?"CAPITAL â€” PILOT REQUIRED":"LARGE HULL â€” PILOT REQUIRED";
-  return <div className="contract-detail"><div className="contract-detail-head"><div><p className="eyebrow">CONTRACT {row.contractId}</p><h3>{row.title}</h3><small className="contract-detail-location">{row.station} Â· {row.systemName}{row.securityBand!=="high"&&row.securityBand&&<SecurityBadge band={row.securityBand}/>} Â· expires {new Date(row.expires).toLocaleString()}</small><div className="contract-detail-meta"><span>{contractTypeLabel(row.contractType||"item_exchange")}</span><span>{availabilityLabel(row.availability||"public")}</span>{row.issuerName&&<span>Issuer: {row.issuerName}</span>}{row.issuerCorporationName&&row.issuerCorporationName!==row.issuerName&&<span>{row.issuerCorporationName}</span>}{row.dateIssued&&<span>Issued {new Date(row.dateIssued).toLocaleString()}</span>}</div></div><div className="contract-detail-actions"><strong>{money(row.price)} ISK</strong><button type="button" className="find-in-eve" disabled={finding} onClick={onFind}>{finding?"Opening in EVE...":"Find in EVE"}</button>{exit&&exit.profit>0&&<button type="button" className="contract-complete-deal" onClick={onComplete}>I completed this deal</button>}</div></div>
-    <div className="contract-value-grid"><span><small>COST OF CONTRACT</small><strong>{money(contractCost)} ISK</strong></span><span><small>REVENUE FROM SALE</small><strong>{exit==null?"-":money(exit.revenue)+" ISK"}</strong></span><span><small>PROFIT</small><strong>{exit==null?"-":(exit.profit>=0?"+":"")+money(exit.profit)+" ISK"}</strong></span>{haulRequired&&<span><small>HAUL CARGO (REPACKAGED)</small><strong>{cargoVolume(row.haulCargoVolumeM3)} mÂ³</strong></span>}{haulRequired&&row.pilotRequiredShips.length>0&&<span className="contract-pilot-value"><small>{pilotLabel}</small><strong>{row.pilotRequiredShips.map(ship=>`${ship.quantity}Ã— ${ship.typeName}`).join(", ")}</strong></span>}</div>
-    <div className="contract-item-table"><div className="contract-item-row heading"><span>Side</span><span>Item</span><span>Qty</span><span>Best buy</span><span>Best sell</span></div>{row.items.map((item,index)=><div className="contract-item-row" key={`${item.typeId}-${index}`}><span className={item.included?"included":"requested"}>{item.included?"YOU GET":"YOU GIVE"}</span><strong>{item.typeName}</strong><span>{item.quantity.toLocaleString()}</span><span>{!item.recoverableForResale?(item.valuationNote??"NON-RECOVERABLE"):item.bestBuy==null?"â€”":`${money(item.bestBuy)} ISK`}</span><span>{!item.recoverableForResale?"EXCLUDED":item.bestSell==null?"â€”":`${money(item.bestSell)} ISK`}</span></div>)}</div>
+  const pilotLabel=hasCapitalPilot?"CAPITAL - PILOT REQUIRED":"LARGE HULL - PILOT REQUIRED";
+  const profile=row.characterProjection;
+  const sellOrderProjected=profile&&row.sellOrderNetProfit!=null;
+  return <div className="contract-detail"><div className="contract-detail-head"><div><p className="eyebrow">CONTRACT {row.contractId}</p><h3>{row.title}</h3><small className="contract-detail-location">{row.station} — {row.systemName}{row.securityBand!=="high"&&row.securityBand&&<SecurityBadge band={row.securityBand}/>} — expires {new Date(row.expires).toLocaleString()}</small><div className="contract-detail-meta"><span>{contractTypeLabel(row.contractType||"item_exchange")}</span><span>{availabilityLabel(row.availability||"public")}</span>{row.issuerName&&<span>Issuer: {row.issuerName}</span>}{row.issuerCorporationName&&row.issuerCorporationName!==row.issuerName&&<span>{row.issuerCorporationName}</span>}{row.dateIssued&&<span>Issued {new Date(row.dateIssued).toLocaleString()}</span>}{profile&&<span>{profile.characterName} · Accounting {profile.accountingLevel} · Broker Relations {profile.brokerRelationsLevel}</span>}</div></div><div className="contract-detail-actions"><strong>{money(row.price)} ISK</strong><button type="button" className="find-in-eve" disabled={finding} onClick={onFind}>{finding?"Opening in EVE...":"Find in EVE"}</button>{exit&&exit.profit>0&&<button type="button" className="contract-complete-deal" onClick={onComplete}>I completed this deal</button>}</div></div>
+    <div className="contract-value-grid character-net">
+      <span><small>COST OF CONTRACT</small><strong>{money(contractCost)} ISK</strong></span>
+      <span><small>GROSS SALE REVENUE</small><strong>{exit==null?"-":money(exit.revenue)+" ISK"}</strong></span>
+      <span className="contract-fee-value"><small>{profile?`SALES TAX - ${profile.characterName} / ACCOUNTING ${profile.accountingLevel}`:"SALES TAX"}</small><strong>{exit==null?"-":`-${money(exit.salesTaxAmount)} ISK (${exit.salesTaxRate.toFixed(3)}%)`}</strong></span>
+      <span className="contract-fee-value"><small>BROKER FEE</small><strong>{exit==null?"-":exit.brokerFeeAmount>0?`-${money(exit.brokerFeeAmount)} ISK (${exit.brokerFeeRate.toFixed(3)}%)`:"0 ISK - existing buy order"}</strong></span>
+      <span><small>NET SALE REVENUE</small><strong>{exit==null?"-":money(exit.netRevenue)+" ISK"}</strong></span>
+      <span className="contract-net-profit"><small>NET PROFIT</small><strong>{exit==null?"-":(exit.profit>=0?"+":"")+money(exit.profit)+" ISK"}</strong></span>
+      {haulRequired&&<span><small>HAUL CARGO (REPACKAGED)</small><strong>{cargoVolume(row.haulCargoVolumeM3)} m³</strong></span>}
+      {haulRequired&&row.pilotRequiredShips.length>0&&<span className="contract-pilot-value"><small>{pilotLabel}</small><strong>{row.pilotRequiredShips.map(ship=>`${ship.quantity}x ${ship.typeName}`).join(", ")}</strong></span>}
+    </div>
+    {sellOrderProjected&&<section className="contract-sell-order-projection">
+      <div className="contract-sell-order-heading"><div><small>SELL-ORDER PROJECTION</small><strong>Listing route with character-adjusted market fees</strong></div><span>Broker Relations {profile.brokerRelationsLevel} | {profile.brokerFeeRate.toFixed(3)}% estimate before standings</span></div>
+      <div className="contract-value-grid sell-order">
+        <span><small>GROSS REVENUE</small><strong>{money(row.sellOrderGross)} ISK</strong></span>
+        <span className="contract-fee-value"><small>SALES TAX</small><strong>-{money(row.sellOrderSalesTaxAmount??0)} ISK ({(row.sellOrderSalesTaxRate??0).toFixed(3)}%)</strong></span>
+        <span className="contract-fee-value"><small>BROKER / LISTING FEE</small><strong>-{money(row.sellOrderBrokerFeeAmount??0)} ISK ({(row.sellOrderBrokerFeeRate??0).toFixed(3)}%)</strong></span>
+        <span><small>NET SALE REVENUE</small><strong>{money(row.sellOrderNetRevenue??0)} ISK</strong></span>
+        <span className="contract-net-profit"><small>NET PROFIT / ROI</small><strong>{(row.sellOrderNetProfit??0)>=0?"+":""}{money(row.sellOrderNetProfit??0)} ISK | {percent(row.sellOrderNetRoiPercent)}</strong></span>
+      </div>
+    </section>}
+    <div className="contract-item-table"><div className="contract-item-row heading"><span>Side</span><span>Item</span><span>Qty</span><span>Best buy</span><span>Best sell</span></div>{row.items.map((item,index)=><div className="contract-item-row" key={`${item.typeId}-${index}`}><span className={item.included?"included":"requested"}>{item.included?"YOU GET":"YOU GIVE"}</span><strong>{item.typeName}</strong><span>{item.quantity.toLocaleString()}</span><span>{!item.recoverableForResale?(item.valuationNote??"NON-RECOVERABLE"):item.bestBuy==null?"—":`${money(item.bestBuy)} ISK`}</span><span>{!item.recoverableForResale?"EXCLUDED":item.bestSell==null?"—":`${money(item.bestSell)} ISK`}</span></div>)}</div>
     <small className="contract-detail-note">{row.note}</small>{findStatus&&<div className="contract-find-status" role="status">{findStatus}</div>}{completionStatus&&<div className="contract-completion-status" role="status">{completionStatus}</div>}
   </div>;
 }

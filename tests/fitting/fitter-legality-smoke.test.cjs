@@ -18,6 +18,7 @@ const dogma = require('../../dist-electron/fitting-dogma.js');
     'Shield Command Burst II',
     'Shield Extension Charge',
     'Ogre II',
+    'Drones',
     'Tritanium',
   ])).map(item => [item.name, item.id]));
   const id = name => {
@@ -92,7 +93,7 @@ const dogma = require('../../dist-electron/fitting-dogma.js');
   const droneSpares = await dogma.analyzeFittingDogma({
     hullTypeId: id('Ishtar'),
     items: [{ typeId: id('Ogre II'), quantity: 10, rack: 'drone' }],
-    snapshot: baseSnapshot,
+    snapshot: { ...baseSnapshot, skills: { total_sp: 0, skills: [{ skill_id: id('Drones'), trained_skill_level: 5 }] } },
   });
   assert.equal(droneSpares.issues.some(issue => issue.code === 'drone-bandwidth'), false, 'spare drones in bay must not be treated as active bandwidth');
   assert.equal(droneSpares.storage.droneBandwidthUsed, 125, 'visible bandwidth must reflect the five active Ogre IIs, not all ten spares');

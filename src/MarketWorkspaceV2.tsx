@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CharacterSnapshot } from "./types";
 import { GlobalMarketSearch } from "./GlobalMarketSearch";
-import { appendShoppingList, loadShoppingList, OPEN_SHOPPING_LIST_EVENT, OPEN_SHOPPING_LIST_PENDING_KEY, saveShoppingList, SHOPPING_LIST_UPDATED_EVENT, type ShoppingItem, type ShoppingListAdd } from "./shopping-list";
+import { appendShoppingList, loadShoppingList, OPEN_SHOPPING_LIST_EVENT, OPEN_SHOPPING_LIST_PENDING_KEY, saveShoppingList, serializeShoppingListForEveMultiBuy, SHOPPING_LIST_UPDATED_EVENT, type ShoppingItem, type ShoppingListAdd } from "./shopping-list";
 
 const itemIcon = (typeId:number) => `https://images.evetech.net/types/${typeId}/icon?size=64`;
+const MULTIBUY_HELP = "Copy this shopping list, then in EVE Online open the Market > MultiBuy window, choose Import Shopping List, paste the list, review the prices and quantities, then buy the items.";
 
 export function MarketWorkspaceV2({snapshot}:{snapshot?:CharacterSnapshot}){
   const [tab,setTab]=useState<"search"|"shopping">(() => sessionStorage.getItem(OPEN_SHOPPING_LIST_PENDING_KEY)==="1" ? "shopping" : "search");
@@ -28,6 +29,7 @@ export function MarketWorkspaceV2({snapshot}:{snapshot?:CharacterSnapshot}){
   },[]);
   function add(input:ShoppingListAdd){appendShoppingList([input],`${input.name} added to Shopping List.`);}
   const remaining=useMemo(()=>items.filter(item=>!item.done),[items]);
+  const multiBuyText=useMemo(()=>serializeShoppingListForEveMultiBuy(items),[items]);
   const completed=items.length-remaining.length;
   async function open(item:ShoppingItem){
     if(!snapshot?.characterId){setStatus("Select a connected character before opening items in EVE.");return;}
@@ -38,6 +40,13 @@ export function MarketWorkspaceV2({snapshot}:{snapshot?:CharacterSnapshot}){
     }catch(error){setStatus(error instanceof Error?error.message:"Could not open the item market in EVE.");}
   }
   async function openNext(){const next=remaining[0];if(!next){setStatus("Shopping List complete.");return;}await open(next);}
+  async function copyForEveMultiBuy(){
+    if(!multiBuyText){setStatus("No remaining valid Shopping List items to copy for EVE MultiBuy.");return;}
+    try{
+      const verified=await window.sage.copyText(multiBuyText);
+      setStatus(verified?"Copied for EVE MultiBuy":"Could not copy for EVE MultiBuy: clipboard verification failed.");
+    }catch(error){setStatus(error instanceof Error?`Could not copy for EVE MultiBuy: ${error.message}`:"Could not copy for EVE MultiBuy.");}
+  }
   function setQuantity(id:string,value:string){setItems(current=>current.map(row=>row.id===id?{...row,quantity:Math.max(1,Math.floor(Number(value)||1))}:row));}
   function toggleDone(id:string){setItems(current=>current.map(row=>row.id===id?{...row,done:!row.done}:row));}
   function remove(id:string){setItems(current=>current.filter(row=>row.id!==id));}
@@ -52,7 +61,10 @@ export function MarketWorkspaceV2({snapshot}:{snapshot?:CharacterSnapshot}){
     {tab==="shopping"&&<section className="market-shopping-list">
       <div className="market-shopping-head">
         <div><p className="eyebrow">EVE PURCHASE RUNNER</p><h2>Shopping List</h2><p>Work the list directly against the EVE market, then mark each line complete.</p></div>
-        <button className="primary market-shopping-next" onClick={()=>void openNext()} disabled={!remaining.length}>Open Next in EVE</button>
+        <div className="market-shopping-head-actions">
+          <button className="market-shopping-multibuy" onClick={()=>void copyForEveMultiBuy()} disabled={!multiBuyText} title={MULTIBUY_HELP}>Copy for EVE MultiBuy</button>
+          <button className="primary market-shopping-next" onClick={()=>void openNext()} disabled={!remaining.length}>Open Next in EVE</button>
+        </div>
       </div>
       <div className="market-shopping-summary">
         <article><span>Remaining</span><strong>{remaining.length}</strong></article>

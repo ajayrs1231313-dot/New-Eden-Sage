@@ -1,5 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { availableParallelism } from "node:os";
+import { Worker } from "node:worker_threads";
 import { DATA_ROOT } from "./data-paths";
 import { analyzeCapabilities, analyzeCurrentShipUse, type CapabilityAnalysis, type CapabilityResult } from "./capability-engine";
 import { getPveStaticIndex, type PveSystemStatic } from "./pve-static-index";
@@ -356,6 +358,63 @@ function earningsFor(row: Pick<PveLocationOpportunity, "kind" | "readiness">) {
   };
 }
 
+type PveReadinessBundle = {
+  capabilities: CapabilityAnalysis | null;
+  currentShipReadiness: CapabilityResult | null;
+};
+
+function runPveReadinessWorker(
+  task: "capabilities" | "current-ship",
+  snapshot: any,
+  cloneState: CloneState,
+): Promise<CapabilityAnalysis | CapabilityResult | null> {
+  return new Promise((resolve) => {
+    const worker = new Worker(path.join(__dirname, "pve-readiness-worker.js"), {
+      name: `new-eden-sage-pve-${task}`,
+      workerData: { task, snapshot, cloneState },
+      env: process.env,
+      resourceLimits: { maxOldGenerationSizeMb: 192, maxYoungGenerationSizeMb: 32 },
+    });
+    let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
+    const finish = (value: CapabilityAnalysis | CapabilityResult | null) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      resolve(value);
+      void worker.terminate().catch(() => undefined);
+    };
+    worker.once("message", (message: any) => finish(message?.type === "result" ? message.result ?? null : null));
+    worker.once("error", () => finish(null));
+    worker.once("exit", () => finish(null));
+    timeout = setTimeout(() => finish(null), 90_000);
+    timeout.unref();
+  });
+}
+
+async function resolvePveReadiness(snapshot: any, cloneState: CloneState, suppliedCapabilities?: CapabilityAnalysis): Promise<PveReadinessBundle> {
+  const useParallelWorkers = availableParallelism() >= 10;
+  if (useParallelWorkers) {
+    const [capabilitiesResult, currentShipResult] = await Promise.all([
+      suppliedCapabilities ? Promise.resolve(suppliedCapabilities) : runPveReadinessWorker("capabilities", snapshot, cloneState),
+      runPveReadinessWorker("current-ship", snapshot, cloneState),
+    ]);
+    return {
+      capabilities: capabilitiesResult as CapabilityAnalysis | null,
+      currentShipReadiness: currentShipResult as CapabilityResult | null,
+    };
+  }
+
+  const [capabilitiesResult, currentShipResult] = await Promise.allSettled([
+    suppliedCapabilities ? Promise.resolve(suppliedCapabilities) : analyzeCapabilities(snapshot, cloneState),
+    analyzeCurrentShipUse(snapshot, "pve-combat", cloneState),
+  ]);
+  return {
+    capabilities: capabilitiesResult.status === "fulfilled" ? capabilitiesResult.value : null,
+    currentShipReadiness: currentShipResult.status === "fulfilled" ? currentShipResult.value : null,
+  };
+}
+
 export async function analyzePveLocations(input: PveLocationQuery, runtime: PveAnalysisRuntime): Promise<PveLocationAnalysis> {
   const snapshot = runtime.snapshot;
   if (!snapshot?.location?.solar_system_id) throw new Error("Sync the selected character before analyzing PvE locations.");
@@ -365,26 +424,17 @@ export async function analyzePveLocations(input: PveLocationQuery, runtime: PveA
   const limitPerKind = Math.max(5, Math.min(50, Number(input.limitPerKind ?? 20)));
 
   runtime.progress?.({ stage: "pve-live", message: "Loading current public PvE and system activity signals…", percent: 5 });
-  const live = runtime.liveData ?? await loadLivePveData(Boolean(input.forceLive));
-  const staticIndex = await getPveStaticIndex();
+  const cloneState = runtime.cloneState ?? "omega";
+  const livePromise = runtime.liveData ? Promise.resolve(runtime.liveData) : loadLivePveData(Boolean(input.forceLive));
+  const staticIndexPromise = getPveStaticIndex();
+  const readinessPromise = resolvePveReadiness(snapshot, cloneState, runtime.capabilities);
+
+  const [live, staticIndex] = await Promise.all([livePromise, staticIndexPromise]);
   const originName = staticIndex.systems.get(origin)?.name ?? snapshot.location.solar_system_name ?? `System ${origin}`;
   const maps = metricMaps(live);
 
-  runtime.progress?.({ stage: "pve-readiness", message: "Matching your current ship and skill capability…", percent: 15 });
-  let capabilities = runtime.capabilities ?? null;
-  if (!capabilities) {
-    try {
-      capabilities = await analyzeCapabilities(snapshot, runtime.cloneState ?? "omega");
-    } catch {
-      capabilities = null;
-    }
-  }
-  let currentShipReadiness: CapabilityResult | null = null;
-  try {
-    currentShipReadiness = await analyzeCurrentShipUse(snapshot, "pve-combat", runtime.cloneState ?? "omega");
-  } catch {
-    currentShipReadiness = null;
-  }
+  runtime.progress?.({ stage: "pve-readiness", message: "Matching your current ship and skill capability across PvE workers…", percent: 15 });
+  const { capabilities, currentShipReadiness } = await readinessPromise;
   const readiness = {
     incursion: capability(capabilities, "incursions"),
     mission: capability(capabilities, "missions"),

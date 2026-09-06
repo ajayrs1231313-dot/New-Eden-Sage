@@ -23,6 +23,29 @@ function healthClass(score:number){return score>=90?"good":score>=70?"watch":"ba
 
 const DEFAULT_SETTINGS:PlanetaryRevenueSettings={pocoOwnerTaxPercent:0,brokerFeePercent:null,assumedSecurity:"high",cargoM3:10_000,haulingCostPerTripIsk:0,maxJumps:15,runtimeHours:24};
 
+const PLANNER_STEPS=[
+  [1,"Plan Summary"],[2,"Production Chain"],[3,"Plan Layout"],[4,"Resource Setup"],[5,"Extraction Plan"],[6,"Facility Setup"],[7,"Cost Analysis"],[8,"Review & Deploy"],
+] as const;
+
+function PlannerChainMap({plan,targetTier}:{plan:PlanetaryPlanResult;targetTier:PlanetaryTier}){
+  const tiers=(["P4","P3","P2","P1","P0"] as PlanetaryTier[]).map(tier=>{
+    const built=plan.chain.processors.filter(row=>row.tier===tier).map(row=>({key:`built-${row.outputTypeId}`,name:row.outputName,detail:`${amount(row.output.quantityPerDay*row.equivalent)}/day`,finished:row.outputTypeId===plan.target.typeId,bought:false}));
+    const builtIds=new Set(plan.chain.processors.map(row=>row.outputTypeId));
+    const sourced=plan.sourceDecisions.filter(row=>row.tier===tier&&!builtIds.has(row.typeId)).map(row=>({key:`source-${row.typeId}`,name:row.name,detail:`${amount(row.quantityPerDay)}/day - ${row.decision}`,finished:row.typeId===plan.target.typeId,bought:row.decision==="BUY"}));
+    const nodes=[...built,...sourced];
+    if(tier===targetTier&&!nodes.some(row=>row.finished))nodes.unshift({key:`target-${plan.target.typeId}`,name:plan.target.name,detail:`${amount(plan.target.outputPerDay)}/day`,finished:true,bought:false});
+    return {tier,nodes};
+  }).filter(group=>group.nodes.length);
+  return <div className="pi-reference-chain" aria-label="Production chain">{tiers.map((group,index)=><div className={`pi-reference-chain-stage tier-${group.tier.toLowerCase()}`} key={group.tier}>
+    <div className="pi-reference-chain-label"><span>{group.tier}</span><small>{group.tier==="P0"?"Raw materials":group.tier===targetTier?"Target output":"Production stage"}</small></div>
+    <div className="pi-reference-chain-nodes">{group.nodes.slice(0,8).map(node=><article key={node.key} className={`${node.finished?"finished":""} ${node.bought?"bought":""}`}>
+      <span className="pi-chain-node-icon">{group.tier}</span><div><strong>{node.name}</strong><small>{node.detail}</small></div>
+    </article>)}</div>
+    {index<tiers.length-1&&<span className="pi-reference-chain-flow" aria-hidden="true">v</span>}
+  </div>)}</div>;
+}
+
+
 function TaxSettings({value,onChange,onApply}:{value:PlanetaryRevenueSettings;onChange:(next:PlanetaryRevenueSettings)=>void;onApply:()=>void}){
   return <div className="pi-assumptions">
     <label><span>POCO owner tax</span><div><input type="number" min={0} max={100} step={0.1} value={value.pocoOwnerTaxPercent??0} onChange={e=>onChange({...value,pocoOwnerTaxPercent:Number(e.target.value)||0})}/><b>%</b></div></label>
@@ -100,12 +123,13 @@ function Operations({analysis,onPlan,notificationsEnabled,onToggleNotifications,
   </div>;
 }
 
-function LayoutCard({plan}:{plan:PlanetaryPlanResult}){const l=plan.layout;return <section className="pi-panel"><div className="pi-panel-head"><div><span>LAYOUT SIMULATOR</span><h4>{l.planetType} factory colony</h4><p>Deterministic CCP SDE facility loads are separated from radius-aware proposed-link estimates.</p></div><b className={l.fits?"pi-fit-ok":"pi-fit-bad"}>{l.fits?"FITS":"DOES NOT FIT"}</b></div><div className="pi-layout-bars"><div><span>CPU {amount(l.cpuUsed)} / {amount(l.cpuCapacity)}</span><div><i style={{width:`${l.cpuCapacity?Math.min(100,l.cpuUsed/l.cpuCapacity*100):100}%`}}/></div><small>{amount(l.cpuSpare)} spare</small></div><div><span>Power {amount(l.powerUsed)} / {amount(l.powerCapacity)}</span><div><i style={{width:`${l.powerCapacity?Math.min(100,l.powerUsed/l.powerCapacity*100):100}%`}}/></div><small>{amount(l.powerSpare)} spare</small></div></div><div className="pi-layout-meta"><span>{l.processors} processors</span><span>{l.launchpads} launchpad{l.launchpads===1?"":"s"}</span><span>Facilities CPU {amount(l.facilityCpuUsed)} · PG {amount(l.facilityPowerUsed)}</span><span>Estimated links CPU {amount(l.linkCpu)} · PG {amount(l.linkPower)}</span><span>{l.linkCount} compact links</span><span>{amount(l.minLinkKm)} km nominal minimum link</span><span>{amount(l.bufferVolumeM3)} m³ {l.runtimeHours}h buffer</span><span>CCU {l.ccuLevel}</span></div>{l.missingFacilities.length>0&&<div className="pi-warning">This planet type has no facility for: {l.missingFacilities.join(", ")}.</div>}</section>}
+function LayoutCard({plan}:{plan:PlanetaryPlanResult}){const l=plan.layout;return <section className="pi-panel pi-layout-simulator"><div className="pi-panel-head"><div><span>LAYOUT SIMULATOR</span><h4>{l.planetType} factory colony</h4><p>Deterministic CCP SDE facility loads are separated from radius-aware proposed-link estimates.</p></div><b className={l.fits?"pi-fit-ok":"pi-fit-bad"}>{l.fits?"FITS":"DOES NOT FIT"}</b></div><div className="pi-layout-bars"><div><span>CPU {amount(l.cpuUsed)} / {amount(l.cpuCapacity)}</span><div><i style={{width:`${l.cpuCapacity?Math.min(100,l.cpuUsed/l.cpuCapacity*100):100}%`}}/></div><small>{amount(l.cpuSpare)} spare</small></div><div><span>Power {amount(l.powerUsed)} / {amount(l.powerCapacity)}</span><div><i style={{width:`${l.powerCapacity?Math.min(100,l.powerUsed/l.powerCapacity*100):100}%`}}/></div><small>{amount(l.powerSpare)} spare</small></div></div><div className="pi-layout-meta"><span>{l.processors} processors</span><span>{l.launchpads} launchpad{l.launchpads===1?"":"s"}</span><span>Facilities CPU {amount(l.facilityCpuUsed)} · PG {amount(l.facilityPowerUsed)}</span><span>Estimated links CPU {amount(l.linkCpu)} · PG {amount(l.linkPower)}</span><span>{l.linkCount} compact links</span><span>{amount(l.minLinkKm)} km nominal minimum link</span><span>{amount(l.bufferVolumeM3)} m³ {l.runtimeHours}h buffer</span><span>CCU {l.ccuLevel}</span></div>{l.missingFacilities.length>0&&<div className="pi-warning">This planet type has no facility for: {l.missingFacilities.join(", ")}.</div>}</section>}
 
 function Planner({analysis,snapshot,settings,onSettingsChange,onBack}:{analysis:PlanetaryRevenueAnalysis;snapshot:CharacterSnapshot;settings:PlanetaryRevenueSettings;onSettingsChange:(settings:PlanetaryRevenueSettings)=>void;onBack:()=>void}){
   const [productTypeId,setProductTypeId]=useState<number>(()=>analysis.opportunities.find(row=>(row.taxAdjustedMarginPerDay??0)>0)?.output.typeId??analysis.opportunities[0]?.output.typeId??0);
   const [finalProcessors,setFinalProcessors]=useState(1);const [mode,setMode]=useState<PlanetaryPlanMode>("full");const [hybridBuildTypeIds,setHybridBuildTypeIds]=useState<number[]|undefined>(undefined);const [finderSecurity,setFinderSecurity]=useState<"any"|PlanetarySecurityBand>("any");const [planetId,setPlanetId]=useState<number|null>(null);const [planetTypeId,setPlanetTypeId]=useState<number|null>(null);
   const [observations,setObservations]=useState<PlanetaryResourceObservation[]>([]);const [savedPlans,setSavedPlans]=useState<PlanetarySavedPlan[]>([]);const [loadedDesignerLayout,setLoadedDesignerLayout]=useState<PlanetarySavedPlan["designerLayout"]|null>(null);const [persistenceReady,setPersistenceReady]=useState(false);const [compareSaved,setCompareSaved]=useState<PlanetarySavedPlan|null>(null);const [plan,setPlan]=useState<PlanetaryPlanResult|null>(null);const [loading,setLoading]=useState(false);const [error,setError]=useState("");const [templateText,setTemplateText]=useState("");const [observationText,setObservationText]=useState("");const [planName,setPlanName]=useState("");
+  const [activeStep,setActiveStep]=useState(1);
   const selectedOpportunity=analysis.opportunities.find(row=>row.output.typeId===productTypeId)??analysis.opportunities[0];
 
   const planInput=useMemo<PlanetaryPlanInput>(()=>({characterId:snapshot.characterId,productTypeId:selectedOpportunity?.output.typeId??0,finalProcessors,mode,hybridBuildTypeIds,originSystemId:snapshot.location.solar_system_id,maxJumps:settings.maxJumps,finderSecurity,planetId,planetTypeId,resourceObservations:observations,pocoOwnerTaxPercent:settings.pocoOwnerTaxPercent,brokerFeePercent:settings.brokerFeePercent,assumedSecurity:settings.assumedSecurity,cargoM3:settings.cargoM3,runtimeHours:settings.runtimeHours}),[snapshot.characterId,snapshot.location.solar_system_id,selectedOpportunity?.output.typeId,finalProcessors,mode,hybridBuildTypeIds,settings,finderSecurity,planetId,planetTypeId,observations]);
@@ -127,8 +151,47 @@ function Planner({analysis,snapshot,settings,onSettingsChange,onBack}:{analysis:
   const loadSaved=(saved:PlanetarySavedPlan)=>{const input=saved.input;setLoadedDesignerLayout(saved.designerLayout??null);setProductTypeId(input.productTypeId);setFinalProcessors(input.finalProcessors??1);setMode(input.mode??"full");setHybridBuildTypeIds(input.hybridBuildTypeIds);setFinderSecurity(input.finderSecurity??"any");setPlanetId(input.planetId??null);setPlanetTypeId(input.planetTypeId??null);onSettingsChange({...settings,pocoOwnerTaxPercent:input.pocoOwnerTaxPercent??settings.pocoOwnerTaxPercent,brokerFeePercent:input.brokerFeePercent??settings.brokerFeePercent,assumedSecurity:input.assumedSecurity??settings.assumedSecurity,cargoM3:input.cargoM3??settings.cargoM3,haulingCostPerTripIsk:input.haulingCostPerTripIsk??settings.haulingCostPerTripIsk,maxJumps:input.maxJumps??settings.maxJumps,runtimeHours:input.runtimeHours??settings.runtimeHours});};
 
   if(!selectedOpportunity)return <div className="pi-empty"><strong>No PI schematic is available.</strong></div>;
+  const jumpToStep=(step:number)=>{setActiveStep(step);const selector:Record<number,string>={1:".pi-reference-cockpit",2:".pi-reference-chain",3:".pi-designer-panel",4:".pi-survey-panel",5:".pi-source-grid",6:".pi-layout-simulator",7:".pi-economics",8:".pi-review-deploy"};requestAnimationFrame(()=>document.querySelector(selector[step]??".pi-reference-cockpit")?.scrollIntoView({behavior:"smooth",block:"start"}));};
+  const resetPlan=()=>{setFinalProcessors(1);setMode("full");setHybridBuildTypeIds(undefined);setFinderSecurity("any");setPlanetId(null);setPlanetTypeId(null);setLoadedDesignerLayout(null);setCompareSaved(null);setPlanName("");setActiveStep(1);};
+  const planViable=Boolean(plan?.layout.fits&&!plan?.allocation.deficit&&!plan?.layout.missingFacilities.length);
+  const facilityCount=plan?plan.layout.processors+plan.layout.launchpads+(plan.layout.commandCenter?1:0):0;
   return <div className="pi-planner">
-    <section className="pi-planner-hero"><div><span>PLANETARY PLANNER</span><h4>Design the entire PI operation</h4><p>Build/buy/extract decisions, stockpile refills, character allocation, planet search, layout fitting, hauling and EVE template output in one plan.</p></div><button onClick={onBack}>← Planetary Command</button></section>
+    <section className="pi-planner-hero pi-planner-reference-hero"><div><span>PLANETARY PLANNER</span><h4>Design and optimise PI operations</h4><p>One guided plan from product choice and production chain through colony layout, extraction, economics and deployment.</p></div><div className="pi-planner-hero-actions"><button onClick={resetPlan}>+ New Plan</button><button onClick={onBack}>&lt;- Planetary Command</button></div></section>
+    <nav className="pi-planner-stepper" aria-label="Planetary planner stages">{PLANNER_STEPS.map(([step,label])=><button key={step} className={activeStep===step?"active":activeStep>step?"done":""} onClick={()=>jumpToStep(step)}><b>{step}</b><span>{label}</span></button>)}</nav>
+    {plan&&<section className="pi-reference-cockpit">
+      <aside className="pi-reference-summary">
+        <header><span>PLAN SUMMARY</span></header>
+        <div><small>Target product</small><strong>{plan.target.name}</strong></div>
+        <div><small>Output / day</small><strong>{amount(plan.target.outputPerDay)}</strong><span>{plan.target.name}</span></div>
+        <div><small>Net value / day</small><strong className={(plan.target.taxAdjustedProfitPerDay??0)>=0?"positive":"negative"}>{money(plan.target.taxAdjustedProfitPerDay)}</strong><span>after configured taxes and fees</span></div>
+        <div><small>Plan size</small><strong>{facilityCount}</strong><span>facilities - {plan.chain.dedicatedProcessors} processors</span></div>
+        <div><small>Plan type</small><em>{mode==="full"?"Full production":mode==="hybrid"?"Hybrid plan":"Buy-input plan"}</em></div>
+        <div><small>Planet</small><strong>{plan.layout.planetType}</strong><span>{plan.layout.planetId?`Planet ${plan.layout.planetId}`:"candidate layout"}</span></div>
+      </aside>
+      <main className="pi-reference-production">
+        <header><div><span>PRODUCTION CHAIN</span><small>Live from the selected Sage plan</small></div><em>{selectedOpportunity.tier} target</em></header>
+        <PlannerChainMap plan={plan} targetTier={selectedOpportunity.tier}/>
+        <footer><span><i className="finished"/>Finished product</span><span><i className="intermediate"/>Processed / intermediate</span><span><i className="raw"/>Raw / acquired material</span></footer>
+      </main>
+      <aside className="pi-reference-feasibility">
+        <header><span>PLAN FEASIBILITY</span></header>
+        <div className={`pi-reference-status ${planViable?"viable":"blocked"}`}><b>{planViable?"OK":"!"}</b><div><strong>{planViable?"VIABLE PLAN":"PLAN NEEDS WORK"}</strong><span>{planViable?"All layout requirements met":plan.layout.missingFacilities.length?"Missing required facility":"Capacity or colony-slot constraint"}</span></div></div>
+        <div className="pi-reference-resource"><span>CPU <b>{amount(plan.layout.cpuUsed)} / {amount(plan.layout.cpuCapacity)}</b></span><div><i style={{width:`${Math.min(100,plan.layout.cpuCapacity?plan.layout.cpuUsed/plan.layout.cpuCapacity*100:100)}%`}}/></div></div>
+        <div className="pi-reference-resource"><span>Power Grid <b>{amount(plan.layout.powerUsed)} / {amount(plan.layout.powerCapacity)}</b></span><div><i style={{width:`${Math.min(100,plan.layout.powerCapacity?plan.layout.powerUsed/plan.layout.powerCapacity*100:100)}%`}}/></div></div>
+        <dl><div><dt>Processors</dt><dd>{plan.layout.processors}</dd></div><div><dt>Launchpads</dt><dd>{plan.layout.launchpads}</dd></div><div><dt>Links</dt><dd>{plan.layout.linkCount}</dd></div><div><dt>Planets required</dt><dd>{plan.allocation.requiredColonies}</dd></div><div><dt>Slots available</dt><dd>{plan.allocation.availableColonies}</dd></div><div><dt>Buffer</dt><dd>{amount(plan.layout.bufferVolumeM3)} m3</dd></div></dl>
+        <button onClick={()=>{setMode("hybrid");setHybridBuildTypeIds(undefined);setActiveStep(2);}}>Optimise Plan</button>
+      </aside>
+      <footer className="pi-reference-footer">
+        <button onClick={()=>void savePlan()}>Save Plan</button>
+        <article><span>Input cost / day</span><strong>{money(plan.target.inputAcquisitionCostPerDay)}</strong></article>
+        <article><span>Runtime target</span><strong>{settings.runtimeHours??24}h</strong></article>
+        <article><span>Net / day</span><strong className={(plan.target.taxAdjustedProfitPerDay??0)>=0?"positive":"negative"}>{money(plan.target.taxAdjustedProfitPerDay)}</strong></article>
+        <article><span>Hauling</span><strong>{plan.hauling.tripsPerWeek} trips/wk</strong></article>
+        <article><span>Margin</span><strong>{pct(plan.target.trueMarginPercent)}</strong></article>
+        <button className="next" onClick={()=>jumpToStep(Math.min(8,activeStep+1))}>Next Step -&gt;</button>
+      </footer>
+    </section>}
+    <section className="pi-planner-parameters"><div><span>PLAN PARAMETERS</span><small>Fine-tune the live plan without leaving the guided workspace.</small></div></section>
     <div className="pi-planner-controls">
       <label className="wide"><span>Target product</span><select value={selectedOpportunity.output.typeId} onChange={e=>{setProductTypeId(Number(e.target.value));setPlanetId(null);setPlanetTypeId(null);setHybridBuildTypeIds(undefined);}}>{analysis.opportunities.filter(row=>row.tier!=="P0").sort((a,b)=>(b.taxAdjustedMarginPerDay??-Infinity)-(a.taxAdjustedMarginPerDay??-Infinity)).map(row=><option key={row.schematicId} value={row.output.typeId}>{row.tier} · {row.output.name} · {money(row.taxAdjustedMarginPerDay)}/processor/day</option>)}</select></label>
       <label><span>Final processors</span><input type="number" min={1} max={40} value={finalProcessors} onChange={e=>setFinalProcessors(Math.max(1,Math.min(40,Number(e.target.value)||1)))}/></label>
@@ -176,7 +239,7 @@ function Planner({analysis,snapshot,settings,onSettingsChange,onBack}:{analysis:
 
       <PlanetaryTemplateLibrary snapshot={snapshot} currentInput={planInput} savedPlans={savedPlans} setSavedPlans={setSavedPlans} onLoad={loadSaved}/>
 
-      <section className="pi-panel"><div className="pi-panel-head"><div><span>SAVED PLANS</span><h4>Profiles and sharing</h4><p>Keep alternate factory, extraction and hybrid setups locally; share the exact planner input as JSON.</p></div><button onClick={()=>void window.sage.copyText(JSON.stringify(planInput,null,2))}>Copy current plan</button></div><div className="pi-savebar"><input value={planName} onChange={e=>setPlanName(e.target.value)} placeholder="Plan name (optional)"/><button onClick={savePlan}>Save current plan</button></div>{compareSaved&&<div className="pi-plan-compare"><strong>Comparing current plan with {compareSaved.name}</strong><span>Product {compareSaved.input.productTypeId===planInput.productTypeId?"same":"different"} · mode {compareSaved.input.mode??"full"} → {planInput.mode??"full"} · processors {compareSaved.input.finalProcessors??1} → {planInput.finalProcessors??1} · max jumps {compareSaved.input.maxJumps??15} → {planInput.maxJumps??15} · POCO {compareSaved.input.pocoOwnerTaxPercent??0}% → {planInput.pocoOwnerTaxPercent??0}%</span></div>}{savedPlans.length===0?<div className="pi-empty"><span>No saved PI plans yet.</span></div>:<div className="pi-saved-list">{savedPlans.map(saved=><div key={saved.id}><strong>{saved.name}</strong><span>{when(saved.savedAt)}</span><div><button onClick={()=>loadSaved(saved)}>Load</button><button onClick={()=>setCompareSaved(compareSaved?.id===saved.id?null:saved)}>{compareSaved?.id===saved.id?"Close compare":"Compare"}</button><button onClick={()=>void cloneSaved(saved)}>Clone</button><button onClick={()=>void renameSaved(saved)}>Rename</button><button onClick={()=>void window.sage.copyText(JSON.stringify(saved.input,null,2))}>Share</button><button onClick={()=>void deleteSaved(saved)}>Delete</button></div></div>)}</div>}</section>
+      <section className="pi-panel pi-review-deploy"><div className="pi-panel-head"><div><span>SAVED PLANS</span><h4>Profiles and sharing</h4><p>Keep alternate factory, extraction and hybrid setups locally; share the exact planner input as JSON.</p></div><button onClick={()=>void window.sage.copyText(JSON.stringify(planInput,null,2))}>Copy current plan</button></div><div className="pi-savebar"><input value={planName} onChange={e=>setPlanName(e.target.value)} placeholder="Plan name (optional)"/><button onClick={savePlan}>Save current plan</button></div>{compareSaved&&<div className="pi-plan-compare"><strong>Comparing current plan with {compareSaved.name}</strong><span>Product {compareSaved.input.productTypeId===planInput.productTypeId?"same":"different"} · mode {compareSaved.input.mode??"full"} → {planInput.mode??"full"} · processors {compareSaved.input.finalProcessors??1} → {planInput.finalProcessors??1} · max jumps {compareSaved.input.maxJumps??15} → {planInput.maxJumps??15} · POCO {compareSaved.input.pocoOwnerTaxPercent??0}% → {planInput.pocoOwnerTaxPercent??0}%</span></div>}{savedPlans.length===0?<div className="pi-empty"><span>No saved PI plans yet.</span></div>:<div className="pi-saved-list">{savedPlans.map(saved=><div key={saved.id}><strong>{saved.name}</strong><span>{when(saved.savedAt)}</span><div><button onClick={()=>loadSaved(saved)}>Load</button><button onClick={()=>setCompareSaved(compareSaved?.id===saved.id?null:saved)}>{compareSaved?.id===saved.id?"Close compare":"Compare"}</button><button onClick={()=>void cloneSaved(saved)}>Clone</button><button onClick={()=>void renameSaved(saved)}>Rename</button><button onClick={()=>void window.sage.copyText(JSON.stringify(saved.input,null,2))}>Share</button><button onClick={()=>void deleteSaved(saved)}>Delete</button></div></div>)}</div>}</section>
     </>}
   </div>;
 }

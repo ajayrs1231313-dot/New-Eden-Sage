@@ -47,6 +47,27 @@ export function mergeShoppingList(current:ShoppingItem[], additions:ShoppingList
   return next;
 }
 
+function eveMultiBuyName(value:unknown) {
+  const name = String(value ?? "").trim();
+  if (!name || /^type\s+\d+$/i.test(name)) return "";
+  return name;
+}
+
+export function serializeShoppingListForEveMultiBuy(items:ShoppingItem[]) {
+  const grouped = new Map<number, { name:string; quantity:number }>();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || item.done) continue;
+    const typeId = Number(item.typeId);
+    const quantity = Math.floor(Number(item.quantity));
+    const name = eveMultiBuyName(item.name);
+    if (!Number.isInteger(typeId) || typeId <= 0 || !Number.isFinite(quantity) || quantity <= 0 || !name) continue;
+    const existing = grouped.get(typeId);
+    if (existing) existing.quantity += quantity;
+    else grouped.set(typeId, { name, quantity });
+  }
+  return [...grouped.values()].map((item) => `${item.name} ${item.quantity}`).join("\n");
+}
+
 export function appendShoppingList(additions:ShoppingListAdd[], message?:string) {
   const valid = additions.filter((item) => Number.isInteger(Number(item.typeId)) && Number(item.typeId) > 0 && Number(item.quantity) > 0);
   const next = mergeShoppingList(loadShoppingList(), valid);

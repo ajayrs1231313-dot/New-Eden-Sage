@@ -2,6 +2,7 @@ export type IskModuleWakeDecision = {
   active: boolean;
   visible: boolean;
   prepared: unknown;
+  preparedSource?: "exact" | "last-known-good" | null;
   busy: boolean;
   buildKey: string;
   lastBuildKey: string | null;
@@ -12,9 +13,10 @@ export function iskModuleBuildKey(kind: string, characterId: string, ...revision
 }
 
 export function shouldWakeIskModule(input: IskModuleWakeDecision) {
+  const needsCurrentResult = !input.prepared || input.preparedSource === "last-known-good";
   return input.active
     && input.visible
-    && !input.prepared
+    && needsCurrentResult
     && !input.busy
     && input.buildKey !== input.lastBuildKey;
 }

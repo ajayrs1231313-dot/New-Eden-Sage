@@ -60,4 +60,12 @@ assert.match(isk, /marketAutoBuildKey\.current = null;\r?\n\s*setMarketStatus/, 
 assert.match(isk, /pveAutoBuildKey\.current = null;\r?\n\s*const message/, "failed PvE auto-builds must be retryable");
 assert.match(isk, /inventionAutoBuildKey\.current = null;\r?\n\s*setInventionStatus/, "failed Invention auto-builds must be retryable");
 
+assert.equal(
+  shouldWakeIskModule({ active: true, visible: true, prepared: { previous: true }, preparedSource: "last-known-good", busy: false, buildKey: "market|1|r2", lastBuildKey: null }),
+  true,
+  "last-known-good data must remain visible but still wake one current preparation",
+);
+assert.doesNotMatch(isk, /function openPveTab\(\) \{[\s\S]{0,160}scanPve\(true\)/, "normal PvE tab activation must not force a live analysis");
+assert.match(isk, /onRefresh=\{\(\) => void scanPve\(true\)\}/, "explicit PvE Refresh must retain the live path");
+
 console.log("ISK Command activation regression checks passed");

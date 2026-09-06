@@ -1685,7 +1685,7 @@ function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageP
         </div>
       </div>
     </details>
-    <section><h3><i>⚡</i> Capacitor</h3><div className="pyfa-stat-grid"><Stat icon="◍" label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"—"}/><Stat icon="⏱" label="State" value={cap?(cap.stable?"Stable "+fmt(cap.stablePercent,0)+"%":fmt(cap.depletionSeconds,0)+" s"):"—"}/><Stat icon="↓" label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"—"}/><Stat icon="↑" label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"—"}/></div></section>
+    <section><h3><i>⚡</i> Capacitor</h3><div className="pyfa-stat-grid"><Stat icon="◍" label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"—"}/><Stat icon="⏱" label="State" value={cap?(cap.stable?"Stable +"+fmt(cap.stablePercent,1)+"%":fmt(cap.depletionSeconds,0)+" s"):"—"}/><Stat icon="↓" label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"—"}/><Stat icon="↑" label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"—"}/></div></section>
     <section><h3><i>⌖</i> Targeting & misc</h3><div className="pyfa-stat-grid"><Stat icon="⌖" label="Targets" value={targeting?fmt(targeting.maximumLockedTargets):"—"}/><Stat icon="◎" label="Lock range" value={targeting?fmt(targeting.maximumRangeM/1000,1)+" km":"—"}/><Stat icon="◌" label="Scan res" value={targeting?fmt(targeting.scanResolution,0)+" mm":"—"}/><Stat icon="∿" label="Sensor str" value={targeting?fmt(targeting.sensorStrength,1):"—"}/><Stat icon="➤" label="Speed" value={nav?fmt(nav.maximumVelocity,0)+" m/s":"—"}/><Stat icon="⏱" label="Align" value={nav?fmt(nav.alignSeconds,2)+" s":"—"}/><Stat icon="◯" label="Signature" value={targeting?fmt(targeting.signatureRadiusM,0)+" m":"—"}/><Stat icon="✧" label="Warp" value={nav?fmt(nav.warpSpeedAuPerSecond,1)+" AU/s":"—"}/></div></section>
   </aside>;
 }
@@ -1914,9 +1914,12 @@ function FitPerformance({
           )}
           {analysis.capacitor && (
             <div className="base-stat-grid">
+              <article><span>Capacitor capacity</span><strong>{analysis.capacitor.capacityGj.toFixed(1)} GJ</strong></article>
+              <article><span>Recharge time</span><strong>{analysis.capacitor.rechargeSeconds.toFixed(1)} s</strong></article>
               <article><span>Capacitor demand</span><strong>{analysis.capacitor.demandGjPerSecond.toFixed(2)} GJ/s</strong></article>
               <article><span>Peak recharge</span><strong>{analysis.capacitor.peakRechargeGjPerSecond.toFixed(2)} GJ/s</strong></article>
-              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable - ${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
+              <article><span>Net capacitor</span><strong>{analysis.capacitor.stable ? `+${analysis.capacitor.deltaGjPerSecond.toFixed(2)} GJ/s` : `-${(analysis.capacitor.netDemandGjPerSecond-analysis.capacitor.peakRechargeGjPerSecond).toFixed(2)} GJ/s`}</strong></article>
+              <article><span>Capacitor state</span><strong>{analysis.capacitor.stable ? `Stable +${analysis.capacitor.stablePercent.toFixed(1)}%` : `${Math.round(analysis.capacitor.depletionSeconds)}s`}</strong></article>
             </div>
           )}
           {analysis.damage && (

@@ -107,6 +107,45 @@ function findLocklessDevStacks(lockOwnerPid) {
   return [...watchers.values()].filter((stack) => stack.electronPids.length > 0);
 }
 
+function findOrphanDevElectronMains() {
+  const processes = windowsProcessSnapshot();
+  if (!processes?.length) return [];
+  const rootLower = root.toLowerCase();
+  const byPid = new Map(processes.map((entry) => [Number(entry?.ProcessId), entry]));
+  const orphanPids = [];
+
+  for (const entry of processes) {
+    const pid = Number(entry?.ProcessId);
+    const parentPid = Number(entry?.ParentProcessId);
+    const name = String(entry?.Name || '').toLowerCase();
+    const commandLine = String(entry?.CommandLine || '').toLowerCase();
+    if (name !== 'electron.exe' || !Number.isInteger(pid)) continue;
+    if (!commandLine.includes(rootLower) || !/(?:^|\s)--dev(?:\s|$)/.test(commandLine)) continue;
+    if (/(?:^|\s)--type=/.test(commandLine)) continue;
+
+    const parent = byPid.get(parentPid);
+    const parentName = String(parent?.Name || '').toLowerCase();
+    const parentCommandLine = String(parent?.CommandLine || '').toLowerCase();
+    if (parentName === 'node.exe' && parentCommandLine.includes('electron-dev-watch.cjs')) continue;
+
+    orphanPids.push(pid);
+  }
+
+  return orphanPids;
+}
+
+async function stopOrphanDevElectronMains(pids) {
+  if (!pids.length) return;
+  const label = pids.length === 1 ? 'process' : 'processes';
+  const pronoun = pids.length === 1 ? 'it' : 'them';
+  console.log('[sage-dev] Found orphaned Sage dev Electron ' + label + ' (' + pids.join('/') + '). Retiring ' + pronoun + ' before launch.');
+  for (const pid of pids) {
+    try { process.kill(pid); } catch {}
+  }
+  const deadline = Date.now() + 4000;
+  while (Date.now() < deadline && pids.some(pidAlive)) await sleep(100);
+}
+
 async function stopLocklessDevStacks(stacks) {
   if (!stacks.length) return;
   const description = stacks.map((stack) => {
@@ -150,6 +189,17 @@ function runNode(args) {
     await stopLauncher(launcher);
     launcher = null;
     try { fs.unlinkSync(launcherLockFile); } catch {}
+  }
+
+  // An Electron main can survive after its watcher/parent dies. Chromium keeps
+  // the dev profile locked in that state, so a fresh launcher cannot start.
+  // Reconcile orphaned mains across Windows sessions before deciding whether
+  // an existing stack is reusable; healthy watcher-owned mains are preserved.
+  const orphanElectronPids = findOrphanDevElectronMains();
+  if (orphanElectronPids.length) {
+    await stopOrphanDevElectronMains(orphanElectronPids);
+    vite = await viteAlive();
+    launcher = launcherPid();
   }
 
   // Older Sage dev stacks predate dev-launcher.lock. They can coexist with a

@@ -488,6 +488,24 @@ function applyOrderedChanges(current: number, changes: Array<{ value: number; op
   return current;
 }
 
+type MixedOrderedChange = { value: number; operation: number; stacking: boolean };
+
+function applyMixedOrderedChanges(current: number, changes: MixedOrderedChange[], stackingPenalized: boolean, penalties: number[]) {
+  for (const operation of DOGMA_OPERATION_ORDER) {
+    if (operation === 9) continue;
+    const phase = changes
+      .filter((change) => change.operation === operation)
+      .sort((left, right) => operationStrength(right.value, operation) - operationStrength(left.value, operation));
+    const stackingPhase = stackingPenalized ? phase.filter((change) => change.stacking) : [];
+    for (const change of phase) {
+      const stackingIndex = stackingPenalized && change.stacking ? stackingPhase.indexOf(change) : -1;
+      const penalty = stackingIndex >= 0 ? (penalties[stackingIndex] ?? 0) : 1;
+      current = applyOperationWithPenalty(current, change.value, operation, penalty);
+    }
+  }
+  return current;
+}
+
 function requiredSkillIds(dogma: Dogma | undefined) {
   return REQUIREMENTS.map(([skillAttribute]) => attr(dogma, skillAttribute)).filter(Boolean);
 }
@@ -1236,18 +1254,30 @@ export async function analyzeFittingDogma(input: {
         }
       }
     }
-    if (item.state === "overheated") {
-      const heated: Dogma = { attributes: new Map(loaded.attributes), effects: loaded.effects };
-      for (const effectId of loaded.effects) {
-        const effect = modifiers.get(effectId);
-        if (!effect || effect.category !== 5) continue;
-        for (const modifier of effect.modifiers) {
-          if (modifier.domain !== "itemID" || modifier.func !== "ItemModifier" || modifier.modifiedAttributeID == null || modifier.modifyingAttributeID == null) continue;
-          const current = attr(heated, modifier.modifiedAttributeID);
-          heated.attributes.set(modifier.modifiedAttributeID, applyVerifiedOperation(current, attr(heated, modifier.modifyingAttributeID), modifier.operation ?? 0));
-        }
+    // Active/overheated effects can modify the module itself before its other
+    // effects read those attributes. ADC emergency resistance is one CCP example;
+    // heat bonuses are another. Evaluate all state-eligible item-domain changes
+    // with normal DOGMA operation precedence instead of a heat-only special case.
+    const selfChanges = new Map<number, Array<{ value: number; operation: number }>>();
+    for (const effectId of loaded.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect) continue;
+      const activeEffect = effect.category === 1 && (item.state === "active" || item.state === "overheated");
+      const heatEffect = effect.category === 5 && item.state === "overheated";
+      if (!activeEffect && !heatEffect) continue;
+      for (const modifier of effect.modifiers) {
+        if (modifier.domain !== "itemID" || modifier.func !== "ItemModifier" || modifier.modifiedAttributeID == null || modifier.modifyingAttributeID == null) continue;
+        const list = selfChanges.get(modifier.modifiedAttributeID) ?? [];
+        list.push({ value: attr(loaded, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
+        selfChanges.set(modifier.modifiedAttributeID, list);
       }
-      loaded = heated;
+    }
+    if (selfChanges.size) {
+      const stateAdjusted: Dogma = { attributes: new Map(loaded.attributes), effects: loaded.effects };
+      for (const [attributeId, changes] of selfChanges) {
+        stateAdjusted.attributes.set(attributeId, applyOrderedChanges(attr(stateAdjusted, attributeId), changes, false, [1]));
+      }
+      loaded = stateAdjusted;
     }
     return loaded;
   };
@@ -1284,6 +1314,7 @@ export async function analyzeFittingDogma(input: {
   // LocationGroupModifier skills can scale attributes on fitted modules/subsystems
   // before those items use the scaled attribute as the source of a ship/owner
   // modifier. T3 subsystem skills use exactly this two-stage DOGMA pattern.
+  const skillScaledSources = new WeakSet<Dogma>();
   const skillScaledSourceFor = (source: Dogma | undefined, typeId: number) => {
     if (!source) return undefined;
     const groupId = groups.get(typeId) ?? 0;
@@ -1310,10 +1341,22 @@ export async function analyzeFittingDogma(input: {
         }
       }
     }
-    return attributes ? { attributes, effects: source.effects } : source;
+    if (!attributes) return source;
+    const scaled = { attributes, effects: source.effects };
+    skillScaledSources.add(scaled);
+    return scaled;
   };
   const used = { cpu: 0, powergrid: 0, calibration: 0 };
   const shipAttributes = new Map(hull.attributes);
+  // Collect every direct ship modifier first, then apply CCP DOGMA operations in
+  // their global precedence order. Applying skills/implants immediately and fitted
+  // modules later changes Add/PostMul/PostPercent semantics (notably cap batteries).
+  const pending = new Map<number, Array<{ value: number; operation: number }>>();
+  const queueShipModifier = (attributeId: number, value: number, operation: number) => {
+    const list = pending.get(attributeId) ?? [];
+    list.push({ value, operation });
+    pending.set(attributeId, list);
+  };
   // CCP stores a ship's base cargo hold in the type physical capacity field,
   // not reliably as dogma attribute 38 in the SDE bundle. Seed attribute 38
   // before skill/module modifiers so fitted cargo expanders and rigs apply to
@@ -1361,17 +1404,10 @@ export async function analyzeFittingDogma(input: {
         ) {
           continue;
         }
-        const current =
-          shipAttributes.get(modifier.modifiedAttributeID) ??
-          attributeDefaults.get(modifier.modifiedAttributeID) ??
-          0;
-        shipAttributes.set(
+        queueShipModifier(
           modifier.modifiedAttributeID,
-          applyVerifiedOperation(
-            current,
-            attr(source, modifier.modifyingAttributeID),
-            modifier.operation ?? 0,
-          ),
+          attr(source, modifier.modifyingAttributeID),
+          modifier.operation ?? 0,
         );
       }
     }
@@ -1383,13 +1419,11 @@ export async function analyzeFittingDogma(input: {
       if (!effect || effect.category !== 0 || !enhancementEffectAllowed(enhancement, effectId, effect)) continue;
       for (const modifier of effect.modifiers) {
         if (modifier.domain !== "shipID" || modifier.func !== "ItemModifier" || modifier.modifiedAttributeID == null || modifier.modifyingAttributeID == null) continue;
-        const current = shipAttributes.get(modifier.modifiedAttributeID) ?? attributeDefaults.get(modifier.modifiedAttributeID) ?? 0;
-        shipAttributes.set(modifier.modifiedAttributeID, applyVerifiedOperation(current, attr(enhancement.source, modifier.modifyingAttributeID), modifier.operation ?? 0));
+        queueShipModifier(modifier.modifiedAttributeID, attr(enhancement.source, modifier.modifyingAttributeID), modifier.operation ?? 0);
       }
     }
   }
 
-  const pending = new Map<number, Array<{ value: number; operation: number }>>();
   const projectedItemChanges = new Map<number, Array<{ value: number; operation: number }>>();
   const projectedSources: Array<{ typeId: number; name: string; effectiveness: number; effects: string[] }> = [];
   for (const item of online) {
@@ -1467,6 +1501,10 @@ export async function analyzeFittingDogma(input: {
 
   const commandRequiredModifiers: RequiredAttributeModifier[] = [];
   const commandGroupModifiers: GroupAttributeModifier[] = [];
+  // Skill LocationGroupModifiers are already folded into skillScaledSourceFor.
+  // Keep them separate so raw targets can still receive them without double-
+  // applying them to a source that has already been skill-scaled.
+  const skillGroupModifiers: GroupAttributeModifier[] = [];
   const commandBurstSources: Array<{ typeId: number; name: string; chargeTypeId?: number; charge?: string; buffs: Array<{ buffId: number; description: string; value: number }> }> = [];
   const commandCandidates = new Map<number, Array<{ value: number; source: FittingItem; definition: DBuffDefinition }>>();
   const operationFromName = (name: string) => name === "PreAssignment" ? -1 : name === "PreMul" ? 0 : name === "Add" ? 2 : name === "Subtract" ? 3 : name === "PostMul" ? 4 : name === "PostDiv" ? 5 : name === "PostAssignment" ? 7 : 6;
@@ -1556,7 +1594,11 @@ export async function analyzeFittingDogma(input: {
   const ownerModifiers: RequiredAttributeModifier[] = [...environmentOwnerModifiers];
   const locationItemModifiers: Array<{ attributeId: number; value: number; operation: number }> = [];
 
-  const collectLocationItemModifiers = (source: Dogma, effectFilter?: (effectId: number, effect: EffectDefinition) => boolean) => {
+  const collectLocationItemModifiers = (
+    source: Dogma,
+    effectFilter?: (effectId: number, effect: EffectDefinition) => boolean,
+    groupDestination: GroupAttributeModifier[] = commandGroupModifiers,
+  ) => {
     for (const effectId of source.effects) {
       const effect = modifiers.get(effectId);
       if (!effect || (effectFilter && !effectFilter(effectId, effect))) continue;
@@ -1565,7 +1607,7 @@ export async function analyzeFittingDogma(input: {
         if (modifier.func === "LocationModifier") {
           locationItemModifiers.push({ attributeId: modifier.modifiedAttributeID, value: attr(source, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
         } else if (modifier.func === "LocationGroupModifier" && modifier.groupID) {
-          commandGroupModifiers.push({ groupId: modifier.groupID, attributeId: modifier.modifiedAttributeID, value: attr(source, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
+          groupDestination.push({ groupId: modifier.groupID, attributeId: modifier.modifiedAttributeID, value: attr(source, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
         }
       }
     }
@@ -1613,7 +1655,7 @@ export async function analyzeFittingDogma(input: {
   for (const [skillTypeId, source] of skillSources) {
     collectRequiredModifiers(source, "LocationRequiredSkillModifier", false);
     collectRequiredModifiers(source, "OwnerRequiredSkillModifier", false);
-    collectLocationItemModifiers(source);
+    collectLocationItemModifiers(source, undefined, skillGroupModifiers);
 
     // Some long-lived CCP skill effects are represented only by an effect ID,
     // with no modifierInfo. Preserve their DOGMA semantics explicitly so those
@@ -1667,6 +1709,75 @@ export async function analyzeFittingDogma(input: {
     }
   }
 
+  // Character-domain ItemModifiers are a separate DOGMA state from the ship. CCP
+  // uses this path for missile damage, drone control range/count, target count and
+  // other pilot-level attributes. Collect all applicable sources first so operation
+  // precedence is global, while stacking penalties apply only to fitted module/rig
+  // contributors rather than to skills, hull role bonuses, implants or boosters.
+  const characterAttributes = new Map<number, number>();
+  const pendingCharacter = new Map<number, MixedOrderedChange[]>();
+  const queueCharacterModifier = (attributeId: number, value: number, operation: number, stacking: boolean) => {
+    const list = pendingCharacter.get(attributeId) ?? [];
+    list.push({ value, operation, stacking });
+    pendingCharacter.set(attributeId, list);
+  };
+  const collectCharacterItemModifiers = (
+    source: Dogma,
+    options: { stacking?: boolean; quantity?: number; state?: FittingItem["state"]; effectFilter?: (effectId: number, effect: EffectDefinition) => boolean; environment?: boolean } = {},
+  ) => {
+    const quantity = Math.max(1, options.quantity ?? 1);
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect || (options.effectFilter && !options.effectFilter(effectId, effect))) continue;
+      // Passive skill/hull/enhancement character effects are not limited to the
+      // ordinary fitted-module effect categories. Only stateful fitted sources use
+      // the local-module category gate; passive sources still exclude projected/
+      // targeted categories 2/3. Environment sources are explicitly category 7.
+      if (!options.environment && options.state && (effect.category === 2 || effect.category === 3 || effect.category > 5)) continue;
+      if (!options.environment && !options.state && (effect.category === 2 || effect.category === 3)) continue;
+      if (options.environment && effect.category !== 7) continue;
+      if (options.state) {
+        if (effect.category === 5 && options.state !== "overheated") continue;
+        if (effect.category === 1 && options.state !== "active" && options.state !== "overheated") continue;
+      }
+      for (const modifier of effect.modifiers) {
+        if (
+          modifier.domain !== "charID" ||
+          modifier.func !== "ItemModifier" ||
+          modifier.modifiedAttributeID == null ||
+          modifier.modifyingAttributeID == null
+        ) continue;
+        for (let count = 0; count < quantity; count += 1) {
+          queueCharacterModifier(
+            modifier.modifiedAttributeID,
+            attr(source, modifier.modifyingAttributeID),
+            modifier.operation ?? 0,
+            Boolean(options.stacking),
+          );
+        }
+      }
+    }
+  };
+
+  for (const source of skillSources.values()) collectCharacterItemModifiers(source);
+  collectCharacterItemModifiers(scaledHullSource);
+  for (const enhancement of enhancementSources) {
+    const filter = (effectId: number, effect: EffectDefinition) => enhancementEffectAllowed(enhancement, effectId, effect);
+    collectCharacterItemModifiers(enhancement.source, { effectFilter: filter });
+  }
+  for (const item of online) {
+    const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
+    if (!source) continue;
+    collectCharacterItemModifiers(source, { stacking: true, quantity: item.quantity ?? 1, state: item.state ?? "active" });
+  }
+  for (const environment of environmentSources) collectCharacterItemModifiers(environment.source, { environment: true });
+
+  for (const [attributeId, changes] of pendingCharacter) {
+    const current = attributeDefaults.get(attributeId) ?? 0;
+    characterAttributes.set(attributeId, applyMixedOrderedChanges(current, changes, penalized.has(attributeId), penalties));
+  }
+  const characterAttr = (attributeId: number) => characterAttributes.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
+
   const skilledAttribute = (target: Dogma | undefined, attributeId: number) => {
     let current = attr(target, attributeId);
     if (!target) return current;
@@ -1705,6 +1816,10 @@ export async function analyzeFittingDogma(input: {
       const groupId = groups.get(targetTypeId) ?? 0;
       const grouped = commandGroupModifiers.filter((change) => change.attributeId === attributeId && change.groupId === groupId);
       if (grouped.length) current = applyOrderedChanges(current, grouped, false, penalties);
+      if (!skillScaledSources.has(target)) {
+        const skillGrouped = skillGroupModifiers.filter((change) => change.attributeId === attributeId && change.groupId === groupId);
+        if (skillGrouped.length) current = applyOrderedChanges(current, skillGrouped, false, penalties);
+      }
     }
     return current;
   };
@@ -2032,12 +2147,19 @@ export async function analyzeFittingDogma(input: {
   const peakRechargeGjPerSecond =
     rechargeSeconds > 0 ? (2.5 * capacitorCapacity) / rechargeSeconds : 0;
   const stable = netDemandGjPerSecond <= peakRechargeGjPerSecond;
+  const deltaGjPerSecond = peakRechargeGjPerSecond - netDemandGjPerSecond;
+  // EVE's fitting window shows capacitor delta both in GJ/s and as a percentage
+  // of peak recharge. Keep that display value separate from the continuous-drain
+  // equilibrium charge level so the two concepts cannot be confused again.
+  const stablePercent = stable && peakRechargeGjPerSecond > 0
+    ? Math.max(0, Math.min(100, (deltaGjPerSecond / peakRechargeGjPerSecond) * 100))
+    : 0;
   const rechargeRatio =
     peakRechargeGjPerSecond > 0 ? netDemandGjPerSecond / peakRechargeGjPerSecond : Infinity;
   const equilibriumRoot = stable
     ? (1 + Math.sqrt(Math.max(0, 1 - rechargeRatio))) / 2
     : 0;
-  const stablePercent = !netDemandGjPerSecond
+  const equilibriumPercent = !netDemandGjPerSecond
     ? 100
     : stable
       ? equilibriumRoot * equilibriumRoot * 100
@@ -2075,7 +2197,9 @@ export async function analyzeFittingDogma(input: {
     const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     const charge = dogma.get(item.chargeTypeId!);
     const quantity = item.quantity ?? 1;
-    const multiplier = effectiveItemAttr(module, 64, item.typeId) || effectiveItemAttr(module, 212, item.typeId) || 1;
+    const moduleMultiplier = effectiveItemAttr(module, 64, item.typeId) || effectiveItemAttr(module, 212, item.typeId) || 1;
+    const characterMissileMultiplier = module?.effects.has(40) ? (characterAttr(212) || 1) : 1;
+    const multiplier = moduleMultiplier * characterMissileMultiplier;
     const rawDamageVector = effectiveDamageVectorFor(charge, item.chargeTypeId!);
     const damageVector = rawDamageVector.map((amount) => amount * multiplier * quantity) as DamageVector;
     const volley = damageVector.reduce((sum, amount) => sum + amount, 0);
@@ -2189,15 +2313,16 @@ export async function analyzeFittingDogma(input: {
     .sort((left, right) => right.dps - left.dps);
 
   const activeDrones: typeof droneCandidates = [];
+  const maxActiveDrones = Math.max(0, Math.floor(characterAttr(352)));
   let bandwidthRemaining = shipAttr(1271);
   if (explicitDroneSelection) {
     const requestedBandwidth = droneCandidates.reduce((sum, drone) => sum + drone.bandwidth, 0);
-    if (droneCandidates.length > 5) issues.push({ level: "error", code: "active-drone-count", message: `${droneCandidates.length} drones are marked active; ships can control at most 5 at once.` });
+    if (droneCandidates.length > maxActiveDrones) issues.push({ level: "error", code: "active-drone-count", message: `${droneCandidates.length} drones are marked active; this pilot/hull combination can control at most ${maxActiveDrones} at once.` });
     if (requestedBandwidth > shipAttr(1271)) issues.push({ level: "error", code: "active-drone-bandwidth", message: `Selected active drones require ${requestedBandwidth} Mbit/s; the hull provides ${shipAttr(1271)} Mbit/s.` });
-    activeDrones.push(...droneCandidates.slice(0, 5));
+    activeDrones.push(...droneCandidates.slice(0, maxActiveDrones));
   } else {
     for (const drone of droneCandidates) {
-      if (activeDrones.length >= 5) break;
+      if (activeDrones.length >= maxActiveDrones) break;
       if (drone.bandwidth <= bandwidthRemaining) {
         activeDrones.push(drone);
         bandwidthRemaining -= drone.bandwidth;
@@ -2207,29 +2332,7 @@ export async function analyzeFittingDogma(input: {
   const droneVolley = activeDrones.reduce((sum, drone) => sum + drone.volley, 0);
   const droneDps = activeDrones.reduce((sum, drone) => sum + drone.dps, 0);
 
-  // Drone control distance is a character attribute. CCP gives every pilot a
-  // 20 km default (attribute 458), then Drone Avionics / Advanced Drone
-  // Avionics and any other charID ItemModifier effects add their trained value.
-  let droneControlDistanceM = shipAttr(458);
-  for (const source of skillSources.values()) {
-    for (const effectId of source.effects) {
-      const effect = modifiers.get(effectId);
-      if (!effect) continue;
-      for (const modifier of effect.modifiers) {
-        if (
-          modifier.domain !== "charID" ||
-          modifier.func !== "ItemModifier" ||
-          modifier.modifiedAttributeID !== 458 ||
-          modifier.modifyingAttributeID == null
-        ) continue;
-        droneControlDistanceM = applyVerifiedOperation(
-          droneControlDistanceM,
-          attr(source, modifier.modifyingAttributeID),
-          modifier.operation ?? 0,
-        );
-      }
-    }
-  }
+  const droneControlDistanceM = characterAttr(458);
 
   const resistAdjustedSourceDps = (sourceDps: number, vector: DamageVector, resists: DamageVector) => {
     const total = vector.reduce((sum, amount) => sum + Math.max(0, amount), 0);
@@ -2591,7 +2694,7 @@ export async function analyzeFittingDogma(input: {
     maximumRangeM: shipAttr(76),
     scanResolution: shipAttr(564) * (abyssConfig?.weather === "exotic" ? 1.5 : 1),
     signatureRadiusM: shipAttr(552) * mwdSignatureMultiplier,
-    maximumLockedTargets: shipAttr(192),
+    maximumLockedTargets: Math.max(0, Math.min(shipAttr(192), Math.floor(characterAttr(192)))),
     sensorStrength:
       shipAttr(1371) || Math.max(shipAttr(208), shipAttr(209), shipAttr(210), shipAttr(211)),
   };
@@ -2750,8 +2853,10 @@ export async function analyzeFittingDogma(input: {
       netDemandGjPerSecond,
       capacitorInjectors,
       peakRechargeGjPerSecond,
+      deltaGjPerSecond,
       stable,
       stablePercent,
+      equilibriumPercent,
       depletionSeconds,
     },
     magazines,

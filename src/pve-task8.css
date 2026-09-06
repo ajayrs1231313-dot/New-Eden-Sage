@@ -622,3 +622,392 @@ html[data-fit-to-monitor="on"] .pve-reference{font-size:12px}
   .pve-map-node-title{font-size:10px}
   .pve-map-node-count{font-size:6.6px}
 }
+
+/* PvE visual polish pass 9: full-bleed intelligence field + thumbnail info clearance. */
+.pve-hero{
+  isolation:isolate;
+  background:#01090e!important;
+  box-shadow:inset 0 0 95px rgba(0,0,0,.46),0 12px 38px rgba(0,0,0,.22)!important;
+}
+.pve-hero>.pve-star-map{
+  position:absolute!important;
+  inset:0!important;
+  width:100%!important;
+  height:100%!important;
+  min-height:0!important;
+  z-index:1!important;
+}
+.pve-hero>.pve-hero-copy{
+  grid-column:1!important;
+  grid-row:1!important;
+  z-index:3!important;
+  background:
+    linear-gradient(90deg,rgba(1,9,14,.985) 0%,rgba(2,13,19,.93) 54%,rgba(2,13,19,.68) 78%,rgba(2,13,19,.12) 100%)!important;
+  box-shadow:28px 0 42px rgba(0,0,0,.16);
+}
+.pve-hero>.pve-load-card{
+  grid-column:3!important;
+  grid-row:1!important;
+  z-index:4!important;
+  backdrop-filter:blur(6px);
+  background:linear-gradient(180deg,rgba(5,27,34,.93),rgba(3,17,23,.91))!important;
+  box-shadow:0 14px 35px rgba(0,0,0,.48),inset 0 0 32px rgba(20,208,198,.035)!important;
+}
+.pve-star-map-redesign{
+  background:
+    radial-gradient(ellipse at 50% 49%,rgba(248,179,65,.16) 0%,rgba(121,74,18,.075) 14%,transparent 31%),
+    radial-gradient(ellipse at 35% 47%,rgba(16,130,169,.11) 0%,transparent 25%),
+    radial-gradient(ellipse at 18% 29%,rgba(19,157,225,.18) 0%,rgba(9,78,121,.09) 20%,transparent 38%),
+    radial-gradient(ellipse at 83% 25%,rgba(229,48,57,.17) 0%,rgba(111,20,31,.08) 21%,transparent 39%),
+    radial-gradient(ellipse at 83% 79%,rgba(160,72,218,.16) 0%,rgba(71,26,101,.075) 20%,transparent 37%),
+    radial-gradient(ellipse at 17% 81%,rgba(27,199,190,.12) 0%,rgba(11,85,88,.055) 20%,transparent 34%),
+    linear-gradient(180deg,#03131c 0%,#020b11 43%,#01070b 100%)!important;
+  box-shadow:inset 0 0 120px rgba(0,0,0,.48)!important;
+}
+.pve-star-map-redesign:before{
+  opacity:.9!important;
+  background-image:
+    radial-gradient(circle,#ecfdff 0 .78px,transparent 1.05px),
+    radial-gradient(circle,#74d8ea 0 .92px,transparent 1.2px),
+    radial-gradient(circle,#ffd887 0 .7px,transparent 1px),
+    radial-gradient(circle,#fff 0 .45px,transparent .72px),
+    radial-gradient(circle,#52d8ff 0 .42px,transparent .7px)!important;
+  background-size:73px 59px,119px 91px,157px 131px,203px 169px,269px 211px!important;
+  background-position:7px 11px,31px 39px,83px 27px,17px 67px,141px 19px!important;
+  filter:drop-shadow(0 0 2px rgba(73,207,231,.22));
+}
+.pve-star-map-redesign:after{
+  background:
+    linear-gradient(90deg,rgba(1,7,11,.54),transparent 12%,transparent 88%,rgba(1,7,11,.54)),
+    linear-gradient(180deg,rgba(0,0,0,.1),transparent 22%,transparent 72%,rgba(0,0,0,.22)),
+    radial-gradient(ellipse at 50% 49%,transparent 42%,rgba(0,0,0,.21) 100%),
+    repeating-linear-gradient(180deg,rgba(110,218,231,.012) 0 1px,transparent 1px 4px)!important;
+}
+.pve-star-map-redesign svg{
+  width:100%!important;
+  height:100%!important;
+  opacity:.98;
+  filter:drop-shadow(0 0 10px rgba(19,107,132,.08))!important;
+}
+.pve-map-mist{opacity:1!important}
+.pve-map-nebula-ribbons{opacity:1!important;filter:drop-shadow(0 0 13px currentColor)}
+.pve-map-nebula-ribbons .blue{fill:rgba(12,104,151,.15)!important;stroke:rgba(75,210,248,.22)!important}
+.pve-map-nebula-ribbons .amber{fill:rgba(145,92,26,.12)!important;stroke:rgba(250,188,79,.17)!important}
+.pve-map-nebula-ribbons .red{fill:rgba(151,30,40,.125)!important;stroke:rgba(255,88,88,.18)!important}
+.pve-map-nebula-ribbons .purple{fill:rgba(91,38,129,.12)!important;stroke:rgba(201,119,255,.17)!important}
+.pve-map-current-orbits circle{opacity:.27!important;stroke-width:.7!important}
+.pve-map-current-orbits path{opacity:.21!important}
+.pve-map-local-network path{opacity:.38!important;stroke-width:.72!important}
+.pve-map-local-network path.right{opacity:.31!important}
+.pve-map-local-network circle{opacity:.72!important}
+.pve-map-route-glows path{stroke-width:8!important;opacity:.13!important;filter:blur(4px)!important}
+.pve-map-route-lines .route{stroke-width:1.9!important;opacity:.97!important}
+.pve-map-route-lines .route.ghost{stroke-width:1!important;opacity:.38!important}
+.pve-map-transit-nodes .halo{fill:rgba(2,12,18,.9)!important;stroke-width:1.35!important}
+.pve-map-transit-nodes .core{filter:drop-shadow(0 0 4px currentColor)}
+.pve-map-archetype-node{filter:drop-shadow(0 0 8px currentColor)!important}
+.pve-map-node-pulse{opacity:.08!important}
+.pve-map-node-ring.outer{opacity:.92!important;stroke-width:1.2!important}
+.pve-map-node-ring.inner{opacity:.72!important}
+.pve-map-node-title{font-size:11.5px!important;fill:#f0f7f8!important}
+.pve-map-node-count{fill:#93a9ae!important}
+.pve-current-aura{opacity:.13!important}
+.pve-current-ring.orbit{opacity:.84!important;stroke-width:.9!important}
+.pve-current-ring.outer{stroke-width:1.45!important}
+.pve-current-system-label{font-size:13.5px!important;filter:drop-shadow(0 0 6px rgba(246,183,70,.5))}
+
+/* Keep the location description completely clear of the thumbnail and its badge. */
+.pve-result-row .pve-location-cell{
+  grid-template-columns:252px minmax(0,1fr)!important;
+  gap:14px!important;
+  overflow:visible!important;
+}
+.pve-result-row .pve-location-thumb{
+  width:224px!important;
+  height:70px!important;
+  margin-left:18px!important;
+}
+.pve-result-row .pve-location-copy{
+  position:relative;
+  z-index:6;
+  min-width:0!important;
+  padding-left:0!important;
+}
+.pve-result-row .pve-location-copy strong,
+.pve-result-row .pve-location-copy small,
+.pve-result-row .pve-location-copy em{
+  max-width:100%;
+}
+
+@media(max-width:1320px){
+  .pve-hero>.pve-load-card{grid-column:1/-1!important;grid-row:2!important}
+  .pve-hero>.pve-hero-copy{grid-column:1!important;grid-row:1!important}
+}
+@media(max-width:820px){
+  .pve-hero>.pve-hero-copy{grid-column:1!important}
+  .pve-hero>.pve-load-card{grid-column:1!important;grid-row:2!important}
+  .pve-star-map-redesign svg{opacity:.78}
+}
+/* PvE cinematic space background pass 10 */
+.pve-star-map-redesign{
+  background:
+    radial-gradient(circle at 54% 46%,rgba(255,221,150,.15) 0 1.2%,rgba(238,171,61,.12) 3.5%,rgba(136,73,15,.07) 10%,transparent 24%),
+    radial-gradient(ellipse at 28% 38%,rgba(47,180,229,.22) 0%,rgba(15,98,145,.15) 18%,rgba(7,47,77,.08) 35%,transparent 56%),
+    radial-gradient(ellipse at 73% 29%,rgba(222,74,90,.19) 0%,rgba(118,29,48,.12) 19%,rgba(53,15,31,.07) 38%,transparent 58%),
+    radial-gradient(ellipse at 80% 73%,rgba(171,88,235,.18) 0%,rgba(82,35,125,.12) 20%,rgba(38,18,65,.07) 40%,transparent 60%),
+    radial-gradient(ellipse at 16% 78%,rgba(31,207,198,.13) 0%,rgba(11,103,112,.08) 22%,transparent 48%),
+    linear-gradient(156deg,transparent 0 27%,rgba(84,142,165,.035) 34%,rgba(194,164,113,.055) 45%,rgba(93,54,91,.038) 55%,transparent 66%),
+    linear-gradient(180deg,#020b12 0%,#03131d 39%,#020a10 72%,#01060a 100%)!important;
+  box-shadow:inset 0 0 150px rgba(0,0,0,.62),inset 0 -55px 90px rgba(0,0,0,.32)!important;
+}
+.pve-star-map-redesign:before{
+  opacity:1!important;
+  background-image:
+    radial-gradient(circle,#ffffff 0 .95px,rgba(219,248,255,.76) 1px,transparent 1.45px),
+    radial-gradient(circle,#70dfff 0 .72px,rgba(72,190,226,.5) .9px,transparent 1.3px),
+    radial-gradient(circle,#ffd892 0 .64px,rgba(241,170,74,.42) .82px,transparent 1.22px),
+    radial-gradient(circle,#bcb8ff 0 .48px,transparent .88px),
+    radial-gradient(circle,#ffffff 0 .34px,transparent .7px)!important;
+  background-size:89px 73px,137px 109px,181px 149px,239px 191px,311px 247px!important;
+  background-position:11px 17px,47px 31px,97px 71px,29px 113px,173px 23px!important;
+  filter:drop-shadow(0 0 2px rgba(120,218,255,.28)) contrast(1.08);
+}
+.pve-star-map-redesign:after{
+  background:
+    radial-gradient(circle at 20% 17%,rgba(178,235,255,.9) 0 .55px,rgba(75,196,237,.32) 1.4px,transparent 3px),
+    radial-gradient(circle at 66% 13%,rgba(255,224,158,.88) 0 .45px,rgba(255,183,76,.25) 1.3px,transparent 2.8px),
+    radial-gradient(circle at 88% 57%,rgba(204,171,255,.82) 0 .5px,rgba(154,88,231,.25) 1.4px,transparent 3px),
+    linear-gradient(162deg,transparent 0 29%,rgba(7,29,43,.18) 36%,rgba(19,14,23,.26) 46%,rgba(5,20,31,.16) 58%,transparent 68%),
+    linear-gradient(90deg,rgba(1,5,8,.69),transparent 13%,transparent 87%,rgba(1,5,8,.72)),
+    linear-gradient(180deg,rgba(0,0,0,.2),transparent 20%,transparent 74%,rgba(0,0,0,.34)),
+    radial-gradient(ellipse at 50% 48%,transparent 36%,rgba(0,0,0,.24) 70%,rgba(0,0,0,.5) 100%)!important;
+  z-index:4!important;
+  opacity:.94;
+}
+.pve-star-map-redesign svg{
+  opacity:.96!important;
+  filter:drop-shadow(0 0 12px rgba(22,112,138,.12)) saturate(1.06)!important;
+}
+.pve-map-mist{opacity:.88!important;mix-blend-mode:screen!important}
+.pve-map-nebula-ribbons{opacity:.78!important;mix-blend-mode:screen!important;filter:blur(.15px) drop-shadow(0 0 18px currentColor)!important}
+.pve-map-nebula-ribbons .blue{fill:rgba(22,123,172,.12)!important;stroke:rgba(92,213,250,.2)!important}
+.pve-map-nebula-ribbons .amber{fill:rgba(161,101,28,.105)!important;stroke:rgba(255,198,93,.17)!important}
+.pve-map-nebula-ribbons .red{fill:rgba(157,36,48,.11)!important;stroke:rgba(255,104,105,.17)!important}
+.pve-map-nebula-ribbons .purple{fill:rgba(97,43,137,.105)!important;stroke:rgba(211,139,255,.16)!important}
+
+
+/* PvE cinematic asset loop pass 11 */
+.pve-star-map-redesign{
+  background:#01070b!important;
+}
+.pve-star-map-redesign:before{
+  opacity:0!important;
+  background:none!important;
+  filter:none!important;
+}
+.pve-cinematic-bg{
+  position:absolute;
+  inset:-2%;
+  z-index:0;
+  display:block;
+  overflow:hidden;
+  pointer-events:none;
+  opacity:0;
+  transform:scale(1.015);
+  transform-origin:center;
+  will-change:opacity;
+}
+.pve-cinematic-bg img{
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  object-position:center center;
+  user-select:none;
+  pointer-events:none;
+}
+@media (min-aspect-ratio:21/9){
+  .pve-cinematic-bg{inset:-1.25% -0.5%;transform:scale(1.01)}
+  .pve-cinematic-bg img{object-position:center 50%}
+}
+.pve-cinematic-bg-emagrerian{animation:pveCinematicEmagrerian 28s ease-in-out infinite;}
+.pve-cinematic-bg-frontier{animation:pveCinematicFrontier 28s ease-in-out infinite;}
+@keyframes pveCinematicEmagrerian{
+  0%,42%{opacity:1}
+  50%,92%{opacity:0}
+  100%{opacity:1}
+}
+@keyframes pveCinematicFrontier{
+  0%,42%{opacity:0}
+  50%,92%{opacity:1}
+  100%{opacity:0}
+}
+.pve-star-map-redesign svg{z-index:2!important;}
+.pve-star-map-redesign:after{
+  z-index:3!important;
+  opacity:1!important;
+  background:
+    linear-gradient(90deg,rgba(1,6,10,.76) 0%,rgba(1,7,11,.42) 16%,rgba(1,7,11,.09) 36%,rgba(1,7,11,.08) 70%,rgba(1,6,10,.46) 90%,rgba(1,6,10,.74) 100%),
+    linear-gradient(180deg,rgba(0,0,0,.16),transparent 24%,transparent 68%,rgba(0,0,0,.34)),
+    radial-gradient(ellipse at 50% 50%,transparent 40%,rgba(0,0,0,.28) 100%)!important;
+}
+@media (prefers-reduced-motion:reduce){
+  .pve-cinematic-bg{animation:none!important;}
+  .pve-cinematic-bg-emagrerian{opacity:1!important;}
+  .pve-cinematic-bg-frontier{opacity:0!important;}
+}
+
+
+/* PvE responsive map + compact command strip pass 12 */
+.pve-page-intro{
+  display:flex;
+  align-items:end;
+  justify-content:space-between;
+  gap:20px;
+  padding:4px 4px 2px;
+}
+.pve-page-intro .eyebrow{margin:0 0 6px;color:#24e1db;font-size:11px;font-weight:900;letter-spacing:.18em}
+.pve-page-intro h2{margin:0;color:#f1f8f9;font-size:34px;line-height:1.02;letter-spacing:-.035em}
+.pve-page-intro p:not(.eyebrow){max-width:760px;margin:8px 0 0;color:#8fa6ad;font-size:12px;line-height:1.45}
+.pve-intel-state{min-width:170px;display:grid;justify-items:end;gap:3px;padding:0 2px 4px;text-align:right}
+.pve-intel-state span{font-size:9px;font-weight:850;letter-spacing:.08em;color:#37dba6}
+.pve-intel-state.stale span{color:#efb64b}
+.pve-intel-state small{max-width:240px;color:#657d84;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.pve-hero{
+  position:relative!important;
+  display:block!important;
+  width:100%!important;
+  height:clamp(300px,25vw,470px)!important;
+  min-height:0!important;
+  overflow:hidden!important;
+  border:1px solid #0b3f4d!important;
+  border-radius:8px!important;
+  background:#01070b!important;
+}
+.pve-hero:before{display:none!important}
+.pve-hero:after{z-index:5!important;box-shadow:inset 0 0 0 1px rgba(52,205,213,.025),inset 0 -24px 65px rgba(0,0,0,.18)!important}
+.pve-hero>.pve-star-map{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;min-height:0!important;z-index:1!important}
+.pve-star-map-redesign{container-type:inline-size;background:#01070b!important}
+.pve-star-map-redesign svg{inset:0!important;width:100%!important;height:100%!important;overflow:visible!important}
+.pve-cinematic-bg{
+  position:absolute!important;
+  inset:0!important;
+  width:100%!important;
+  height:100%!important;
+  display:block!important;
+  object-fit:cover!important;
+  object-position:center center!important;
+  transform:none!important;
+}
+.pve-star-map-redesign[data-map-variant="standard"] .pve-cinematic-bg{object-position:center 48%!important}
+.pve-star-map-redesign[data-map-variant="widescreen"] .pve-cinematic-bg{object-position:center 50%!important}
+.pve-star-map-redesign[data-map-variant="ultrawide"] .pve-cinematic-bg{object-position:center 50%!important}
+.pve-star-map-redesign[data-map-variant="standard"] .pve-map-node-title{font-size:12px!important}
+.pve-star-map-redesign[data-map-variant="standard"] .pve-map-node-count{font-size:7.8px!important}
+.pve-star-map-redesign[data-map-variant="standard"] .pve-current-system-label{font-size:14px!important}
+.pve-star-map-redesign[data-map-variant="widescreen"] .pve-map-node-title{font-size:11.5px!important}
+.pve-star-map-redesign[data-map-variant="ultrawide"] .pve-map-node-title{font-size:12.5px!important}
+.pve-star-map-redesign[data-map-variant="ultrawide"] .pve-map-node-count{font-size:8px!important}
+.pve-star-map-redesign[data-map-variant="ultrawide"] .pve-current-system-label{font-size:14px!important}
+
+.pve-command-strip{
+  display:grid;
+  grid-template-columns:minmax(245px,290px) minmax(0,1fr) auto;
+  gap:8px;
+  align-items:stretch;
+  min-width:0;
+}
+.pve-compact-ship{
+  min-width:0;
+  height:47px;
+  display:grid;
+  grid-template-columns:42px minmax(0,1fr) auto;
+  gap:9px;
+  align-items:center;
+  padding:3px 9px 3px 4px;
+  border:1px solid #173e49;
+  border-radius:5px;
+  background:linear-gradient(180deg,#071a21,#051219);
+}
+.pve-compact-ship-art{position:relative;width:40px;height:40px;display:grid;place-items:center;overflow:hidden;border-radius:3px;background:radial-gradient(circle at 50% 50%,rgba(51,197,215,.15),transparent 67%)}
+.pve-compact-ship-art .pve-ship-fallback{position:absolute;width:22px;height:22px;color:#60828b;opacity:.55}
+.pve-compact-ship-art.has-ship-render .pve-ship-fallback{display:none}
+.pve-compact-ship-art img{position:relative;z-index:2;width:100%;height:100%;object-fit:contain;filter:drop-shadow(0 3px 5px rgba(0,0,0,.8))}
+.pve-compact-ship-copy{min-width:0}
+.pve-compact-ship-copy span{display:block;color:#27ded8;font-size:8px;font-weight:900;letter-spacing:.08em}
+.pve-compact-ship-copy strong{display:block;margin-top:1px;color:#e9f2f3;font-size:12px;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pve-compact-ship-copy small{display:block;margin-top:2px;color:#718991;font-size:8px;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pve-compact-readiness{display:grid;justify-items:end;gap:1px;padding-left:7px;border-left:1px solid #143943}
+.pve-compact-readiness strong{color:#58e7d5;font-size:14px;line-height:1}
+.pve-compact-readiness small{max-width:62px;color:#738b92;font-size:7px;line-height:1.1;text-align:right}
+.pve-compact-readiness.unresolved strong{color:#788f96}
+
+.pve-command-strip .pve-kind-tabs{min-width:0;min-height:47px;padding:0;gap:6px;overflow-x:auto;overflow-y:hidden}
+.pve-command-strip .pve-kind-tabs button{height:47px;min-width:112px;padding:0 11px;flex:1 0 auto}
+.pve-command-strip .pve-kind-tabs button.all{min-width:78px;flex:0 0 78px}
+.pve-refresh-compact{
+  width:126px;
+  height:47px;
+  display:grid;
+  grid-template-columns:18px 1fr;
+  grid-template-rows:1fr 1fr;
+  column-gap:6px;
+  align-items:center;
+  padding:5px 10px;
+  border:1px solid #16716f;
+  border-radius:5px;
+  background:linear-gradient(180deg,#073034,#051b21);
+  color:#5ce9df;
+}
+.pve-refresh-compact:hover:not(:disabled){border-color:#28ddd2;background:#083a3d}
+.pve-refresh-compact:disabled{opacity:.55;cursor:wait}
+.pve-refresh-compact .isk-glyph{grid-row:1/3;width:17px;height:17px;color:#2ddbd2}
+.pve-refresh-compact span{align-self:end;color:#d1efed;font-size:9px;font-weight:850;white-space:nowrap}
+.pve-refresh-compact small{align-self:start;color:#738e94;font-size:8px;white-space:nowrap}
+
+@media(max-width:1320px){
+  .pve-hero{height:clamp(290px,30vw,390px)!important}
+  .pve-command-strip{grid-template-columns:minmax(220px,260px) minmax(0,1fr) 118px}
+  .pve-command-strip .pve-kind-tabs button{min-width:104px}
+  .pve-compact-readiness small{display:none}
+}
+@media(max-width:980px){
+  .pve-page-intro{align-items:start}
+  .pve-intel-state{display:none}
+  .pve-hero{height:clamp(270px,40vw,340px)!important}
+  .pve-command-strip{grid-template-columns:1fr auto}
+  .pve-compact-ship{grid-column:1/2}
+  .pve-refresh-compact{grid-column:2/3;grid-row:1}
+  .pve-command-strip .pve-kind-tabs{grid-column:1/3;grid-row:2}
+}
+@media(max-width:620px){
+  .pve-page-intro h2{font-size:28px}
+  .pve-page-intro p:not(.eyebrow){font-size:11px}
+  .pve-hero{height:280px!important}
+  .pve-command-strip{grid-template-columns:minmax(0,1fr) 112px}
+  .pve-compact-readiness{display:none}
+  .pve-refresh-compact{width:112px}
+  .pve-command-strip .pve-kind-tabs button{min-width:100px}
+}
+/* PvE performance pass 13: preserve the cinematic map while removing avoidable renderer pressure. */
+.pve-result-wrap{
+  content-visibility:auto;
+  contain-intrinsic-size:auto 86px;
+}
+.pve-star-map-redesign{
+  contain:layout paint style;
+}
+.pve-star-map-redesign svg{
+  filter:none!important;
+}
+/* The approved cinematic assets now provide the atmosphere. Do not composite the
+   old synthetic haze/ribbon layers or a second blurred copy of every route. */
+.pve-map-mist,
+.pve-map-nebula-ribbons,
+.pve-map-route-glows{
+  display:none!important;
+}
+.pve-cinematic-bg{
+  will-change:auto!important;
+}

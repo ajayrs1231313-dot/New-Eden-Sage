@@ -9,7 +9,7 @@ import {
   getMarketType,
   searchMarketTypes,
 } from "./market-static-index";
-import type { MarketOrder } from "./market";
+import { resolveMarketLocationNames, type MarketOrder } from "./market";
 import { universeRoute } from "./universe-route-graph";
 
 export type RawMarketSearchInput = {
@@ -26,7 +26,7 @@ export type RawMarketSearchInput = {
   locationQuery?: string;
   originSystemId?: number | null;
   maxJumps?: number | null;
-  sort?: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest";
+  sort?: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest" | "distance";
   offset?: number;
   limit?: number;
 };
@@ -89,7 +89,7 @@ export type RawMarketSearchResult = {
     locationQuery: string;
     originSystemId: number | null;
     maxJumps: number | null;
-    sort: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest";
+    sort: "sell-lowest" | "buy-highest" | "price-low" | "price-high" | "volume" | "newest" | "distance";
   };
   regionOptions: Array<{ regionId: number; regionName: string }>;
   totalOrders: number;
@@ -199,6 +199,16 @@ async function loadTypeOrders(snapshot: RawMarketSnapshot, typeId: number, typeN
     }
   });
   await Promise.all(workers);
+  const unresolvedLocationIds = orders
+    .filter((order) => !order.locationName || /^Location \d+$/.test(order.locationName))
+    .map((order) => order.locationId);
+  if (unresolvedLocationIds.length) {
+    const resolvedLocations = await resolveMarketLocationNames(unresolvedLocationIds);
+    for (const order of orders) {
+      const resolved = resolvedLocations.get(order.locationId);
+      if (resolved) order.locationName = resolved;
+    }
+  }
   typeOrderCache.set(key, {
     snapshotId: snapshot.id,
     typeId,
@@ -221,6 +231,12 @@ function sortOrders(orders: RawMarketSearchOrder[], sort: RawMarketSearchResult[
   if (sort === "price-high") return copy.sort((a, b) => b.price - a.price || b.volumeRemain - a.volumeRemain);
   if (sort === "volume") return copy.sort((a, b) => b.volumeRemain - a.volumeRemain || a.price - b.price);
   if (sort === "newest") return copy.sort((a, b) => Date.parse(b.issued) - Date.parse(a.issued));
+  if (sort === "distance") return copy.sort((a, b) => {
+    const distance = Number(a.jumpsFromOrigin ?? 999) - Number(b.jumpsFromOrigin ?? 999);
+    if (distance) return distance;
+    if (a.side !== b.side) return a.side === "buy" ? -1 : 1;
+    return a.side === "buy" ? b.price - a.price || b.volumeRemain - a.volumeRemain : a.price - b.price || b.volumeRemain - a.volumeRemain;
+  });
   return copy.sort((a, b) => {
     if (a.side !== b.side) return a.side === "sell" ? -1 : 1;
     return a.side === "sell" ? a.price - b.price || b.volumeRemain - a.volumeRemain : b.price - a.price || b.volumeRemain - a.volumeRemain;

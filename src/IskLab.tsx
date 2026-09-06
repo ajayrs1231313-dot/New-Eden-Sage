@@ -60,7 +60,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
   const [marketStatus, setMarketStatus] = useState("Use the newest full public market snapshot to compare candidate trade routes.");
   const [pveStatus, setPveStatus] = useState("Connect and sync a character to rank PvE locations from your current system.");
   const pveRequestSequence = useRef(0);
-  const pvePreferLive = useRef(false);
+
   const marketRequestSequence = useRef(0);
   const [preparedDataRevision, setPreparedDataRevision] = useState(0);
   const preparedDataDirty = useRef(false);
@@ -71,7 +71,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
   useEffect(() => {
     setAnalysis(null);
     setPveAnalysis(null);
-    pvePreferLive.current = false;
+
     setInventionAnalysis(null);
   }, [snapshot?.characterId]);
 
@@ -203,7 +203,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
           ? "invention"
           : null;
     if (!preparedModule) return () => { cancelled = true; };
-    if (preparedModule === "pve" && pvePreferLive.current) return () => { cancelled = true; };
+
 
     const marketBuildKey = iskModuleBuildKey("market", snapshot.characterId, snapshot.updatedAt, marketDataRevision, preparedDataRevision);
     const pveBuildKey = iskModuleBuildKey("pve", snapshot.characterId, snapshot.updatedAt, cloneState ?? "omega", preparedDataRevision);
@@ -218,11 +218,19 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
         if (cancelled) return;
         if (preparedModule === "market") {
           if (prepared.market) {
-            marketAutoBuildKey.current = marketBuildKey;
+            const previous = prepared.marketState?.source === "last-known-good";
             setAnalysis(prepared.market);
-            setMarketStatus(
-              `${prepared.market.market.opportunities.length.toLocaleString()} candidate routes ready from ${prepared.market.signals.marketOrdersInspected.toLocaleString()} retained public orders across ${prepared.market.signals.marketRegionsInspected.toLocaleString()} regions.`,
-            );
+            setMarketStatus(previous
+              ? `${prepared.market.market.opportunities.length.toLocaleString()} previous coherent candidate routes are shown while Sage prepares the current market/character revision.`
+              : `${prepared.market.market.opportunities.length.toLocaleString()} candidate routes ready from ${prepared.market.signals.marketOrdersInspected.toLocaleString()} retained public orders across ${prepared.market.signals.marketRegionsInspected.toLocaleString()} regions.`);
+            if (previous) {
+              if (shouldWakeIskModule({ active, visible: true, prepared: prepared.market, preparedSource: prepared.marketState?.source, busy: marketBusy, buildKey: marketBuildKey, lastBuildKey: marketAutoBuildKey.current })) {
+                marketAutoBuildKey.current = marketBuildKey;
+                void scanMarketWithCargo(null);
+              }
+            } else {
+              marketAutoBuildKey.current = marketBuildKey;
+            }
           } else {
             setMarketStatus("Preparing Market Scanner intelligence from the installed server-prepared market generation and current local character data...");
             if (shouldWakeIskModule({ active, visible: true, prepared: prepared.market, busy: marketBusy, buildKey: marketBuildKey, lastBuildKey: marketAutoBuildKey.current })) {
@@ -235,11 +243,19 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
 
         if (preparedModule === "pve") {
           if (prepared.pve) {
-            pveAutoBuildKey.current = pveBuildKey;
+            const previous = prepared.pveState?.source === "last-known-good";
             setPveAnalysis(prepared.pve);
-            setPveStatus(
-              `${prepared.pve.locations.length} PvE/location leads are ready from ${prepared.pve.character.systemName}. Public activity data is ${ageLabel(prepared.pve.dataStatus.ageMinutes)}.`,
-            );
+            setPveStatus(previous
+              ? `${prepared.pve.locations.length} previous coherent PvE/location leads are shown from ${prepared.pve.character.systemName} while Sage prepares the current revision.`
+              : `${prepared.pve.locations.length} PvE/location leads are ready from ${prepared.pve.character.systemName}. Public activity data is ${ageLabel(prepared.pve.dataStatus.ageMinutes)}.`);
+            if (previous) {
+              if (shouldWakeIskModule({ active, visible: true, prepared: prepared.pve, preparedSource: prepared.pveState?.source, busy: pveBusy, buildKey: pveBuildKey, lastBuildKey: pveAutoBuildKey.current })) {
+                pveAutoBuildKey.current = pveBuildKey;
+                void scanPve(false);
+              }
+            } else {
+              pveAutoBuildKey.current = pveBuildKey;
+            }
           } else {
             setPveStatus("No prepared PvE/location result is available yet. Building it from local character context and shared public activity data...");
             if (shouldWakeIskModule({ active, visible: true, prepared: prepared.pve, busy: pveBusy, buildKey: pveBuildKey, lastBuildKey: pveAutoBuildKey.current })) {
@@ -275,9 +291,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
   }, [active, tab, snapshot?.characterId, snapshot?.updatedAt, marketDataRevision, cloneState, preparedDataRevision]);
 
   function openPveTab() {
-    pvePreferLive.current = true;
     setTab("pve");
-    void scanPve(true);
   }
 
   async function exportMarketCsv() {
@@ -446,7 +460,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
 
       {tab === "orders" && <OrderDesk snapshot={snapshot} />}
 
-      {contractsVisited && <div hidden={tab !== "contracts"}><MarketContracts characterId={snapshot?.characterId} marketDataRevision={marketDataRevision} /></div>}
+      {contractsVisited && <div hidden={tab !== "contracts"}><MarketContracts snapshot={snapshot} marketDataRevision={marketDataRevision} /></div>}
 
       {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
       {tab === "opportunities" && !analysis && <div className="market-no-results">No prepared Opportunities result is available yet. Sage builds this view from installed public data and local character context.</div>}
@@ -469,7 +483,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
       {tab === "pve" && !snapshot && <div className="market-no-results">Connect and sync a character so Sage can rank locations from your current system.</div>}
       {tab === "pve" && snapshot && !pveAnalysis && pveBusy && <div className="planner-analysis-state">Building PvE and location intelligence in the background...</div>}
       {tab === "pve" && snapshot && !pveAnalysis && !pveBusy && <div className="market-no-results">No prepared PvE/location result is available yet. Open the PvE tab to build it from local character context and shared public activity data.</div>}
-      {tab === "pve" && pveAnalysis && <PveLocationIntel analysis={pveAnalysis} busy={pveBusy} onRefresh={() => { pvePreferLive.current = true; void scanPve(true); }} />}
+      {tab === "pve" && pveAnalysis && <PveLocationIntel analysis={pveAnalysis} busy={pveBusy} onRefresh={() => void scanPve(true)} />}
     </section>
   );
 }

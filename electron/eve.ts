@@ -6,6 +6,8 @@ import { trainingTimesToLevels } from "./skill-training";
 import { getLocalSkillDogmaMetadata } from "./skill-static";
 import { privateEsiJson, privateEsiPagedJson } from "./private-esi-cache";
 import { loadSharedPublicSource } from "./shared-market-data";
+import { blueprintRecordsByItemId, summarizeAssets, valueAssetWithBlueprintIdentity, type AssetMarketPriceSource } from "./asset-valuation";
+import { blueprintContractQueryForRecord, blueprintContractQueryKey, loadBlueprintContractValuations } from "./blueprint-contract-history";
 
 export const EVE_SCOPES = [
   "esi-assets.read_assets.v1",
@@ -797,7 +799,7 @@ export async function fetchCharacterSnapshot(
 
   report("enrichment", 86, "Preparing local asset enrichment.");
   const enrichedAssets = Array.isArray(assets)
-    ? await enrichAssets(assets as AssetRecord[], headers)
+    ? await enrichAssets(assets as AssetRecord[], headers, blueprints)
     : assets;
   const assetSummary = Array.isArray(enrichedAssets)
     ? summarizeAssets(enrichedAssets)
@@ -935,6 +937,7 @@ type AssetRecord = {
 async function enrichAssets(
   assets: AssetRecord[],
   headers: Record<string, string>,
+  blueprints: unknown,
 ) {
   const postNames = async (ids: number[]) => {
     if (!ids.length) return [];
@@ -960,11 +963,21 @@ async function enrichAssets(
   }>>("markets-prices").catch(() => null);
   const prices = Array.isArray(sharedPrices?.data) ? sharedPrices.data : [];
   const priceByType = new Map(
-    prices.map((price) => [
-      price.type_id,
-      price.average_price ?? price.adjusted_price ?? 0,
-    ]),
+    prices.map((price) => {
+      const source: AssetMarketPriceSource = price.average_price != null
+        ? "market"
+        : price.adjusted_price != null
+          ? "adjusted"
+          : "unpriced";
+      return [price.type_id, { unitValue: price.average_price ?? price.adjusted_price ?? 0, source }] as const;
+    }),
   );
+  const blueprintByItemId = blueprintRecordsByItemId(blueprints);
+  const blueprintQueries = [...new Map(assets.map((asset) => {
+    const query = blueprintContractQueryForRecord(blueprintByItemId.get(asset.item_id));
+    return query ? [blueprintContractQueryKey(query), query] as const : null;
+  }).filter((entry): entry is readonly [string, NonNullable<ReturnType<typeof blueprintContractQueryForRecord>>] => Boolean(entry))).values()];
+  const blueprintContractValuations = await loadBlueprintContractValuations(blueprintQueries).catch(() => new Map());
   const assetById = new Map(assets.map((asset) => [asset.item_id, asset]));
   const rootLocation = (asset: AssetRecord) => {
     let current = asset;
@@ -1069,12 +1082,24 @@ async function enrichAssets(
     const root = rootLocation(asset);
     const resolved = rootByKey.get(`${root.type}:${root.id}`);
     const itemVolumeM3 = volumes.get(asset.type_id) ?? 0;
-    const estimatedUnitValue = priceByType.get(asset.type_id) ?? 0;
+    const categoryId = categoryIds.get(asset.type_id) ?? 0;
+    const price = priceByType.get(asset.type_id) ?? { unitValue: 0, source: "unpriced" as const };
     const quantity = asset.quantity > 0 ? asset.quantity : 1;
+    const valuation = valueAssetWithBlueprintIdentity({
+      asset,
+      categoryId,
+      marketUnitValue: price.unitValue,
+      marketPriceSource: price.source,
+      blueprint: blueprintByItemId.get(asset.item_id),
+      contractEvidence: (() => {
+        const query = blueprintContractQueryForRecord(blueprintByItemId.get(asset.item_id));
+        return query ? blueprintContractValuations.get(blueprintContractQueryKey(query)) : undefined;
+      })(),
+    });
     return {
       ...asset,
       item: typeNameById.get(asset.type_id) ?? `Type ${asset.type_id}`,
-      category_id: categoryIds.get(asset.type_id) ?? 0,
+      category_id: categoryId,
       station: resolved?.station ?? null,
       system: resolved?.system ?? null,
       system_id: resolved?.systemId ?? null,
@@ -1083,90 +1108,9 @@ async function enrichAssets(
         asset.location_type === "item" ? asset.location_id : null,
       item_volume_m3: itemVolumeM3,
       total_volume_m3: itemVolumeM3 * quantity,
-      estimated_unit_value: estimatedUnitValue,
-      estimatedValue: estimatedUnitValue * quantity,
+      ...valuation,
     };
   });
-}
-
-function summarizeAssets(
-  assets: Array<{
-    item: string;
-    category_id: number;
-    station: string | null;
-    system: string | null;
-    quantity: number;
-    estimatedValue: number;
-    item_volume_m3: number;
-    total_volume_m3: number;
-    type_id: number;
-    item_id: number;
-  }>,
-) {
-  const categoryNames: Record<number, string> = {
-    6: "Ships",
-    7: "Modules",
-    8: "Ammo",
-    9: "Blueprints",
-    16: "Skillbooks",
-  };
-  const byCategory: Record<string, number> = {
-    Ships: 0,
-    Modules: 0,
-    Ammo: 0,
-    Blueprints: 0,
-    Skillbooks: 0,
-    Misc: 0,
-  };
-  const stationTotals = new Map<
-    string,
-    {
-      station: string;
-      system: string | null;
-      estimatedValue: number;
-      items: number;
-    }
-  >();
-  const ownedShips = [];
-  for (const asset of assets) {
-    const category = categoryNames[asset.category_id] ?? "Misc";
-    byCategory[category] += asset.estimatedValue;
-    const station = asset.station ?? asset.system ?? "Unresolved location";
-    const stationTotal = stationTotals.get(station) ?? {
-      station,
-      system: asset.system,
-      estimatedValue: 0,
-      items: 0,
-    };
-    stationTotal.estimatedValue += asset.estimatedValue;
-    stationTotal.items += asset.quantity > 0 ? asset.quantity : 1;
-    stationTotals.set(station, stationTotal);
-    if (asset.category_id === 6)
-      ownedShips.push({
-        item: asset.item,
-        station: asset.station,
-        system: asset.system,
-        quantity: asset.quantity > 0 ? asset.quantity : 1,
-        estimatedValue: asset.estimatedValue,
-        item_volume_m3: asset.item_volume_m3,
-        total_volume_m3: asset.total_volume_m3,
-        type_id: asset.type_id,
-        item_id: asset.item_id,
-      });
-  }
-  return {
-    valuation_basis:
-      "ESI average market price, falling back to adjusted price; estimates are not guaranteed sale values.",
-    byCategory,
-    totalAssetValue: Object.values(byCategory).reduce(
-      (total, value) => total + value,
-      0,
-    ),
-    assetsByStation: [...stationTotals.values()].sort(
-      (a, b) => b.estimatedValue - a.estimatedValue,
-    ),
-    ownedShips: ownedShips.sort((a, b) => a.item.localeCompare(b.item)),
-  };
 }
 
 function captureStatus(value: unknown) {

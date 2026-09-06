@@ -24,6 +24,7 @@ import type {
 } from "./types";
 import { NavigationUniverseMap } from "./NavigationUniverseMap";
 import { NavigationRouteList } from "./NavigationRouteList";
+import { consumeNavigationRouteIntent, OPEN_NAVIGATION_ROUTE_EVENT } from "./navigation-intent";
 import "./navigation-command.css";
 
 type NavigationSection = "route" | "advanced-map" | "saved" | "intelligence" | "capital";
@@ -148,6 +149,7 @@ export function NavigationCommand() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("Choose an origin and destination.");
   const lastCalculatedSignature = useRef("");
+  const pendingMarketRoute = useRef<NavigationSystem[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -357,6 +359,58 @@ export function NavigationCommand() {
     }
   }, [waypoints, graph, profile, route?.routeId, route?.name, route?.createdAt, route?.version, routeNotes, waypointAnnotations, lockedSegments, effectiveCustomConnections]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const loadMarketRoute = async () => {
+      const intent = consumeNavigationRouteIntent();
+      if (!intent) return;
+      setSection("route");
+      setBusy(true);
+      setMessage(`Loading market route ${intent.originSystemName} -> ${intent.destinationSystemName}...`);
+      try {
+        const [origin, destination] = await Promise.all([
+          window.sage.getNavigationSystem(intent.originSystemId),
+          window.sage.getNavigationSystem(intent.destinationSystemId),
+        ]);
+        if (cancelled) return;
+        if (!origin || !destination) throw new Error("Could not resolve the market origin or destination in the navigation graph.");
+        const stops = origin.systemId === destination.systemId ? [origin] : [origin, destination];
+        setWaypoints(stops);
+        setSelectedSystem(destination);
+        setLockedSegments([]);
+        setRoute(null);
+        setRecentDestinations((current) => [destination, ...current.filter((row) => row.systemId !== destination.systemId)].slice(0, 8));
+        lastCalculatedSignature.current = "";
+        pendingMarketRoute.current = stops.length >= 2 ? stops : null;
+        if (stops.length >= 2 && graph) {
+          pendingMarketRoute.current = null;
+          await calculatePlan(stops);
+        } else {
+          setMessage(intent.destinationLocationName
+            ? `Loaded market destination ${intent.destinationLocationName} in ${destination.name}.`
+            : `Loaded market destination ${destination.name}.`);
+        }
+      } catch (error) {
+        if (!cancelled) setMessage(error instanceof Error ? error.message : "Could not load the market destination into Route Planner.");
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    };
+    const handleOpen = () => void loadMarketRoute();
+    void loadMarketRoute();
+    window.addEventListener(OPEN_NAVIGATION_ROUTE_EVENT, handleOpen);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(OPEN_NAVIGATION_ROUTE_EVENT, handleOpen);
+    };
+  }, [graph, calculatePlan]);
+
+  useEffect(() => {
+    if (!graph || busy || !pendingMarketRoute.current) return;
+    const stops = pendingMarketRoute.current;
+    pendingMarketRoute.current = null;
+    void calculatePlan(stops);
+  }, [graph, busy, calculatePlan]);
   useEffect(() => {
     if (!route || busy || waypoints.length < 2 || signature === lastCalculatedSignature.current) return;
     const timer = setTimeout(() => void calculatePlan(), 120);

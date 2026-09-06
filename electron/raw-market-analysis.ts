@@ -46,12 +46,18 @@ export type FullMarketBandMetrics = {
   buyVolume: number;
   sellVolume: number;
   bestBuy: number | null;
+  bestBuyOrderId: number | null;
   bestBuySystemId: number | null;
   bestBuySystemName: string | null;
+  bestBuyLocationId: number | null;
+  bestBuyLocationName: string | null;
   bestBuyVolume: number;
   bestSell: number | null;
+  bestSellOrderId: number | null;
   bestSellSystemId: number | null;
   bestSellSystemName: string | null;
+  bestSellLocationId: number | null;
+  bestSellLocationName: string | null;
   bestSellVolume: number;
 };
 
@@ -73,6 +79,9 @@ export type FullMarketItem = {
   totalSellVolume: number;
   buys: FullMarketOrder[];
   sells: FullMarketOrder[];
+  /** Best exact executable order retained for each major trade-hub system. */
+  majorHubBuys?: FullMarketOrder[];
+  majorHubSells?: FullMarketOrder[];
   regions: Record<string, FullMarketRegionMetrics>;
 };
 
@@ -101,10 +110,11 @@ export type FullMarketAnalysisIndex = {
 // each side still gives trade ranking ample depth while keeping the full index
 // safely within desktop memory limits.
 const SIDE_DEPTH = 16;
+const MAJOR_TRADE_HUB_SYSTEMS = new Set(["jita", "amarr", "dodixie", "hek", "rens"]);
 const gunzipAsync = promisify(gunzip);
 const gzipAsync = promisify(gzip);
 const MARGIN_SNAPSHOT_SCHEMA = 1;
-const ANALYSIS_INDEX_SCHEMA = 4;
+const ANALYSIS_INDEX_SCHEMA = 6;
 const ANALYSIS_SAVE_TIMEOUT_MS = 5 * 60_000;
 let currentCache: { snapshotId: string; value: FullMarketAnalysisIndex } | null = null;
 const historicalCache = new Map<string, FullMarketAnalysisIndex>();
@@ -329,31 +339,61 @@ function insertCandidate(list: FullMarketOrder[], order: FullMarketOrder, buy: b
   if (list.length > SIDE_DEPTH) list.pop();
 }
 
+export function retainMajorHubCandidate(list: FullMarketOrder[], order: FullMarketOrder, buy: boolean) {
+  if (!MAJOR_TRADE_HUB_SYSTEMS.has(order.systemName.trim().toLowerCase())) return;
+  const existingIndex = list.findIndex((candidate) => candidate.systemId === order.systemId);
+  if (existingIndex < 0) {
+    list.push(order);
+    return;
+  }
+  const existing = list[existingIndex];
+  const betterPrice = buy ? order.price > existing.price : order.price < existing.price;
+  const betterTie = order.price === existing.price && (
+    order.volumeRemain > existing.volumeRemain ||
+    (order.volumeRemain === existing.volumeRemain && order.orderId < existing.orderId)
+  );
+  if (betterPrice || betterTie) list[existingIndex] = order;
+}
+
 function emptyBandMetrics(): FullMarketBandMetrics {
   return {
     buyOrders: 0, sellOrders: 0, buyVolume: 0, sellVolume: 0,
-    bestBuy: null, bestBuySystemId: null, bestBuySystemName: null, bestBuyVolume: 0,
-    bestSell: null, bestSellSystemId: null, bestSellSystemName: null, bestSellVolume: 0,
+    bestBuy: null, bestBuyOrderId: null, bestBuySystemId: null, bestBuySystemName: null, bestBuyLocationId: null, bestBuyLocationName: null, bestBuyVolume: 0,
+    bestSell: null, bestSellOrderId: null, bestSellSystemId: null, bestSellSystemName: null, bestSellLocationId: null, bestSellLocationName: null, bestSellVolume: 0,
   };
 }
 
-function recordRegionalOrder(metrics: FullMarketBandMetrics, raw: MarketOrder, order: FullMarketOrder) {
+export function recordRegionalOrder(metrics: FullMarketBandMetrics, raw: MarketOrder, order: FullMarketOrder) {
   if (raw.is_buy_order) {
     metrics.buyOrders += 1;
     metrics.buyVolume += raw.volume_remain;
-    if (metrics.bestBuy == null || raw.price > metrics.bestBuy) {
+    const replacesWinner = metrics.bestBuy == null || raw.price > metrics.bestBuy || (raw.price === metrics.bestBuy && (
+      raw.volume_remain > metrics.bestBuyVolume ||
+      (raw.volume_remain === metrics.bestBuyVolume && (metrics.bestBuyOrderId == null || raw.order_id < metrics.bestBuyOrderId))
+    ));
+    if (replacesWinner) {
       metrics.bestBuy = raw.price;
+      metrics.bestBuyOrderId = order.orderId;
       metrics.bestBuySystemId = order.systemId;
       metrics.bestBuySystemName = order.systemName;
+      metrics.bestBuyLocationId = order.locationId;
+      metrics.bestBuyLocationName = order.locationName;
       metrics.bestBuyVolume = raw.volume_remain;
     }
   } else {
     metrics.sellOrders += 1;
     metrics.sellVolume += raw.volume_remain;
-    if (metrics.bestSell == null || raw.price < metrics.bestSell) {
+    const replacesWinner = metrics.bestSell == null || raw.price < metrics.bestSell || (raw.price === metrics.bestSell && (
+      raw.volume_remain > metrics.bestSellVolume ||
+      (raw.volume_remain === metrics.bestSellVolume && (metrics.bestSellOrderId == null || raw.order_id < metrics.bestSellOrderId))
+    ));
+    if (replacesWinner) {
       metrics.bestSell = raw.price;
+      metrics.bestSellOrderId = order.orderId;
       metrics.bestSellSystemId = order.systemId;
       metrics.bestSellSystemName = order.systemName;
+      metrics.bestSellLocationId = order.locationId;
+      metrics.bestSellLocationName = order.locationName;
       metrics.bestSellVolume = raw.volume_remain;
     }
   }
@@ -457,6 +497,8 @@ export async function buildFullMarketAnalysisIndex(
             totalSellVolume: 0,
             buys: [],
             sells: [],
+            majorHubBuys: [],
+            majorHubSells: [],
             regions: {},
           };
           items.set(raw.type_id, item);
@@ -476,10 +518,12 @@ export async function buildFullMarketAnalysisIndex(
           item.totalBuyOrders += 1;
           item.totalBuyVolume += raw.volume_remain;
           insertCandidate(item.buys, order, true);
+          retainMajorHubCandidate(item.majorHubBuys!, order, true);
         } else {
           item.totalSellOrders += 1;
           item.totalSellVolume += raw.volume_remain;
           insertCandidate(item.sells, order, false);
+          retainMajorHubCandidate(item.majorHubSells!, order, false);
         }
       }
       completedRegions += 1;
@@ -575,6 +619,10 @@ function mergeFullMarketItem(target: FullMarketItem, source: FullMarketItem) {
   target.totalSellVolume += source.totalSellVolume;
   for (const order of source.buys) insertCandidate(target.buys, order, true);
   for (const order of source.sells) insertCandidate(target.sells, order, false);
+  target.majorHubBuys ??= [];
+  target.majorHubSells ??= [];
+  for (const order of source.majorHubBuys ?? []) retainMajorHubCandidate(target.majorHubBuys, order, true);
+  for (const order of source.majorHubSells ?? []) retainMajorHubCandidate(target.majorHubSells, order, false);
   Object.assign(target.regions, source.regions);
 }
 

@@ -26,6 +26,7 @@ image = (
     .add_local_dir(str(ROOT / "dist-electron"), remote_path="/app/dist-electron")
     .add_local_dir(str(ROOT / "vendor" / "market-data"), remote_path="/app/vendor/market-data")
     .add_local_file(str(ROOT / "tools" / "modal" / "public_data_worker.mjs"), remote_path="/app/public_data_worker.mjs")
+    .add_local_file(str(ROOT / "tools" / "modal" / "blueprint_contract_history.py"), remote_path="/app/blueprint_contract_history.py")
     .add_local_file(r"F:\New Eden Sage Data\Static Data\eve-static-data-jsonl.zip", remote_path="/app/New Eden Sage Data/Static Data/eve-static-data-jsonl.zip")
 )
 
@@ -175,6 +176,29 @@ def main():
 
 @app.function(
     image=image,
+    volumes={"/history": history_volume},
+    cpu=1.0,
+    memory=1024,
+    timeout=360,
+    max_containers=2,
+)
+def query_blueprint_contract_history(payload: dict) -> dict:
+    """Query compact blueprint valuation evidence derived from retained public-contract history."""
+    import importlib.util
+    history_volume.reload()
+    module_path = "/app/blueprint_contract_history.py"
+    spec = importlib.util.spec_from_file_location("blueprint_contract_history_runtime", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load blueprint contract-history module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    result = module.query_blueprint_valuations("/history", payload, retention_days=HISTORY_RETENTION_DAYS)
+    history_volume.commit()
+    return result
+
+
+@app.function(
+    image=image,
     volumes={"/published": published_volume},
     cpu=0.25,
     memory=256,
@@ -228,6 +252,18 @@ def shared_market_web():
                     "refreshError": str(error),
                 }
             raise HTTPException(status_code=503, detail=f"No shared public generation is available: {error}")
+
+    @web.post("/contract-history/blueprint-valuations")
+    def blueprint_contract_valuations(payload: dict):
+        queries = payload.get("queries") if isinstance(payload, dict) else None
+        if not isinstance(queries, list) or not queries:
+            raise HTTPException(status_code=400, detail="queries must be a non-empty array")
+        if len(queries) > 250:
+            raise HTTPException(status_code=400, detail="at most 250 blueprint queries are allowed per request")
+        try:
+            return query_blueprint_contract_history.remote(payload)
+        except Exception as error:
+            raise HTTPException(status_code=503, detail=f"Blueprint contract-history query failed: {error}") from error
 
     @web.get("/events")
     async def events(request: Request, generation: str = ""):
