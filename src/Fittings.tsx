@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import "./fittings-task11.css";
-import { fitFingerprint, parseFits, validateFit, type FitValidationResult } from "./fitting-engine";
+import { parseFits, prepareImportedFits, validateFit, type FitValidationResult } from "./fitting-engine";
 import { duplicateFit, ensureFitMeta, exportFitJson, filterAndSortFits, renameFit, summarizeFit, type FitLibraryMetaMap, type FitLibrarySort } from "./fitting-library";
 import "./fittings-task12.css";
 import "./fittings-layout-v2.css";
@@ -474,14 +474,21 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   const initialPending = useMemo(() => {
     try { return takePendingFit(); } catch { return null; }
   }, []);
-  const [fits, setFits] = useState<Fit[]>(() => {
+  const legacyFittingPersistence = useMemo(() => {
+    let savedFits: unknown[] = [];
+    let fitLibraryMeta: Record<string, unknown> = {};
     try {
-      return (JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]") as any[]).map(normalizeFit);
-    } catch {
-      return [];
-    }
-  });
-  const [activeId, setActiveId] = useState(fits[0]?.id ?? "");
+      const parsed = JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]");
+      if (Array.isArray(parsed)) savedFits = parsed;
+    } catch {}
+    try {
+      const parsed = JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") ?? "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) fitLibraryMeta = parsed;
+    } catch {}
+    return { savedFits, fitLibraryMeta };
+  }, []);
+  const [fits, setFits] = useState<Fit[]>([]);
+  const [activeId, setActiveId] = useState("");
   const [input, setInput] = useState("");
   const [status, setStatus] = useState(
     "Paste an EFT or Sage JSON fitting block from ChatGPT.",
@@ -498,11 +505,30 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   const [lastValidation, setLastValidation] = useState<FitValidationResult | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
   const [librarySort, setLibrarySort] = useState<FitLibrarySort>("recent");
-  const [libraryMeta, setLibraryMeta] = useState<FitLibraryMetaMap>(() => {
-    try { return JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") ?? "{}"); } catch { return {}; }
-  });
+  const [libraryMeta, setLibraryMeta] = useState<FitLibraryMetaMap>({});
+  const [persistenceReady, setPersistenceReady] = useState(false);
   useEffect(() => {
-    if (!initialPending?.fit) return;
+    let cancelled = false;
+    void window.sage.loadFittingPersistence(legacyFittingPersistence).then((value) => {
+      if (cancelled) return;
+      const normalized = (Array.isArray(value.savedFits) ? value.savedFits : [])
+        .filter((candidate): candidate is Record<string, unknown> => Boolean(candidate) && typeof candidate === "object" && !Array.isArray(candidate))
+        .map((candidate) => normalizeFit(candidate));
+      const meta = value.fitLibraryMeta && typeof value.fitLibraryMeta === "object" ? value.fitLibraryMeta as FitLibraryMetaMap : {};
+      setFits(normalized);
+      setLibraryMeta(ensureFitMeta(normalized, meta));
+      const selected = value.selectedFitId && normalized.some((fit) => fit.id === value.selectedFitId) ? value.selectedFitId : normalized[0]?.id ?? "";
+      setActiveId(selected);
+      setPersistenceReady(true);
+      if (normalized.length) setStatus("Loaded " + normalized.length + " saved fitting" + (normalized.length === 1 ? "" : "s") + " from Sage persistent storage.");
+    }).catch((caught) => {
+      if (cancelled) return;
+      setStatus(caught instanceof Error ? "Saved fittings could not be loaded: " + caught.message : "Saved fittings could not be loaded.");
+    });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!persistenceReady || !initialPending?.fit) return;
     let cancelled = false;
     void resolveFitFromEve(initialPending.fit, new Map<string, number>()).then((resolved) => {
       if (cancelled) return;
@@ -515,8 +541,9 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
       if (!cancelled) setStatus(caught instanceof Error ? caught.message : "Activity Command fit failed CCP rack validation.");
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [persistenceReady]);
   useEffect(() => {
+    if (!persistenceReady) return;
     const importPendingFit = () => {
       try {
         const pending = takePendingFit();
@@ -536,7 +563,7 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
     };
     window.addEventListener("sage:navigate-fittings", importPendingFit);
     return () => window.removeEventListener("sage:navigate-fittings", importPendingFit);
-  }, []);
+  }, [persistenceReady]);
   useEffect(() => {
     window.sage.listSnapshots().then((loaded) => {
       setCharacters(loaded);
@@ -552,6 +579,7 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
     if (characters.some((character) => character.characterId === activeCharacterId)) setSelectedCharacterId(activeCharacterId);
   }, [activeCharacterId, characters]);
   useEffect(() => {
+    if (!persistenceReady) return;
     const rackSchemaKey = "new-eden-sage-fitting-rack-schema";
     const rackSchemaVersion = "ccp-dogma-v1";
     if (localStorage.getItem(rackSchemaKey) === rackSchemaVersion) return;
@@ -574,12 +602,13 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
       if (results.every((result) => result.repaired)) localStorage.setItem(rackSchemaKey, rackSchemaVersion);
     });
     return () => { cancelled = true; };
-  }, []);
+  }, [persistenceReady]);
   useEffect(() => {
-    localStorage.setItem("new-eden-sage-fits", JSON.stringify(fits));
+    if (!persistenceReady) return;
     setLibraryMeta((current) => ensureFitMeta(fits, current));
-  }, [fits]);
+  }, [fits, persistenceReady]);
   useEffect(() => {
+    if (!persistenceReady) return;
     let cancelled = false;
     const migrateLegacyFighters = async () => {
       const names = [...new Set(fits.flatMap((fit) => fit.drones.map((item) => item.name)).filter(Boolean))];
@@ -608,14 +637,14 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
     };
     void migrateLegacyFighters();
     return () => { cancelled = true; };
-  }, []);
+  }, [persistenceReady]);
   useEffect(() => {
-    localStorage.setItem("new-eden-sage-fit-library-meta", JSON.stringify(libraryMeta));
-  }, [libraryMeta]);
+    if (!persistenceReady) return;
+    void window.sage.saveFittingPersistence({ savedFits: fits, fitLibraryMeta: libraryMeta, selectedFitId: activeId || undefined })
+      .catch((caught) => setStatus(caught instanceof Error ? "Saved fittings could not be persisted: " + caught.message : "Saved fittings could not be persisted."));
+  }, [fits, libraryMeta, activeId, persistenceReady]);
   useEffect(() => {
-    void window.sage.syncMcpRendererData({ savedFits: fits, fitLibraryMeta: libraryMeta });
-  }, [fits, libraryMeta]);
-  useEffect(() => {
+    if (!persistenceReady) return;
     let updateSequence = 0;
     const applyMcpFitUpdate = async (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown>; selectedFitId?: string }) => {
       const sequence = ++updateSequence;
@@ -657,12 +686,12 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
       removeIpcListener();
       window.removeEventListener("sage:mcp-fit-data-updated", onDirectRendererUpdate);
     };
-  }, []);
-  // Saved fits render immediately. Resolving the complete CCP DOGMA index on
+  }, [persistenceReady]);
+  // Saved fits hydrate once from Sage persistent storage. Resolving the complete CCP DOGMA index on
   // mount used to freeze the entire app the first time Fittings was opened.
   // Type resolution now happens only when a fit is imported or analyzed.
   const active = useMemo(
-    () => fits.find((fit) => fit.id === activeId) ?? fits[0],
+    () => activeId ? fits.find((fit) => fit.id === activeId) : undefined,
     [fits, activeId],
   );
   const visibleFits = useMemo(() => filterAndSortFits(fits, libraryMeta, libraryQuery, librarySort), [fits, libraryMeta, libraryQuery, librarySort]);
@@ -677,16 +706,15 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
         return;
       }
       const resolved = await Promise.all(parsedFits.map((fit) => resolveFitFromEve(fit, typeNames)));
-      const existing = new Set(fits.map(fitFingerprint));
-      const unique = resolved.filter((fit) => { const key = fitFingerprint(fit); if (existing.has(key)) return false; existing.add(key); return true; });
-      const duplicateCount = resolved.length - unique.length;
-      if (!unique.length) { setStatus(`Import skipped: ${duplicateCount} duplicate fitting${duplicateCount === 1 ? "" : "s"} already exist.`); return; }
-      const validations = unique.map(validateFit);
+      const { imported, duplicateCount, renamedCount } = prepareImportedFits(fits, resolved);
+      const validations = imported.map(validateFit);
       setLastValidation(validations.find((result) => result.issues.length) ?? validations[0]);
-      setFits((current) => [...unique, ...current]);
-      setActiveId(unique[0].id);
-      const unresolved = unique.reduce((total, fit) => total + fitItems(fit).filter((item) => !item.typeId).length, 0);
-      setStatus(`Imported ${unique.length} fitting${unique.length === 1 ? "" : "s"}. ${duplicateCount ? `${duplicateCount} duplicate${duplicateCount === 1 ? " was" : "s were"} skipped. ` : ""}${unresolved} item name(s) remain unresolved.`);
+      setFits((current) => [...imported, ...current]);
+      setActiveId(imported[0].id);
+      const unresolved = imported.reduce((total, fit) => total + fitItems(fit).filter((item) => !item.typeId).length, 0);
+      const duplicateNote = duplicateCount ? ` ${duplicateCount} duplicate fitting${duplicateCount === 1 ? "" : "s"} kept instead of skipped.` : "";
+      const renamedNote = renamedCount ? ` ${renamedCount} imported fitting${renamedCount === 1 ? "" : "s"} automatically renamed.` : "";
+      setStatus(`Imported ${imported.length} fitting${imported.length === 1 ? "" : "s"}.${duplicateNote}${renamedNote} ${unresolved} item name(s) remain unresolved.`);
       setInput("");
     } catch (error) {
       setLastValidation(null);
@@ -699,6 +727,14 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   }
   function touchFit(id: string) {
     setLibraryMeta((current) => ({ ...current, [id]: { ...(current[id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), readiness: "unknown" } }));
+  }
+
+  function startNewFit() {
+    setActiveId("");
+    setSideMode("build");
+    setInput("");
+    setLastValidation(null);
+    setStatus("New fitting ready. Choose a ship to start a clean build.");
   }
 
   function createBuilderFit(ship: ShipChoice, name?: string) {
@@ -915,6 +951,7 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
     <section className="fit-workspace fit-workspace-v2">
       <div className="fit-v2-toolbar">
         <label>Saved fit<select value={active?.id ?? ""} onChange={(event) => setActiveId(event.target.value)}><option value="">Select fitting...</option>{fits.map((fit) => <option key={fit.id} value={fit.id}>{fit.name} - {fit.hull.name}</option>)}</select></label>
+        <button type="button" className="fit-new-build" onClick={startNewFit} title="Start a clean fitting without deleting any saved fits">+ New Fit</button>
         <button type="button" className={sideMode === "build" ? "active" : ""} onClick={() => setSideMode("build")}>Modules</button>
         <button type="button" className={sideMode === "import" ? "active" : ""} onClick={() => setSideMode("import")}>Import</button>
       </div>
@@ -979,7 +1016,11 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
     void window.sage.listShips().then((items: ShipChoice[]) => { if(items.length)setShips(items); }).catch(()=>undefined);
   }, []);
   useEffect(() => {
-    if (!fit) setBrowserTab("ships");
+    if (!fit) {
+      setBrowserTab("ships");
+      setFitName("");
+      setHullQuery("");
+    }
   }, [fit?.id]);
   useEffect(() => {
     if (!onlyFlyableShips) { setFlyableHullIds(null); setFlyablePending(false); setFlyableError(""); return; }
@@ -1407,11 +1448,18 @@ function FitDisplay({
           setAnalysis(result);
           setAnalysisRefreshing(false);
           const missingCount = result.missingRequirements.length;
-          setAnalysisStatus(missingCount ? `${missingCount} missing or undertrained requirement(s).` : "All identified fitting skill requirements are met.");
-          onAnalysis(missingCount ? "missing" : "ready", missingCount);
+          const fittingBlockers = (result.issues ?? []).filter((issue: any) => issue.level === "error").length;
+          const blocked = missingCount > 0 || fittingBlockers > 0;
+          setAnalysisStatus(blocked ? `${missingCount} skill requirement(s), ${fittingBlockers} fitting blocker(s).` : "All identified fitting skill and resource requirements are met.");
+          onAnalysis(blocked ? "missing" : "ready", missingCount);
           const issueCodes = (result.issues ?? []).map((issue: any) => String(issue.code));
           const itemTypeIds = fitItems(fit).map((item) => item.typeId).filter((id): id is number => Boolean(id));
-          void window.sage.getFittingRemediesLocal({ characterId, hullTypeId: fit.hull.typeId!, issueCodes, itemTypeIds })
+          const remedyItems = (["low", "mid", "high", "rig", "subsystem"] as const).flatMap((rack) =>
+            fit[rack].flatMap((item) => item.typeId ? [{ typeId:item.typeId, quantity:item.quantity, chargeTypeId:item.chargeTypeId, chargeQuantity:item.chargeQuantity, attributeOverrides:item.attributeOverrides, state:item.state ?? (rack === "rig" || rack === "subsystem" ? "online" : "active"), rack }] : []),
+          );
+          const remedyImplants = fit.implants.map((item) => item.typeId).filter((id): id is number => Boolean(id));
+          const remedyBoosters = [...fit.boosters.map((item) => item.typeId).filter((id): id is number => Boolean(id)), ...externalEffects.filter((item) => item.kind === "booster").map((item) => item.typeId)];
+          void window.sage.getFittingRemediesLocal({ characterId, hullTypeId: fit.hull.typeId!, issueCodes, itemTypeIds, items:remedyItems, implantTypeIds:remedyImplants, boosterTypeIds:remedyBoosters })
             .then((candidates) => {
               if (cancelled) return;
               const installed = new Set((result.enhancements ?? []).filter((item: any) => item.kind === "implant").map((item: any) => Number(item.typeId)));
@@ -1444,6 +1492,7 @@ function FitDisplay({
       missingRequirements: (analysis?.missingRequirements ?? []).map((requirement: any) => ({ item: String(requirement.item ?? "Fitted item"), skillId: Number(requirement.skillId), skill: String(requirement.skill ?? `Skill ${requirement.skillId}`), requiredLevel: Number(requirement.requiredLevel ?? 1), trainedLevel: Number(requirement.trainedLevel ?? 0) })),
       remedies,
       resources: analysis?.resources ? { used: { ...analysis.resources.used }, capacity: { ...analysis.resources.capacity } } : undefined,
+      rigSlots: { used: fit.rig.reduce((sum, item) => sum + Math.max(1, Number(item.quantity ?? 1)), 0), capacity: Number(analysis?.fitting?.slots?.rig ?? 0) },
     });
   };
   async function exportCurrentFitToEve() {
@@ -1604,18 +1653,20 @@ function FitIssuesPanel({ analysis, remedies, onFix }: { analysis:any; remedies:
   const rawMissing = analysis?.missingRequirements ?? [];
   const missing = [...new Map(rawMissing.map((item:any) => [`${item.skillId}:${item.requiredLevel}`, item])).values()] as any[];
   const issues = (analysis?.issues ?? []) as any[];
-  const resolvable = missing.length > 0 || remedies.length > 0;
+  const hasIssues = issues.length > 0 || missing.length > 0;
+  const hasRemedySummary = missing.length > 0 || remedies.length > 0;
   const supportSkills = remedies.filter((item) => item.kind === "skill");
-  const augments = remedies.filter((item) => item.kind === "implant");
+  const augments = remedies.filter((item) => item.kind === "implant" || item.kind === "implant-set");
+  const moduleChanges = remedies.filter((item) => item.kind === "module");
   const rigs = remedies.filter((item) => item.kind === "rig");
   return <aside className="fit-v2-issues">
     <div className="fit-v2-issues-head"><strong>Fitting issues</strong><span>{analysis ? issues.length + missing.length : "…"}</span></div>
     {!analysis ? <small className="fit-issues-state">Analyzing fit…</small> : issues.length === 0 && missing.length === 0 ? <div className="fit-issue-ok">✓ Fit viable for this pilot</div> : <div className="fit-issue-list">
       {missing.slice(0,4).map((item:any) => <article className="skill" key={`skill-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><small>L{item.trainedLevel} → L{item.requiredLevel}</small><em>{item.item}</em></article>)}
-      {issues.slice(0,6).map((issue:any,index:number) => <article className={issue.level === "error" ? "error" : "warning"} key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small>{(issue.code === "cpu-exceeded" || issue.code === "powergrid-exceeded") && <em>{remedies.filter((item) => item.solves.includes(issue.code)).length} verified skill / augment / rig options</em>}</article>)}
+      {issues.slice(0,6).map((issue:any,index:number) => <article className={issue.level === "error" ? "error" : "warning"} key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small>{(issue.code === "cpu-exceeded" || issue.code === "powergrid-exceeded") && <em>{remedies.filter((item) => item.solves.includes(issue.code)).length} exact full-fit fixes</em>}</article>)}
     </div>}
-    {resolvable && <div className="fit-issue-remedy-summary"><span>{supportSkills.length} skills</span><span>{augments.length} augments</span><span>{rigs.length} rigs</span></div>}
-    {resolvable && <button type="button" className="fit-issues-fix" onClick={onFix}>Fix these issues</button>}
+    {hasRemedySummary && <div className="fit-issue-remedy-summary"><span>{supportSkills.length} skills</span><span>{augments.length} augments</span><span>{moduleChanges.length} module swaps</span><span>{rigs.length} rigs</span></div>}
+    {hasIssues && <button type="button" className="fit-issues-fix" onClick={onFix}>Fix Fit</button>}
   </aside>;
 }
 function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageProfilePreset, onTargetDamageProfilePresetChange, damageProfilePreset, onDamageProfilePresetChange, targetProfile, onTargetProfileChange, targetNpc, npcTargetOptions, npcTargetSearch, onNpcTargetSearchChange, onNpcTargetChange }: { analysis:any; refreshing:boolean; fit:Fit; hullProfile:HullFittingProfile|null; targetDamageProfilePreset:NpcDamagePreset; onTargetDamageProfilePresetChange(value:NpcDamagePreset):void; damageProfilePreset:NpcDamagePreset; onDamageProfilePresetChange(value:NpcDamagePreset):void; targetProfile:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}; onTargetProfileChange(value:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}):void; targetNpc:FittingSearchResult|null; npcTargetOptions:FittingSearchResult[]; npcTargetSearch:string; onNpcTargetSearchChange(value:string):void; onNpcTargetChange(typeId:number):void }) {

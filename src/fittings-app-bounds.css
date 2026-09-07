@@ -613,7 +613,7 @@ main > .cached-view > section.fit-workspace.fit-workspace-v2 > .fit-main {
 .fit-issue-list em { color:#5f8588; font-size:6px; font-style:normal; }
 .fit-issue-remedy-summary {
   display: grid;
-  grid-template-columns: repeat(3,1fr);
+  grid-template-columns: repeat(4,1fr);
   gap: 2px;
 }
 .fit-issue-remedy-summary span {

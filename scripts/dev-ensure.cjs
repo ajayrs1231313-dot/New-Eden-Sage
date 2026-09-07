@@ -113,6 +113,8 @@ function findOrphanDevElectronMains() {
   for (const entry of processes) {
     const pid = Number(entry?.ProcessId);
     const parentPid = Number(entry?.ParentProcessId);
+    const sessionId = Number(entry?.SessionId);
+    if (Number.isInteger(processSessionId) && sessionId !== processSessionId) continue;
     if (!isRepoElectronMain(entry, root)) continue;
 
     const parent = byPid.get(parentPid);
@@ -185,8 +187,8 @@ function runNode(args) {
 
   // An Electron main can survive after its watcher/parent dies. Chromium keeps
   // the dev profile locked in that state, so a fresh launcher cannot start.
-  // Reconcile orphaned mains across Windows sessions before deciding whether
-  // an existing stack is reusable; healthy watcher-owned mains are preserved.
+  // Chromium dev profiles are isolated per Windows session, so only reconcile
+  // orphaned mains from this session; healthy watcher-owned mains are preserved.
   const orphanElectronPids = findOrphanDevElectronMains();
   if (orphanElectronPids.length) {
     await stopOrphanDevElectronMains(orphanElectronPids);

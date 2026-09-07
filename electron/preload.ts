@@ -92,6 +92,8 @@ contextBridge.exposeInMainWorld("sage", {
   openChatGptPlugins: () => ipcRenderer.invoke("mcp:open-chatgpt"),
   openOpenAiTunnels: () => ipcRenderer.invoke("mcp:open-tunnels"),
   openOpenAiApiKeys: () => ipcRenderer.invoke("mcp:open-api-keys"),
+  loadFittingPersistence: (legacyValue: unknown) => ipcRenderer.invoke("fitting:persistence-load", legacyValue),
+  saveFittingPersistence: (value: unknown) => ipcRenderer.invoke("fitting:persistence-save", value),
   syncMcpRendererData: (value: unknown) => ipcRenderer.invoke("mcp:sync-renderer-data", value),
   onMcpFitDataUpdated: (callback: (value: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);

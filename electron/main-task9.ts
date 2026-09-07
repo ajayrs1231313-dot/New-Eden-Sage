@@ -82,11 +82,12 @@ import {
 } from "./industrial-preparation";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
+import { hydrateCanonicalFittingStore, saveCanonicalFittingStore } from "./fitting-persistence";
 import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility, repairClaudeDesktopDirectConfig, showClaudeDesktopBundle } from "./claude-integration";
 import { typeImageProtocolResponse } from "./eve-assets";
 import { getHostClockInfo, setHostClock, syncHostClock } from "./system-time";
 import { loadGlobalMarketQuotes } from "./market-intelligence";
-import { analyzeLpCorporation, getLpEarningCandidates, resolveLpCorporations } from "./lp-store";
+import { analyzeLpCorporation, disposeLpStoreWorker, getLpEarningCandidates, getLpStoreWorkerStatus, resolveLpCorporations } from "./lp-store-worker-manager";
 import { applyProfitBulkBookkeeping, completeProfitDeal, getProfitLedger, getProfitPurchaseReview, getProfitReconciliationReview, reconcileProfitLedger, removeProfitLedgerRecord, setProfitMatchDecision, setProfitMaterialProvenance, setProfitPurchaseTransactionOverride, setProfitTransactionOverride } from "./profit-ledger";
 import { analyzePlanetaryRevenue, buildPlanetaryPlan, type PlanetaryPlanInput, type PlanetaryRevenueSettings } from "./planetary-revenue";
 import { analyzePlanetaryAdvanced, buildPlanetaryBasketPlan, buildPlanetaryDesignerEveTemplate, buildPlanetaryDesignerSeedFromSnapshot, evaluatePlanetaryDesignerLayout, generatePlanetaryDesignerLayouts, type PlanetaryBasketInput, type PlanetaryDesignerInput } from "./planetary-advanced";
@@ -437,6 +438,7 @@ async function ensureSyncMemoryHeadroom(context: string) {
   if (!decision.ok) {
     await Promise.all([
       disposeFittingWorker(),
+      disposeLpStoreWorker(),
       releaseIdleMarketAnalysisWorker(),
       releaseIdleAnalysisWorkers(),
     ]);
@@ -1074,9 +1076,19 @@ if (!hasSingleInstanceLock) {
   void ensureClaudeCompatibility()
     .then((status) => void logEvent("info", "mcp.claude_compatibility", { desktop: status.desktop, code: status.code }))
     .catch((error) => void logEvent("warn", "mcp.claude_compatibility_failed", { error }));
+  const hydratedFittingRenderers = new Set<number>();
+  ipcMain.handle("fitting:persistence-load", async (event, legacyValue: unknown) => {
+    const state = await hydrateCanonicalFittingStore(legacyValue);
+    hydratedFittingRenderers.add(event.sender.id);
+    event.sender.once("destroyed", () => hydratedFittingRenderers.delete(event.sender.id));
+    return state;
+  });
+  ipcMain.handle("fitting:persistence-save", async (event, value: unknown) => {
+    if (!hydratedFittingRenderers.has(event.sender.id)) throw new Error("Fitting persistence must be hydrated before it can be saved.");
+    return saveCanonicalFittingStore(value, USER_DATA_ROOT, { allowEmptyOverwrite: true });
+  });
   ipcMain.handle("mcp:sync-renderer-data", async (_event, value: unknown) => {
-    const target = path.join(USER_DATA_ROOT, "mcp-renderer-data.json");
-    await fs.writeFile(target, JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
+    await saveCanonicalFittingStore(value);
     return true;
   });
   ipcMain.handle("system-time:get", () => getHostClockInfo());
@@ -1181,6 +1193,7 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("lp-store:corporations", (_event, corporationIds:number[]) => resolveLpCorporations(Array.isArray(corporationIds) ? corporationIds : []));
   ipcMain.handle("lp-store:offers", (_event, corporationId:number, marketRevision:number) => analyzeLpCorporation(Number(corporationId), Number(marketRevision)));
   ipcMain.handle("lp-store:earning-candidates", (_event, standings:unknown, currentCorporationIds:unknown) => getLpEarningCandidates(standings, currentCorporationIds));
+  ipcMain.handle("lp-store:worker-status", () => getLpStoreWorkerStatus());
   ipcMain.handle("market:contract-workspace", () => getContractMarketWorkspace((progress) => {
     window?.webContents.send("market:progress", {
       mode: "contracts",
@@ -1317,7 +1330,7 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("fitting:remedies-local", async (_event, input: any) => {
     const snapshot = input?.characterId ? getSnapshot(String(input.characterId)) as any : undefined;
     const trainedSkills = (snapshot?.skills?.skills ?? []).map((skill: any) => ({ skillId: Number(skill.skill_id), level: Number(skill.trained_skill_level ?? 0) }));
-    return runFittingWorker("remedies", { ...input, trainedSkills });
+    return runFittingWorker("remedies", { ...input, trainedSkills, snapshot });
   });
   ipcMain.handle("universe:resolve-types", async (_event, names: string[]) => {
     const unique = [
@@ -2859,6 +2872,7 @@ app.on("before-quit", () => {
   disposePrivateRefreshProcess();
   disposePublicDataRefreshProcess();
   disposeContractIntelligenceProcess();
+  void disposeLpStoreWorker();
 });
 
 app.on("window-all-closed", () => {
@@ -2870,6 +2884,7 @@ app.on("window-all-closed", () => {
   disposeContractIntelligenceProcess();
   void disposeAnalysisWorker();
   void disposeFittingWorker();
+  void disposeLpStoreWorker();
   void stopMcpWriteBridge();
   if (process.platform !== "darwin") app.quit();
 });

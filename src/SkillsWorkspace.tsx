@@ -4,6 +4,7 @@ import type {
   ShipReadinessResult,
   SkillDetail,
   FitResolutionIntent,
+  FitRemedyCandidate,
 } from "./types";
 import { describeSkill, getSkillTrainingState } from "./skill-intelligence";
 import { ActivityPlanner } from "./ActivityPlanner";
@@ -339,32 +340,26 @@ function DetailGroup({ title, items }: { title: string; items: string[] }) {
 function FitResolutionPlan({ intent }: { intent: FitResolutionIntent }) {
   const missing = [...new Map(intent.missingRequirements.map((item) => [`${item.skillId}:${item.requiredLevel}`, item])).values()];
   const supportSkills = intent.remedies.filter((item) => item.kind === "skill");
-  const implants = intent.remedies.filter((item) => item.kind === "implant");
+  const implants = intent.remedies.filter((item) => item.kind === "implant" || item.kind === "implant-set");
   const rigs = intent.remedies.filter((item) => item.kind === "rig");
+  const moduleChanges = intent.remedies.filter((item) => item.kind === "module");
   const hardIssues = intent.issues.filter((issue) => issue.code !== "cpu-exceeded" && issue.code !== "powergrid-exceeded");
-  const shortage = (code:string) => {
-    const resources = intent.resources;
-    if (!resources) return 0;
-    const key = code === "cpu-exceeded" ? "cpu" : "powergrid";
-    const used = resources.used[key]; const cap = resources.capacity[key];
-    return cap > 0 ? Math.max(0, (used / cap - 1) * 100) : 0;
-  };
-  const remedyNote = (item:any) => {
-    const issue = item.solves?.[0];
-    const need = shortage(issue);
-    const directOutput = (item.affectedAttributeId === 48 || item.affectedAttributeId === 11) && item.operation === 6;
-    if (directOutput && need > 0 && item.effectValue >= need) return `Covers the current ${issue === "cpu-exceeded" ? "CPU" : "powergrid"} shortfall alone (${need.toFixed(1)}% needed).`;
-    return item.reason;
-  };
+  const resourceLabel = (item: FitRemedyCandidate) => item.solves.map((code) => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ");
+  const resultLabel = (item: FitRemedyCandidate) => item.result
+    ? `${item.result.used.toFixed(1)} / ${item.result.capacity.toFixed(1)} ${item.result.resource === "cpu" ? "tf" : "MW"} (${item.result.headroom.toFixed(1)} spare)`
+    : "";
+  const rigRackFull = Boolean(intent.rigSlots && intent.rigSlots.capacity > 0 && intent.rigSlots.used >= intent.rigSlots.capacity);
+
   return <section className="fit-resolution-plan">
     <div className="fit-resolution-title"><div><p className="eyebrow">{intent.source === "dream-fit" ? "DREAM FIT RESOLUTION" : "FIT ISSUE RESOLUTION"}</p><h3>{intent.fitName}</h3><small>{intent.hullName} · exact fitting blockers carried from Fitting Command</small></div><strong>{intent.issues.length + missing.length} blockers</strong></div>
     {intent.issues.length === 0 && missing.length === 0 ? <div className="fit-resolution-ready">This fit is already viable for the selected pilot.</div> : <div className="fit-resolution-grid">
-      <article><h4>Train these skills</h4>{missing.length === 0 && supportSkills.length === 0 ? <small>No training fix identified.</small> : <>{missing.map((item) => <div key={`required-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><span>L{item.trainedLevel} → L{item.requiredLevel}</span><small>Required by {item.item}</small></div>)}{supportSkills.map((item) => <div key={`support-${item.typeId}-${item.solves.join("-")}`}><strong>{item.name}</strong><span>L{item.currentLevel ?? 0} → L{item.targetLevel ?? 1}</span><small>{item.reason}</small></div>)}</>}</article>
-      <article><h4>Augments that can help</h4>{implants.length ? implants.map((item) => <div key={`implant-${item.typeId}`}><strong>{item.name}</strong><span>{item.solves.map(code => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ")}</span><small>{remedyNote(item)}</small></div>) : <small>No relevant fitting implant was found in the current local CCP SDE.</small>}</article>
-      <article><h4>Rigs that can help</h4>{rigs.length ? rigs.map((item) => <div key={`rig-${item.typeId}`}><strong>{item.name}</strong><span>{item.solves.map(code => code === "cpu-exceeded" ? "CPU" : "Powergrid").join(" + ")}</span><small>{remedyNote(item)}</small></div>) : <small>No compatible fitting rig was identified for this hull and current issue set.</small>}</article>
-      <article><h4>Fit changes required</h4>{hardIssues.length ? hardIssues.map((issue,index) => <div key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small></div>) : <small>No hard slot, calibration, hardpoint or compatibility blocker remains beyond the resource/skill issues above.</small>}</article>
+      <article><h4>Train these skills</h4>{missing.length === 0 && supportSkills.length === 0 ? <small>No training path clears this blocker.</small> : <>{missing.map((item) => <div key={`required-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><span>L{item.trainedLevel} → L{item.requiredLevel}</span><small>Required by {item.item}</small></div>)}{supportSkills.map((item) => <div key={`support-${item.typeId}-${item.targetLevel}`}><strong>{item.name}</strong><span>L{item.currentLevel ?? 0} → L{item.targetLevel ?? 1}</span><small>{item.reason}</small>{item.result && <em>{resultLabel(item)}</em>}</div>)}</>}</article>
+      <article><h4>Implant fixes</h4>{implants.length ? implants.map((item) => <div key={`implant-${item.kind}-${item.components?.map((part) => part.typeId).join("-") ?? item.typeId}`}><strong>{item.kind === "implant-set" ? `${item.components?.length ?? 0}-implant set` : item.name}</strong><span>{resourceLabel(item)}</span>{item.kind === "implant-set" && <em>{item.components?.map((part) => `${part.name}${part.slot ? ` (slot ${part.slot})` : ""}`).join(" + ")}</em>}<small>{item.reason}</small>{item.result && <em>{resultLabel(item)}</em>}</div>) : <small>No implant or compatible implant combination clears the blocker.</small>}</article>
+      <article><h4>Rig fixes</h4>{rigRackFull ? <small>Rig rack is full ({intent.rigSlots!.used}/{intent.rigSlots!.capacity}); Sage did not suggest impossible extra rigs.</small> : rigs.length ? rigs.map((item) => <div key={`rig-${item.typeId}`}><strong>{item.name}</strong><span>{resourceLabel(item)}</span><small>{item.reason}</small>{item.result && <em>{resultLabel(item)}</em>}</div>) : <small>No free-slot rig change clears the blocker.</small>}</article>
+      <article><h4>Comparable module swaps</h4>{moduleChanges.length ? moduleChanges.map((item) => <div key={`module-${item.replacement?.fromTypeId}-${item.replacement?.toTypeId}-${item.replacement?.count}`}><strong>{item.replacement ? `${item.replacement.count}× ${item.replacement.fromName} → ${item.replacement.count}× ${item.replacement.toName}` : item.name}</strong><span>{resourceLabel(item)}</span><small>{item.reason}</small>{item.result && <em>{resultLabel(item)}</em>}</div>) : <small>No same-group module swap was found that clears the blocker without creating another fitting error.</small>}</article>
+      {hardIssues.length > 0 && <article><h4>Other blockers</h4>{hardIssues.map((issue,index) => <div key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small></div>)}</article>}
     </div>}
-    <p className="fit-resolution-note">Sage only lists augments and rigs whose current CCP DOGMA modifiers target the failing fitting resource. Apply a suggested change in Fitting Command and the live analysis will verify whether the complete fit is resolved.</p>
+    <p className="fit-resolution-note">Only changes Sage simulated against this exact fit and selected pilot are shown. Suggestions that merely improve CPU or powergrid but do not clear the blocker are excluded.</p>
   </section>;
 }
 function ShipPlanner({

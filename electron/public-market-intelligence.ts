@@ -8,6 +8,10 @@ export type PreparedPublicTradeDataset = {
   createdAt: string;
   routeChecks: number;
   viablePairs: number;
+  spreadComparisonGeneration: string | null;
+  spreadComparisonSnapshotId: string | null;
+  spreadComparisonGeneratedAt: string | null;
+  spreadComparisonCount: number;
   opportunities: PreparedPublicTradeCandidate[];
 };
 
@@ -22,6 +26,13 @@ export type PreparedPublicTradeCandidate = {
   availableUnits: number;
   marginPerUnit: number;
   marginPercent: number;
+  currentSpread: number;
+  previousSpread: number | null;
+  spreadChange: number | null;
+  spreadChangePercent: number | null;
+  spreadComparisonGeneration: string | null;
+  spreadComparisonSnapshotId: string | null;
+  spreadComparisonGeneratedAt: string | null;
   publicGrossPotential: number;
   fillScore: number;
   jumps: number;
@@ -29,8 +40,13 @@ export type PreparedPublicTradeCandidate = {
   routeSecurity: "high" | "low" | "null";
   minimumRouteSecurityStatus: number;
   risk: "Low" | "Medium" | "High";
-  marginWidenedBy: null;
+  marginWidenedBy: number | null;
   publicScore: number;
+};
+
+export type PreparedTradeSpreadHistory = {
+  generation: string | null;
+  dataset: PreparedPublicTradeDataset | null;
 };
 
 export type PreparedPublicShortageDataset = {
@@ -100,6 +116,55 @@ function pairKey(sell: FullMarketOrder, buy: FullMarketOrder) {
   return `${sell.orderId}:${buy.orderId}`;
 }
 
+export function preparedTradeLaneKey(typeId: number, sell: Partial<FullMarketOrder>, buy: Partial<FullMarketOrder>) {
+  const sourceLocation = Number(sell.locationId ?? 0);
+  const targetLocation = Number(buy.locationId ?? 0);
+  if (sourceLocation > 0 && targetLocation > 0) return `${typeId}:location:${sourceLocation}->${targetLocation}`;
+  const sourceSystem = Number(sell.systemId ?? 0);
+  const targetSystem = Number(buy.systemId ?? 0);
+  if (sourceSystem > 0 && targetSystem > 0) return `${typeId}:system:${sourceSystem}->${targetSystem}`;
+  const sourceRegion = Number((sell as any).regionId ?? 0);
+  const targetRegion = Number((buy as any).regionId ?? 0);
+  return `${typeId}:region:${sourceRegion || String((sell as any).regionName ?? "unknown")}->${targetRegion || String((buy as any).regionName ?? "unknown")}`;
+}
+
+export function attachPreparedTradeSpreadHistory<T extends {
+  typeId: number;
+  sell: Partial<FullMarketOrder>;
+  buy: Partial<FullMarketOrder>;
+  marginPerUnit: number;
+}>(candidates: T[], history?: PreparedTradeSpreadHistory | null) {
+  const previous = history?.dataset;
+  const comparisonGeneration = history?.generation ?? previous?.snapshotId ?? null;
+  const comparisonSnapshotId = previous?.snapshotId ?? null;
+  const comparisonGeneratedAt = previous?.createdAt ?? null;
+  const previousByLane = new Map<string, number>();
+  for (const candidate of previous?.opportunities ?? []) {
+    const spread = Number(candidate.currentSpread ?? candidate.marginPerUnit ?? (Number(candidate.buy?.price ?? 0) - Number(candidate.sell?.price ?? 0)));
+    if (!Number.isFinite(spread)) continue;
+    const key = preparedTradeLaneKey(Number(candidate.typeId), candidate.sell ?? {}, candidate.buy ?? {});
+    const existing = previousByLane.get(key);
+    if (existing == null || spread > existing) previousByLane.set(key, spread);
+  }
+  return candidates.map((candidate) => {
+    const currentSpread = Number(candidate.marginPerUnit);
+    const previousSpread = previousByLane.get(preparedTradeLaneKey(candidate.typeId, candidate.sell, candidate.buy)) ?? null;
+    const spreadChange = previousSpread == null ? null : currentSpread - previousSpread;
+    const spreadChangePercent = previousSpread == null || previousSpread === 0 ? null : (spreadChange! / Math.abs(previousSpread)) * 100;
+    return {
+      ...candidate,
+      currentSpread,
+      previousSpread,
+      spreadChange,
+      spreadChangePercent,
+      spreadComparisonGeneration: previousSpread == null ? null : comparisonGeneration,
+      spreadComparisonSnapshotId: previousSpread == null ? null : comparisonSnapshotId,
+      spreadComparisonGeneratedAt: previousSpread == null ? null : comparisonGeneratedAt,
+      marginWidenedBy: spreadChange,
+    };
+  });
+}
+
 function publicPairs(sells: FullMarketOrder[], buys: FullMarketOrder[]) {
   const pairs = new Map<string, { sell: FullMarketOrder; buy: FullMarketOrder }>();
   for (const sell of sells) {
@@ -130,7 +195,11 @@ async function mapLimited<T, R>(items: T[], limit: number, mapper: (item: T, ind
   return results;
 }
 
-export async function buildPreparedPublicTradeDataset(index: FullMarketAnalysisIndex, progress?: Progress): Promise<PreparedPublicTradeDataset> {
+export async function buildPreparedPublicTradeDataset(
+  index: FullMarketAnalysisIndex,
+  progress?: Progress,
+  history?: PreparedTradeSpreadHistory | null,
+): Promise<PreparedPublicTradeDataset> {
   const preliminary: Array<PreparedPublicTradeCandidate & { preScore: number }> = [];
   let viablePairs = 0;
   let itemNo = 0;
@@ -157,6 +226,13 @@ export async function buildPreparedPublicTradeDataset(index: FullMarketAnalysisI
         availableUnits,
         marginPerUnit,
         marginPercent,
+        currentSpread: marginPerUnit,
+        previousSpread: null,
+        spreadChange: null,
+        spreadChangePercent: null,
+        spreadComparisonGeneration: null,
+        spreadComparisonSnapshotId: null,
+        spreadComparisonGeneratedAt: null,
         publicGrossPotential,
         fillScore,
         jumps: 999,
@@ -176,7 +252,9 @@ export async function buildPreparedPublicTradeDataset(index: FullMarketAnalysisI
     if (itemNo % 2000 === 0) progress?.({ stage: "trade-candidates", completed: itemNo, total: index.items.size, message: "Building public trade candidates" });
   }
 
-  const routesToCheck = preliminary.sort((a, b) => b.preScore - a.preScore).slice(0, 30_000);
+  const comparableHistory = history?.dataset && history.dataset.snapshotId !== index.snapshotId ? history : null;
+  const withHistory = attachPreparedTradeSpreadHistory(preliminary, comparableHistory);
+  const routesToCheck = withHistory.sort((a, b) => b.preScore - a.preScore).slice(0, 30_000);
   let routed = 0;
   const checked = await mapLimited(routesToCheck, 32, async (candidate) => {
     const route = await universeRoute(candidate.sell.systemId, candidate.buy.systemId);
@@ -199,16 +277,21 @@ export async function buildPreparedPublicTradeDataset(index: FullMarketAnalysisI
     } satisfies PreparedPublicTradeCandidate;
   });
 
+  const opportunities = checked
+    .filter((candidate) => candidate.jumps < 999 && candidate.availableUnits > 0 && candidate.publicGrossPotential > 0)
+    .sort((a, b) => b.publicScore - a.publicScore || b.publicGrossPotential - a.publicGrossPotential);
   return {
     schemaVersion: 1,
     dataset: "market-trades",
     snapshotId: index.snapshotId,
     createdAt: index.createdAt,
+    spreadComparisonGeneration: comparableHistory?.generation ?? comparableHistory?.dataset?.snapshotId ?? null,
+    spreadComparisonSnapshotId: comparableHistory?.dataset?.snapshotId ?? null,
+    spreadComparisonGeneratedAt: comparableHistory?.dataset?.createdAt ?? null,
+    spreadComparisonCount: opportunities.filter((candidate) => candidate.previousSpread != null).length,
     routeChecks: checked.length,
     viablePairs,
-    opportunities: checked
-      .filter((candidate) => candidate.jumps < 999 && candidate.availableUnits > 0 && candidate.publicGrossPotential > 0)
-      .sort((a, b) => b.publicScore - a.publicScore || b.publicGrossPotential - a.publicGrossPotential),
+    opportunities,
   };
 }
 

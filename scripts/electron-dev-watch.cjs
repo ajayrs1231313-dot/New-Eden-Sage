@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync, spawn } = require('node:child_process');
 const { createHash } = require('node:crypto');
+const { parseConsoleSessionId, resolveDevUserData } = require('./dev-profile-policy.cjs');
 
 const root = path.resolve(__dirname, '..');
 const dist = path.join(root, 'dist-electron');
@@ -13,9 +14,17 @@ const processSessionId = currentWindowsSessionId();
 const launcherLockFile = path.join(logRoot, process.platform === 'win32' && Number.isInteger(processSessionId) ? `dev-launcher-session-${processSessionId}.lock` : 'dev-launcher.lock');
 const launcherCommandFile = path.join(logRoot, process.platform === 'win32' && Number.isInteger(processSessionId) ? `dev-launcher-command-session-${processSessionId}.json` : 'dev-launcher-command.json');
 const defaultDevUserData = path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage-dev');
-const devUserData = process.platform === 'win32' && processSessionId === 0
-  ? path.join(process.env.APPDATA || process.env.LOCALAPPDATA || root, 'new-eden-sage-dev-session-0')
-  : defaultDevUserData;
+const consoleSessionId = currentWindowsConsoleSessionId();
+const interactiveDesktop = currentWindowsDesktopSession(processSessionId);
+const devUserData = resolveDevUserData({
+  platform: process.platform,
+  sessionId: processSessionId,
+  consoleSessionId,
+  interactiveDesktop,
+  appDataRoot: process.env.APPDATA || process.env.LOCALAPPDATA,
+  fallbackRoot: root,
+});
+console.log(`[sage-dev] Windows session ${processSessionId ?? 'unknown'}; console session ${consoleSessionId ?? 'unknown'}; interactive desktop ${interactiveDesktop ? 'yes' : 'no'}; Chromium profile ${devUserData}`);
 const sharedUserData = path.dirname(logRoot);
 const sharedLocalState = path.join(sharedUserData, 'Local State');
 const devLocalState = path.join(devUserData, 'Local State');
@@ -29,6 +38,23 @@ function currentWindowsSessionId() {
     const value = Number(raw);
     return Number.isInteger(value) && value >= 0 ? value : null;
   } catch { return null; }
+}
+
+function currentWindowsConsoleSessionId() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const queryPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'query.exe');
+    const output = execFileSync(queryPath, ['session'], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 3000 });
+    return parseConsoleSessionId(output);
+  } catch { return null; }
+}
+
+function currentWindowsDesktopSession(sessionId) {
+  if (process.platform !== 'win32' || !Number.isInteger(sessionId) || sessionId === 0) return false;
+  try {
+    const raw = execFileSync('powershell.exe', ['-NoProfile', '-Command', `(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq ${sessionId} } | Measure-Object).Count`], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 3000 }).trim();
+    return Number(raw) > 0;
+  } catch { return false; }
 }
 
 // Chromium safeStorage derives its AES key from Local State. The dev stack keeps

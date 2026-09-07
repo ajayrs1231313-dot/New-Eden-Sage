@@ -190,6 +190,10 @@ export async function findFullMarketTrades(
         appliedCapitalLimit: Number.isFinite(capitalLimit) ? capitalLimit : null,
         appliedCargoCapacityM3: cargoCapacity,
         datasetCreatedAt: null,
+        spreadComparisonGeneration: null,
+        spreadComparisonSnapshotId: null,
+        spreadComparisonGeneratedAt: null,
+        spreadComparisonCount: 0,
         localFilterMs: Date.now() - preparedStartedAt,
       },
       message: "The current shared generation does not include prepared trade intelligence yet. Sage will not rebuild the public market locally.",
@@ -229,7 +233,7 @@ export async function findFullMarketTrades(
     if (maxJumps != null && trade.jumps > maxJumps) return false;
     if (maxMinutes != null && Number(trade.estimatedMinutes ?? 0) > maxMinutes) return false;
     if (mode === "under10" && trade.jumps > 10) return false;
-    if (mode === "widened") return false;
+    if (mode === "widened") return trade.spreadChange != null ? Number(trade.spreadChange) > 0 : Number(trade.marginWidenedBy ?? 0) > 0;
     return true;
   });
 
@@ -256,9 +260,13 @@ export async function findFullMarketTrades(
       appliedCapitalLimit: Number.isFinite(capitalLimit) ? capitalLimit : null,
       appliedCargoCapacityM3: cargoCapacity,
       datasetCreatedAt: prepared.createdAt,
+      spreadComparisonGeneration: prepared.spreadComparisonGeneration ?? null,
+      spreadComparisonSnapshotId: prepared.spreadComparisonSnapshotId ?? null,
+      spreadComparisonGeneratedAt: prepared.spreadComparisonGeneratedAt ?? null,
+      spreadComparisonCount: Number(prepared.spreadComparisonCount ?? 0),
       localFilterMs: Date.now() - preparedStartedAt,
     },
-    message: mode === "widened" ? "Margin-widening history is not rebuilt on the desktop; the server-prepared current market remains available in other modes." : undefined,
+    message: mode === "widened" && !(Number(prepared.spreadComparisonCount ?? 0) > 0) ? "Spread history is not available for this market generation." : undefined,
   };
 }
 

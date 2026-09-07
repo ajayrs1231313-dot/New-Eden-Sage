@@ -831,7 +831,16 @@ export async function getAugmentGuideLocal(installedTypeIds:number[]=[]):Promise
   ]};
 }
 
-export async function getFittingRemediesLocal(input: { hullTypeId:number; issueCodes?:string[]; itemTypeIds?:number[]; trainedSkills?:Array<{ skillId:number; level:number }> }) {
+export async function getFittingRemediesLocal(input: {
+  hullTypeId:number;
+  issueCodes?:string[];
+  itemTypeIds?:number[];
+  items?:FittingItem[];
+  trainedSkills?:Array<{ skillId:number; level:number }>;
+  snapshot?:any;
+  implantTypeIds?:number[];
+  boosterTypeIds?:number[];
+}) {
   const issueCodes = new Set((input.issueCodes ?? []).map(String));
   const wantsCpu = issueCodes.has("cpu-exceeded");
   const wantsPowergrid = issueCodes.has("powergrid-exceeded");
@@ -845,7 +854,30 @@ export async function getFittingRemediesLocal(input: { hullTypeId:number; issueC
     for (const skillId of requiredSkillIds(dogma.get(Number(typeId)))) fittedRequiredSkills.add(skillId);
   }
 
-  type Candidate = { kind:"skill"|"implant"|"rig"; typeId:number; name:string; solves:string[]; affectedAttributeId:number; effectValue:number; operation:number; skillTypeId?:number; skillName?:string; currentLevel?:number; targetLevel?:number; reason:string; score:number };
+  type RemedyKind = "skill"|"implant"|"implant-set"|"rig"|"module";
+  type Candidate = {
+    kind:RemedyKind;
+    typeId:number;
+    name:string;
+    solves:string[];
+    affectedAttributeId:number;
+    effectValue:number;
+    operation:number;
+    skillTypeId?:number;
+    skillName?:string;
+    currentLevel?:number;
+    targetLevel?:number;
+    reason:string;
+    score:number;
+    slot?:number;
+    verifiedFix?:boolean;
+    components?:Array<{ typeId:number; name:string; slot?:number }>;
+    replacement?:{ fromTypeId:number; fromName:string; toTypeId:number; toName:string; count:number };
+    result?: { resource:"cpu"|"powergrid"; used:number; capacity:number; headroom:number };
+    sourceAttributeId?:number;
+    sourceGroupId?:number;
+    synergyOnly?:boolean;
+  };
   const byKey = new Map<string, Candidate>();
   const targetFor = (attributeId:number) => attributeId === 48 || attributeId === 50 ? "cpu-exceeded" : attributeId === 11 || attributeId === 30 ? "powergrid-exceeded" : "";
   const helpful = (attributeId:number, value:number, operation:number) => {
@@ -879,13 +911,14 @@ export async function getFittingRemediesLocal(input: { hullTypeId:number; issueC
         const key = `skill:${typeId}:${issue}`;
         const targetName = affectedAttributeId === 48 ? "ship CPU output" : affectedAttributeId === 11 ? "ship powergrid output" : affectedAttributeId === 50 ? "module CPU need" : "module powergrid need";
         const magnitude = operation === 6 ? Math.abs(effectValue) : Math.abs(applyVerifiedOperation(100, effectValue, operation) - 100);
-        const reason = requiredTargetSkill ? `Train ${name} to level ${currentLevel + 1}; CCP DOGMA applies it to fitted modules requiring ${names.get(requiredTargetSkill) ?? `Skill ${requiredTargetSkill}`}, improving ${targetName}.` : `Train ${name} to level ${currentLevel + 1}; CCP DOGMA improves ${targetName}.`;
+        const reason = requiredTargetSkill ? `Train ${name}; CCP DOGMA applies it to fitted modules requiring ${names.get(requiredTargetSkill) ?? `Skill ${requiredTargetSkill}`}, improving ${targetName}.` : `Train ${name}; CCP DOGMA improves ${targetName}.`;
         const candidate: Candidate = { kind:"skill", typeId, name, solves:[issue], affectedAttributeId, effectValue, operation, skillTypeId:requiredTargetSkill, skillName:requiredTargetSkill ? names.get(requiredTargetSkill) : undefined, currentLevel, targetLevel:currentLevel + 1, reason, score:magnitude };
         const previous = byKey.get(key);
         if (!previous || candidate.score > previous.score) byKey.set(key, candidate);
       }
     }
   }
+
   for (const item of catalogue.items as Array<any>) {
     const isRig = item.rootName === "Rigs";
     const isImplant = item.rootName === "Implants & Boosters" && String(item.categoryName ?? "").toLowerCase().includes("implant");
@@ -915,28 +948,304 @@ export async function getFittingRemediesLocal(input: { hullTypeId:number; issueC
         const itemName = names.get(Number(item.id)) ?? String(item.name);
         const reason = skillName ? `${itemName} improves ${targetName} for modules requiring ${skillName}.` : `${itemName} improves ${targetName}.`;
         const key = `${item.id}:${issue}`;
-        const candidate: Candidate = { kind:isRig ? "rig" : "implant", typeId:Number(item.id), name:itemName, solves:[issue], affectedAttributeId, effectValue, operation, skillTypeId, skillName, reason, score:magnitude };
+        const candidate: Candidate = { kind:isRig ? "rig" : "implant", typeId:Number(item.id), name:itemName, solves:[issue], affectedAttributeId, effectValue, operation, skillTypeId, skillName, reason, score:magnitude, slot:isImplant ? Math.trunc(attr(source,331)) || undefined : undefined, sourceAttributeId:isImplant ? Number(modifier.modifyingAttributeID) : undefined, sourceGroupId:isImplant ? (groups.get(Number(item.id)) ?? 0) : undefined };
         const previous = byKey.get(key);
         if (!previous || candidate.score > previous.score) byKey.set(key, candidate);
       }
     }
   }
 
-  const candidates = [...byKey.values()];
-  const selected: Candidate[] = [];
-  for (const issue of ["cpu-exceeded", "powergrid-exceeded"]) {
-    if (!issueCodes.has(issue)) continue;
-    for (const kind of ["skill", "implant", "rig"] as const) {
-      selected.push(...candidates.filter(c => c.solves.includes(issue) && c.kind === kind).sort((a,b)=>b.score-a.score || a.name.localeCompare(b.name)).slice(0, kind === "skill" ? 8 : kind === "implant" ? 8 : 6));
+  const rawCandidates = [...byKey.values()];
+  if (!input.snapshot || !Array.isArray(input.items)) return [];
+  const baseItems = input.items.map(item => ({...item, attributeOverrides:item.attributeOverrides ? {...item.attributeOverrides} : undefined}));
+  const baseImplants = [...new Set((input.implantTypeIds ?? []).map(Number).filter(id=>Number.isInteger(id)&&id>0))];
+  const baseBoosters = [...new Set((input.boosterTypeIds ?? []).map(Number).filter(id=>Number.isInteger(id)&&id>0))];
+  const analyze = (items:FittingItem[], snapshot=input.snapshot, implantTypeIds=baseImplants) => analyzeFittingDogma({
+    hullTypeId:Number(input.hullTypeId),
+    items,
+    snapshot,
+    implantTypeIds,
+    boosterTypeIds:baseBoosters,
+  });
+  const baseline = await analyze(baseItems);
+  const baselineErrors = new Set((baseline.issues ?? []).filter((issue:any)=>issue.level==="error").map((issue:any)=>String(issue.code)));
+  const baselineMissing = new Set((baseline.missingRequirements ?? []).map((item:any)=>`${item.skillId}:${item.requiredLevel}:${item.item}`));
+  const isExactFix = (result:any, issue:string) => {
+    if ((result.issues ?? []).some((entry:any)=>entry.level==="error" && String(entry.code)===issue)) return false;
+    if ((result.issues ?? []).some((entry:any)=>entry.level==="error" && !baselineErrors.has(String(entry.code)))) return false;
+    if ((result.missingRequirements ?? []).some((entry:any)=>!baselineMissing.has(`${entry.skillId}:${entry.requiredLevel}:${entry.item}`))) return false;
+    return true;
+  };
+  const resourceResult = (result:any, issue:string) => {
+    const resource = issue === "cpu-exceeded" ? "cpu" : "powergrid";
+    const used = Number(result.resources?.used?.[resource] ?? 0);
+    const capacity = Number(result.resources?.capacity?.[resource] ?? 0);
+    return {resource,used,capacity,headroom:capacity-used} as Candidate["result"];
+  };
+  const fittedRigCount = baseItems.filter(item=>item.rack==="rig").reduce((sum,item)=>sum+Math.max(1,Number(item.quantity??1)),0);
+  const rigCapacity = Math.max(0,Math.trunc(Number(baseline.fitting?.slots?.rig ?? attr(hull,1137) ?? 0)));
+  const freeRigSlots = Math.max(0,rigCapacity-fittedRigCount);
+  const verified:Candidate[]=[];
+
+  const cloneSnapshotAtSkill = (skillId:number, level:number) => {
+    const sourceSkills = Array.isArray(input.snapshot?.skills?.skills) ? input.snapshot.skills.skills : [];
+    let found=false;
+    const skills=sourceSkills.map((skill:any)=>{
+      if(Number(skill.skill_id)!==skillId)return {...skill};
+      found=true;
+      return {...skill,trained_skill_level:level,active_skill_level:level};
+    });
+    if(!found)skills.push({skill_id:skillId,trained_skill_level:level,active_skill_level:level});
+    return {...input.snapshot,skills:{...(input.snapshot.skills??{}),skills}};
+  };
+
+  for (const issue of ["cpu-exceeded","powergrid-exceeded"]) {
+    if (!issueCodes.has(issue) || !baselineErrors.has(issue)) continue;
+
+    for (const candidate of rawCandidates.filter(item=>item.kind==="skill"&&item.solves.includes(issue)).sort((a,b)=>b.score-a.score)) {
+      const start=Math.max(0,candidate.currentLevel??trainedSkills.get(candidate.typeId)??0);
+      for(let level=start+1;level<=5;level++) {
+        const result=await analyze(baseItems,cloneSnapshotAtSkill(candidate.typeId,level));
+        if(!isExactFix(result,issue))continue;
+        verified.push({...candidate,targetLevel:level,verifiedFix:true,result:resourceResult(result,issue),reason:`Train ${candidate.name} to level ${level}; Sage simulated the complete fit and it clears the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker.`});
+        break;
+      }
     }
+
+    const directImplants=rawCandidates.filter(item=>item.kind==="implant"&&item.solves.includes(issue)).sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name));
+    const implantRequirementsMet = (typeId:number) => {
+      const source=dogma.get(typeId);
+      if(!source)return false;
+      return REQUIREMENTS.every(([skillAttribute,levelAttribute])=>{
+        const skillId=attr(source,skillAttribute);
+        if(!skillId)return true;
+        const requiredLevel=attr(source,levelAttribute)||1;
+        return (trainedSkills.get(skillId)??0)>=requiredLevel;
+      });
+    };
+    const implantPoolByType=new Map<number,Candidate>();
+    for(const candidate of directImplants) implantPoolByType.set(candidate.typeId,candidate);
+
+    // Some fitting implants only become decisive as a set. CCP expresses that
+    // relationship as charID LocationGroupModifiers which amplify an attribute
+    // on another implant in the same group. Pull those set members into the
+    // search even when they do not directly touch CPU/PG themselves.
+    const influenceTargets=directImplants.flatMap(candidate=>candidate.sourceAttributeId&&candidate.sourceGroupId?[{
+      sourceAttributeId:candidate.sourceAttributeId,
+      sourceGroupId:candidate.sourceGroupId,
+      affectedAttributeId:candidate.affectedAttributeId,
+    }]:[]);
+    if(influenceTargets.length) {
+      for(const item of catalogue.items as any[]) {
+        if(item.rootName!=="Implants & Boosters" || !String(item.categoryName??"").toLowerCase().includes("implant")) continue;
+        const typeId=Number(item.id);
+        if(implantPoolByType.has(typeId))continue;
+        const source=dogma.get(typeId);
+        if(!source)continue;
+        let matched:{affectedAttributeId:number;value:number;operation:number}|undefined;
+        for(const effectId of source.effects) {
+          const effect=modifiers.get(effectId);
+          if(!effect || effect.category!==0)continue;
+          for(const modifier of effect.modifiers) {
+            if(modifier.domain!=="charID" || modifier.func!=="LocationGroupModifier" || modifier.groupID==null || modifier.modifiedAttributeID==null || modifier.modifyingAttributeID==null)continue;
+            const target=influenceTargets.find(value=>value.sourceGroupId===modifier.groupID&&value.sourceAttributeId===modifier.modifiedAttributeID);
+            if(!target)continue;
+            const value=attr(source,modifier.modifyingAttributeID);
+            const operation=Number(modifier.operation??0);
+            const changed=applyVerifiedOperation(100,value,operation);
+            if(Math.abs(changed-100)<1e-12)continue;
+            matched={affectedAttributeId:target.affectedAttributeId,value,operation};
+            break;
+          }
+          if(matched)break;
+        }
+        if(!matched)continue;
+        const itemName=names.get(typeId)??String(item.name);
+        implantPoolByType.set(typeId,{
+          kind:"implant",typeId,name:itemName,solves:[issue],affectedAttributeId:matched.affectedAttributeId,
+          effectValue:matched.value,operation:matched.operation,reason:`${itemName} amplifies another fitting implant through CCP implant-set DOGMA.`,
+          score:Math.abs(applyVerifiedOperation(100,matched.value,matched.operation)-100),slot:Math.trunc(attr(source,331))||undefined,synergyOnly:true,
+        });
+      }
+    }
+
+    const implantPool=[...implantPoolByType.values()].filter(candidate=>candidate.slot&&implantRequirementsMet(candidate.typeId)).sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name));
+    const implantsFor = (components:Candidate[]) => {
+      const replacingSlots=new Set(components.map(item=>item.slot).filter((slot):slot is number=>Boolean(slot)));
+      const kept=baseImplants.filter(typeId=>{
+        const slot=Math.trunc(attr(dogma.get(typeId),331));
+        return !slot || !replacingSlots.has(slot);
+      });
+      return [...new Set([...kept,...components.map(item=>item.typeId)])];
+    };
+    const baselineResource=resourceResult(baseline,issue)!;
+    const singleImprovement=new Map<number,number>();
+    const singleFixes:Candidate[]=[];
+    for(const candidate of implantPool) {
+      const result=await analyze(baseItems,input.snapshot,implantsFor([candidate]));
+      const resource=resourceResult(result,issue)!;
+      singleImprovement.set(candidate.typeId,resource.headroom-baselineResource.headroom);
+      if(!isExactFix(result,issue))continue;
+      singleFixes.push({...candidate,verifiedFix:true,result:resource,reason:`Sage simulated ${candidate.name} on this exact fit and pilot; it clears the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker.`});
+    }
+    verified.push(...singleFixes.sort((a,b)=>Math.abs(a.result?.headroom??Infinity)-Math.abs(b.result?.headroom??Infinity)).slice(0,4));
+
+    if(singleFixes.length===0 && implantPool.length>1) {
+      const bySlot=new Map<number,Candidate[]>();
+      for(const candidate of implantPool) {
+        const slot=candidate.slot!;
+        const list=bySlot.get(slot)??[];list.push(candidate);bySlot.set(slot,list);
+      }
+      const slotOptions=[...bySlot.entries()].map(([slot,candidates])=>{
+        const direct=candidates.filter(candidate=>!candidate.synergyOnly).sort((a,b)=>(singleImprovement.get(b.typeId)??-Infinity)-(singleImprovement.get(a.typeId)??-Infinity)||b.score-a.score).slice(0,2);
+        const synergy=candidates.filter(candidate=>candidate.synergyOnly);
+        const merged=new Map<number,Candidate>();
+        for(const candidate of [...direct,...synergy])merged.set(candidate.typeId,candidate);
+        return {slot,options:[...merged.values()]};
+      }).filter(entry=>entry.options.length).sort((a,b)=>a.slot-b.slot);
+      const setFixes:Candidate[]=[];
+      let testedSets=0;
+      const maxSetTests=3000;
+      const testSet=async(parts:Candidate[])=>{
+        if(testedSets++>=maxSetTests)return;
+        const result=await analyze(baseItems,input.snapshot,implantsFor(parts));
+        if(!isExactFix(result,issue))return;
+        const components=parts.map(part=>({typeId:part.typeId,name:part.name,slot:part.slot}));
+        setFixes.push({
+          kind:"implant-set",
+          typeId:parts[0].typeId,
+          name:parts.map(part=>part.name).join(" + "),
+          solves:[issue],
+          affectedAttributeId:parts[0].affectedAttributeId,
+          effectValue:parts.reduce((sum,part)=>sum+Math.abs(part.effectValue),0),
+          operation:6,
+          reason:`Use this ${parts.length}-implant combination; Sage simulated CCP implant-set interactions and the complete fit, and it clears the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker.`,
+          score:parts.reduce((sum,part)=>sum+part.score,0),
+          verifiedFix:true,
+          components,
+          result:resourceResult(result,issue),
+        });
+      };
+      const searchSize=async(targetSize:number)=>{
+        const before=setFixes.length;
+        const visit=async(index:number,chosen:Candidate[]):Promise<void>=>{
+          if(testedSets>=maxSetTests || setFixes.length-before>=8)return;
+          if(chosen.length===targetSize){await testSet(chosen);return;}
+          if(index>=slotOptions.length || chosen.length+(slotOptions.length-index)<targetSize)return;
+          await visit(index+1,chosen);
+          for(const option of slotOptions[index].options){
+            await visit(index+1,[...chosen,option]);
+            if(testedSets>=maxSetTests || setFixes.length-before>=8)return;
+          }
+        };
+        await visit(0,[]);
+        return setFixes.length>before;
+      };
+      for(let size=2;size<=Math.min(8,slotOptions.length)&&testedSets<maxSetTests;size+=1){
+        if(await searchSize(size))break;
+      }
+      setFixes.sort((a,b)=>(a.components?.length??99)-(b.components?.length??99)||Math.abs(a.result?.headroom??Infinity)-Math.abs(b.result?.headroom??Infinity)||b.score-a.score);
+      const seenSets=new Set<string>();
+      for(const candidate of setFixes) {
+        const key=(candidate.components??[]).map(item=>item.typeId).sort((a,b)=>a-b).join(":");
+        if(seenSets.has(key))continue;
+        seenSets.add(key);verified.push(candidate);
+        if(seenSets.size>=4)break;
+      }
+    }
+
+    if(freeRigSlots>0) {
+      for(const candidate of rawCandidates.filter(item=>item.kind==="rig"&&item.solves.includes(issue)).sort((a,b)=>b.score-a.score).slice(0,12)) {
+        const result=await analyze([...baseItems,{typeId:candidate.typeId,quantity:1,rack:"rig",state:"online"}]);
+        if(!isExactFix(result,issue))continue;
+        verified.push({...candidate,verifiedFix:true,result:resourceResult(result,issue),reason:`Sage simulated this rig in a free rig slot and it clears the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker without creating another fitting error.`});
+      }
+    }
+
+    const resourceAttribute=issue==="cpu-exceeded"?50:30;
+    const catalogueByGroup=new Map<number,any[]>();
+    for(const item of catalogue.items as any[]) {
+      if(item.rootName!=="Ship Equipment" || !["low","mid","high"].includes(String(item.rack??"")))continue;
+      const list=catalogueByGroup.get(Number(item.groupId))??[];list.push(item);catalogueByGroup.set(Number(item.groupId),list);
+    }
+    const sources=baseItems.filter(item=>["low","mid","high"].includes(String(item.rack??""))&&Number(item.typeId)>0);
+    const sourceGroups=new Map<string, {item:FittingItem;count:number}>();
+    for(const item of sources) {
+      const key=`${item.rack}:${item.typeId}`;
+      const current=sourceGroups.get(key);
+      if(current)current.count+=Math.max(1,Number(item.quantity??1));
+      else sourceGroups.set(key,{item:{...item,quantity:1},count:Math.max(1,Number(item.quantity??1))});
+    }
+    const moduleFixes:Candidate[]=[];
+    for(const {item:sourceItem,count:sourceCount} of sourceGroups.values()) {
+      const sourceDogma=dogma.get(sourceItem.typeId);
+      const sourceBase=attr(sourceDogma,resourceAttribute);
+      if(!(sourceBase>0))continue;
+      const groupId=groups.get(sourceItem.typeId)??0;
+      const sourceCatalogueItem=(catalogue.items as any[]).find(entry=>Number(entry.id)===sourceItem.typeId);
+      const sourceMeta=Number(sourceCatalogueItem?.metaLevel??0);
+      const sourceMarketGroupId=Number(sourceCatalogueItem?.marketGroupId??0);
+      const alternatives=(catalogueByGroup.get(groupId)??[])
+        .filter(alt=>Number(alt.id)!==sourceItem.typeId&&alt.rack===sourceItem.rack&&(!sourceMarketGroupId||Number(alt.marketGroupId)===sourceMarketGroupId)&&attr(dogma.get(Number(alt.id)),resourceAttribute)<sourceBase)
+        .sort((a,b)=>{
+          const da=Math.abs(Number(a.metaLevel??0)-sourceMeta), db=Math.abs(Number(b.metaLevel??0)-sourceMeta);
+          const ra=attr(dogma.get(Number(a.id)),resourceAttribute), rb=attr(dogma.get(Number(b.id)),resourceAttribute);
+          return da-db || rb-ra || String(a.name).localeCompare(String(b.name));
+        }).slice(0,18);
+      for(const alternative of alternatives) {
+        for(let replaceCount=1;replaceCount<=sourceCount;replaceCount++) {
+          let remaining=replaceCount;
+          const changed:FittingItem[]=[];
+          for(const entry of baseItems) {
+            if(remaining>0&&entry.typeId===sourceItem.typeId&&entry.rack===sourceItem.rack) {
+              const qty=Math.max(1,Number(entry.quantity??1));
+              const take=Math.min(qty,remaining);
+              if(qty>take)changed.push({...entry,quantity:qty-take});
+              remaining-=take;
+            } else changed.push({...entry});
+          }
+          changed.push({typeId:Number(alternative.id),quantity:replaceCount,rack:sourceItem.rack,state:sourceItem.state??"active"});
+          const result=await analyze(changed);
+          if(!isExactFix(result,issue))continue;
+          const fromName=names.get(sourceItem.typeId)??String(sourceItem.typeId);
+          const toName=names.get(Number(alternative.id))??String(alternative.name);
+          moduleFixes.push({
+            kind:"module",
+            typeId:Number(alternative.id),
+            name:`${fromName} → ${toName}`,
+            solves:[issue],
+            affectedAttributeId:resourceAttribute,
+            effectValue:sourceBase-attr(dogma.get(Number(alternative.id)),resourceAttribute),
+            operation:3,
+            reason:`Replace ${replaceCount}Ô ${fromName} with ${replaceCount}× ${toName}. They are in the same CCP module market group, and Sage simulated the complete changed fit: the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker is cleared.`,
+            score:1000-replaceCount*20-Math.abs(Number(alternative.metaLevel??0)-sourceMeta),
+            verifiedFix:true,
+            replacement:{fromTypeId:sourceItem.typeId,fromName,toTypeId:Number(alternative.id),toName,count:replaceCount},
+            result:resourceResult(result,issue),
+          });
+          break;
+        }
+      }
+    }
+    moduleFixes.sort((a,b)=>(a.replacement?.count??99)-(b.replacement?.count??99)||Math.abs(a.result?.headroom??Infinity)-Math.abs(b.result?.headroom??Infinity)||b.score-a.score);
+    verified.push(...moduleFixes.slice(0,6));
   }
-  const merged = new Map<number, Candidate>();
-  for (const candidate of selected) {
-    const existing = merged.get(candidate.typeId);
-    if (!existing) merged.set(candidate.typeId, candidate);
-    else if (!existing.solves.includes(candidate.solves[0])) existing.solves.push(candidate.solves[0]);
+
+  const kindOrder:Record<Candidate["kind"],number>={skill:0,"implant-set":1,implant:1,module:2,rig:3};
+  const deduped=new Map<string,Candidate>();
+  for(const candidate of verified) {
+    const id=candidate.kind==="implant-set"?`set:${candidate.components?.map(item=>item.typeId).sort((a,b)=>a-b).join(":")}`:candidate.kind==="module"?`module:${candidate.replacement?.fromTypeId}:${candidate.replacement?.toTypeId}:${candidate.replacement?.count}`:`${candidate.kind}:${candidate.typeId}:${candidate.targetLevel??""}`;
+    if(!deduped.has(id))deduped.set(id,candidate);
   }
-  return [...merged.values()].map(({ score, ...candidate }) => candidate);
+  const ordered=[...deduped.values()]
+    .sort((a,b)=>kindOrder[a.kind]-kindOrder[b.kind]||(a.replacement?.count??0)-(b.replacement?.count??0)||Math.abs(a.result?.headroom??Infinity)-Math.abs(b.result?.headroom??Infinity)||b.score-a.score||a.name.localeCompare(b.name));
+  const counts={skill:0,augment:0,module:0,rig:0};
+  return ordered.filter((candidate)=>{
+    const bucket=candidate.kind==="implant"||candidate.kind==="implant-set"?"augment":candidate.kind;
+    const limit=bucket==="skill"?4:bucket==="augment"?4:bucket==="module"?4:3;
+    if(counts[bucket]>=limit)return false;
+    counts[bucket]++;return true;
+  }).map(({score,...candidate})=>candidate);
 }
 export async function getFittingChargesForModulesLocal(moduleTypeIds:number[]) {
   const uniqueModules=[...new Set((moduleTypeIds ?? []).map(Number).filter(typeId=>Number.isInteger(typeId)&&typeId>0))];
@@ -1217,13 +1526,47 @@ export async function analyzeFittingDogma(input: {
   const boosterTypeIds = [...new Set([...unslottedBoosters,...boostersBySlot.values()])];
   const implantTypeIdSet = new Set(implantTypeIds);
   const enhancementTypeIds = [...new Set([...implantTypeIds, ...boosterTypeIds])];
-  const enhancementSources = enhancementTypeIds.flatMap((typeId) => {
+  const rawEnhancementSources = enhancementTypeIds.flatMap((typeId) => {
     const source = dogma.get(typeId);
     return source ? [{ typeId, source, kind: implantTypeIdSet.has(typeId) ? "implant" as const : "booster" as const }] : [];
   });
   const selectedBoosterSideEffects = new Set((input.boosterSideEffectIds ?? []).filter((effectId) => Number.isInteger(effectId) && effectId > 0));
   const selectedBoosterSideEffectSelections = new Set((input.boosterSideEffectSelections ?? []).flatMap((selection) => Number.isInteger(selection?.boosterTypeId) && selection.boosterTypeId > 0 && Number.isInteger(selection?.effectId) && selection.effectId > 0 ? [`${selection.boosterTypeId}:${selection.effectId}`] : []));
-  const enhancementEffectAllowed = (enhancement: typeof enhancementSources[number], effectId: number, effect: EffectDefinition) => enhancement.kind !== "booster" || effect.fittingUsageChanceAttributeID == null || selectedBoosterSideEffects.has(effectId) || selectedBoosterSideEffectSelections.has(`${enhancement.typeId}:${effectId}`);
+  const enhancementEffectAllowed = (enhancement: typeof rawEnhancementSources[number], effectId: number, effect: EffectDefinition) => enhancement.kind !== "booster" || effect.fittingUsageChanceAttributeID == null || selectedBoosterSideEffects.has(effectId) || selectedBoosterSideEffectSelections.has(`${enhancement.typeId}:${effectId}`);
+
+  // Implant-set DOGMA is expressed as character-domain LocationGroupModifiers
+  // that scale attributes on the other implants in the same set before those
+  // implants project their normal ship/character bonuses. Genolution is a
+  // fitting-critical example: the CA set amplifies CA-2's CPU bonus.
+  const enhancementSources = rawEnhancementSources.map((target) => {
+    const targetGroupId = groups.get(target.typeId) ?? 0;
+    if (!targetGroupId) return target;
+    const pendingEnhancement = new Map<number, Array<{ value:number; operation:number }>>();
+    for (const sourceEnhancement of rawEnhancementSources) {
+      for (const effectId of sourceEnhancement.source.effects) {
+        const effect = modifiers.get(effectId);
+        if (!effect || effect.category !== 0 || !enhancementEffectAllowed(sourceEnhancement, effectId, effect)) continue;
+        for (const modifier of effect.modifiers) {
+          if (
+            modifier.domain !== "charID" ||
+            modifier.func !== "LocationGroupModifier" ||
+            modifier.groupID !== targetGroupId ||
+            modifier.modifiedAttributeID == null ||
+            modifier.modifyingAttributeID == null
+          ) continue;
+          const list = pendingEnhancement.get(modifier.modifiedAttributeID) ?? [];
+          list.push({ value: attr(sourceEnhancement.source, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
+          pendingEnhancement.set(modifier.modifiedAttributeID, list);
+        }
+      }
+    }
+    if (!pendingEnhancement.size) return target;
+    const scaled: Dogma = { attributes: new Map(target.source.attributes), effects: target.source.effects };
+    for (const [attributeId, changes] of pendingEnhancement) {
+      scaled.attributes.set(attributeId, applyOrderedChanges(attr(scaled, attributeId), changes, false, [1]));
+    }
+    return { ...target, source: scaled };
+  });
 
   const moduleDogmaFor = (item: FittingItem): Dogma | undefined => {
     const raw = dogma.get(item.typeId);
@@ -1283,7 +1626,7 @@ export async function analyzeFittingDogma(input: {
   };
 
   const projectedSourceDogmaFor = (item: FittingItem): Dogma | undefined => moduleDogmaFor(item);
-  const ids = [...new Set([input.hullTypeId, ...input.items.map((item) => item.typeId)])];
+  const ids = [...new Set([input.hullTypeId, ...input.items.map((item) => item.typeId), ...rawPlannedImplantTypeIds])];
   const requirements = ids.map((typeId) => {
     const itemDogma = dogma.get(typeId);
     const skills = REQUIREMENTS.flatMap(([skillAttribute, levelAttribute]) => {

@@ -92,6 +92,17 @@ function turnoverLabel(fillScore: number) {
   return "THIN";
 }
 
+function spreadMovementFor(trade: MarketOpportunity) {
+  const change = trade.spreadChange ?? trade.marginWidenedBy;
+  if (change == null) return { state: "No comparable previous lane", value: "NEW / NO HISTORY", className: "no-history" };
+  const state = change > 0 ? "Widening" : change < 0 ? "Narrowing" : "Unchanged";
+  const percent = trade.spreadChangePercent;
+  const value = percent == null
+    ? `${change >= 0 ? "+" : ""}${money(change)} ISK/unit`
+    : `${percent >= 0 ? "+" : ""}${percent.toFixed(1)}%`;
+  return { state, value, className: change > 0 ? "widening" : change < 0 ? "narrowing" : "unchanged" };
+}
+
 function rowFor(trade: MarketOpportunity, settings: DayTraderSettings): DayTraderRow {
   const economics = calculateDayTradeEconomics({
     buyUnitPrice: trade.sell.price,
@@ -104,7 +115,7 @@ function rowFor(trade: MarketOpportunity, settings: DayTraderSettings): DayTrade
     haulingCostIsk: settings.haulingCostIsk,
     marginWidenedBy: trade.marginWidenedBy,
   });
-  return { trade, saleGross: economics.saleGross, salesTax: economics.salesTax, brokerFee: economics.brokerFee, haulingCost: economics.haulingCost, netProfit: economics.netProfit, netMarginPercent: economics.netMarginPercent, netIskPerM3: economics.netIskPerM3, netIskPerJump: economics.netIskPerJump, breakEvenSellPrice: economics.breakEvenSellPrice, wideningPercent: economics.wideningPercent };
+  return { trade, saleGross: economics.saleGross, salesTax: economics.salesTax, brokerFee: economics.brokerFee, haulingCost: economics.haulingCost, netProfit: economics.netProfit, netMarginPercent: economics.netMarginPercent, netIskPerM3: economics.netIskPerM3, netIskPerJump: economics.netIskPerJump, breakEvenSellPrice: economics.breakEvenSellPrice, wideningPercent: trade.spreadChangePercent ?? economics.wideningPercent };
 }
 
 export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, marketBusy = false }: { analysis: OpportunityAnalysis; snapshot?: CharacterSnapshot; onCargoCapacityChange?: (cargoCapacityM3: number | null, cargoProfileId?: string | null) => void | Promise<void>; marketBusy?: boolean }) {
@@ -149,7 +160,7 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
       if (settings.targetRegion !== "all" && trade.buy.regionName !== settings.targetRegion) return false;
       if (settings.crossRegionOnly && trade.sell.regionName === trade.buy.regionName) return false;
       if (settings.highSecOnly && trade.routeSecurity !== "high") return false;
-      if (settings.wideningOnly && !(trade.marginWidenedBy != null && trade.marginWidenedBy > 0)) return false;
+      if (settings.wideningOnly && !((trade.spreadChange ?? trade.marginWidenedBy) != null && Number(trade.spreadChange ?? trade.marginWidenedBy) > 0)) return false;
       if (trade.fillScore < settings.minFillScore) return false;
       if (row.netProfit < settings.minNetProfit) return false;
       if (row.netMarginPercent < settings.minNetMarginPercent) return false;
@@ -160,7 +171,7 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
     const sortValue = (row: DayTraderRow) => {
       if (settings.sort === "roi") return row.netMarginPercent;
       if (settings.sort === "fill") return row.trade.fillScore;
-      if (settings.sort === "widening") return row.trade.marginWidenedBy ?? -Infinity;
+      if (settings.sort === "widening") return row.trade.spreadChange ?? row.trade.marginWidenedBy ?? -Infinity;
       if (settings.sort === "iskm3") return row.netIskPerM3;
       if (settings.sort === "iskjump") return row.netIskPerJump;
       if (settings.sort === "jumps") return -row.trade.jumps;
@@ -213,6 +224,7 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
     };
   }, [rows]);
   const topOpportunity = dashboard.topNet ?? best;
+  const spreadHistoryAvailable = analysis.signals.marketSpreadHistoryAvailable && analysis.signals.marketSpreadComparisonCount > 0;
 
   function replaceSettings(next: DayTraderSettings) {
     setSettings(next);
@@ -388,6 +400,7 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
         <button type="button" className={settings.sort === "roi" ? "active" : ""} onClick={() => preset("roi")}><span className="mo-preset-icon"><IskGlyph name="target" /></span><span><strong>Best Net ROI</strong><small>Capital-efficient opportunities</small></span></button>
         <button type="button" className={settings.sort === "iskm3" ? "active" : ""} onClick={() => preset("cargo")}><span className="mo-preset-icon"><IskGlyph name="box" /></span><span><strong>Cargo Efficient</strong><small>Highest net ISK per m³</small></span></button>
       </div>
+      {settings.wideningOnly && !spreadHistoryAvailable && <div className="mo-spread-history-unavailable">Spread history is not available for this market generation.</div>}
     </section>
 
     <details className="day-trader-filter-panel">
@@ -454,6 +467,7 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
           {rows.slice(0, 200).map((row) => {
             const trade = row.trade;
             const open = expanded === trade.id;
+            const spreadMovement = spreadMovementFor(trade);
             return <article id={`mo-route-${trade.id}`} className={`mo-route-result risk-${trade.risk.toLowerCase()}${open ? " open" : ""}`} key={trade.id}>
               <button type="button" className="mo-routes-row mo-route-summary" onClick={() => setExpanded(open ? null : trade.id)} aria-expanded={open}>
                 <span className="mo-route-item"><span className="mo-item-avatar"><img src={`sage-asset://type/${trade.typeId}/icon?size=64`} alt="" /></span><span><strong>{trade.item}</strong><small>{trade.category} · {turnoverLabel(trade.fillScore)} {trade.fillScore}/100</small></span></span>
@@ -502,13 +516,13 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
                     <div><span>Net capital return</span><strong>{row.netMarginPercent.toFixed(2)}%</strong><small>after current costs</small></div>
                     <div><span>Net cargo return</span><strong>{Number.isFinite(row.netIskPerM3) ? `${compact(row.netIskPerM3)} ISK/m³` : "—"}</strong><small>cargo efficiency</small></div>
                   </div>
-                  <div className="mo-volatility-line"><IskGlyph name="percent" /><span>Spread change: {trade.marginWidenedBy == null ? "Needs a previous full snapshot" : `${trade.marginWidenedBy >= 0 ? "+" : ""}${money(trade.marginWidenedBy)} ISK/unit${row.wideningPercent == null ? "" : ` (${row.wideningPercent >= 0 ? "+" : ""}${row.wideningPercent.toFixed(1)}%)`}`}</span></div>
+                  <div className={`mo-volatility-line ${spreadMovement.className}`}><IskGlyph name="percent" /><span>Spread movement: <strong>{spreadMovement.value}</strong> {spreadMovement.state}{trade.previousSpread != null ? ` · previous ${money(trade.previousSpread)} ISK/unit · current ${money(trade.currentSpread)} ISK/unit` : ""}</span></div>
                   <em>Re-check both live orders before buying. Market depth can move faster than the retained snapshot.</em>
                 </section>
               </div>}
             </article>;
           })}
-          {!rows.length && <div className="mo-panel-empty mo-routes-empty">No actionable trade routes match the current filters.</div>}
+          {!rows.length && <div className="mo-panel-empty mo-routes-empty">{settings.wideningOnly && !spreadHistoryAvailable ? "Spread history is not available for this market generation." : "No actionable trade routes match the current filters."}</div>}
         </div>
         <footer className="mo-routes-footer"><span>Showing {Math.min(rows.length, 200).toLocaleString()} of {rows.length.toLocaleString()} actionable routes</span><button type="button" onClick={() => { const panel = document.querySelector<HTMLDetailsElement>(".day-trader-polished .day-trader-filter-panel"); if (panel) { panel.open = true; requestAnimationFrame(() => panel.scrollIntoView({ behavior: "smooth", block: "nearest" })); } }}>Refine trade filters <IskGlyph name="chevron" /></button></footer>
       </section>

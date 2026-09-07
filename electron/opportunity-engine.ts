@@ -152,6 +152,13 @@ export type MarketOpportunity = {
   fillScore: number;
   risk: OpportunityRisk;
   routeSecurity: "high" | "low" | "null";
+  currentSpread: number;
+  previousSpread: number | null;
+  spreadChange: number | null;
+  spreadChangePercent: number | null;
+  spreadComparisonGeneration: string | null;
+  spreadComparisonSnapshotId: string | null;
+  spreadComparisonGeneratedAt: string | null;
   marginWidenedBy: number | null;
   score: number;
   scoreBreakdown: {
@@ -172,6 +179,7 @@ export type PersonalOpportunity = {
   category: string;
   score: number;
   risk: OpportunityRisk;
+  routeSecurity: "high" | "low" | "null";
   jumps: number;
   estimatedMinutes: number;
   fillScore: number;
@@ -230,6 +238,10 @@ export type OpportunityAnalysis = {
     marketOrdersInspected: number;
     marketRegionsInspected: number;
     marketSource: string;
+    marketSpreadHistoryAvailable: boolean;
+    marketSpreadComparisonGeneration: string | null;
+    marketSpreadComparisonGeneratedAt: string | null;
+    marketSpreadComparisonCount: number;
     regionalShortageSignals: number;
   };
 };
@@ -365,6 +377,13 @@ function adjustedTrades(
       fillScore: tradeFillScore,
       risk,
       routeSecurity,
+      currentSpread: Number(trade.currentSpread ?? (buyPrice - sellPrice)),
+      previousSpread: trade.previousSpread == null ? null : Number(trade.previousSpread),
+      spreadChange: trade.spreadChange == null ? (trade.marginWidenedBy == null ? null : Number(trade.marginWidenedBy)) : Number(trade.spreadChange),
+      spreadChangePercent: trade.spreadChangePercent == null ? null : Number(trade.spreadChangePercent),
+      spreadComparisonGeneration: trade.spreadComparisonGeneration == null ? null : String(trade.spreadComparisonGeneration),
+      spreadComparisonSnapshotId: trade.spreadComparisonSnapshotId == null ? null : String(trade.spreadComparisonSnapshotId),
+      spreadComparisonGeneratedAt: trade.spreadComparisonGeneratedAt == null ? null : String(trade.spreadComparisonGeneratedAt),
       marginWidenedBy: trade.marginWidenedBy == null ? null : Number(trade.marginWidenedBy),
       score: clamp(scored.score * freshnessFactor),
       scoreBreakdown: scored.breakdown,
@@ -449,6 +468,7 @@ async function assetOpportunities(snapshot: any, freshnessFactor: number): Promi
       category: item.categoryName,
       score,
       risk,
+      routeSecurity: routeBand,
       jumps: route.jumps,
       estimatedMinutes,
       fillScore: confidence,
@@ -470,7 +490,7 @@ async function assetOpportunities(snapshot: any, freshnessFactor: number): Promi
   return rows.sort((a, b) => b.score - a.score || b.primaryValue - a.primaryValue).slice(0, 40);
 }
 
-function toPersonalShortage(signal: RegionalShortageSignal): PersonalOpportunity {
+export function toPersonalShortage(signal: RegionalShortageSignal): PersonalOpportunity {
   const executableUnits = signal.targetBuyPrice != null && signal.targetBuyPrice > signal.sourcePrice
     ? Math.min(signal.source.bestSellVolume, signal.target.bestBuyVolume)
     : 0;
@@ -487,6 +507,7 @@ function toPersonalShortage(signal: RegionalShortageSignal): PersonalOpportunity
     category: signal.category,
     score: signal.score,
     risk: signal.risk,
+    routeSecurity: signal.routeSecurity,
     jumps: signal.jumpsFromCharacter,
     estimatedMinutes: signal.estimatedMinutes,
     fillScore: signal.confidenceScore,
@@ -510,7 +531,7 @@ function toPersonalShortage(signal: RegionalShortageSignal): PersonalOpportunity
   };
 }
 
-function toPersonalTrade(trade: MarketOpportunity): PersonalOpportunity {
+export function toPersonalTrade(trade: MarketOpportunity): PersonalOpportunity {
   return {
     id: trade.id,
     kind: "trade",
@@ -519,6 +540,7 @@ function toPersonalTrade(trade: MarketOpportunity): PersonalOpportunity {
     category: trade.category,
     score: trade.score,
     risk: trade.risk,
+    routeSecurity: trade.routeSecurity,
     jumps: trade.jumps,
     estimatedMinutes: trade.estimatedMinutes,
     fillScore: trade.fillScore,
@@ -650,6 +672,10 @@ export async function analyzeOpportunities(
       marketOrdersInspected: Number((base.diagnostics as any)?.sourceOrdersInspected ?? 0),
       marketRegionsInspected: Number((base.diagnostics as any)?.sourceRegions ?? 0),
       marketSource: String((base.diagnostics as any)?.source ?? "complete raw market order book"),
+      marketSpreadHistoryAvailable: Number((base.diagnostics as any)?.spreadComparisonCount ?? 0) > 0,
+      marketSpreadComparisonGeneration: (base.diagnostics as any)?.spreadComparisonSnapshotId ?? (base.diagnostics as any)?.spreadComparisonGeneration ?? null,
+      marketSpreadComparisonGeneratedAt: (base.diagnostics as any)?.spreadComparisonGeneratedAt ?? null,
+      marketSpreadComparisonCount: Number((base.diagnostics as any)?.spreadComparisonCount ?? 0),
       regionalShortageSignals: shortageSignals.length,
     },
   };

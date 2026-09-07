@@ -1,6 +1,7 @@
 import { loadGlobalMarketQuotes, type GlobalMarketQuote } from "./market-intelligence";
 import { getMarketSystemIndex, getMarketTypeIndex } from "./market-static-index";
 import { getPveStaticIndex } from "./pve-static-index";
+import { invalidateSharedMarketMemoryCache } from "./shared-market-data";
 
 export type LpHubName = "Jita" | "Amarr" | "Dodixie" | "Rens" | "Hek";
 
@@ -280,6 +281,24 @@ function scoreOffer(input: {
   return { score: roundScore(score), components };
 }
 
+export function invalidateLpStoreMarketData() {
+  analysisCache.clear();
+  invalidateSharedMarketMemoryCache();
+}
+
+export async function warmLpStoreStaticData() {
+  const [typeIndex, systemIndex, pveIndex] = await Promise.all([
+    getMarketTypeIndex(),
+    getMarketSystemIndex(),
+    getPveStaticIndex(),
+  ]);
+  return {
+    typeCount: typeIndex.size,
+    systemCount: systemIndex.size,
+    missionStagingCount: pveIndex.missionStaging.length,
+  };
+}
+
 export async function resolveLpCorporations(corporationIds: number[]) {
   return resolveNames(corporationIds);
 }
@@ -359,9 +378,9 @@ export async function getLpEarningCandidates(standingsInput: unknown, currentCor
     .slice(0, 12);
 }
 
-export async function analyzeLpCorporation(corporationIdInput: number, marketRevisionInput = 0): Promise<LpCorporationAnalysis> {
+export async function analyzeLpCorporation(corporationIdInput: number, marketRevisionInput: string | number = 0): Promise<LpCorporationAnalysis> {
   const corporationId = Number(corporationIdInput);
-  const marketRevision = Number.isFinite(Number(marketRevisionInput)) ? Number(marketRevisionInput) : 0;
+  const marketRevision = String(marketRevisionInput ?? "0").trim() || "0";
   const cacheKey = `${corporationId}:${marketRevision}`;
   if (!Number.isSafeInteger(corporationId) || corporationId <= 0) throw new Error("Choose a valid LP corporation.");
   const now = Date.now();

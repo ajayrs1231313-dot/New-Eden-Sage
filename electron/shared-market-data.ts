@@ -58,6 +58,10 @@ export type SharedPreparedTradeDataset = {
   createdAt: string;
   routeChecks: number;
   viablePairs: number;
+  spreadComparisonGeneration?: string | null;
+  spreadComparisonSnapshotId?: string | null;
+  spreadComparisonGeneratedAt?: string | null;
+  spreadComparisonCount?: number;
   opportunities: any[];
 };
 
@@ -120,6 +124,16 @@ const shortageGenerationCache = new Map<string, Promise<SharedPreparedShortageDa
 const publicSharedGenerationCache = new Map<string, Promise<SharedPreparedPublicDataset | null>>();
 const contractGenerationCache = new Map<string, Promise<SharedPublicContractsDataset | null>>();
 
+export function invalidateSharedMarketMemoryCache() {
+  manifestMemory = undefined;
+  globalGenerationCache.clear();
+  regionalGenerationCache.clear();
+  tradeGenerationCache.clear();
+  shortageGenerationCache.clear();
+  publicSharedGenerationCache.clear();
+  contractGenerationCache.clear();
+}
+
 export function sharedMarketServerBaseUrl() {
   return String(process.env.NEW_EDEN_SAGE_SHARED_MARKET_URL || DEFAULT_SHARED_MARKET_BASE_URL).trim().replace(/\/$/, "");
 }
@@ -164,6 +178,14 @@ export function validateSharedMarketManifest(value: unknown): SharedMarketManife
   for (const key of REQUIRED_ARTIFACTS) validateArtifact(key, manifest.files[key]);
   for (const [key, artifact] of Object.entries(manifest.files)) validateArtifact(key, artifact);
   return manifest;
+}
+
+export async function loadInstalledSharedMarketManifestFresh(): Promise<SharedMarketManifest | null> {
+  try {
+    return validateSharedMarketManifest(JSON.parse(await fs.readFile(manifestPath(), "utf8")));
+  } catch {
+    return null;
+  }
 }
 
 export async function loadCurrentSharedMarketManifest(): Promise<SharedMarketManifest | null> {
@@ -284,21 +306,96 @@ function localArtifactPath(manifest: SharedMarketManifest, key: string, root = g
 
 async function parseGlobalArtifact(manifest: SharedMarketManifest, root: string): Promise<FullMarketAnalysisIndex> {
   const file = localArtifactPath(manifest, "market-global", root);
-  const payload = JSON.parse((await gunzipAsync(await fs.readFile(file))).toString("utf8")) as {
+  type GlobalHeader = {
     schemaVersion: number; dataset: string; snapshotId: string; createdAt: string; orderCount: number; regionCount: number;
-    sourceOrdersInspected: number; candidateDepthPerSide: number; items: FullMarketItem[];
+    sourceOrdersInspected: number; candidateDepthPerSide: number; itemCount: number;
   };
+  const marker = '"items":[';
+  let header: GlobalHeader | null = null;
+  let headerBuffer = "";
+  const items = new Map<number, FullMarketItem>();
+  let inItem = false;
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let itemParts: string[] = [];
+  let sawItemsEnd = false;
+
+  const consumeItems = (text: string) => {
+    let segmentStart = inItem ? 0 : -1;
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text[index];
+      if (!inItem) {
+        if (character === "]") {
+          sawItemsEnd = true;
+          continue;
+        }
+        if (character === "{") {
+          inItem = true;
+          inString = false;
+          escaped = false;
+          depth = 1;
+          segmentStart = index;
+          continue;
+        }
+        if (character === "," || character === "}" || /\s/.test(character)) continue;
+        throw new Error("Shared market-global item stream is malformed.");
+      }
+
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+      } else if (character === '"') inString = true;
+      else if (character === "{" || character === "[") depth += 1;
+      else if (character === "}" || character === "]") {
+        depth -= 1;
+        if (depth === 0) {
+          itemParts.push(text.slice(segmentStart, index + 1));
+          const item = JSON.parse(itemParts.join("")) as FullMarketItem;
+          items.set(item.typeId, item);
+          itemParts = [];
+          inItem = false;
+          inString = false;
+          escaped = false;
+          segmentStart = -1;
+        }
+      }
+    }
+    if (inItem && segmentStart >= 0) itemParts.push(text.slice(segmentStart));
+  };
+
+  const input = createReadStream(file).pipe(createGunzip());
+  input.setEncoding("utf8");
+  for await (const chunk of input) {
+    let text = String(chunk);
+    if (!header) {
+      headerBuffer += text;
+      const markerIndex = headerBuffer.indexOf(marker);
+      if (markerIndex < 0) {
+        if (headerBuffer.length > 1_000_000) throw new Error("Shared market-global header is malformed.");
+        continue;
+      }
+      const headerJson = headerBuffer.slice(0, markerIndex).replace(/,\s*$/, "") + "}";
+      header = JSON.parse(headerJson) as GlobalHeader;
+      text = headerBuffer.slice(markerIndex + marker.length);
+      headerBuffer = "";
+    }
+    consumeItems(text);
+  }
+
+  if (!header || !sawItemsEnd || inItem) throw new Error("Shared market-global payload ended before its item stream completed.");
   const globalArtifact = validateArtifact("market-global", manifest.files["market-global"]);
-  if (payload.schemaVersion !== globalArtifact.schemaVersion || payload.dataset !== "market-global" || payload.snapshotId !== globalArtifact.version) throw new Error("Shared market-global payload identity is invalid.");
-  if (payload.orderCount !== manifest.orderCount || payload.regionCount !== manifest.regionCount || payload.items.length !== manifest.itemCount) throw new Error("Shared market-global payload counts do not match its manifest.");
+  if (header.schemaVersion !== globalArtifact.schemaVersion || header.dataset !== "market-global" || header.snapshotId !== globalArtifact.version) throw new Error("Shared market-global payload identity is invalid.");
+  if (header.orderCount !== manifest.orderCount || header.regionCount !== manifest.regionCount || header.itemCount !== manifest.itemCount || items.size !== manifest.itemCount) throw new Error("Shared market-global payload counts do not match its manifest.");
   return {
-    snapshotId: payload.snapshotId,
-    createdAt: payload.createdAt,
-    orderCount: payload.orderCount,
-    regionCount: payload.regionCount,
-    sourceOrdersInspected: payload.sourceOrdersInspected,
-    candidateDepthPerSide: payload.candidateDepthPerSide,
-    items: new Map(payload.items.map((item) => [item.typeId, item])),
+    snapshotId: header.snapshotId,
+    createdAt: header.createdAt,
+    orderCount: header.orderCount,
+    regionCount: header.regionCount,
+    sourceOrdersInspected: header.sourceOrdersInspected,
+    candidateDepthPerSide: header.candidateDepthPerSide,
+    items,
   };
 }
 

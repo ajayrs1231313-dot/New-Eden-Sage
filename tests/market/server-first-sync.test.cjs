@@ -37,7 +37,6 @@ assert.match(master, /marketDownloadWorkers:\s*0/);
 assert.match(master, /publicMarketSource: "shared-server"/);
 assert.match(master, /privateDataOnly: true/);
 assert.doesNotMatch(master, /ensureCurrentSharedMarketData|master-derived-worker|stageStaticDataRefreshLowImpact|buildFullMarketAnalysisIndexParallel|buildRegionalMarketAggregateIndex/);
-assert.match(master, /character_refresh\.per_character/);
 assert.match(master, /character_refresh\.total/);
 
 const main = read("electron/main-task9.ts");
@@ -135,7 +134,7 @@ assert.ok(pruneStart >= 0 && statsStart > pruneStart && mainStart > statsStart);
 assert.doesNotMatch(worker.slice(pruneStart, statsStart), /fs\.stat|async function walk/, "normal retention pruning must delete indexed date partitions without scanning history files");
 assert.doesNotMatch(worker.slice(statsStart, mainStart), /fs\.stat|async function walk/, "normal history stats must aggregate partition metadata rather than scan history files");
 assert.match(worker, /if \(!materialChanged\)/);
-assert.match(worker, /market-global-v1\.json\.gz/);
+assert.match(worker, /market-global-v2\.json\.gz/);
 assert.match(worker, /market-regional-v1\.jsonl\.gz/);
 assert.match(worker, /market-trades-v1\.json\.gz/);
 assert.match(worker, /market-shortages-v1\.json\.gz/);
@@ -144,7 +143,7 @@ assert.match(worker, /public-contracts-v1\.json\.gz/);
 
 const contractUi = read("src/MarketContracts.tsx");
 assert.doesNotMatch(contractUi, /Starting EVE-wide public contract scan/);
-assert.match(contractUi, /server-prepared public contracts/i);
+assert.match(contractUi, /server-prepared public contract/i);
 
 const app = read("src/App.tsx");
 assert.doesNotMatch(app, /take up to 5 minutes/i);

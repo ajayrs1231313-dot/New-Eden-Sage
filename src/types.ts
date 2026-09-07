@@ -323,6 +323,13 @@ export interface MarketOpportunity {
   fillScore: number;
   risk: OpportunityRisk;
   routeSecurity: "high" | "low" | "null";
+  currentSpread: number;
+  previousSpread: number | null;
+  spreadChange: number | null;
+  spreadChangePercent: number | null;
+  spreadComparisonGeneration: string | null;
+  spreadComparisonSnapshotId: string | null;
+  spreadComparisonGeneratedAt: string | null;
   marginWidenedBy: number | null;
   score: number;
   scoreBreakdown: { profit: number; fill: number; route: number; capitalEfficiency: number; cargoEfficiency: number };
@@ -337,6 +344,7 @@ export interface PersonalOpportunity {
   category: string;
   score: number;
   risk: OpportunityRisk;
+  routeSecurity?: "high" | "low" | "null";
   jumps: number;
   estimatedMinutes: number;
   fillScore: number;
@@ -364,7 +372,7 @@ export interface OpportunityAnalysis {
     diagnostics: unknown;
   };
   ranked: PersonalOpportunity[];
-  signals: { ownedAssetStacks: number; marketTradesConsidered: number; marketDatasetCreatedAt: string | null; marketDatasetAgeMinutes: number | null; marketDatasetStale: boolean; marketOrdersInspected: number; marketRegionsInspected: number; marketSource: string; regionalShortageSignals: number };
+  signals: { ownedAssetStacks: number; marketTradesConsidered: number; marketDatasetCreatedAt: string | null; marketDatasetAgeMinutes: number | null; marketDatasetStale: boolean; marketOrdersInspected: number; marketRegionsInspected: number; marketSource: string; marketSpreadHistoryAvailable: boolean; marketSpreadComparisonGeneration: string | null; marketSpreadComparisonGeneratedAt: string | null; marketSpreadComparisonCount: number; regionalShortageSignals: number };
 }
 
 export type PveLocationKind = "incursion" | "mission-staging" | "ded-search" | "lowsec-ratting" | "nullsec-ratting";
@@ -550,7 +558,7 @@ export interface RawMarketSearchResult {
 }
 
 export type FitRemedyCandidate = {
-  kind: "skill" | "implant" | "rig";
+  kind: "skill" | "implant" | "implant-set" | "rig" | "module";
   typeId: number;
   name: string;
   solves: string[];
@@ -562,6 +570,11 @@ export type FitRemedyCandidate = {
   currentLevel?: number;
   targetLevel?: number;
   reason: string;
+  slot?: number;
+  verifiedFix?: boolean;
+  components?: Array<{ typeId:number; name:string; slot?:number }>;
+  replacement?: { fromTypeId:number; fromName:string; toTypeId:number; toName:string; count:number };
+  result?: { resource:"cpu"|"powergrid"; used:number; capacity:number; headroom:number };
 };
 
 export type FitResolutionIntent = {
@@ -574,6 +587,7 @@ export type FitResolutionIntent = {
   missingRequirements: Array<{ item: string; skillId: number; skill: string; requiredLevel: number; trainedLevel: number }>;
   remedies: FitRemedyCandidate[];
   resources?: { used: { cpu:number; powergrid:number; calibration:number }; capacity: { cpu:number; powergrid:number; calibration:number } };
+  rigSlots?: { used:number; capacity:number };
 };
 
 
@@ -1154,6 +1168,8 @@ declare global {
       openChatGptPlugins(): Promise<void>;
       openOpenAiTunnels(): Promise<void>;
       openOpenAiApiKeys(): Promise<void>;
+      loadFittingPersistence(legacyValue: unknown): Promise<{ schemaVersion:number; migrationVersion:number; savedFits:unknown[]; fitLibraryMeta:Record<string, unknown>; selectedFitId?:string; updatedAt?:string; migratedAt?:string }>;
+      saveFittingPersistence(value: unknown): Promise<{ schemaVersion:number; migrationVersion:number; savedFits:unknown[]; fitLibraryMeta:Record<string, unknown>; selectedFitId?:string; updatedAt?:string; migratedAt?:string }>;
       syncMcpRendererData(value: unknown): Promise<boolean>;
       onMcpFitDataUpdated(callback: (value: { savedFits?: unknown[]; fitLibraryMeta?: Record<string, unknown>; selectedFitId?: string }) => void): () => void;
       onUpdateStatus(callback: (value: { status: string; detail?: any }) => void): () => void;
@@ -1239,7 +1255,7 @@ declare global {
       getMutationOptionsLocal(typeId: number): Promise<Array<{ mutaplasmidTypeId: number; mutaplasmidName: string; resultingTypeId: number; resultingTypeName: string; attributes: Array<{ attributeId: number; name: string; baseValue: number; minValue: number; maxValue: number; minMultiplier: number; maxMultiplier: number; highIsGood: boolean; unitId?: number }> }>>;
       checkFittingChargeCompatibilityLocal(moduleTypeId:number, chargeTypeId:number): Promise<{ compatible:boolean; reason:string }>;
       checkFittingItemCompatibilityLocal(input:{ hullTypeId:number; itemTypeId:number; placement?:string; fitted?:Array<{typeId:number;rack?:string}> }): Promise<{ compatible:boolean; code:string; reason:string }>;
-      getFittingRemediesLocal(input: { characterId?:string; hullTypeId:number; issueCodes:string[]; itemTypeIds:number[] }): Promise<FitRemedyCandidate[]>;
+      getFittingRemediesLocal(input: { characterId?:string; hullTypeId:number; issueCodes:string[]; itemTypeIds:number[]; items?:Array<{typeId:number;quantity?:number;rack?:string;chargeTypeId?:number;chargeQuantity?:number;activeQuantity?:number;attributeOverrides?:Record<string,number>;state?:"offline"|"online"|"active"|"overheated"}>; implantTypeIds?:number[]; boosterTypeIds?:number[] }): Promise<FitRemedyCandidate[]>;
       resolveTypeIds(ids: number[]): Promise<Array<{ id: number; name: string }>>;
       listShips(): Promise<Array<{ typeId: number; name: string; groupId: number; groupName: string; metaGroupId?: number; metaGroupName?: string; factionId?: number; factionName?: string }>>;
       getManufacturingPlan(input: any): Promise<any>;

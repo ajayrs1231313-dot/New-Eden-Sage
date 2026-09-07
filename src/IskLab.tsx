@@ -322,7 +322,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
 
   return (
     <section className="isk-lab isk-lab-v2">
-      <div className={`isk-head${tab === "invention" ? " invention-command-head" : ""}`}>
+      <div className={`isk-head${tab === "invention" ? " invention-command-head" : ""}${tab === "orders" ? " order-desk-parent-head" : ""}`}>
         {tab === "invention" ? (
           <>
             <div className="invention-command-copy">
@@ -458,11 +458,11 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
       {tab === "market-opportunities" && analysis && <MarketDayTrader analysis={analysis} snapshot={snapshot} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
       {tab === "market-opportunities" && !analysis && <div className="market-no-results">No prepared Market Opportunities result is available yet. Sage builds this view from the installed server-prepared market generation.</div>}
 
-      {tab === "orders" && <OrderDesk snapshot={snapshot} />}
+      {tab === "orders" && <OrderDesk snapshot={snapshot} onNavigate={(destination) => { if (destination === "contracts") setContractsVisited(true); setTab(destination); }} />}
 
       {contractsVisited && <div hidden={tab !== "contracts"}><MarketContracts snapshot={snapshot} marketDataRevision={marketDataRevision} /></div>}
 
-      {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} extraRows={pveAnalysis?.ranked ?? []} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
+      {tab === "opportunities" && analysis && <OpportunityExplorer analysis={analysis} onCargoCapacityChange={scanMarketWithCargo} marketBusy={marketBusy} />}
       {tab === "opportunities" && !analysis && <div className="market-no-results">No prepared Opportunities result is available yet. Sage builds this view from installed public data and local character context.</div>}
 
       {tab === "invention" && !snapshot && <div className="market-no-results">Connect and sync a character to include owned blueprint originals.</div>}

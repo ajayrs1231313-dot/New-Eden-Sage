@@ -473,6 +473,43 @@ export function fitFingerprint(fit: Fit) {
   return JSON.stringify({ hull: fit.hull.typeId ?? fit.hull.name.toLowerCase(), low: rack(fit.low), mid: rack(fit.mid), high: rack(fit.high), rig: rack(fit.rig), subsystem: rack(fit.subsystem), drones: rack(fit.drones), cargo: rack(fit.cargo) });
 }
 
+export type PreparedImportedFits = {
+  imported: Fit[];
+  duplicateCount: number;
+  renamedCount: number;
+};
+
+export function prepareImportedFits(existingFits: Fit[], resolvedFits: Fit[]): PreparedImportedFits {
+  const existingFingerprints = new Set(existingFits.map(fitFingerprint));
+  const usedNames = new Set(existingFits.map((fit) => fit.name.trim().toLowerCase()).filter(Boolean));
+  let duplicateCount = 0;
+  let renamedCount = 0;
+
+  const imported = resolvedFits.map((fit) => {
+    const fingerprint = fitFingerprint(fit);
+    if (existingFingerprints.has(fingerprint)) duplicateCount += 1;
+    existingFingerprints.add(fingerprint);
+
+    const baseName = fit.name.trim() || `${fit.hull.name} fitting`;
+    if (!usedNames.has(baseName.toLowerCase())) {
+      usedNames.add(baseName.toLowerCase());
+      return baseName === fit.name ? fit : { ...fit, name: baseName };
+    }
+
+    let index = 2;
+    let name = `${baseName} (Imported ${index})`;
+    while (usedNames.has(name.toLowerCase())) {
+      index += 1;
+      name = `${baseName} (Imported ${index})`;
+    }
+    usedNames.add(name.toLowerCase());
+    renamedCount += 1;
+    return { ...fit, name };
+  });
+
+  return { imported, duplicateCount, renamedCount };
+}
+
 export function fitItems(fit: Fit) {
   return [
     fit.hull,

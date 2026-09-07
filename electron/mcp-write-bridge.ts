@@ -9,6 +9,7 @@ import { decrypt, encrypt, readConfig, writeConfig } from "./config";
 import { refreshEveToken } from "./eve";
 import { importFits, validateImportedFit, type ImportedFit, type ImportedFitItem } from "./fitting-import";
 import { resolveFittingTypeNamesLocal } from "./fitting-dogma";
+import { readCanonicalFittingStore, saveCanonicalFittingStore } from "./fitting-persistence";
 
 type BridgeAction =
   | "save_sage_fit"
@@ -28,13 +29,12 @@ function bridgePath() { return path.join(USER_DATA_ROOT, "mcp-write-bridge.json"
 function rendererPath() { return path.join(USER_DATA_ROOT, "mcp-renderer-data.json"); }
 
 async function readRendererData(): Promise<RendererData> {
-  try {
-    const value = JSON.parse(await fs.readFile(rendererPath(), "utf8")) as Partial<RendererData>;
-    return { savedFits: Array.isArray(value.savedFits) ? value.savedFits : [], fitLibraryMeta: value.fitLibraryMeta ?? {} };
-  } catch { return { savedFits: [], fitLibraryMeta: {} }; }
+  const value = await readCanonicalFittingStore();
+  return { savedFits: value.savedFits, fitLibraryMeta: value.fitLibraryMeta };
 }
 
 async function mergeWindowRendererData(value: RendererData, getWindow: () => BrowserWindow | null): Promise<RendererData> {
+  if (value.savedFits.length || Object.keys(value.fitLibraryMeta).length) return value;
   const window = getWindow();
   if (!window || window.isDestroyed()) return value;
   try {
@@ -55,20 +55,10 @@ async function mergeWindowRendererData(value: RendererData, getWindow: () => Bro
 }
 
 async function saveRendererData(value: RendererData, getWindow: () => BrowserWindow | null, selectedFitId?: string) {
-  await fs.writeFile(rendererPath(), JSON.stringify(value), { encoding: "utf8", mode: 0o600 });
+  const persisted = await saveCanonicalFittingStore({ ...value, ...(selectedFitId ? { selectedFitId } : {}) }, USER_DATA_ROOT, { allowEmptyOverwrite: true });
+  const update: RendererFitUpdate = { savedFits: persisted.savedFits, fitLibraryMeta: persisted.fitLibraryMeta, ...(persisted.selectedFitId ? { selectedFitId: persisted.selectedFitId } : {}) };
   const window = getWindow();
-  const update: RendererFitUpdate = { ...value, ...(selectedFitId ? { selectedFitId } : {}) };
-  if (window && !window.isDestroyed()) {
-    const updateJson = JSON.stringify(update);
-    const script = `(() => {
-      const update = ${updateJson};
-      localStorage.setItem("new-eden-sage-fits", JSON.stringify(update.savedFits));
-      localStorage.setItem("new-eden-sage-fit-library-meta", JSON.stringify(update.fitLibraryMeta));
-      window.dispatchEvent(new CustomEvent("sage:mcp-fit-data-updated", { detail: update }));
-    })()`;
-    await window.webContents.executeJavaScript(script, true).catch(() => undefined);
-    window.webContents.send("mcp:fit-data-updated", update);
-  }
+  if (window && !window.isDestroyed()) window.webContents.send("mcp:fit-data-updated", update);
   return update;
 }
 

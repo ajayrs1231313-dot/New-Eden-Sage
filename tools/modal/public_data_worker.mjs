@@ -767,7 +767,7 @@ function sharedMarketItem(item, stationNames) {
   };
 }
 
-async function writeMarketArtifacts(generationRoot, snapshot) {
+async function writeMarketArtifacts(generationRoot, snapshot, previousManifest) {
   const computeStarted = performance.now();
   const { buildFullMarketAnalysisIndex } = await import('/app/dist-electron/raw-market-analysis.js');
   const { buildRegionalMarketAggregateIndexFromFull } = await import('/app/dist-electron/regional-market-index.js');
@@ -775,7 +775,16 @@ async function writeMarketArtifacts(generationRoot, snapshot) {
   const index = await buildFullMarketAnalysisIndex(snapshot, { bypassCache: true, skipPersist: true, retainHistoricalCache: false });
   const stationNames = await resolveMarketNpcStationNames(index);
   const regional = await buildRegionalMarketAggregateIndexFromFull(index, { progress: () => {} });
-  const trades = await buildPreparedPublicTradeDataset(index);
+  let previousTrades = null;
+  const previousTradeArtifact = previousManifest?.files?.['market-trades'];
+  if (previousTradeArtifact?.path) {
+    previousTrades = await readGzipJson(path.join(PUBLISH_ROOT, previousTradeArtifact.path), null);
+    if (previousTrades?.dataset !== 'market-trades' || !Array.isArray(previousTrades?.opportunities) || previousTrades?.snapshotId === index.snapshotId) previousTrades = null;
+  }
+  const trades = await buildPreparedPublicTradeDataset(index, undefined, previousTrades ? {
+    generation: String(previousTrades.snapshotId || previousTradeArtifact?.version || previousManifest?.generation || ''),
+    dataset: previousTrades,
+  } : null);
   const shortages = await buildPreparedPublicShortageDataset(index);
   if (index.orderCount !== snapshot.orderCount || index.regionCount !== snapshot.regionCount || index.sourceOrdersInspected !== snapshot.orderCount) throw new Error('Prepared market counts do not match the authoritative current source snapshot.');
 
@@ -968,7 +977,7 @@ async function main() {
   const generationRoot = path.join(PUBLISH_ROOT, 'generations', generation);
   await fs.mkdir(generationRoot, { recursive: true });
   let marketPrepared;
-  if (market.changed || !previousManifest || marketSchemaUpgradeRequired) marketPrepared = await writeMarketArtifacts(generationRoot, market.snapshot);
+  if (market.changed || !previousManifest || marketSchemaUpgradeRequired) marketPrepared = await writeMarketArtifacts(generationRoot, market.snapshot, previousManifest);
   else {
     const files = await copyPreviousArtifacts(previousManifest, generationRoot, ['market-global', 'market-regional', 'market-trades', 'market-shortages']);
     marketPrepared = { files, index: null, regional: null, trades: null, shortages: null, computeMs: 0 };

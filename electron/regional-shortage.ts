@@ -21,6 +21,7 @@ export type RegionalShortageSignal = {
   score: number;
   confidenceScore: number;
   risk: "Low" | "Medium" | "High";
+  routeSecurity: "high" | "low" | "null";
   jumpsFromCharacter: number;
   estimatedMinutes: number;
   reasons: string[];
@@ -61,9 +62,21 @@ function preliminaryScore(input: {
   return clamp(premiumScore * 0.35 + pressureScore * 0.25 + scarcityScore * 0.25 + executableScore * 0.15);
 }
 
+export function routeSecurityFromMinimumStatus(minSecurity: number) {
+  if (minSecurity <= 0) return "null" as const;
+  if (minSecurity < 0.45) return "low" as const;
+  return "high" as const;
+}
+
+export function routeSecurityAcrossMinimumStatuses(...statuses: number[]) {
+  const finite = statuses.filter(Number.isFinite);
+  return routeSecurityFromMinimumStatus(finite.length ? Math.min(...finite) : -1);
+}
+
 function riskFromRoute(minSecurity: number) {
-  if (minSecurity <= 0) return "High" as const;
-  if (minSecurity < 0.45) return "Medium" as const;
+  const band = routeSecurityFromMinimumStatus(minSecurity);
+  if (band === "null") return "High" as const;
+  if (band === "low") return "Medium" as const;
   return "Low" as const;
 }
 
@@ -89,18 +102,24 @@ export async function findRegionalShortages(
   for (let index = 0; index < candidates.length; index += 1) {
     if (runtime.shouldCancel?.()) throw new Error("Analysis cancelled.");
     const candidate = candidates[index];
-    let jumps = 0;
-    let minSecurity = Number(candidate.minimumRouteSecurityStatus ?? 1);
+    const sourceToTargetJumps = Number(candidate.sourceToTargetJumps ?? 0);
+    const sourceToTargetMinimumSecurity = Number(candidate.minimumRouteSecurityStatus ?? -1);
+    let positioningJumps = 0;
+    let jumps = sourceToTargetJumps;
+    let minSecurity = sourceToTargetMinimumSecurity;
     if (origin) {
-      const route = await universeRoute(origin, Number(candidate.targetSystemId ?? candidate.target?.bestBuySystemId ?? candidate.target?.bestSellSystemId ?? 0));
-      if (route.jumps >= 999) continue;
-      jumps = route.jumps;
-      minSecurity = route.minimumSecurityStatus;
+      const sourceSystemId = Number(candidate.sourceSystemId ?? candidate.source?.bestSellSystemId ?? 0);
+      const positioningRoute = await universeRoute(origin, sourceSystemId);
+      if (positioningRoute.jumps >= 999) continue;
+      positioningJumps = positioningRoute.jumps;
+      jumps = positioningJumps + sourceToTargetJumps;
+      minSecurity = Math.min(positioningRoute.minimumSecurityStatus, sourceToTargetMinimumSecurity);
     }
+    const routeSecurity = routeSecurityFromMinimumStatus(minSecurity);
     const estimatedMinutes = minutesFor(jumps);
     if (maxJumps != null && jumps > maxJumps) continue;
     if (maxMinutes != null && estimatedMinutes > maxMinutes) continue;
-    const travelPenalty = origin ? Math.min(30, jumps) : 0;
+    const travelPenalty = origin ? Math.min(30, positioningJumps) : 0;
     results.push({
       id: String(candidate.id),
       typeId: Number(candidate.typeId),
@@ -119,11 +138,14 @@ export async function findRegionalShortages(
       score: clamp(Number(candidate.score ?? 0) - travelPenalty * 0.7),
       confidenceScore: clamp(Number(candidate.confidenceScore ?? 0)),
       risk: riskFromRoute(minSecurity),
+      routeSecurity,
       jumpsFromCharacter: jumps,
       estimatedMinutes,
       reasons: [
         ...(Array.isArray(candidate.reasons) ? candidate.reasons.map(String) : []),
-        origin ? `${jumps} jumps from the selected character to the target market area.` : `Server-prepared source-to-target route: ${Number(candidate.sourceToTargetJumps ?? 0)} jumps.`,
+        origin
+          ? `${positioningJumps} jumps to the source + ${sourceToTargetJumps} source-to-target jumps = ${jumps} planned jumps; whole-route security is ${routeSecurity}.`
+          : `Server-prepared source-to-target route: ${sourceToTargetJumps} jumps; route security is ${routeSecurity}.`,
       ],
     });
     if (results.length >= limit && index >= limit) break;
