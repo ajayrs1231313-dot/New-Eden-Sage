@@ -289,6 +289,53 @@ async function refreshJsonSource(definition) {
 }
 
 async function loadCurrentRawManifest() { return readJson(path.join(RAW_ROOT, 'current-all.json'), null); }
+
+function publishedGenerationDay(name) {
+  const match = /^(\d{4}-\d{2}-\d{2})T/.exec(String(name || ''));
+  return match?.[1] || null;
+}
+
+async function prunePublishedRawSnapshots(keepSnapshotId) {
+  let entries = [];
+  try { entries = await fs.readdir(RAW_ROOT, { withFileTypes: true }); } catch { return { removed: 0, kept: keepSnapshotId || null }; }
+  const stale = entries.filter(entry => entry.isDirectory() && /-all$/.test(entry.name) && entry.name !== keepSnapshotId);
+  await mapLimited(stale, 16, entry => fs.rm(path.join(RAW_ROOT, entry.name), { recursive: true, force: true }).catch(() => undefined));
+  return { removed: stale.length, kept: keepSnapshotId || null };
+}
+
+async function prunePublishedGenerations(activeGeneration) {
+  const root = path.join(PUBLISH_ROOT, 'generations');
+  let entries = [];
+  try { entries = await fs.readdir(root, { withFileTypes: true }); } catch { return { removed: 0, keptDaily: 0 }; }
+  const names = entries.filter(entry => entry.isDirectory()).map(entry => entry.name).filter(name => publishedGenerationDay(name));
+  const today = dateKey(new Date());
+  const cutoffDay = dateKey(new Date(Date.now() - RETENTION_MS));
+  const latestByClosedDay = new Map();
+  for (const name of names) {
+    const day = publishedGenerationDay(name);
+    if (!day || day >= today || day < cutoffDay) continue;
+    const prior = latestByClosedDay.get(day);
+    if (!prior || name > prior) latestByClosedDay.set(day, name);
+  }
+  const keep = new Set([activeGeneration, ...latestByClosedDay.values()].filter(Boolean));
+  const stale = names.filter(name => {
+    if (keep.has(name)) return false;
+    const day = publishedGenerationDay(name);
+    if (!day) return false;
+    if (day === today) return false;
+    return true;
+  });
+  await mapLimited(stale, 12, name => fs.rm(path.join(root, name), { recursive: true, force: true }).catch(() => undefined));
+  return { removed: stale.length, keptDaily: latestByClosedDay.size, activeGeneration: activeGeneration || null };
+}
+
+async function prunePublishedStorage(activeGeneration, keepRawSnapshotId) {
+  const [raw, generations] = await Promise.all([
+    prunePublishedRawSnapshots(keepRawSnapshotId),
+    prunePublishedGenerations(activeGeneration),
+  ]);
+  return { raw, generations };
+}
 function marketStateKey(regionId) { return `market-orders-${regionId}`; }
 async function fetchMarketRegion(region, previousEntry, previousManifest) {
   const key = marketStateKey(region.regionId);
@@ -954,8 +1001,10 @@ async function historyStats() {
 async function main() {
   const overallStarted = performance.now();
   await Promise.all([fs.mkdir(CURRENT_ROOT, { recursive: true }), fs.mkdir(STATE_ROOT, { recursive: true }), fs.mkdir(HISTORY_ROOT, { recursive: true }), fs.mkdir(HISTORY_PARTITION_INDEX_ROOT, { recursive: true })]);
-  await ensureHistoryMetadata();
   const previousManifest = await readJson(path.join(PUBLISH_ROOT, 'manifest.json'), null);
+  const previousRawManifest = await loadCurrentRawManifest();
+  const publishedPruningBeforeRefresh = await prunePublishedStorage(previousManifest?.generation || null, previousRawManifest?.id || null);
+  await ensureHistoryMetadata();
   const publicResults = await mapLimited(PUBLIC_SOURCES, 4, refreshJsonSource);
   const regions = await discoverRegions();
   const market = await refreshMarketOrders(regions);
@@ -967,7 +1016,7 @@ async function main() {
 
   if (!materialChanged) {
     const history = await historyStats();
-    const result = { published: false, generation: previousManifest?.generation || null, marketChanged: false, contractsChanged: false, publicChanged: false, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, contractComputeMs: contracts.durationMs, scheduler: telemetry, history, pruning, totalMs: Math.round(performance.now() - overallStarted) };
+    const result = { published: false, generation: previousManifest?.generation || null, marketChanged: false, contractsChanged: false, publicChanged: false, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, contractComputeMs: contracts.durationMs, scheduler: telemetry, history, pruning, publishedPruning: publishedPruningBeforeRefresh, totalMs: Math.round(performance.now() - overallStarted) };
     await writeJsonAtomic(path.join(STATE_ROOT, 'scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
     console.log(JSON.stringify(result));
     return;
@@ -1010,8 +1059,9 @@ async function main() {
   await fs.writeFile(partial, JSON.stringify(manifest, null, 2), 'utf8');
   await fs.rename(partial, path.join(PUBLISH_ROOT, 'manifest.json'));
 
+  const publishedPruningAfterRefresh = await prunePublishedStorage(generation, market.snapshot?.id || null);
   const history = await historyStats();
-  const result = { published: true, generation, marketChanged: market.changed, contractsChanged: contracts.changed, publicChanged, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, computeMs: marketPrepared.computeMs, contractComputeMs: contracts.durationMs, scheduler: telemetry, history, pruning, totalMs: Math.round(performance.now() - overallStarted) };
+  const result = { published: true, generation, marketChanged: market.changed, contractsChanged: contracts.changed, publicChanged, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, computeMs: marketPrepared.computeMs, contractComputeMs: contracts.durationMs, scheduler: telemetry, history, pruning, publishedPruning: { before: publishedPruningBeforeRefresh, after: publishedPruningAfterRefresh }, totalMs: Math.round(performance.now() - overallStarted) };
   await writeJsonAtomic(path.join(STATE_ROOT, 'scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
   console.log(JSON.stringify(result));
 }

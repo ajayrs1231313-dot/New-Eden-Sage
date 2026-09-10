@@ -1,4 +1,4 @@
-export const CURRENT_ESI_SCOPE_SCHEMA_VERSION = 1;
+export const CURRENT_ESI_SCOPE_SCHEMA_VERSION = 2;
 
 export const CORE_READ_SCOPES = [
   "esi-location.read_location.v1",

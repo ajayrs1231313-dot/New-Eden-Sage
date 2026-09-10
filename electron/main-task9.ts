@@ -841,8 +841,17 @@ async function ensureEsiScopeSchemaMigration() {
   if (config.esiScopeSchemaVersion >= CURRENT_ESI_SCOPE_SCHEMA_VERSION) return;
 
   const snapshotCharacterIds = listSnapshots().map((snapshot: any) => String(snapshot?.characterId ?? "")).filter(Boolean);
-  const authorizedCharacterIds = Object.keys(config.encryptedRefreshTokens);
-  mergeReauthorizationIds(config, [...snapshotCharacterIds, ...authorizedCharacterIds]);
+  const tokenCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  const authorizationCharacterIds = Object.keys(config.eveAuthorizations);
+  // Scope migrations are deliberately keyed to the local character inventory, not just
+  // currently-live refresh tokens. A user may skip multiple releases or arrive here after
+  // another migration already invalidated tokens; every remembered character must still
+  // be forced through the current ESI grant exactly once for this schema version.
+  mergeReauthorizationIds(config, [
+    ...snapshotCharacterIds,
+    ...tokenCharacterIds,
+    ...authorizationCharacterIds,
+  ]);
   config.encryptedRefreshTokens = {};
   config.encryptedSageSessionToken = undefined;
   config.esiScopeSchemaVersion = CURRENT_ESI_SCOPE_SCHEMA_VERSION;
