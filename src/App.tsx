@@ -121,6 +121,13 @@ const RetainedAssetsCommand = memo(AssetsCommand, (a, b) => a.snapshots === b.sn
 const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId && a.active === b.active);
 const RetainedNavigationCommand = memo(NavigationCommand, () => true);
 const RetainedWormholeCommand = memo(WormholeCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
+const RetainedFleetCommand = memo(FleetCommand);
+
+function useVisibleValue<T>(value: T, visible: boolean): T {
+  const retained = useRef(value);
+  if (visible) retained.current = value;
+  return retained.current;
+}
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
@@ -351,6 +358,18 @@ export default function App() {
       setMessage("Add a character before refreshing private data.");
       return;
     }
+    const requiresReauthorization = Boolean(
+      config && (
+        !config.connectedCharacterIds.includes(selectedCharacterId)
+        || config.reauthorizationRequiredCharacterIds.includes(selectedCharacterId)
+      ),
+    );
+    if (requiresReauthorization) {
+      const characterName = snapshots.find((item) => item.characterId === selectedCharacterId)?.character.name ?? "Selected character";
+      setMessage(`${characterName} needs EVE re-authorisation before private data can refresh. Opening EVE SSO...`);
+      await connect();
+      return;
+    }
     setPrivateRefreshActive(true);
     setMessage("Refreshing selected character private EVE data locally...");
     try {
@@ -452,12 +471,20 @@ export default function App() {
   }
 
   const allCommandTabsVisited = commandNav.every((item) => visitedCommandViews.has(item.id));
+  const active = snapshots.find((item) => item.characterId === activeId) ?? snapshots[0];
+  const overviewSnapshot = useVisibleValue(active, view === "overview");
+  const overviewSnapshots = useVisibleValue(snapshots, view === "overview");
+  const skillsSnapshot = useVisibleValue(active, view === "skills");
+  const iskSnapshot = useVisibleValue(active, view === "isk");
+  const fittingsCharacterId = useVisibleValue(activeId, view === "fittings");
+  const assetSnapshot = useVisibleValue(active, view === "loot");
+  const assetSnapshots = useVisibleValue(snapshots, view === "loot");
+  const wormholeSnapshots = useVisibleValue(snapshots, view === "wormholes");
+  const wormholeCharacterId = useVisibleValue(active?.characterId, view === "wormholes");
+  const industrialSnapshots = useVisibleValue(snapshots, view === "industrial");
+  const industrialCharacterId = useVisibleValue(active?.characterId, view === "industrial");
+  const cloneConfirmationRequired = Boolean(skillsSnapshot && !cloneStates[skillsSnapshot.characterId]);
   if (!config) return <div className="boot">Waking New Eden Sage...</div>;
-  const active =
-    snapshots.find((item) => item.characterId === activeId) ?? snapshots[0];
-  const cloneConfirmationRequired = Boolean(
-    active && !cloneStates[active.characterId],
-  );
 
   return (
     <div className={`app-shell ${view === "fittings" ? "fittings-shell-active" : ""} ${view === "fleet" && fleetWargameActive ? "wargame-shell-active" : ""}`}>
@@ -668,11 +695,11 @@ export default function App() {
         {mountedViews.current.has("overview") && (
           <div className="cached-view" hidden={view !== "overview"}>
             <CharacterCommand
-              snapshot={active}
-              snapshots={snapshots}
+              snapshot={overviewSnapshot}
+              snapshots={overviewSnapshots}
               onConnect={connect}
               active={view === "overview"}
-              cloneState={active ? cloneStates[active.characterId] : undefined}
+              cloneState={overviewSnapshot ? cloneStates[overviewSnapshot.characterId] : undefined}
               marketDataRevision={marketDataRevision}
               allCommandTabsVisited={allCommandTabsVisited}
               onNavigate={navigateFromCharacter}
@@ -685,8 +712,8 @@ export default function App() {
         {mountedViews.current.has("skills") && (
           <div className="cached-view" hidden={view !== "skills"}>
             <RetainedSkillsWorkspace
-              snapshot={active}
-              cloneState={active ? cloneStates[active.characterId] : undefined}
+              snapshot={skillsSnapshot}
+              cloneState={skillsSnapshot ? cloneStates[skillsSnapshot.characterId] : undefined}
               confirmationRequired={cloneConfirmationRequired}
               activeTab={activityCommandTab}
               onTabChange={setActivityCommandTab}
@@ -698,9 +725,9 @@ export default function App() {
         {mountedViews.current.has("isk") && (
           <div className="cached-view" hidden={view !== "isk"}>
             <RetainedIskLab
-              snapshot={active}
+              snapshot={iskSnapshot}
               active={view === "isk"}
-              cloneState={active ? cloneStates[active.characterId] : undefined}
+              cloneState={iskSnapshot ? cloneStates[iskSnapshot.characterId] : undefined}
               marketDataRevision={marketDataRevision}
               onMarketDataUpdated={() => setMarketDataRevision((value) => value + 1)}
             />
@@ -708,14 +735,15 @@ export default function App() {
         )}
         {mountedViews.current.has("fittings") && (
           <div className="cached-view" hidden={view !== "fittings"}>
-            <RetainedFittingsWorkspace activeCharacterId={activeId} onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setActivityCommandTab("planner"); setView("skills"); }} />
+            <RetainedFittingsWorkspace activeCharacterId={fittingsCharacterId} onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setActivityCommandTab("planner"); setView("skills"); }} />
           </div>
         )}
         {mountedViews.current.has("loot") && (
           <div className="cached-view" hidden={view !== "loot"}>
             <AssetCommand
-              snapshot={active}
-              snapshots={snapshots}
+              snapshot={assetSnapshot}
+              snapshots={assetSnapshots}
+              active={view === "loot"}
               tab={assetCommandTab}
               onTabChange={setAssetCommandTab}
               walletView={walletCommandView}
@@ -732,21 +760,25 @@ export default function App() {
         )}
         {mountedViews.current.has("wormholes") && (
           <div className="cached-view" hidden={view !== "wormholes"}>
-            <RetainedWormholeCommand snapshots={snapshots} activeCharacterId={active?.characterId} onSelectCharacter={selectCharacter} />
+            <RetainedWormholeCommand snapshots={wormholeSnapshots} activeCharacterId={wormholeCharacterId} onSelectCharacter={selectCharacter} />
           </div>
         )}
         {mountedViews.current.has("industrial") && (
           <div className="cached-view" hidden={view !== "industrial"}>
             <RetainedIndustrialCommand
-              snapshots={snapshots}
-              activeCharacterId={active?.characterId}
+              snapshots={industrialSnapshots}
+              activeCharacterId={industrialCharacterId}
               active={view === "industrial"}
               onSelectCharacter={selectCharacter}
             />
           </div>
         )}
         {view === "corporation" && <CorporationManagement />}
-        {view === "fleet" && <FleetCommand onWargameActiveChange={setFleetWargameActive} />}
+        {mountedViews.current.has("fleet") && (
+          <div className="cached-view" hidden={view !== "fleet"}>
+            <RetainedFleetCommand active={view === "fleet"} onWargameActiveChange={setFleetWargameActive} />
+          </div>
+        )}
         <footer>
           <span className="pulse" />
           {message}
@@ -782,6 +814,12 @@ function CharacterCommand({
   mountedTabs.current.add(tab);
   const [publicDataRevision, setPublicDataRevision] = useState(0);
   const publicDataDirty = useRef(false);
+  const overviewSnapshot = useVisibleValue(snapshot, active && tab === "overview");
+  const overviewCloneState = useVisibleValue(cloneState, active && tab === "overview");
+  const queueSnapshot = useVisibleValue(snapshot, active && tab === "queue");
+  const augmentsSnapshot = useVisibleValue(snapshot, active && tab === "augments");
+  const lpStoreSnapshot = useVisibleValue(snapshot, active && tab === "lp-store");
+  const killmailSnapshots = useVisibleValue(snapshots, active && tab === "killmails");
   const consumesPublicMarket = active && (tab === "augments" || tab === "lp-store");
   useEffect(() => window.sage.onPreparedDataUpdated((value) => {
     if (!value.publicDataUpdated) return;
@@ -811,7 +849,7 @@ function CharacterCommand({
       {mountedTabs.current.has("lp-store") && (
         <div className="cached-view" hidden={tab !== "lp-store"}>
           <LpStore
-            snapshot={snapshot}
+            snapshot={lpStoreSnapshot}
             marketDataRevision={effectiveMarketDataRevision}
             onOpenShoppingList={() => onNavigate("asset-market")}
             onOpenIndustry={() => onNavigate("industrial")}
@@ -820,21 +858,21 @@ function CharacterCommand({
         </div>
       )}
       <div className="cached-view" hidden={tab !== "overview"}>
-        <RetainedOverview snapshot={snapshot} onConnect={onConnect} cloneState={cloneState} onNavigate={onNavigate} allCommandTabsVisited={allCommandTabsVisited} />
+        <RetainedOverview snapshot={overviewSnapshot} onConnect={onConnect} cloneState={overviewCloneState} onNavigate={onNavigate} allCommandTabsVisited={allCommandTabsVisited} />
       </div>
       {mountedTabs.current.has("queue") && (
         <div className="cached-view" hidden={tab !== "queue"}>
-          <CharacterQueue snapshot={snapshot} />
+          <CharacterQueue snapshot={queueSnapshot} />
         </div>
       )}
       {mountedTabs.current.has("augments") && (
         <div className="cached-view" hidden={tab !== "augments"}>
-          <AugmentsGuide snapshot={snapshot} marketDataRevision={effectiveMarketDataRevision} />
+          <AugmentsGuide snapshot={augmentsSnapshot} marketDataRevision={effectiveMarketDataRevision} />
         </div>
       )}
       {mountedTabs.current.has("killmails") && (
         <div className="cached-view" hidden={tab !== "killmails"}>
-          <KillmailsCommand snapshots={snapshots} />
+          <KillmailsCommand snapshots={killmailSnapshots} />
         </div>
       )}
     </section>
@@ -844,6 +882,7 @@ function CharacterCommand({
 function AssetCommand({
   snapshot,
   snapshots,
+  active,
   tab,
   onTabChange,
   walletView,
@@ -853,6 +892,7 @@ function AssetCommand({
 }: {
   snapshot?: CharacterSnapshot;
   snapshots: CharacterSnapshot[];
+  active: boolean;
   tab: AssetCommandTab;
   onTabChange(tab: AssetCommandTab): void;
   walletView: WalletCommandView;
@@ -862,6 +902,10 @@ function AssetCommand({
 }) {
   const mountedTabs = useRef(new Set<AssetCommandTab>([tab]));
   mountedTabs.current.add(tab);
+  const assetsSnapshots = useVisibleValue(snapshots, active && tab === "assets");
+  const marketSnapshot = useVisibleValue(snapshot, active && tab === "market");
+  const walletSnapshot = useVisibleValue(snapshot, active && tab === "wallet");
+  const walletSnapshots = useVisibleValue(snapshots, active && tab === "wallet");
   return (
     <section className="command-workspace asset-command">
       <div className="command-subtabs" role="tablist" aria-label="Asset Command sections">
@@ -871,13 +915,13 @@ function AssetCommand({
         <button type="button" className={tab === "wallet" ? "active" : ""} onClick={() => onTabChange("wallet")}>Wallet</button>
       </div>
       {mountedTabs.current.has("loot") && <div className="cached-view" hidden={tab !== "loot"}><RetainedLoot /></div>}
-      {mountedTabs.current.has("assets") && <div className="cached-view" hidden={tab !== "assets"}><RetainedAssetsCommand snapshots={snapshots} /></div>}
+      {mountedTabs.current.has("assets") && <div className="cached-view" hidden={tab !== "assets"}><RetainedAssetsCommand snapshots={assetsSnapshots} /></div>}
       {mountedTabs.current.has("market") && (
         <div className="cached-view" hidden={tab !== "market"}>
-          <RetainedMarketWorkspace snapshot={snapshot} marketDataRevision={marketDataRevision} onMarketDataUpdated={onMarketDataUpdated} />
+          <RetainedMarketWorkspace snapshot={marketSnapshot} marketDataRevision={marketDataRevision} onMarketDataUpdated={onMarketDataUpdated} />
         </div>
       )}
-      {mountedTabs.current.has("wallet") && <div className="cached-view" hidden={tab !== "wallet"}><WalletCommand snapshot={snapshot} snapshots={snapshots} walletView={walletView} onWalletViewChange={onWalletViewChange} /></div>}
+      {mountedTabs.current.has("wallet") && <div className="cached-view" hidden={tab !== "wallet"}><WalletCommand snapshot={walletSnapshot} snapshots={walletSnapshots} walletView={walletView} onWalletViewChange={onWalletViewChange} /></div>}
     </section>
   );
 }

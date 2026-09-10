@@ -836,34 +836,68 @@ async function ensureOneTimeCharacterResetMigration() {
   });
 }
 
+const ESI_SCOPE_MIGRATION_LOCK_PATH = path.join(USER_DATA_ROOT, "esi-scope-schema-migration.lock");
+
 async function ensureEsiScopeSchemaMigration() {
-  const config = await readConfig();
-  if (config.esiScopeSchemaVersion >= CURRENT_ESI_SCOPE_SCHEMA_VERSION) return;
+  let lockHandle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  for (let attempt = 0; attempt < 80 && !lockHandle; attempt += 1) {
+    try {
+      lockHandle = await fs.open(ESI_SCOPE_MIGRATION_LOCK_PATH, "wx");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const stat = await fs.stat(ESI_SCOPE_MIGRATION_LOCK_PATH);
+        if (Date.now() - stat.mtimeMs > 30_000) {
+          await fs.unlink(ESI_SCOPE_MIGRATION_LOCK_PATH).catch(() => undefined);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  if (!lockHandle) {
+    await logEvent("warn", "esi.scope_schema.migration_lock_timeout", {
+      scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
+    });
+    return;
+  }
 
-  const snapshotCharacterIds = listSnapshots().map((snapshot: any) => String(snapshot?.characterId ?? "")).filter(Boolean);
-  const tokenCharacterIds = Object.keys(config.encryptedRefreshTokens);
-  const authorizationCharacterIds = Object.keys(config.eveAuthorizations);
-  // Scope migrations are deliberately keyed to the local character inventory, not just
-  // currently-live refresh tokens. A user may skip multiple releases or arrive here after
-  // another migration already invalidated tokens; every remembered character must still
-  // be forced through the current ESI grant exactly once for this schema version.
-  mergeReauthorizationIds(config, [
-    ...snapshotCharacterIds,
-    ...tokenCharacterIds,
-    ...authorizationCharacterIds,
-  ]);
-  config.encryptedRefreshTokens = {};
-  config.encryptedSageSessionToken = undefined;
-  config.esiScopeSchemaVersion = CURRENT_ESI_SCOPE_SCHEMA_VERSION;
-  config.esiScopeMigratedAt = new Date().toISOString();
-  await writeConfig(config);
-  await logEvent("info", "esi.scope_schema.authorization_reset", {
-    scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
-    affectedCharacters: config.reauthorizationRequiredCharacterIds.length,
-    snapshotsPreserved: snapshotCharacterIds.length,
-  });
+  try {
+    // Re-read only after the cross-process lock is held. Dev sessions intentionally
+    // share Sage settings, so a stale pre-lock read could erase a character that
+    // another Sage process has just re-authorised.
+    const config = await readConfig();
+    if (config.esiScopeSchemaVersion >= CURRENT_ESI_SCOPE_SCHEMA_VERSION) return;
+
+    const snapshotCharacterIds = listSnapshots().map((snapshot: any) => String(snapshot?.characterId ?? "")).filter(Boolean);
+    const tokenCharacterIds = Object.keys(config.encryptedRefreshTokens);
+    const authorizationCharacterIds = Object.keys(config.eveAuthorizations);
+    // Scope migrations are deliberately keyed to the local character inventory, not just
+    // currently-live refresh tokens. A user may skip multiple releases or arrive here after
+    // another migration already invalidated tokens; every remembered character must still
+    // be forced through the current ESI grant exactly once for this schema version.
+    mergeReauthorizationIds(config, [
+      ...snapshotCharacterIds,
+      ...tokenCharacterIds,
+      ...authorizationCharacterIds,
+    ]);
+    config.encryptedRefreshTokens = {};
+    config.encryptedSageSessionToken = undefined;
+    config.esiScopeSchemaVersion = CURRENT_ESI_SCOPE_SCHEMA_VERSION;
+    config.esiScopeMigratedAt = new Date().toISOString();
+    await writeConfig(config);
+    await logEvent("info", "esi.scope_schema.authorization_reset", {
+      scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
+      affectedCharacters: config.reauthorizationRequiredCharacterIds.length,
+      snapshotsPreserved: snapshotCharacterIds.length,
+    });
+  } finally {
+    await lockHandle.close().catch(() => undefined);
+    await fs.unlink(ESI_SCOPE_MIGRATION_LOCK_PATH).catch(() => undefined);
+  }
 }
-
 async function planetaryCorporationContext(characterId: string) {
   const config = await readConfig();
   if (!config.encryptedSageSessionToken) {

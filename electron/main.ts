@@ -25,9 +25,14 @@ if (!DESKTOP_SINGLE_INSTANCE_LOCK) app.quit();
 
 const HEARTBEAT_FILE = path.join(LOG_ROOT, `electron-heartbeat-${process.pid}.json`);
 const HEALTH_LOG_FILE = path.join(LOG_ROOT, "electron-health.jsonl");
+const HEALTH_LOG_ARCHIVE_FILE = path.join(LOG_ROOT, "electron-health.1.jsonl");
+const HEALTH_LOG_MAX_BYTES = 16 * 1024 * 1024;
+const HEALTH_SAMPLE_INTERVAL_MS = 30_000;
+const HEALTH_FAILURE_LOG_THROTTLE_MS = 60_000;
 let rendererHeartbeatAt = 0;
 let rendererHeartbeat: Record<string, unknown> | null = null;
 let healthRecorderRunning = false;
+let lastHealthFailureLoggedAt = 0;
 
 try {
   crashReporter.start({
@@ -46,9 +51,21 @@ ipcMain.on("diagnostics:renderer-heartbeat", (_event, report) => {
   rendererHeartbeat = report && typeof report === "object" ? report as Record<string, unknown> : null;
 });
 
+async function rotateHealthLogIfNeeded() {
+  try {
+    const stat = await nodeFs.promises.stat(HEALTH_LOG_FILE);
+    if (stat.size < HEALTH_LOG_MAX_BYTES) return;
+    await nodeFs.promises.rm(HEALTH_LOG_ARCHIVE_FILE, { force: true });
+    await nodeFs.promises.rename(HEALTH_LOG_FILE, HEALTH_LOG_ARCHIVE_FILE);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 async function writeHealthSample() {
   if (healthRecorderRunning || !app.isReady()) return;
   healthRecorderRunning = true;
+  const temp = `${HEARTBEAT_FILE}.${process.pid}.tmp`;
   try {
     const processMemory = await process.getProcessMemoryInfo();
     const sample = {
@@ -63,18 +80,24 @@ async function writeHealthSample() {
       appMetrics: app.getAppMetrics(),
       crashDumpsPath: app.getPath("crashDumps"),
     };
-    nodeFs.mkdirSync(LOG_ROOT, { recursive: true });
-    const temp = `${HEARTBEAT_FILE}.${process.pid}.tmp`;
-    nodeFs.writeFileSync(temp, JSON.stringify(sample), "utf8");
-    nodeFs.renameSync(temp, HEARTBEAT_FILE);
-    nodeFs.appendFileSync(HEALTH_LOG_FILE, `${JSON.stringify(sample)}\n`, "utf8");
+    const encoded = JSON.stringify(sample);
+    await nodeFs.promises.mkdir(LOG_ROOT, { recursive: true });
+    await nodeFs.promises.writeFile(temp, encoded, "utf8");
+    await nodeFs.promises.rm(HEARTBEAT_FILE, { force: true });
+    await nodeFs.promises.rename(temp, HEARTBEAT_FILE);
+    await rotateHealthLogIfNeeded();
+    await nodeFs.promises.appendFile(HEALTH_LOG_FILE, `${encoded}\n`, "utf8");
   } catch (error) {
-    void logEvent("warn", "diagnostics.health_sample_failed", { error });
+    const now = Date.now();
+    if (now - lastHealthFailureLoggedAt >= HEALTH_FAILURE_LOG_THROTTLE_MS) {
+      lastHealthFailureLoggedAt = now;
+      void logEvent("warn", "diagnostics.health_sample_failed", { error });
+    }
   } finally {
+    await nodeFs.promises.rm(temp, { force: true }).catch(() => undefined);
     healthRecorderRunning = false;
   }
 }
-
 app.whenReady().then(() => {
   void logEvent("info", "diagnostics.crash_monitor_ready", {
     heartbeatFile: HEARTBEAT_FILE,
@@ -83,7 +106,7 @@ app.whenReady().then(() => {
   });
   void app.getGPUInfo("complete").then((gpuInfo) => logEvent("info", "diagnostics.gpu_info", { gpuInfo })).catch((error) => logEvent("warn", "diagnostics.gpu_info_failed", { error }));
   void writeHealthSample();
-  const timer = setInterval(() => void writeHealthSample(), 5000);
+  const timer = setInterval(() => void writeHealthSample(), HEALTH_SAMPLE_INTERVAL_MS);
   timer.unref();
 });
 

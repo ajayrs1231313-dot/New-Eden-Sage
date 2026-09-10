@@ -2909,7 +2909,7 @@ export async function analyzeFittingDogma(input: {
 
   // Expose support/ewar modules using the same skill-, hull-, script- and heat-adjusted
   // DOGMA attributes used by the fitter. Wargame consumes this instead of raw SDE stats.
-  const supportSystems = online.flatMap((item) => {
+  const supportSystems = online.flatMap((item): Array<Record<string, unknown>> => {
     if (item.state !== "active" && item.state !== "overheated") return [];
     const source = moduleDogmaFor(item);
     if (!source) return [];
@@ -2932,7 +2932,17 @@ export async function analyzeFittingDogma(input: {
     if (groupId === 67) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,90,item.typeId))*quantity; return [{...common,kind:"remoteCapacitor",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
     if (groupId === 290) return [{...common,kind:"remoteSensorBooster",maxTargetRangeBonus:effectiveItemAttr(source,309,item.typeId)/100,scanResolutionBonus:effectiveItemAttr(source,566,item.typeId)/100,sensorStrengthBonus:Math.max(...[1027,1028,1029,1030].map((attributeId)=>effectiveItemAttr(source,attributeId,item.typeId)/100))}];
     if (groupId === 209) return [{...common,kind:"remoteTrackingComputer",optimalBonus:effectiveItemAttr(source,351,item.typeId)/100,falloffBonus:effectiveItemAttr(source,349,item.typeId)/100,trackingBonus:effectiveItemAttr(source,767,item.typeId)/100}];
-    if (groupId === 1770) return [{...common,kind:"commandBurst"}];
+    if (groupId === 1770) {
+      const buffs = ([[2468,2469],[2470,2471],[2472,2473],[2536,2537]] as const).flatMap(([idAttr,valueAttr]) => {
+        const buffId=Math.trunc(effectiveItemAttr(source,idAttr,item.typeId));
+        if(!buffId)return [];
+        const definition=dbuffs.get(buffId);
+        if(!definition)return [];
+        const value=effectiveItemAttr(source,valueAttr,item.typeId);
+        return [{buffId,description:definition.developerDescription ?? `Command buff ${buffId}`,value}];
+      });
+      return [{...common,kind:"commandBurst",buffs}];
+    }
     return [];
   });
 

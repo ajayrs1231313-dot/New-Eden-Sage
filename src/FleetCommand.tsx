@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type WheelEvent } from "react";
 import { OnTheFlyJumpMap } from "./OnTheFlyJumpMap";
 import type { NavigationCharacterLocation, NavigationSystem } from "./types";
 import "./navigation-command.css";
 import { CorporationDoctrines, PENDING_DOCTRINE_FIT_KEY } from "./CorporationDoctrines";
-import { analyzeWargameFit, type WargameSupportSystem } from "./wargame-fit-bridge";
+import { analyzeWargameFit, type WargameFitResult } from "./wargame-fit-bridge";
+import { COMMON_WARGAME_SYSTEM_EFFECTS, cloneDamageSources, cloneOrderChain, type WargameDamageSource, type WargameMovementOrder, type WargameOrderCondition, type WargameOrderStep, type WargamePropulsionOrder, type WargameSystemEffect } from "./wargame-command-model";
+import { clampPercent, damageSourceApplication, defaultTargetSwitchDelay, defaultWeaponCycle, healthPercent, liveShipCount, perShipEhp, prepareWargameUnit, primaryEhp, rangeRateMps, sourcePaperDps, sourcePaperVolley, velocityMps, weaponApplication, wargameConditionUsesSeconds, wargameConditionUsesTarget, wargameConditionUsesThreshold, wargameDistanceKm, wargameSupportSystemKey, wargameSupportTargetSide } from "./wargame-engine";
+import type { WargameSide, WargameStance, WargameSupportSystem, WargameUnit, WargameWeaponModel } from "./wargame-types";
+import { applyWargameCommand, createWargameSession, WARGAME_DEFAULT_RNG_SEED, type WargameCommand, type WargameCommandRecord } from "./wargame-session";
 
 type FleetCorporation = {
   characterId: string;
@@ -16,11 +20,28 @@ type FleetCorporation = {
 
 type FleetCommandTab = "doctrines" | "jump-map" | "wargame";
 type WargamePhase = 0 | 1 | 2 | 3;
-type WargameSide = "blue" | "red";
 type WargameAssetTab = "ships" | "terrain" | "fleets";
-type WargameOrderMode = "move" | "engage" | null;
-type WargameWeaponModel = "turret" | "missile" | "drone" | "support";
-type WargameStance = "brawl" | "pursue" | "kite" | "screen" | "support" | "hold";
+type WargameOrderMode = "move" | "engage" | "logistics" | "tackle" | "ewar" | "align" | "warp" | null;
+
+const WARGAME_CONDITION_OPTIONS: Array<{ value: WargameOrderCondition["kind"]; label: string }> = [
+  { value: "always", label: "Immediately / always" },
+  { value: "target-destroyed", label: "Target destroyed" },
+  { value: "target-health-below", label: "Target HP below %" },
+  { value: "target-ships-below", label: "Target ships at/below N" },
+  { value: "range-below", label: "Range below km" },
+  { value: "range-above", label: "Range above km" },
+  { value: "target-scrammed", label: "Target scrammed" },
+  { value: "target-warp-disrupted", label: "Target warp disrupted" },
+  { value: "target-warping", label: "Target entering warp" },
+  { value: "target-jammed", label: "Target jammed" },
+  { value: "self-health-below", label: "Own fleet HP below %" },
+  { value: "self-cap-below", label: "Own capacitor below %" },
+  { value: "after-seconds", label: "After N seconds" },
+  { value: "arrived", label: "Movement arrived" },
+  { value: "self-aligned", label: "Own fleet aligned" },
+  { value: "self-warped", label: "Own fleet landed from warp" },
+  { value: "manual", label: "Manual only" },
+];
 
 type ShipChoice = {
   typeId: number;
@@ -31,101 +52,6 @@ type ShipChoice = {
   factionName?: string;
 };
 
-type WargameUnit = {
-  id: string;
-  name: string;
-  typeId?: number;
-  side: WargameSide;
-  count: number;
-  x: number;
-  y: number;
-  dps: number;
-  ehp: number;
-  speed: number;
-  range: number;
-  em: number;
-  therm: number;
-  kin: number;
-  exp: number;
-  role: string;
-  targetId?: string;
-  maxEhp?: number;
-  destinationX?: number;
-  destinationY?: number;
-  weaponModel?: WargameWeaponModel;
-  signature?: number;
-  tracking?: number;
-  repPerSecond?: number;
-  repRange?: number;
-  webStrength?: number;
-  webRange?: number;
-  tackleRange?: number;
-  stance?: WargameStance;
-  velocityX?: number;
-  velocityY?: number;
-  effectiveSpeed?: number;
-  application?: number;
-  repTargetId?: string;
-  shipsAlive?: number;
-  primaryEhp?: number;
-  primaryShieldHp?: number;
-  primaryArmorHp?: number;
-  primaryStructureHp?: number;
-  weaponCycle?: number;
-  fireCooldown?: number;
-  targetSwitchDelay?: number;
-  lockRemaining?: number;
-  lastTargetId?: string;
-  repCycle?: number;
-  repCooldown?: number;
-  repLockTime?: number;
-  repLockRemaining?: number;
-  repLastTargetId?: string;
-  lastVolleyDamage?: number;
-  volleyPerShip?: number;
-  optimalRange?: number;
-  falloffRange?: number;
-  signatureResolution?: number;
-  explosionRadius?: number;
-  explosionVelocity?: number;
-  damageReductionFactor?: number;
-  damageEm?: number;
-  damageTherm?: number;
-  damageKin?: number;
-  damageExp?: number;
-  shieldHp?: number;
-  armorHp?: number;
-  structureHp?: number;
-  shieldResists?: [number, number, number, number];
-  armorResists?: [number, number, number, number];
-  hullResists?: [number, number, number, number];
-  fitName?: string;
-  fitCharacter?: string;
-  fitSourceSummary?: string;
-  supportSystems?: WargameSupportSystem[];
-  capacitorCapacity?: number;
-  capacitorCurrent?: number;
-  capacitorRechargeSeconds?: number;
-  capacitorDemandGjPerSecond?: number;
-  capacitorInjectedGjPerSecond?: number;
-  baseSpeed?: number;
-  propulsionKind?: "ab" | "mwd";
-  targetingRange?: number;
-  scanResolution?: number;
-  sensorStrength?: number;
-  ewarSignatureMultiplier?: number;
-  ewarTrackingMultiplier?: number;
-  ewarOptimalMultiplier?: number;
-  ewarFalloffMultiplier?: number;
-  ewarTargetingRangeMultiplier?: number;
-  ewarScanResolutionMultiplier?: number;
-  jamRemaining?: number;
-  jammedBy?: string;
-  scrammed?: boolean;
-  neutPressureGjPerSecond?: number;
-  supportCooldowns?: Record<string, number>;
-};
-
 type WargameTerrain = {
   id: string;
   kind: string;
@@ -133,9 +59,12 @@ type WargameTerrain = {
   glyph: string;
   x: number;
   y: number;
+  side?: WargameSide;
+  radiusKm?: number;
 };
 
 type WargameMovePreview = { unitId: string; x: number; y: number } | null;
+type WargameSavedFit = { id: string; name: string; hullName: string; hullTypeId?: number; source: "SAGE" | "EVE ESI"; payload: unknown };
 
 const PHASES = [
   { short: "DEPLOYMENT", title: "Deployment / Initial Situation", detail: "Place forces, terrain, objectives and known intelligence." },
@@ -154,199 +83,18 @@ const TERRAIN_ASSETS = [
   { kind: "anomaly", label: "Anomaly", glyph: "⌁" },
   { kind: "hideout", label: "Hideout / Safe", glyph: "△" },
   { kind: "wormhole", label: "Wormhole", glyph: "◉" },
+  { kind: "bubble", label: "Warp Disruption Bubble", glyph: "◎" },
   { kind: "beacon", label: "Beacon / Objective", glyph: "✦" },
 ] as const;
 
-const INITIAL_UNITS: WargameUnit[] = [
-  { id: "blue-hurricanes", name: "Hurricane Fleet Issue", typeId: 33151, side: "blue", count: 30, x: 31, y: 61, dps: 22500, ehp: 1950000, maxEhp: 1950000, speed: 1680, range: 62, em: 69, therm: 65, kin: 72, exp: 78, role: "Mainline / artillery", targetId: "red-ferox", weaponModel: "turret", signature: 250, tracking: .035, stance: "pursue" },
-  { id: "blue-logi", name: "Scimitar", typeId: 11978, side: "blue", count: 6, x: 23, y: 72, dps: 0, ehp: 330000, maxEhp: 330000, speed: 2200, range: 70, em: 72, therm: 79, kin: 86, exp: 75, role: "Logistics wing", weaponModel: "support", signature: 95, repPerSecond: 4800, repRange: 68, stance: "support" },
-  { id: "blue-tackle", name: "Stiletto", typeId: 11198, side: "blue", count: 4, x: 39, y: 47, dps: 420, ehp: 56000, maxEhp: 56000, speed: 5100, range: 28, em: 55, therm: 60, kin: 68, exp: 72, role: "Tackle / screen", targetId: "red-control", weaponModel: "turret", signature: 42, tracking: .12, tackleRange: 28, stance: "screen" },
-  { id: "red-ferox", name: "Ferox Navy Issue", typeId: 72811, side: "red", count: 30, x: 70, y: 39, dps: 22500, ehp: 2040000, maxEhp: 2040000, speed: 1420, range: 76, em: 72, therm: 68, kin: 75, exp: 81, role: "Hostile mainline", targetId: "blue-hurricanes", weaponModel: "turret", signature: 300, tracking: .032, stance: "kite" },
-  { id: "red-logi", name: "Scimitar", typeId: 11978, side: "red", count: 6, x: 78, y: 30, dps: 0, ehp: 330000, maxEhp: 330000, speed: 2150, range: 70, em: 72, therm: 79, kin: 86, exp: 75, role: "Hostile logistics", weaponModel: "support", signature: 95, repPerSecond: 4800, repRange: 68, stance: "support" },
-  { id: "red-control", name: "Huginn", typeId: 11961, side: "red", count: 2, x: 64, y: 54, dps: 650, ehp: 118000, maxEhp: 118000, speed: 1850, range: 58, em: 66, therm: 72, kin: 79, exp: 73, role: "Web / control", targetId: "blue-logi", weaponModel: "missile", signature: 180, webStrength: .6, webRange: 42, stance: "screen" },
-];
+const INITIAL_UNITS: WargameUnit[] = [];
 
-const INITIAL_TERRAIN: WargameTerrain[] = [
-  { id: "terrain-gate", kind: "stargate", label: "Outbound Gate", glyph: "◇", x: 50, y: 50 },
-  { id: "terrain-moon", kind: "moon", label: "Moon 7", glyph: "○", x: 83, y: 79 },
-  { id: "terrain-belt", kind: "belt", label: "Asteroid Belt", glyph: "⋯", x: 17, y: 24 },
-  { id: "terrain-upwell", kind: "upwell", label: "Friendly Fortizar", glyph: "⬡", x: 15, y: 83 },
-];
-
-function clampPercent(value: number) {
-  return Math.max(2, Math.min(98, value));
-}
+// The board starts clean. Every formation, gate, structure, celestial and zone
+// must be deliberately placed by the FC (or loaded from a saved scenario).
+const INITIAL_TERRAIN: WargameTerrain[] = [];
 
 function imageUrl(typeId: number) {
   return `https://images.evetech.net/types/${typeId}/render?size=128`;
-}
-
-function wargameDistanceKm(a: Pick<WargameUnit, "x" | "y">, b: Pick<WargameUnit, "x" | "y">) {
-  return Math.hypot(a.x - b.x, a.y - b.y) * 2.5;
-}
-
-function healthPercent(unit: WargameUnit) {
-  const maximum = Math.max(1, unit.maxEhp ?? unit.ehp);
-  return Math.max(0, Math.min(100, (unit.ehp / maximum) * 100));
-}
-
-function liveShipCount(unit: WargameUnit) {
-  if (unit.ehp <= 0) return 0;
-  if (unit.shipsAlive != null) return Math.max(0, Math.min(unit.count, Math.floor(unit.shipsAlive)));
-  return Math.max(1, Math.ceil(unit.count * (healthPercent(unit) / 100)));
-}
-
-function perShipEhp(unit: WargameUnit) {
-  return Math.max(1, (unit.maxEhp ?? unit.ehp) / Math.max(1, unit.count));
-}
-
-function primaryEhp(unit: WargameUnit) {
-  if (liveShipCount(unit) <= 0) return 0;
-  return Math.max(0, Math.min(perShipEhp(unit), unit.primaryEhp ?? perShipEhp(unit)));
-}
-
-function primaryHealthPercent(unit: WargameUnit) {
-  return liveShipCount(unit) > 0 ? (primaryEhp(unit) / perShipEhp(unit)) * 100 : 0;
-}
-
-function defaultWeaponCycle(unit: WargameUnit) {
-  const name = unit.name.toLowerCase();
-  const role = unit.role.toLowerCase();
-  if ((unit.weaponModel ?? "turret") === "support") return 0;
-  if (name.includes("hurricane") && role.includes("artillery")) return 8.5;
-  if (name.includes("ferox")) return 5.2;
-  if ((unit.weaponModel ?? "turret") === "missile") return 6;
-  if (role.includes("tackle") || role.includes("interceptor")) return 3;
-  return 5;
-}
-
-function defaultTargetSwitchDelay(unit: WargameUnit) {
-  const role = unit.role.toLowerCase();
-  if (role.includes("tackle") || role.includes("interceptor")) return 1.2;
-  if (unit.name.toLowerCase().includes("hurricane")) return 2.8;
-  return 2.2;
-}
-
-function prepareWargameUnit(unit: WargameUnit): WargameUnit {
-  const count = Math.max(1, unit.count);
-  const total = Math.max(0, unit.maxEhp ?? unit.ehp);
-  const alive = unit.ehp > 0 ? Math.max(1, Math.min(count, unit.shipsAlive ?? count)) : 0;
-  const shipEhp = Math.max(1, total / count);
-  return {
-    ...unit,
-    shipsAlive: alive,
-    primaryEhp: alive > 0 ? Math.min(shipEhp, unit.primaryEhp ?? shipEhp) : 0,
-    primaryShieldHp: alive > 0 && unit.shieldHp != null ? Math.max(0, Math.min(unit.shieldHp, unit.primaryShieldHp ?? unit.shieldHp)) : unit.primaryShieldHp,
-    primaryArmorHp: alive > 0 && unit.armorHp != null ? Math.max(0, Math.min(unit.armorHp, unit.primaryArmorHp ?? unit.armorHp)) : unit.primaryArmorHp,
-    primaryStructureHp: alive > 0 && unit.structureHp != null ? Math.max(0, Math.min(unit.structureHp, unit.primaryStructureHp ?? unit.structureHp)) : unit.primaryStructureHp,
-    weaponCycle: unit.weaponCycle ?? defaultWeaponCycle(unit),
-    fireCooldown: unit.fireCooldown ?? 0,
-    targetSwitchDelay: unit.targetSwitchDelay ?? defaultTargetSwitchDelay(unit),
-    lockRemaining: unit.lockRemaining ?? 0,
-    repCycle: unit.repCycle ?? ((unit.repPerSecond ?? 0) > 0 ? 4 : 0),
-    repCooldown: unit.repCooldown ?? 0,
-    repLockTime: unit.repLockTime ?? 2.5,
-    repLockRemaining: unit.repLockRemaining ?? 0,
-    capacitorCurrent: unit.capacitorCurrent ?? unit.capacitorCapacity ?? 0,
-    ewarSignatureMultiplier: 1,
-    ewarTrackingMultiplier: 1,
-    ewarOptimalMultiplier: 1,
-    ewarFalloffMultiplier: 1,
-    ewarTargetingRangeMultiplier: 1,
-    ewarScanResolutionMultiplier: 1,
-    jamRemaining: unit.jamRemaining ?? 0,
-    scrammed: false,
-    neutPressureGjPerSecond: 0,
-    supportCooldowns: { ...(unit.supportCooldowns ?? {}) },
-  };
-}
-
-function velocityMps(unit: WargameUnit) {
-  return Math.hypot(unit.velocityX ?? 0, unit.velocityY ?? 0) * 2500;
-}
-
-function relativeVelocityMps(a: WargameUnit, b: WargameUnit) {
-  return Math.hypot((a.velocityX ?? 0) - (b.velocityX ?? 0), (a.velocityY ?? 0) - (b.velocityY ?? 0)) * 2500;
-}
-
-function rangeRateMps(a: WargameUnit, b: WargameUnit) {
-  const dx = (b.x - a.x) * 2500;
-  const dy = (b.y - a.y) * 2500;
-  const distance = Math.max(1, Math.hypot(dx, dy));
-  const rvx = ((b.velocityX ?? 0) - (a.velocityX ?? 0)) * 2500;
-  const rvy = ((b.velocityY ?? 0) - (a.velocityY ?? 0)) * 2500;
-  return (dx * rvx + dy * rvy) / distance;
-}
-
-function preferredCombatRange(unit: WargameUnit) {
-  const stance = unit.stance ?? "kite";
-  if (stance === "brawl") return Math.max(5, unit.range * .35);
-  if (stance === "pursue") return Math.max(5, unit.range * .55);
-  if (stance === "screen") return Math.max(8, unit.range * .58);
-  if (stance === "hold") return Math.max(5, unit.range * .72);
-  return Math.max(8, unit.range * .82);
-}
-
-function weaponApplication(attacker: WargameUnit, target: WargameUnit, rangeKm = wargameDistanceKm(attacker, target)) {
-  const baseOptimal = Math.max(0, attacker.optimalRange ?? attacker.range * .62);
-  const baseFalloff = Math.max(.001, attacker.falloffRange ?? Math.max(4, attacker.range - baseOptimal));
-  const optimal = baseOptimal * Math.max(.05, attacker.ewarOptimalMultiplier ?? 1);
-  const falloff = baseFalloff * Math.max(.05, attacker.ewarFalloffMultiplier ?? 1);
-  const maxRange = (attacker.weaponModel ?? "turret") === "turret" ? Math.max(1, optimal + falloff * 2) : Math.max(1, attacker.range);
-  if (rangeKm > maxRange || attacker.ehp <= 0 || target.ehp <= 0) return 0;
-  const model = attacker.weaponModel ?? "turret";
-  if (model === "support") return 0;
-  if (model === "missile") {
-    const explosionRadius = Math.max(1, attacker.explosionRadius ?? 180);
-    const explosionVelocity = Math.max(1, attacker.explosionVelocity ?? 1450);
-    const drf = Math.max(.05, attacker.damageReductionFactor ?? .62);
-    const signatureRatio = Math.max(0, (target.signature ?? 160) * (target.ewarSignatureMultiplier ?? 1)) / explosionRadius;
-    const speed = Math.max(0, target.effectiveSpeed ?? velocityMps(target));
-    const velocityTerm = speed <= 0 ? 1 : Math.pow(Math.max(0, signatureRatio * explosionVelocity / speed), drf);
-    return Math.max(0, Math.min(1, signatureRatio, velocityTerm));
-  }
-  if (model === "drone") {
-    const relativeSpeed = relativeVelocityMps(attacker, target);
-    const controlFactor = rangeKm <= maxRange ? 1 : 0;
-    const speedFactor = Math.max(.2, Math.min(1, 1.12 - relativeSpeed / 5200));
-    return controlFactor * speedFactor;
-  }
-  const dxM = (target.x - attacker.x) * 2500;
-  const dyM = (target.y - attacker.y) * 2500;
-  const distanceM = Math.max(1000, Math.hypot(dxM, dyM));
-  const rvx = ((target.velocityX ?? 0) - (attacker.velocityX ?? 0)) * 2500;
-  const rvy = ((target.velocityY ?? 0) - (attacker.velocityY ?? 0)) * 2500;
-  const transverse = Math.abs(dxM * rvy - dyM * rvx) / distanceM;
-  const angular = transverse / distanceM;
-  const tracking = Math.max(1e-12, (attacker.tracking ?? .04) * Math.max(.05, attacker.ewarTrackingMultiplier ?? 1));
-  const signatureResolution = Math.max(1, attacker.signatureResolution ?? 125);
-  const trackingTerm = angular * signatureResolution / (tracking * Math.max(1, (target.signature ?? 160) * (target.ewarSignatureMultiplier ?? 1)));
-  const rangeTerm = Math.max(0, rangeKm - optimal) / falloff;
-  const hitChance = Math.pow(.5, trackingTerm * trackingTerm + rangeTerm * rangeTerm);
-  const expectedDamageFactor = hitChance <= .01 ? 3 * hitChance : .5 * hitChance * hitChance + .49 * hitChance + .02505;
-  return Math.max(0, Math.min(1, expectedDamageFactor));
-}
-
-function unitDamageProfile(unit: WargameUnit) {
-  const values = [unit.damageEm ?? .25, unit.damageTherm ?? .25, unit.damageKin ?? .25, unit.damageExp ?? .25];
-  const total = Math.max(1e-12, values.reduce((sum, value) => sum + Math.max(0, value), 0));
-  return values.map((value) => Math.max(0, value) / total) as [number, number, number, number];
-}
-
-function profileEhpPerShip(unit: WargameUnit, profile: [number, number, number, number]) {
-  if (unit.shieldHp == null || unit.armorHp == null || unit.structureHp == null || !unit.shieldResists || !unit.armorResists || !unit.hullResists) return perShipEhp(unit);
-  const layer = (hp: number, resists: [number, number, number, number]) => {
-    const fraction = profile.reduce((sum, weight, index) => sum + weight * (1 - (resists[index] ?? 0)), 0);
-    return Math.max(0, hp) / Math.max(1e-12, fraction);
-  };
-  return layer(unit.shieldHp, unit.shieldResists) + layer(unit.armorHp, unit.armorResists) + layer(unit.structureHp, unit.hullResists);
-}
-
-function resistanceScale(attacker: WargameUnit, target: WargameUnit) {
-  if (!target.shieldResists || !target.armorResists || !target.hullResists) return 1;
-  const omni = profileEhpPerShip(target, [.25, .25, .25, .25]);
-  const against = profileEhpPerShip(target, unitDamageProfile(attacker));
-  return against > 0 ? Math.max(.1, Math.min(3, omni / against)) : 1;
 }
 
 function supportSystemDetail(system: WargameSupportSystem) {
@@ -365,19 +113,112 @@ function supportSystemDetail(system: WargameSupportSystem) {
   if (system.kind === "remoteCapacitor") return `${Math.round(Number(system.amountPerCycle) || 0)} GJ/cycle transfer · ${envelope}`;
   if (system.kind === "remoteSensorBooster") return `+${Math.round((Number(system.maxTargetRangeBonus) || 0) * 100)}% range · +${Math.round((Number(system.scanResolutionBonus) || 0) * 100)}% scan res · ${envelope}`;
   if (system.kind === "remoteTrackingComputer") return `+${Math.round((Number(system.trackingBonus) || 0) * 100)}% tracking · +${Math.round((Number(system.optimalBonus) || 0) * 100)}% optimal · ${envelope}`;
-  if (system.kind === "commandBurst") return `command burst · ${envelope}`;
+  if (system.kind === "commandBurst") { const buffs=(system.buffs ?? []).map((buff) => `${buff.description.replace(/^.*?:\s*/, "")} ${buff.value >= 0 ? "+" : ""}${buff.value.toFixed(1)}%`).join(" · "); return `${buffs || "command burst"} · ${envelope}`; }
   return envelope;
 }
 
-function tacticalProfileForGroup(groupName: string): Pick<WargameUnit, "weaponModel" | "signature" | "tracking" | "stance"> {
-  const value = groupName.toLowerCase();
-  if (value.includes("logistics")) return { weaponModel: "support", signature: 95, tracking: 0, stance: "support" };
-  if (value.includes("interceptor") || value.includes("frigate")) return { weaponModel: "turret", signature: 45, tracking: .11, stance: "screen" };
-  if (value.includes("missile")) return { weaponModel: "missile", signature: 150, tracking: 0, stance: "kite" };
-  return { weaponModel: "turret", signature: 180, tracking: .045, stance: "kite" };
+function displayedSourceTarget(unit: WargameUnit, source: WargameDamageSource) {
+  return source.targetId ?? unit.targetId;
 }
 
-function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation; onNavigate(tab: FleetCommandTab): void }) {
+function unconfiguredScenarioStats(): Pick<WargameUnit, "dps" | "ehp" | "maxEhp" | "speed" | "range" | "weaponModel" | "signature" | "tracking" | "stance" | "simulationReady"> {
+  // A hull dragged from the catalogue is only a board marker until a real fit is linked.
+  // Do not invent DPS, tank, speed, range or application for an unknown fitting.
+  return { dps: 0, ehp: 1, maxEhp: 1, speed: 0, range: 0, weaponModel: "support", signature: 1, tracking: 0, stance: "hold", simulationReady: false };
+}
+
+function wargameUnitFromFit(unit: WargameUnit, result: WargameFitResult, fitText: string): WargameUnit {
+  const count = Math.max(1, unit.count);
+  const totalEhp = result.perShipEhp * count;
+  const dominantLayer = [
+    { hp: result.shieldHp, resists: result.shieldResists },
+    { hp: result.armorHp, resists: result.armorResists },
+    { hp: result.structureHp, resists: result.hullResists },
+  ].sort((a, b) => b.hp - a.hp)[0];
+  const previousTargets = new Map((unit.damageSources ?? []).map((source) => [source.id, source.targetId]));
+  const damageSources = result.damageSources.map((source) => ({
+    ...source,
+    targetId: previousTargets.get(source.id) ?? unit.targetId,
+    fireCooldown: 0,
+    lockRemaining: 0,
+    lastTargetId: undefined,
+    droneOnTargetId: undefined,
+    droneArrivalRemaining: 0,
+    lastVolleyDamage: 0,
+  }));
+  return prepareWargameUnit({
+    ...unit,
+    name: result.hullName,
+    typeId: result.hullTypeId,
+    dps: result.perShipDps * count,
+    ehp: totalEhp,
+    maxEhp: totalEhp,
+    shipsAlive: count,
+    primaryEhp: result.perShipEhp,
+    primaryShieldHp: result.shieldHp,
+    primaryArmorHp: result.armorHp,
+    primaryStructureHp: result.structureHp,
+    speed: result.speedMps,
+    range: result.rangeKm,
+    optimalRange: result.optimalKm,
+    falloffRange: result.falloffKm,
+    tracking: result.tracking,
+    signatureResolution: result.signatureResolutionM,
+    explosionRadius: result.explosionRadiusM,
+    explosionVelocity: result.explosionVelocityMps,
+    damageReductionFactor: result.damageReductionFactor,
+    signature: result.signatureRadiusM,
+    weaponModel: result.weaponModel,
+    weaponCycle: result.weaponCycle || defaultWeaponCycle(unit),
+    volleyPerShip: result.perShipVolley,
+    damageEm: result.damageProfile.em,
+    damageTherm: result.damageProfile.thermal,
+    damageKin: result.damageProfile.kinetic,
+    damageExp: result.damageProfile.explosive,
+    shieldHp: result.shieldHp,
+    armorHp: result.armorHp,
+    structureHp: result.structureHp,
+    shieldResists: result.shieldResists,
+    armorResists: result.armorResists,
+    hullResists: result.hullResists,
+    em: dominantLayer.resists[0] * 100,
+    therm: dominantLayer.resists[1] * 100,
+    kin: dominantLayer.resists[2] * 100,
+    exp: dominantLayer.resists[3] * 100,
+    repPerSecond: result.repPerSecond > 0 ? result.repPerSecond * count : unit.repPerSecond,
+    repRange: result.repRangeKm > 0 ? result.repRangeKm : unit.repRange,
+    repCycle: result.repCycle > 0 ? result.repCycle : unit.repCycle,
+    webStrength: result.webStrength > 0 ? result.webStrength : unit.webStrength,
+    webRange: result.webRangeKm > 0 ? result.webRangeKm : unit.webRange,
+    tackleRange: result.tackleRangeKm > 0 ? result.tackleRangeKm : unit.tackleRange,
+    supportSystems: result.supportSystems,
+    supportTargetIds: { ...(unit.supportTargetIds ?? {}) },
+    damageSources,
+    capacitorCapacity: result.capacitorCapacityGj,
+    capacitorCurrent: result.capacitorCapacityGj,
+    capacitorRechargeSeconds: result.capacitorRechargeSeconds,
+    capacitorDemandGjPerSecond: result.capacitorDemandGjPerSecond,
+    capacitorInjectedGjPerSecond: result.capacitorInjectedGjPerSecond,
+    baseSpeed: result.baseSpeedMps,
+    alignTimeSeconds: result.alignTimeSeconds,
+    warpSpeedAuPerSecond: result.warpSpeedAuPerSecond,
+    propulsionKind: result.propulsionKind,
+    targetingRange: result.targetingRangeKm,
+    scanResolution: result.scanResolution,
+    sensorStrength: result.sensorStrength,
+    supportCooldowns: {},
+    fitName: result.fitName,
+    fitCharacter: result.characterName,
+    fitSourceSummary: result.sourceSummary,
+    simulationReady: true,
+    fitText,
+    fireCooldown: 0,
+    lockRemaining: 0,
+    lastVolleyDamage: 0,
+  });
+}
+
+function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCorporation; onNavigate(tab: FleetCommandTab): void; active: boolean }) {
   const [phase, setPhase] = useState<WargamePhase>(0);
   const [assetTab, setAssetTab] = useState<WargameAssetTab>("ships");
   const [deploymentSide, setDeploymentSide] = useState<WargameSide>("blue");
@@ -386,19 +227,32 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
   const [units, setUnits] = useState<WargameUnit[]>(() => INITIAL_UNITS.map(prepareWargameUnit));
   const unitsRef = useRef<WargameUnit[]>(units);
   const [terrain, setTerrain] = useState<WargameTerrain[]>(INITIAL_TERRAIN);
-  const [selectedUnitId, setSelectedUnitId] = useState<string>("blue-hurricanes");
+  const [selectedUnitId, setSelectedUnitId] = useState<string>("");
   const [orderMode, setOrderMode] = useState<WargameOrderMode>(null);
   const [movePreview, setMovePreview] = useState<WargameMovePreview>(null);
   const [aiResponseVisible, setAiResponseVisible] = useState(true);
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const sessionRef = useRef(createWargameSession(units));
+  const commandHistoryRef = useRef<WargameCommandRecord[]>([]);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [fitImportOpen, setFitImportOpen] = useState(false);
   const [fitImportText, setFitImportText] = useState("");
   const [fitImportBusy, setFitImportBusy] = useState(false);
   const [fitImportStatus, setFitImportStatus] = useState("");
-  const [combatEvents, setCombatEvents] = useState<string[]>(["Scenario ready — press Play or +10s to execute plotted orders."]);
+  const [savedFits, setSavedFits] = useState<WargameSavedFit[]>([]);
+  const [savedFitsStatus, setSavedFitsStatus] = useState("");
+  const [systemEffects, setSystemEffects] = useState<WargameSystemEffect[]>([]);
+  const [systemEffectDraft, setSystemEffectDraft] = useState("");
+  const [systemEffectBusy, setSystemEffectBusy] = useState(false);
+  const [orderDraftTarget, setOrderDraftTarget] = useState("");
+  const [orderDraftCompletionTarget, setOrderDraftCompletionTarget] = useState("");
+  const [orderDraftPropulsion, setOrderDraftPropulsion] = useState<WargamePropulsionOrder>("cruise");
+  const [orderDraftSeconds, setOrderDraftSeconds] = useState(20);
+  const [mapCamera, setMapCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
+  const [warpRangeDraft, setWarpRangeDraft] = useState(0);
+  const [combatEvents, setCombatEvents] = useState<string[]>(["Empty tactical board ready - deploy only what the FC wants in the scenario."]);
   const engagementStartedRef = useRef(false);
 
   useEffect(() => {
@@ -411,15 +265,56 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => { unitsRef.current = units; }, [units]);
+  useEffect(() => {
+    unitsRef.current = units;
+    sessionRef.current = { ...sessionRef.current, units };
+  }, [units]);
 
   useEffect(() => {
-    if (!running) return;
+    let cancelled = false;
+    const loadSavedFits = async () => {
+      try {
+        let legacyFits: unknown[] = [];
+        let legacyMeta: Record<string, unknown> = {};
+        try { const parsed=JSON.parse(localStorage.getItem("new-eden-sage-fits") ?? "[]"); if (Array.isArray(parsed)) legacyFits=parsed; } catch {}
+        try { const parsed=JSON.parse(localStorage.getItem("new-eden-sage-fit-library-meta") ?? "{}"); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) legacyMeta=parsed as Record<string, unknown>; } catch {}
+        const persisted = await window.sage.loadFittingPersistence({ savedFits: legacyFits, fitLibraryMeta: legacyMeta });
+        const localRows: WargameSavedFit[] = (Array.isArray(persisted.savedFits) ? persisted.savedFits : []).flatMap((fit: any, index: number) => {
+          if (!fit || typeof fit !== "object") return [];
+          const hullName=String(fit?.hull?.name ?? fit?.ship?.name ?? "Unknown hull");
+          const hullTypeId=Number(fit?.hull?.typeId ?? fit?.ship?.typeId ?? 0) || undefined;
+          return [{ id:String(fit.id ?? "sage-"+index), name:String(fit.name ?? hullName+" fit"), hullName, hullTypeId, source:"SAGE" as const, payload:fit }];
+        });
+        const esiRaw=Array.isArray(corporation.snapshot?.extended?.fittings) ? corporation.snapshot.extended.fittings : [];
+        const esiIds=[...new Set<number>(esiRaw.map((fit:any)=>Number(fit?.ship_type_id ?? 0)).filter((id:number)=>id>0))];
+        const esiNames=esiIds.length ? await window.sage.resolveFittingTypeIdsLocal(esiIds) : [];
+        const hullNames=new Map(esiNames.map((row:any)=>[Number(row.id),String(row.name)]));
+        const esiRows: WargameSavedFit[] = esiRaw.flatMap((fit:any,index:number)=>{
+          const hullTypeId=Number(fit?.ship_type_id ?? 0)||undefined;
+          if(!hullTypeId)return [];
+          return [{ id:"esi-"+String(fit?.fitting_id ?? index), name:String(fit?.name ?? "EVE saved fit"), hullName:hullNames.get(hullTypeId) ?? "Type "+hullTypeId, hullTypeId, source:"EVE ESI" as const, payload:fit }];
+        });
+        if(cancelled)return;
+        const rows=[...localRows,...esiRows];
+        setSavedFits(rows);
+        setSavedFitsStatus(rows.length ? rows.length+" saved fits available" : "No saved fits found");
+      } catch(error) {
+        if(!cancelled)setSavedFitsStatus(error instanceof Error ? error.message : "Saved fits could not be loaded.");
+      }
+    };
+    void loadSavedFits();
+    const unsubscribe=typeof window.sage.onMcpFitDataUpdated === "function" ? window.sage.onMcpFitDataUpdated(()=>void loadSavedFits()) : undefined;
+    return()=>{ cancelled=true; unsubscribe?.(); };
+  }, [corporation.characterId, corporation.snapshot]);
+
+  useEffect(() => {
+    if (!active || !running) return;
     const timer = window.setInterval(() => runSimulationTick(1), 1000);
     return () => window.clearInterval(timer);
-  }, [running, aiResponseVisible]);
+  }, [active, running, aiResponseVisible]);
 
   useEffect(() => {
+    if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const tag = (event.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
@@ -435,7 +330,7 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [active]);
 
   const selectedUnit = units.find((unit) => unit.id === selectedUnitId) ?? null;
   const shipResults = useMemo(() => {
@@ -452,18 +347,54 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
 
   function pointFromEvent(event: MouseEvent<HTMLDivElement> | DragEvent<HTMLDivElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
+    const screenX = event.clientX - rect.left;
+    const screenY = event.clientY - rect.top;
+    const worldX = rect.width / 2 + (screenX - rect.width / 2 - mapCamera.panX) / mapCamera.zoom;
+    const worldY = rect.height / 2 + (screenY - rect.height / 2 - mapCamera.panY) / mapCamera.zoom;
     return {
-      x: clampPercent(((event.clientX - rect.left) / rect.width) * 100),
-      y: clampPercent(((event.clientY - rect.top) / rect.height) * 100),
+      x: clampPercent((worldX / rect.width) * 100),
+      y: clampPercent((worldY / rect.height) * 100),
     };
   }
 
-  function updateUnit(id: string, patch: Partial<WargameUnit>) {
-    setUnits((current) => {
-      const next = current.map((unit) => unit.id === id ? { ...unit, ...patch } : unit);
-      unitsRef.current = next;
-      return next;
+  function handleMapWheel(event: WheelEvent<HTMLDivElement>) {
+    if ((event.target as HTMLElement | null)?.closest('.wargame-map-toolbar, .wargame-order-commit')) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const cursorX = event.clientX - rect.left;
+    const cursorY = event.clientY - rect.top;
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const nextZoom = Math.max(1, Math.min(6, mapCamera.zoom * (event.deltaY < 0 ? 1.14 : 1 / 1.14)));
+    if (Math.abs(nextZoom - mapCamera.zoom) < .001) return;
+    const worldOffsetX = (cursorX - centerX - mapCamera.panX) / mapCamera.zoom;
+    const worldOffsetY = (cursorY - centerY - mapCamera.panY) / mapCamera.zoom;
+    setMapCamera({
+      zoom: nextZoom,
+      panX: cursorX - centerX - worldOffsetX * nextZoom,
+      panY: cursorY - centerY - worldOffsetY * nextZoom,
     });
+  }
+
+  function resetMapCamera() {
+    setMapCamera({ zoom: 1, panX: 0, panY: 0 });
+  }
+
+  function nudgeMapZoom(multiplier: number) {
+    setMapCamera((current) => ({ ...current, zoom: Math.max(1, Math.min(6, current.zoom * multiplier)) }));
+  }
+
+  function executeWargameCommand(command: WargameCommand) {
+    const transition = applyWargameCommand(sessionRef.current, command);
+    sessionRef.current = transition.state;
+    commandHistoryRef.current.push(transition.command);
+    unitsRef.current = transition.state.units;
+    setUnits(transition.state.units);
+    return transition;
+  }
+
+  function updateUnit(id: string, patch: Partial<WargameUnit>) {
+    executeWargameCommand({ id: `patch-${sessionRef.current.revision + 1}`, kind: "patch-unit", source: "human", unitId: id, patch });
   }
 
   function pushCombatEvents(...messages: string[]) {
@@ -472,87 +403,17 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
     setCombatEvents((current) => [...clean, ...current].slice(0, 14));
   }
 
-  async function applyFitToSelected() {
+  async function applyFitPayloadToSelected(payload: string) {
     const unit = unitsRef.current.find((candidate) => candidate.id === selectedUnitId);
-    if (!unit || !fitImportText.trim() || fitImportBusy) return;
+    if (!unit || !payload.trim() || fitImportBusy) return;
     setFitImportBusy(true);
     setFitImportStatus("Resolving CCP types and calculating the fit through Sage DOGMA...");
     try {
-      const result = await analyzeWargameFit(fitImportText, corporation.characterId);
+      const result = await analyzeWargameFit(payload, corporation.characterId, systemEffects.map((effect) => effect.typeId));
       if (unit.typeId && unit.typeId !== result.hullTypeId) {
         throw new Error(`That is a ${result.hullName} fit, but the selected formation is ${unit.name}. Select the matching formation first.`);
       }
-      const count = Math.max(1, unit.count);
-      const totalEhp = result.perShipEhp * count;
-      const dominantLayer = [
-        { hp: result.shieldHp, resists: result.shieldResists },
-        { hp: result.armorHp, resists: result.armorResists },
-        { hp: result.structureHp, resists: result.hullResists },
-      ].sort((a, b) => b.hp - a.hp)[0];
-      updateUnit(unit.id, prepareWargameUnit({
-        ...unit,
-        name: result.hullName,
-        typeId: result.hullTypeId,
-        dps: result.perShipDps * count,
-        ehp: totalEhp,
-        maxEhp: totalEhp,
-        shipsAlive: count,
-        primaryEhp: result.perShipEhp,
-        primaryShieldHp: result.shieldHp,
-        primaryArmorHp: result.armorHp,
-        primaryStructureHp: result.structureHp,
-        speed: result.speedMps,
-        range: result.rangeKm,
-        optimalRange: result.optimalKm,
-        falloffRange: result.falloffKm,
-        tracking: result.tracking,
-        signatureResolution: result.signatureResolutionM,
-        explosionRadius: result.explosionRadiusM,
-        explosionVelocity: result.explosionVelocityMps,
-        damageReductionFactor: result.damageReductionFactor,
-        signature: result.signatureRadiusM,
-        weaponModel: result.weaponModel,
-        weaponCycle: result.weaponCycle || defaultWeaponCycle(unit),
-        volleyPerShip: result.perShipVolley,
-        damageEm: result.damageProfile.em,
-        damageTherm: result.damageProfile.thermal,
-        damageKin: result.damageProfile.kinetic,
-        damageExp: result.damageProfile.explosive,
-        shieldHp: result.shieldHp,
-        armorHp: result.armorHp,
-        structureHp: result.structureHp,
-        shieldResists: result.shieldResists,
-        armorResists: result.armorResists,
-        hullResists: result.hullResists,
-        em: dominantLayer.resists[0] * 100,
-        therm: dominantLayer.resists[1] * 100,
-        kin: dominantLayer.resists[2] * 100,
-        exp: dominantLayer.resists[3] * 100,
-        repPerSecond: result.repPerSecond > 0 ? result.repPerSecond * count : unit.repPerSecond,
-        repRange: result.repRangeKm > 0 ? result.repRangeKm : unit.repRange,
-        repCycle: result.repCycle > 0 ? result.repCycle : unit.repCycle,
-        webStrength: result.webStrength > 0 ? result.webStrength : unit.webStrength,
-        webRange: result.webRangeKm > 0 ? result.webRangeKm : unit.webRange,
-        tackleRange: result.tackleRangeKm > 0 ? result.tackleRangeKm : unit.tackleRange,
-        supportSystems: result.supportSystems,
-        capacitorCapacity: result.capacitorCapacityGj,
-        capacitorCurrent: result.capacitorCapacityGj,
-        capacitorRechargeSeconds: result.capacitorRechargeSeconds,
-        capacitorDemandGjPerSecond: result.capacitorDemandGjPerSecond,
-        capacitorInjectedGjPerSecond: result.capacitorInjectedGjPerSecond,
-        baseSpeed: result.baseSpeedMps,
-        propulsionKind: result.propulsionKind,
-        targetingRange: result.targetingRangeKm,
-        scanResolution: result.scanResolution,
-        sensorStrength: result.sensorStrength,
-        supportCooldowns: {},
-        fitName: result.fitName,
-        fitCharacter: result.characterName,
-        fitSourceSummary: result.sourceSummary,
-        fireCooldown: 0,
-        lockRemaining: 0,
-        lastVolleyDamage: 0,
-      }));
+      updateUnit(unit.id, wargameUnitFromFit(unit, result, payload));
       const warning = result.missingRequirements || result.fittingBlockers ? ` WARNING: ${result.sourceSummary}.` : "";
       setFitImportStatus(`FIT-LINKED: ${result.fitName} · ${Math.round(result.perShipDps).toLocaleString()} DPS/ship · ${Math.round(result.perShipVolley).toLocaleString()} volley/ship.${warning}`);
       setFitImportOpen(false);
@@ -564,353 +425,221 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
     }
   }
 
+  async function applyFitToSelected() {
+    await applyFitPayloadToSelected(fitImportText);
+  }
+
+  async function applySavedFitToSelected(fitId: string) {
+    const saved=savedFits.find((fit)=>fit.id===fitId);
+    if(!saved)return;
+    const payload=JSON.stringify(saved.payload);
+    setFitImportText(payload);
+    await applyFitPayloadToSelected(payload);
+  }
+
+  async function setScenarioSystemEffects(nextEffects: WargameSystemEffect[]) {
+    if (systemEffectBusy) return;
+    setSystemEffectBusy(true);
+    const resumeAfterRecalculation=running;
+    if(resumeAfterRecalculation) setRunning(false);
+    try {
+      const ids = nextEffects.map((effect) => effect.typeId);
+      const current = unitsRef.current;
+      const recalculated = await Promise.all(current.map(async (unit) => {
+        if (!unit.fitText) return unit;
+        const result = await analyzeWargameFit(unit.fitText, corporation.characterId, ids);
+        return wargameUnitFromFit(unit, result, unit.fitText);
+      }));
+      executeWargameCommand({ id: `replace-${sessionRef.current.revision + 1}`, kind: "replace-units", source: "system", units: recalculated });
+      setSystemEffects(nextEffects);
+      pushCombatEvents(nextEffects.length
+        ? `SYSTEM EFFECTS: ${nextEffects.map((effect) => effect.name).join(" + ")} applied through Sage DOGMA. Fit-linked formations recalculated.`
+        : "SYSTEM EFFECTS: cleared. Fit-linked formations recalculated in normal space.");
+    } catch (error) {
+      setFitImportStatus(error instanceof Error ? error.message : "System effect recalculation failed.");
+    } finally {
+      setSystemEffectBusy(false);
+      if(resumeAfterRecalculation) setRunning(true);
+    }
+  }
+
+  async function addScenarioSystemEffect(name = systemEffectDraft) {
+    const requested = name.trim();
+    if (!requested || systemEffectBusy) return;
+    const preset = COMMON_WARGAME_SYSTEM_EFFECTS.find((effect) => effect.name.toLowerCase() === requested.toLowerCase());
+    let effect = preset;
+    if (!effect) {
+      const resolved = await window.sage.resolveFittingTypeNamesLocal([requested]);
+      const exact = resolved.find((entry) => String(entry.name).toLowerCase() === requested.toLowerCase());
+      if (!exact) {
+        setFitImportStatus(`No exact CCP type named '${requested}' was found.`);
+        return;
+      }
+      effect = { typeId: Number(exact.id), name: String(exact.name) };
+    }
+    if (systemEffects.some((active) => active.typeId === effect!.typeId)) return;
+    setSystemEffectDraft("");
+    await setScenarioSystemEffects([...systemEffects, effect]);
+  }
+
+  async function removeScenarioSystemEffect(typeId: number) {
+    await setScenarioSystemEffects(systemEffects.filter((effect) => effect.typeId !== typeId));
+  }
+
+  function updateDamageSourceTarget(unitId: string, sourceId: string, targetId?: string) {
+    const unit = unitsRef.current.find((candidate) => candidate.id === unitId);
+    if (!unit) return;
+    updateUnit(unitId, { damageSources: cloneDamageSources(unit.damageSources).map((source) => source.id === sourceId ? { ...source, targetId: targetId || undefined, lastTargetId: undefined, lockRemaining: 0, droneOnTargetId: source.kind === "drone" ? undefined : source.droneOnTargetId, droneArrivalRemaining: source.kind === "drone" ? 0 : source.droneArrivalRemaining } : source) });
+  }
+
+  function assignAllOffence(unitId: string, targetId?: string) {
+    const unit = unitsRef.current.find((candidate) => candidate.id === unitId);
+    if (!unit) return;
+    updateUnit(unitId, {
+      targetId: targetId || undefined,
+      supportTargetIds: Object.fromEntries((unit.supportSystems ?? []).map((system, index) => { const key=wargameSupportSystemKey(system,index); return [key, wargameSupportTargetSide(system.kind) === "hostile" ? (targetId || undefined) : unit.supportTargetIds?.[key]]; })),
+      damageSources: cloneDamageSources(unit.damageSources).map((source) => ({ ...source, targetId: targetId || undefined, lastTargetId: undefined, lockRemaining: 0, droneOnTargetId: source.kind === "drone" ? undefined : source.droneOnTargetId, droneArrivalRemaining: source.kind === "drone" ? 0 : source.droneArrivalRemaining })),
+    });
+  }
+
+  function assignSupportGroup(unitId: string, targetId: string | undefined, kinds: Set<string>, legacy: "rep" | "tackle" | "none" = "none") {
+    const unit = unitsRef.current.find((candidate) => candidate.id === unitId);
+    if (!unit) return;
+    const supportTargetIds = { ...(unit.supportTargetIds ?? {}) };
+    for (let index = 0; index < (unit.supportSystems?.length ?? 0); index += 1) {
+      const system = unit.supportSystems![index];
+      if (kinds.has(system.kind)) supportTargetIds[wargameSupportSystemKey(system, index)] = targetId;
+    }
+    const patch: Partial<WargameUnit> = { supportTargetIds };
+    if (legacy === "rep") patch.repTargetId = targetId;
+    if (legacy === "tackle" && ((unit.tackleRange ?? 0) > 0 || (unit.webRange ?? 0) > 0)) patch.targetId = targetId;
+    updateUnit(unitId, patch);
+  }
+
+  function issueWarpDestination(value: string) {
+    const actor = unitsRef.current.find((candidate) => candidate.id === selectedUnitId);
+    if (!actor || !value) return;
+    if (value.startsWith("unit:")) {
+      const target = unitsRef.current.find((candidate) => candidate.id === value.slice(5));
+      if (!target) return;
+      executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: actor.id, mode: "warp", targetId: target.id, warpRangeKm: warpRangeDraft });
+      pushCombatEvents(`${actor.name}: warp to ${target.name} at ${warpRangeDraft} km.`);
+    } else if (value.startsWith("terrain:")) {
+      const target = terrain.find((candidate) => candidate.id === value.slice(8));
+      if (!target) return;
+      executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: actor.id, mode: "warp", x: target.x, y: target.y, warpRangeKm: warpRangeDraft });
+      pushCombatEvents(`${actor.name}: warp to ${target.label} at ${warpRangeDraft} km.`);
+    }
+    setPhase((current) => current < 1 ? 1 : current);
+    setOrderMode(null);
+    setMovePreview(null);
+  }
+
+  function updateSupportSystemTarget(unitId: string, supportKey: string, targetId?: string) {
+    const unit = unitsRef.current.find((candidate) => candidate.id === unitId);
+    if (!unit) return;
+    updateUnit(unitId, { supportTargetIds: { ...(unit.supportTargetIds ?? {}), [supportKey]: targetId || undefined } });
+  }
+
+  function addOrderStep(unit: WargameUnit) {
+    const hostile = unitsRef.current.find((candidate) => candidate.side !== unit.side && candidate.ehp > 0);
+    const defaultTarget = orderDraftTarget || hostile?.id || "";
+    const completionTarget = orderDraftCompletionTarget || defaultTarget;
+    const step: WargameOrderStep = {
+      id: "order-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7),
+      label: "Order " + ((unit.orderChain?.length ?? 0) + 1),
+      trigger: "immediate",
+      sourceTargets: Object.fromEntries((unit.damageSources ?? []).map((source) => [source.id, defaultTarget || undefined])),
+      supportTargets: Object.fromEntries((unit.supportSystems ?? []).map((system,index) => [wargameSupportSystemKey(system,index), wargameSupportTargetSide(system.kind) === "hostile" ? (defaultTarget || undefined) : undefined])),
+      tackleTargetId: defaultTarget || undefined,
+      movement: "legacy",
+      movementRangeKm: Math.max(0, unit.range * .7),
+      warpRangeKm: 0,
+      propulsion: orderDraftPropulsion,
+      stance: unit.stance,
+      completion: completionTarget ? "target-destroyed" : "manual",
+      completionTargetId: completionTarget || undefined,
+      completionSeconds: Math.max(1, orderDraftSeconds),
+    };
+    updateUnit(unit.id, {
+      orderChain: [...cloneOrderChain(unit.orderChain), step],
+      activeOrderIndex: unit.orderChain?.length ? (unit.activeOrderIndex ?? 0) : 0,
+      activeOrderElapsed: unit.orderChain?.length ? (unit.activeOrderElapsed ?? 0) : 0,
+      activeOrderWaitElapsed: unit.orderChain?.length ? (unit.activeOrderWaitElapsed ?? 0) : 0,
+      activeOrderStarted: unit.orderChain?.length ? Boolean(unit.activeOrderStarted) : false,
+    });
+    pushCombatEvents(unit.name + ": queued " + step.label + ".");
+  }
+
+  function updateOrderStep(unit: WargameUnit, stepId: string, patch: Partial<WargameOrderStep>) {
+    updateUnit(unit.id, { orderChain: cloneOrderChain(unit.orderChain).map((step) => step.id === stepId ? { ...step, ...patch, sourceTargets: patch.sourceTargets ? { ...patch.sourceTargets } : step.sourceTargets } : step) });
+  }
+
+  function updateOrderSourceTarget(unit: WargameUnit, stepId: string, sourceId: string, targetId?: string) {
+    const chain = cloneOrderChain(unit.orderChain);
+    const step = chain.find((candidate) => candidate.id === stepId);
+    if (!step) return;
+    step.sourceTargets = { ...step.sourceTargets, [sourceId]: targetId || undefined };
+    updateUnit(unit.id, { orderChain: chain });
+  }
+
+  function updateOrderSupportTarget(unit: WargameUnit, stepId: string, supportKey: string, targetId?: string) {
+    const chain=cloneOrderChain(unit.orderChain); const step=chain.find((candidate)=>candidate.id===stepId); if(!step)return;
+    step.supportTargets={...(step.supportTargets??{}),[supportKey]:targetId||undefined}; updateUnit(unit.id,{orderChain:chain});
+  }
+
+  function updateOrderCondition(unit: WargameUnit, stepId: string, field: "startWhen"|"completeWhen"|"branchWhen", patch?: Partial<WargameOrderCondition>) {
+    const chain=cloneOrderChain(unit.orderChain); const step=chain.find((candidate)=>candidate.id===stepId); if(!step)return;
+    if(!patch){step[field]=undefined;} else { const current=step[field]??{kind:"always" as const}; step[field]={...current,...patch} as WargameOrderCondition; }
+    updateUnit(unit.id,{orderChain:chain,activeOrderStarted:false,activeOrderElapsed:0,activeOrderWaitElapsed:0});
+  }
+
+  function removeOrderStep(unit: WargameUnit, stepId: string) {
+    const chain = cloneOrderChain(unit.orderChain).filter((step) => step.id !== stepId);
+    updateUnit(unit.id, { orderChain: chain, activeOrderIndex: Math.min(unit.activeOrderIndex ?? 0, Math.max(0, chain.length - 1)), activeOrderElapsed: 0, activeOrderWaitElapsed: 0, activeOrderStarted: false });
+  }
+
+  function moveOrderStep(unit: WargameUnit, stepId: string, delta: -1 | 1) {
+    const chain = cloneOrderChain(unit.orderChain);
+    const index = chain.findIndex((step) => step.id === stepId);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= chain.length) return;
+    [chain[index], chain[target]] = [chain[target], chain[index]];
+    updateUnit(unit.id, { orderChain: chain, activeOrderIndex: 0, activeOrderElapsed: 0, activeOrderWaitElapsed: 0, activeOrderStarted: false });
+  }
+
+  function clearOrderChain(unit: WargameUnit) {
+    updateUnit(unit.id, { orderChain: [], activeOrderIndex: 0, activeOrderElapsed: 0, activeOrderWaitElapsed: 0, activeOrderStarted: false });
+    pushCombatEvents(unit.name + ": order chain cleared.");
+  }
+
+  function advanceOrderChain(unit: WargameUnit) {
+    const chain = unit.orderChain ?? [];
+    const nextIndex = Math.min(chain.length, (unit.activeOrderIndex ?? 0) + 1);
+    updateUnit(unit.id, { activeOrderIndex: nextIndex, activeOrderElapsed: 0, activeOrderWaitElapsed: 0, activeOrderStarted: false, movementPropulsion: undefined });
+    pushCombatEvents(unit.name + ": FC advanced to " + (nextIndex < chain.length ? chain[nextIndex].label : "end of order chain") + ".");
+  }
+
   function runSimulationTick(seconds: number) {
-    const stepSeconds = Math.max(1, Math.min(60, Math.round(seconds)));
-    let next = unitsRef.current.map((unit) => prepareWargameUnit({ ...unit }));
-    const events: string[] = [];
-    let damageOccurred = false;
-
-    const findById = (id?: string) => id ? next.find((unit) => unit.id === id && unit.ehp > 0) : undefined;
-    const living = (side: WargameSide) => next.filter((unit) => unit.side === side && unit.ehp > 0 && liveShipCount(unit) > 0);
-
-    const layerFraction = (profile: [number,number,number,number], resists: [number,number,number,number]) => Math.max(1e-12, profile.reduce((sum,weight,index)=>sum+weight*(1-(resists[index]??0)),0));
-    const remainingPrimaryEhp = (unit: WargameUnit) => {
-      if (unit.primaryShieldHp == null || unit.primaryArmorHp == null || unit.primaryStructureHp == null || !unit.shieldResists || !unit.armorResists || !unit.hullResists) return primaryEhp(unit);
-      const omni:[number,number,number,number]=[.25,.25,.25,.25];
-      return unit.primaryShieldHp/layerFraction(omni,unit.shieldResists)+unit.primaryArmorHp/layerFraction(omni,unit.armorResists)+unit.primaryStructureHp/layerFraction(omni,unit.hullResists);
-    };
-    const recalcFormationEhp = (unit: WargameUnit) => {
-      const alive = liveShipCount(unit);
-      if (alive <= 0) { unit.ehp = 0; unit.primaryEhp = 0; unit.primaryShieldHp=0; unit.primaryArmorHp=0; unit.primaryStructureHp=0; return; }
-      unit.primaryEhp = Math.max(0,Math.min(perShipEhp(unit),remainingPrimaryEhp(unit)));
-      unit.ehp = Math.max(0, (alive - 1) * perShipEhp(unit) + (unit.primaryEhp ?? 0));
-    };
-
-    const applyVolleyToPrimary = (target: WargameUnit, damage: number, attacker: WargameUnit) => {
-      const aliveBefore = liveShipCount(target);
-      if (aliveBefore <= 0 || damage <= 0) return false;
-      if (target.primaryShieldHp != null && target.primaryArmorHp != null && target.primaryStructureHp != null && target.shieldResists && target.armorResists && target.hullResists) {
-        const profile=unitDamageProfile(attacker);
-        let incoming=damage;
-        const hitLayer=(key: "primaryShieldHp"|"primaryArmorHp"|"primaryStructureHp",resists:[number,number,number,number])=>{
-          const hp=Math.max(0,target[key]??0); if(hp<=0||incoming<=0)return;
-          const fraction=layerFraction(profile,resists); const required=hp/fraction;
-          if(incoming>=required){target[key]=0;incoming-=required;}else{target[key]=Math.max(0,hp-incoming*fraction);incoming=0;}
-        };
-        hitLayer("primaryShieldHp",target.shieldResists); hitLayer("primaryArmorHp",target.armorResists); hitLayer("primaryStructureHp",target.hullResists);
-        if ((target.primaryStructureHp??0)<=.0001) {
-          const remaining=Math.max(0,aliveBefore-1); target.shipsAlive=remaining;
-          target.primaryShieldHp=remaining>0?(target.shieldHp??0):0; target.primaryArmorHp=remaining>0?(target.armorHp??0):0; target.primaryStructureHp=remaining>0?(target.structureHp??0):0;
-          target.primaryEhp=remaining>0?perShipEhp(target):0; recalcFormationEhp(target);
-          events.push(`${attacker.name} volley destroys a ${target.name} primary - ${remaining} remain.`);
-          for(const shooter of next){if(shooter.targetId===target.id&&shooter.ehp>0)shooter.lockRemaining=Math.max(shooter.lockRemaining??0,shooter.targetSwitchDelay??defaultTargetSwitchDelay(shooter));}
-          return true;
-        }
-        recalcFormationEhp(target); return false;
-      }
-      const primaryBefore=primaryEhp(target); const actual=Math.min(primaryBefore,damage);
-      if(damage+.01>=primaryBefore){const remaining=Math.max(0,aliveBefore-1);target.shipsAlive=remaining;target.primaryEhp=remaining>0?perShipEhp(target):0;recalcFormationEhp(target);events.push(`${attacker.name} volley destroys a ${target.name} primary - ${remaining} remain.`);for(const shooter of next){if(shooter.targetId===target.id&&shooter.ehp>0)shooter.lockRemaining=Math.max(shooter.lockRemaining??0,shooter.targetSwitchDelay??defaultTargetSwitchDelay(shooter));}return true;}
-      target.primaryEhp=Math.max(0,primaryBefore-actual);recalcFormationEhp(target);return false;
-    };
-
-    const applyRepToPrimary = (target: WargameUnit, amount: number, kind: "shield"|"armor"|"generic" = "generic") => {
-      if (target.ehp <= 0 || liveShipCount(target) <= 0 || amount <= 0) return 0;
-      if(kind!=="generic" && target.primaryShieldHp!=null && target.primaryArmorHp!=null){
-        const key=kind==="shield"?"primaryShieldHp":"primaryArmorHp"; const maximum=kind==="shield"?(target.shieldHp??0):(target.armorHp??0); const before=Math.max(0,target[key]??0); const after=Math.min(maximum,before+amount); target[key]=after; recalcFormationEhp(target); return after-before;
-      }
-      const before = primaryEhp(target);
-      const after = Math.min(perShipEhp(target), before + amount);
-      target.primaryEhp = after; recalcFormationEhp(target); return after-before;
-    };
-
-    for (let second = 0; second < stepSeconds; second += 1) {
-      if (aiResponseVisible) {
-        const blueLiving = living("blue");
-        for (const red of living("red")) {
-          if ((red.stance ?? "kite") === "support" || (red.repPerSecond ?? 0) > 0) continue;
-          let best: WargameUnit | undefined;
-          let bestScore = -Infinity;
-          const supportKinds = new Set((red.supportSystems ?? []).map((system) => system.kind));
-          const hasOffensiveSupport = [...supportKinds].some((kind) => ["web","tackle","targetPainter","sensorDamp","trackingDisruptor","ecm","energyNeutralizer","energyNosferatu"].includes(kind));
-          const redMainTarget = next.find((unit) => unit.side === "red" && unit.role.toLowerCase().includes("mainline"))?.targetId;
-          for (const candidate of blueLiving) {
-            const rangeKm = wargameDistanceKm(red, candidate);
-            const app = weaponApplication(red, candidate, Math.min(rangeKm, red.range));
-            const role = candidate.role.toLowerCase();
-            let score = (hasOffensiveSupport ? app * 15 : app * 55) - rangeKm * .18 + (100 - healthPercent(candidate)) * .22 + (100 - primaryHealthPercent(candidate)) * .18;
-            if (supportKinds.has("web") || supportKinds.has("tackle")) { score += Math.min(70,(candidate.speed/100)); if(role.includes("tackle")||role.includes("interceptor")) score+=35; if((candidate.stance??"")==="pursue")score+=22; }
-            if (supportKinds.has("targetPainter")) { if(candidate.id===redMainTarget)score+=75; score += Math.max(0,220-(candidate.signature??160))*.08; }
-            if (supportKinds.has("sensorDamp")) { if(role.includes("logistics"))score+=70; if((candidate.range??0)>55)score+=35; }
-            if (supportKinds.has("trackingDisruptor")) { if((candidate.weaponModel??"turret")==="turret")score+=65; score+=Math.min(40,(candidate.dps/Math.max(1,candidate.count))/20); }
-            if (supportKinds.has("ecm")) { if(role.includes("logistics"))score+=75; else score+=Math.min(55,(candidate.dps/Math.max(1,candidate.count))/15); }
-            if (supportKinds.has("energyNeutralizer") || supportKinds.has("energyNosferatu")) { if(role.includes("logistics"))score+=65; if((candidate.capacitorCapacity??0)>0)score+=25; }
-            if (!hasOffensiveSupport && role.includes("logistics")) score += red.webStrength ? 70 : 18;
-            if (!hasOffensiveSupport && role.includes("tackle")) score += 8;
-            if (rangeKm <= red.range) score += 18;
-            if (score > bestScore) { bestScore = score; best = candidate; }
-          }
-          if (best && red.targetId !== best.id) {
-            red.targetId = best.id;
-            red.destinationX = undefined;
-            red.destinationY = undefined;
-            red.lastTargetId = undefined;
-            events.push(`RED AI: ${red.name} calls ${best.name}${hasOffensiveSupport ? " for support/EWAR pressure" : " based on range/application"}.`);
-          }
-        }
-      }
-
-      // Resolve fitted support systems against their assigned targets. Values come from skill/hull/script adjusted DOGMA.
-      const webMultiplier = new Map<string, number>();
-      const supportEffectiveness = (system: WargameSupportSystem, rangeKm: number) => {
-        const optimalKm = Math.max(0, Number(system.optimalM) || 0) / 1000;
-        const falloffKm = Math.max(0, Number(system.falloffM) || 0) / 1000;
-        if (rangeKm <= optimalKm) return 1;
-        if (falloffKm <= 0) return 0;
-        const x = (rangeKm - optimalKm) / falloffKm;
-        return Math.pow(.5, x * x);
-      };
-      const STACKING = [1,.86911998,.57058314,.28295515,.10599265,.029994,.006403];
-      const stackedMultiplier = (bonus: number, copies: number, effectiveness: number) => { let value=1; for(let i=0;i<Math.min(copies,STACKING.length);i+=1)value*=Math.max(.02,1+bonus*effectiveness*STACKING[i]); return value; };
-      const capRecharge = (unit: WargameUnit) => {
-        const capacity = Math.max(0, unit.capacitorCapacity ?? 0);
-        const recharge = Math.max(0, unit.capacitorRechargeSeconds ?? 0);
-        if (!capacity || !recharge) return;
-        const current = Math.max(0, Math.min(capacity, unit.capacitorCurrent ?? capacity));
-        const fraction = Math.max(0, Math.min(1, current / capacity));
-        const natural = (10 * capacity / recharge) * (Math.sqrt(fraction) - fraction);
-        const injected = Math.max(0, unit.capacitorInjectedGjPerSecond ?? 0);
-        const demand = Math.max(0, unit.capacitorDemandGjPerSecond ?? 0);
-        unit.capacitorCurrent = Math.max(0, Math.min(capacity, current + natural + injected - demand));
-      };
-      for (const unit of next) {
-        unit.ewarSignatureMultiplier = 1; unit.ewarTrackingMultiplier = 1; unit.ewarOptimalMultiplier = 1; unit.ewarFalloffMultiplier = 1;
-        unit.ewarTargetingRangeMultiplier = 1; unit.ewarScanResolutionMultiplier = 1; unit.scrammed = false; unit.neutPressureGjPerSecond = 0;
-        unit.jamRemaining = Math.max(0, (unit.jamRemaining ?? 0) - 1);
-        if ((unit.jamRemaining ?? 0) <= 0) unit.jammedBy = undefined;
-        capRecharge(unit);
-        const cooldowns = unit.supportCooldowns ?? {};
-        for (const key of Object.keys(cooldowns)) cooldowns[key] = Math.max(0, cooldowns[key] - 1);
-        unit.supportCooldowns = cooldowns;
-      }
-      for (const controller of next) {
-        if (controller.ehp <= 0 || !controller.supportSystems?.length) continue;
-        const hostileTarget = findById(controller.targetId);
-        for (let index = 0; index < controller.supportSystems.length; index += 1) {
-          const system: WargameSupportSystem = controller.supportSystems[index]!;
-          const key = `${system.kind}:${system.typeId}:${index}`;
-          const target = (system.kind === "remoteSensorBooster" || system.kind === "remoteTrackingComputer" || system.kind === "remoteCapacitor") ? findById(controller.repTargetId) : hostileTarget;
-          if (!target || (system.kind.startsWith("remote") ? target.side !== controller.side : target.side === controller.side)) continue;
-          const rangeKm = wargameDistanceKm(controller, target);
-          const effectiveness = supportEffectiveness(system, rangeKm);
-          if (effectiveness <= .01) continue;
-          const copies = Math.max(1, Number(system.quantity) || 1) * Math.max(1, liveShipCount(controller));
-          if (system.kind === "web") { const current=webMultiplier.get(target.id) ?? 1; const one=Math.max(.05,1-Math.max(0,Math.min(.95,Number(system.strength)||0))*effectiveness); webMultiplier.set(target.id, Math.max(.05,current*Math.pow(one,copies))); }
-          else if (system.kind === "targetPainter") target.ewarSignatureMultiplier! *= stackedMultiplier(Math.max(0,Number(system.signatureBonus)||0),copies,effectiveness);
-          else if (system.kind === "sensorDamp") { target.ewarTargetingRangeMultiplier! *= stackedMultiplier(Number(system.maxTargetRangeBonus)||0,copies,effectiveness); target.ewarScanResolutionMultiplier! *= stackedMultiplier(Number(system.scanResolutionBonus)||0,copies,effectiveness); }
-          else if (system.kind === "trackingDisruptor") { target.ewarOptimalMultiplier! *= stackedMultiplier(Number(system.optimalBonus)||0,copies,effectiveness); target.ewarFalloffMultiplier! *= stackedMultiplier(Number(system.falloffBonus)||0,copies,effectiveness); target.ewarTrackingMultiplier! *= stackedMultiplier(Number(system.trackingBonus)||0,copies,effectiveness); }
-          else if (system.kind === "remoteSensorBooster") { target.ewarTargetingRangeMultiplier! *= stackedMultiplier(Math.max(0,Number(system.maxTargetRangeBonus)||0),copies,effectiveness); target.ewarScanResolutionMultiplier! *= stackedMultiplier(Math.max(0,Number(system.scanResolutionBonus)||0),copies,effectiveness); }
-          else if (system.kind === "remoteTrackingComputer") { target.ewarOptimalMultiplier! *= stackedMultiplier(Math.max(0,Number(system.optimalBonus)||0),copies,effectiveness); target.ewarFalloffMultiplier! *= stackedMultiplier(Math.max(0,Number(system.falloffBonus)||0),copies,effectiveness); target.ewarTrackingMultiplier! *= stackedMultiplier(Math.max(0,Number(system.trackingBonus)||0),copies,effectiveness); }
-          else if (system.kind === "tackle" && effectiveness > .5) { if (system.mwdShutdown) target.scrammed = true; }
-          else if (system.kind === "energyNeutralizer" && (controller.supportCooldowns?.[key] ?? 0) <= 0) {
-            const amount=Math.max(0,Number(system.amountPerCycle)||0)*effectiveness*Math.max(1,liveShipCount(controller));
-            if ((target.capacitorCapacity ?? 0) > 0) { target.capacitorCurrent=Math.max(0,(target.capacitorCurrent ?? target.capacitorCapacity ?? 0)-amount); target.neutPressureGjPerSecond=(target.neutPressureGjPerSecond ?? 0)+(Number(system.perSecond)||0)*effectiveness; }
-            controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
-          } else if (system.kind === "energyNosferatu" && (controller.supportCooldowns?.[key] ?? 0) <= 0) {
-            const aCap=Math.max(0,controller.capacitorCapacity??0), tCap=Math.max(0,target.capacitorCapacity??0); const aPct=aCap?((controller.capacitorCurrent??aCap)/aCap):1, tPct=tCap?((target.capacitorCurrent??tCap)/tCap):0;
-            if (aPct < tPct && aCap && tCap) { const amount=Math.min(Math.max(0,Number(system.amountPerCycle)||0)*effectiveness,target.capacitorCurrent??0); target.capacitorCurrent=Math.max(0,(target.capacitorCurrent??0)-amount); controller.capacitorCurrent=Math.min(aCap,(controller.capacitorCurrent??0)+amount); }
-            controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
-          } else if (system.kind === "remoteCapacitor" && (controller.supportCooldowns?.[key] ?? 0) <= 0 && (target.capacitorCapacity ?? 0) > 0) {
-            const amount=Math.max(0,Number(system.amountPerCycle)||0)*effectiveness; target.capacitorCurrent=Math.min(target.capacitorCapacity!, (target.capacitorCurrent??0)+amount); controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
-          } else if (system.kind === "ecm" && (controller.supportCooldowns?.[key] ?? 0) <= 0) {
-            const sensor=Math.max(.1,target.sensorStrength??1); const single=Math.max(0,Math.min(1,(Number(system.strength)||0)*effectiveness/sensor)); const chance=1-Math.pow(1-single,copies);
-            const seed=Math.abs(Math.sin((elapsed+second+1)*12.9898 + controller.id.length*78.233 + target.id.length*37.719))*43758.5453;
-            if ((seed-Math.floor(seed)) < chance) { target.jamRemaining=Math.max(1,Number(system.cycleSeconds)||20); target.jammedBy=controller.id; events.push(`${controller.name}: ECM jams ${target.name} (${Math.round(chance*100)}% cycle chance).`); }
-            controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||20);
-          }
-        }
-      }
-
-      // Scenario-local manual web values remain as a fallback for formations without a fit-linked web.
-      for (const controller of next) {
-        if (controller.ehp <= 0 || controller.supportSystems?.some((system) => system.kind === "web") || !(controller.webStrength && controller.webRange)) continue;
-        const target = findById(controller.targetId);
-        if (!target || target.side === controller.side || wargameDistanceKm(controller, target) > controller.webRange) continue;
-        const current = webMultiplier.get(target.id) ?? 1;
-        webMultiplier.set(target.id, Math.max(.1, current * (1 - Math.max(0, Math.min(.9, controller.webStrength)))));
-      }
-
-      next = next.map((unit) => {
-        if (unit.ehp <= 0 || liveShipCount(unit) <= 0) return unit;
-        let targetX = unit.destinationX;
-        let targetY = unit.destinationY;
-        const combatTarget = findById(unit.targetId);
-        const stance = unit.stance ?? "kite";
-
-        if (targetX == null || targetY == null) {
-          if (stance === "support" || (unit.repPerSecond ?? 0) > 0) {
-            const anchor = next.find((candidate) => candidate.side === unit.side && candidate.ehp > 0 && candidate.id !== unit.id && candidate.role.toLowerCase().includes("mainline"));
-            if (anchor) {
-              const enemies = next.filter((candidate) => candidate.side !== unit.side && candidate.ehp > 0);
-              const threat = enemies.sort((a, b) => wargameDistanceKm(anchor, a) - wargameDistanceKm(anchor, b))[0];
-              if (threat) {
-                const dx = anchor.x - threat.x;
-                const dy = anchor.y - threat.y;
-                const length = Math.max(.001, Math.hypot(dx, dy));
-                const trail = Math.min(9, Math.max(5, ((unit.repRange ?? 60) * .28) / 2.5));
-                targetX = clampPercent(anchor.x + (dx / length) * trail);
-                targetY = clampPercent(anchor.y + (dy / length) * trail);
-              }
-            }
-          } else if (combatTarget && combatTarget.side !== unit.side && stance !== "hold") {
-            const currentRange = wargameDistanceKm(unit, combatTarget);
-            const preferredRange = preferredCombatRange(unit);
-            const dx = combatTarget.x - unit.x;
-            const dy = combatTarget.y - unit.y;
-            const pctDistance = Math.max(.001, Math.hypot(dx, dy));
-            if (currentRange > preferredRange + 2) {
-              const standOffPct = preferredRange / 2.5;
-              const travelPct = Math.max(0, pctDistance - standOffPct);
-              const ratio = travelPct / pctDistance;
-              targetX = unit.x + dx * ratio;
-              targetY = unit.y + dy * ratio;
-            } else if (stance === "kite" && currentRange < preferredRange - 5) {
-              const escapePct = Math.min(12, (preferredRange - currentRange) / 2.5);
-              targetX = clampPercent(unit.x - (dx / pctDistance) * escapePct);
-              targetY = clampPercent(unit.y - (dy / pctDistance) * escapePct);
-            }
-          }
-        }
-
-        if (targetX == null || targetY == null) return { ...unit, velocityX: 0, velocityY: 0, effectiveSpeed: 0 };
-        const dx = targetX - unit.x;
-        const dy = targetY - unit.y;
-        const distance = Math.hypot(dx, dy);
-        if (distance < .05) return { ...unit, x: targetX, y: targetY, destinationX: undefined, destinationY: undefined, velocityX: 0, velocityY: 0, effectiveSpeed: 0 };
-        const capOperational = !(unit.capacitorCapacity && (unit.capacitorCurrent ?? unit.capacitorCapacity) <= Math.max(1, unit.capacitorCapacity * .01));
-        const propSpeed = unit.scrammed && unit.propulsionKind === "mwd" ? Math.max(0, unit.baseSpeed ?? unit.speed) : capOperational ? Math.max(0, unit.speed) : Math.max(0, unit.baseSpeed ?? unit.speed);
-        const effectiveSpeed = propSpeed * (webMultiplier.get(unit.id) ?? 1);
-        const maxStep = effectiveSpeed / 2500;
-        const step = Math.min(distance, maxStep);
-        const newX = clampPercent(unit.x + (dx / distance) * step);
-        const newY = clampPercent(unit.y + (dy / distance) * step);
-        const moved = { ...unit, x: newX, y: newY, velocityX: newX - unit.x, velocityY: newY - unit.y, effectiveSpeed };
-        if (step >= distance - .001) { moved.destinationX = undefined; moved.destinationY = undefined; }
-        return moved;
-      });
-
-      // Logistics choose one damaged primary and must lock/cycle reps; reps cannot spill onto a replacement primary.
-      const repIntents: Array<{ logi: WargameUnit; targetId: string; targetAlive: number; amount: number; kind: "shield"|"armor"|"generic" }> = [];
-      for (const logi of next) {
-        if (logi.ehp <= 0 || !(logi.repPerSecond && logi.repPerSecond > 0)) continue;
-        if (logi.capacitorCapacity && (logi.capacitorCurrent ?? logi.capacitorCapacity) <= Math.max(1, logi.capacitorCapacity * .01)) continue;
-        logi.repCooldown = Math.max(0, (logi.repCooldown ?? 0) - 1);
-        const currentRepTarget = findById(logi.repTargetId);
-        const currentValid = currentRepTarget && currentRepTarget.side === logi.side && primaryHealthPercent(currentRepTarget) < 99.9 && wargameDistanceKm(logi, currentRepTarget) <= (logi.repRange ?? 0);
-        if (!currentValid) {
-          const allies = next.filter((candidate) => candidate.side === logi.side && candidate.ehp > 0 && candidate.id !== logi.id && primaryHealthPercent(candidate) < 99.9 && wargameDistanceKm(logi, candidate) <= (logi.repRange ?? 0));
-          allies.sort((a, b) => primaryHealthPercent(a) - primaryHealthPercent(b));
-          const choice = allies[0];
-          if (choice?.id !== logi.repTargetId) {
-            logi.repTargetId = choice?.id;
-            logi.repLastTargetId = undefined;
-            if (choice) events.push(`${logi.name}: starts locking ${choice.name} primary for reps.`);
-          }
-        }
-        const repairTarget = findById(logi.repTargetId);
-        if (!repairTarget) { logi.repTargetId = undefined; continue; }
-        if (logi.repLastTargetId !== repairTarget.id) {
-          logi.repLastTargetId = repairTarget.id;
-          logi.repLockRemaining = logi.repLockTime ?? 2.5;
-        } else {
-          logi.repLockRemaining = Math.max(0, (logi.repLockRemaining ?? 0) - 1);
-        }
-        if ((logi.repLockRemaining ?? 0) > 0 || (logi.repCooldown ?? 0) > 0) continue;
-        const linkedReps=(logi.supportSystems??[]).filter((system)=>system.kind==="remoteShieldRep"||system.kind==="remoteArmorRep");
-        if(linkedReps.length){
-          for(let repIndex=0;repIndex<linkedReps.length;repIndex+=1){const system=linkedReps[repIndex];const key=`rep:${system.typeId}:${repIndex}`;if((logi.supportCooldowns?.[key]??0)>0)continue;const effectiveness=supportEffectiveness(system,wargameDistanceKm(logi,repairTarget));if(effectiveness<=.01)continue;const amount=Math.max(0,Number(system.amountPerCycle)||0)*Math.max(1,liveShipCount(logi))*effectiveness;repIntents.push({logi,targetId:repairTarget.id,targetAlive:liveShipCount(repairTarget),amount,kind:system.kind==="remoteShieldRep"?"shield":"armor"});logi.supportCooldowns??={};logi.supportCooldowns[key]=Math.max(1,Number(system.cycleSeconds)||1);}
-        }else{
-          const cycle=Math.max(1,logi.repCycle??4);const outputScale=liveShipCount(logi)/Math.max(1,logi.count);repIntents.push({logi,targetId:repairTarget.id,targetAlive:liveShipCount(repairTarget),amount:logi.repPerSecond*cycle*outputScale,kind:"generic"});logi.repCooldown=cycle;
-        }
-      }
-
-      // Weapons fire in discrete synchronized volleys. Damage is focused on one primary and overkill is discarded.
-      const volleys: Array<{ attacker: WargameUnit; targetId: string; damage: number }> = [];
-      for (const attacker of next) {
-        attacker.application = 0;
-        attacker.fireCooldown = Math.max(0, (attacker.fireCooldown ?? 0) - 1);
-        if (attacker.ehp <= 0 || attacker.dps <= 0 || liveShipCount(attacker) <= 0) continue;
-        const target = findById(attacker.targetId);
-        if (!target || target.side === attacker.side) { attacker.lastTargetId = undefined; continue; }
-        if (attacker.lastTargetId !== target.id) {
-          attacker.lastTargetId = target.id;
-          const scanMultiplier = Math.max(.05, attacker.ewarScanResolutionMultiplier ?? 1);
-          attacker.lockRemaining = (attacker.targetSwitchDelay ?? defaultTargetSwitchDelay(attacker)) / scanMultiplier;
-        } else {
-          attacker.lockRemaining = Math.max(0, (attacker.lockRemaining ?? 0) - 1);
-        }
-        const rangeKm = wargameDistanceKm(attacker, target);
-        const effectiveTargetingRange = (attacker.targetingRange ?? Infinity) * Math.max(.05, attacker.ewarTargetingRangeMultiplier ?? 1);
-        const jammedAway = (attacker.jamRemaining ?? 0) > 0 && attacker.jammedBy !== target.id;
-        const capStarved = Boolean(attacker.capacitorCapacity && (attacker.capacitorCurrent ?? attacker.capacitorCapacity) <= Math.max(1, attacker.capacitorCapacity * .01));
-        const application = rangeKm <= effectiveTargetingRange && !jammedAway && !capStarved ? weaponApplication(attacker, target, rangeKm) : 0;
-        attacker.application = application;
-        const effectiveWeaponRange = (attacker.weaponModel ?? "turret") === "turret" ? Math.max(1,(attacker.optimalRange ?? attacker.range*.62)*(attacker.ewarOptimalMultiplier??1)+(attacker.falloffRange ?? Math.max(4,attacker.range-(attacker.optimalRange??attacker.range*.62)))*(attacker.ewarFalloffMultiplier??1)*2) : attacker.range;
-        if ((attacker.lockRemaining ?? 0) > 0 || (attacker.fireCooldown ?? 0) > 0 || application <= 0 || rangeKm > effectiveWeaponRange) continue;
-        const cycle = Math.max(1, attacker.weaponCycle ?? defaultWeaponCycle(attacker));
-        const strength = liveShipCount(attacker) / Math.max(1, attacker.count);
-        const paperVolley = attacker.volleyPerShip && attacker.volleyPerShip > 0 ? attacker.volleyPerShip * liveShipCount(attacker) : attacker.dps * cycle * strength;
-        const volley = paperVolley * application;
-        if (volley <= 0) continue;
-        attacker.lastVolleyDamage = volley;
-        attacker.fireCooldown = cycle;
-        volleys.push({ attacker, targetId: target.id, damage: volley });
-      }
-
-      // Volleys landing on the same called primary in the same second are combined. Overkill is discarded rather than spilling into the next ship.
-      const volleyGroups = new Map<string, { damage: number; attacker: WargameUnit }>();
-      for (const volley of volleys) {
-        const group = volleyGroups.get(volley.targetId);
-        if (group) group.damage += volley.damage;
-        else volleyGroups.set(volley.targetId, { damage: volley.damage, attacker: volley.attacker });
-      }
-      for (const [targetId, group] of volleyGroups) {
-        const target = findById(targetId);
-        if (!target) continue;
-        damageOccurred = true;
-        applyVolleyToPrimary(target, group.damage, group.attacker);
-      }
-
-      // A rep cycle that was aimed at a primary destroyed by the volley lands too late; it never resurrects or spills.
-      for (const intent of repIntents) {
-        const target = findById(intent.targetId);
-        if (!target) continue;
-        if (liveShipCount(target) !== intent.targetAlive) {
-          events.push(`${intent.logi.name}: reps land too late - ${target.name} primary was already destroyed.`);
-          continue;
-        }
-        applyRepToPrimary(target, intent.amount, intent.kind);
-      }
-    }
-
-    if (damageOccurred && !engagementStartedRef.current) {
+    const transition = executeWargameCommand({
+      id: `advance-${sessionRef.current.revision + 1}`,
+      kind: "advance",
+      source: "human",
+      seconds,
+      redAiEnabled: aiResponseVisible,
+      interdictionZones: terrain.filter((object) => object.kind === "bubble").map((object) => ({ id: object.id, label: object.label, x: object.x, y: object.y, radiusKm: Math.max(1, object.radiusKm ?? 20) })),
+    });
+    setElapsed(transition.state.elapsedSeconds);
+    if (transition.damageOccurred && !engagementStartedRef.current) {
       engagementStartedRef.current = true;
-      events.push("Weapons in range - volley combat has begun.");
       setPhase((current) => current < 2 ? 2 : current);
+      pushCombatEvents("Weapons in range - volley combat has begun.");
     }
-
-    const combatPower = (side: WargameSide) => next.filter((unit) => unit.side === side && unit.ehp > 0).reduce((sum, unit) => sum + unit.dps * (liveShipCount(unit) / Math.max(1, unit.count)), 0);
-    const blueEffective = combatPower("blue") > 1000;
-    const redEffective = combatPower("red") > 1000;
-    if (!blueEffective || !redEffective) {
-      events.push(!blueEffective && !redEffective ? "Both forces combat-ineffective - resolution." : blueEffective ? "Red force combat-ineffective - Blue holds the field." : "Blue force combat-ineffective - Red holds the field.");
+    if (transition.combatResolved) {
       setPhase(3);
       setRunning(false);
     }
-
-    unitsRef.current = next;
-    setUnits(next);
-    setElapsed((value) => value + stepSeconds);
-    pushCombatEvents(...events);
+    pushCombatEvents(...transition.events.map((event) => event.message));
   }
   function handleCanvasClick(event: MouseEvent<HTMLDivElement>) {
     if (event.target !== event.currentTarget && (event.target as HTMLElement).closest(".wargame-map-unit, .wargame-terrain-object, button")) return;
@@ -922,18 +651,70 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
 
   function handleUnitClick(event: MouseEvent<HTMLButtonElement>, unit: WargameUnit) {
     event.stopPropagation();
-    if (orderMode === "engage" && selectedUnitId && selectedUnitId !== unit.id) {
-      const attacker = units.find((candidate) => candidate.id === selectedUnitId);
-      if (attacker && attacker.side !== unit.side) {
-        updateUnit(selectedUnitId, { targetId: unit.id, destinationX: undefined, destinationY: undefined });
-        pushCombatEvents(`${attacker.name}: engage ${unit.name}.`);
-        setPhase((current) => current < 1 ? 1 : current);
-        setOrderMode(null);
-        return;
-      }
+    const actor = selectedUnitId ? unitsRef.current.find((candidate) => candidate.id === selectedUnitId) : undefined;
+    if (actor && actor.id !== unit.id && (orderMode === "align" || orderMode === "warp")) {
+      executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: actor.id, mode: orderMode, targetId: unit.id, rangeKm: actor.range * .7, warpRangeKm: orderMode === "warp" ? warpRangeDraft : 0 });
+      pushCombatEvents(`${actor.name}: ${orderMode} order to ${unit.name}${orderMode === "warp" ? ` at ${warpRangeDraft} km` : ""}.`);
+      setOrderMode(null); setMovePreview(null); setPhase((current) => current < 1 ? 1 : current); return;
+    }
+    if (actor && actor.id !== unit.id && orderMode === "engage" && actor.side !== unit.side) {
+      assignAllOffence(actor.id, unit.id);
+      updateUnit(actor.id, { destinationX: undefined, destinationY: undefined });
+      pushCombatEvents(`${actor.name}: full engage ${unit.name} - all damage channels plus tackle/EWAR.`);
+      setPhase((current) => current < 1 ? 1 : current); setOrderMode(null); return;
+    }
+    if (actor && actor.id !== unit.id && orderMode === "logistics" && actor.side === unit.side) {
+      assignSupportGroup(actor.id, unit.id, new Set(["remoteShieldRep", "remoteArmorRep"]), "rep");
+      pushCombatEvents(`${actor.name}: logistics/reps assigned to ${unit.name}.`);
+      setOrderMode(null); return;
+    }
+    if (actor && actor.id !== unit.id && orderMode === "tackle" && actor.side !== unit.side) {
+      assignSupportGroup(actor.id, unit.id, new Set(["tackle", "web"]), "tackle");
+      pushCombatEvents(`${actor.name}: tackle/web assigned to ${unit.name}.`);
+      setOrderMode(null); return;
+    }
+    if (actor && actor.id !== unit.id && orderMode === "ewar" && actor.side !== unit.side) {
+      assignSupportGroup(actor.id, unit.id, new Set(["targetPainter", "sensorDamp", "trackingDisruptor", "ecm", "energyNeutralizer", "energyNosferatu"]));
+      pushCombatEvents(`${actor.name}: EWAR assigned to ${unit.name}.`);
+      setOrderMode(null); return;
     }
     setSelectedUnitId(unit.id);
     setMovePreview(null);
+  }
+
+  async function hydrateUnfittedHullNavigation(unitId: string, hullName: string) {
+    try {
+      const bareHull = `[${hullName}, Wargame bare hull]`;
+      const result = await analyzeWargameFit(bareHull, corporation.characterId, systemEffects.map((effect) => effect.typeId));
+      const current = unitsRef.current.find((candidate) => candidate.id === unitId);
+      if (!current || current.fitName || current.simulationReady !== false) return;
+      const count = Math.max(1, current.count);
+      const bareEhp = Math.max(1, result.perShipEhp * count);
+      updateUnit(unitId, {
+        speed: Math.max(0, result.speedMps),
+        baseSpeed: Math.max(0, result.baseSpeedMps),
+        alignTimeSeconds: Math.max(.1, result.alignTimeSeconds),
+        warpSpeedAuPerSecond: Math.max(.1, result.warpSpeedAuPerSecond),
+        signature: Math.max(1, result.signatureRadiusM),
+        targetingRange: Math.max(0, result.targetingRangeKm),
+        scanResolution: Math.max(0, result.scanResolution),
+        sensorStrength: Math.max(0, result.sensorStrength),
+        ehp: bareEhp,
+        maxEhp: bareEhp,
+        shipsAlive: count,
+        primaryEhp: Math.max(1, result.perShipEhp),
+        shieldHp: result.shieldHp,
+        armorHp: result.armorHp,
+        structureHp: result.structureHp,
+        shieldResists: result.shieldResists,
+        armorResists: result.armorResists,
+        hullResists: result.hullResists,
+        simulationReady: false,
+      });
+      pushCombatEvents(`${current.name}: bare-hull navigation loaded from Sage DOGMA; combat remains disabled until a fit is linked.`);
+    } catch (error) {
+      pushCombatEvents(`${hullName}: bare-hull navigation unavailable - ${error instanceof Error ? error.message : 'DOGMA lookup failed'}.`);
+    }
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -951,28 +732,25 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
       const asset = JSON.parse(raw) as { kind: "ship" | "terrain"; typeId?: number; name?: string; groupName?: string; terrainKind?: string; glyph?: string };
       if (asset.kind === "ship" && asset.typeId && asset.name) {
         const id = `unit-${Date.now()}-${asset.typeId}`;
-        setUnits((current) => [...current, prepareWargameUnit({
+        const baseline = unconfiguredScenarioStats();
+        executeWargameCommand({ id: `add-${sessionRef.current.revision + 1}`, kind: "add-unit", source: "human", unit: prepareWargameUnit({
           id,
           name: asset.name!,
           typeId: asset.typeId,
           side: deploymentSide,
           count: 1,
           ...point,
-          dps: 500,
-          ehp: 50000,
-          maxEhp: 50000,
-          speed: 1500,
-          range: 40,
           em: 60,
           therm: 60,
           kin: 60,
           exp: 60,
-          role: asset.groupName || "Unassigned",
-          ...tacticalProfileForGroup(asset.groupName || ""),
-        })]);
+          role: `${asset.groupName || "Unassigned"} / FIT REQUIRED`,
+          ...baseline,
+        }) });
         setSelectedUnitId(id);
+        void hydrateUnfittedHullNavigation(id, asset.name!);
       } else if (asset.kind === "terrain" && asset.terrainKind && asset.name && asset.glyph) {
-        setTerrain((current) => [...current, { id: `terrain-${Date.now()}`, kind: asset.terrainKind!, label: asset.name!, glyph: asset.glyph!, ...point }]);
+        setTerrain((current) => [...current, { id: `terrain-${Date.now()}`, kind: asset.terrainKind!, label: asset.name!, glyph: asset.glyph!, ...point, side: deploymentSide, radiusKm: asset.terrainKind === "bubble" ? 20 : undefined }]);
       }
     } catch {
       // Ignore malformed drag payloads from outside the wargame workspace.
@@ -982,7 +760,7 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
   function commitMove() {
     if (!movePreview) return;
     const unit = units.find((candidate) => candidate.id === movePreview.unitId);
-    updateUnit(movePreview.unitId, { destinationX: movePreview.x, destinationY: movePreview.y });
+    executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: movePreview.unitId, mode: "approach", x: movePreview.x, y: movePreview.y, rangeKm: 0 });
     if (unit) pushCombatEvents(`${unit.name}: movement order committed.`);
     setPhase((current) => current < 1 ? 1 : current);
     setMovePreview(null);
@@ -992,8 +770,10 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
   function startRetreat() {
     if (!selectedUnit) return;
     setPhase(3);
-    setOrderMode("move");
-    setMovePreview({ unitId: selectedUnit.id, x: selectedUnit.side === "blue" ? 5 : 95, y: selectedUnit.y });
+    executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: selectedUnit.id, mode: "disengage", targetId: selectedTarget?.id, rangeKm: 100 });
+    pushCombatEvents(`${selectedUnit.name}: disengage order issued. Burn clear, then align/warp when able.`);
+    setOrderMode(null);
+    setMovePreview(null);
   }
 
   function resetScenario() {
@@ -1001,18 +781,25 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
     unitsRef.current = initial;
     setUnits(initial);
     setTerrain(INITIAL_TERRAIN.map((object) => ({ ...object })));
-    setSelectedUnitId("blue-hurricanes");
+    setSelectedUnitId("");
     setMovePreview(null);
     setOrderMode(null);
     setPhase(0);
+    sessionRef.current = createWargameSession(initial ?? [], WARGAME_DEFAULT_RNG_SEED);
+    commandHistoryRef.current = [];
     setElapsed(0);
     setRunning(false);
     setAiResponseVisible(true);
     setFitImportText("");
     setFitImportStatus("");
     setFitImportOpen(false);
+    setSystemEffects([]);
+    setSystemEffectDraft("");
+    setOrderDraftTarget("");
+    setOrderDraftCompletionTarget("");
+    resetMapCamera();
     engagementStartedRef.current = false;
-    setCombatEvents(["Scenario reset — press Play or +10s to execute plotted orders."]);
+    setCombatEvents(["Scenario reset - empty board ready for FC deployment."]);
   }
 
   function clearScenario() {
@@ -1023,26 +810,99 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
     setMovePreview(null);
     setOrderMode(null);
     setPhase(0);
+    sessionRef.current = createWargameSession([], WARGAME_DEFAULT_RNG_SEED);
+    commandHistoryRef.current = [];
     setElapsed(0);
     setRunning(false);
     setAiResponseVisible(false);
+    setSystemEffects([]);
+    setSystemEffectDraft("");
+    setOrderDraftTarget("");
+    setOrderDraftCompletionTarget("");
     setFitImportText("");
     setFitImportStatus("");
     setFitImportOpen(false);
+    resetMapCamera();
     engagementStartedRef.current = false;
     setCombatEvents(["Empty scenario ready — deploy forces from the asset library."]);
   }
 
   const redMain = units.find((unit) => unit.side === "red" && unit.role.toLowerCase().includes("mainline")) ?? units.find((unit) => unit.side === "red");
   const blueLogi = units.find((unit) => unit.side === "blue" && unit.role.toLowerCase().includes("logistics"));
-  const aiGhost = redMain && blueLogi ? { x: Math.max(blueLogi.x + 10, 37), y: Math.max(blueLogi.y - 7, 20) } : null;
+  const redTacticalSummary = !aiResponseVisible ? "Red Team AI disabled" : blueLogi ? `Pressure ${blueLogi.name}` : redMain ? "Maintain pressure / seek vulnerable support" : "Awaiting hostile deployment";
   const selectedTarget = selectedUnit?.targetId ? units.find((unit) => unit.id === selectedUnit.targetId && unit.ehp > 0) : undefined;
   const selectedTargetRange = selectedUnit && selectedTarget ? wargameDistanceKm(selectedUnit, selectedTarget) : null;
-  const selectedApplication = selectedUnit && selectedTarget ? weaponApplication(selectedUnit, selectedTarget, selectedTargetRange ?? undefined) : (selectedUnit?.application ?? 0);
+  const selectedSourceStats = selectedUnit?.damageSources?.map((source) => { const target = source.targetId ? units.find((candidate) => candidate.id === source.targetId && candidate.ehp > 0) : undefined; const range = target ? wargameDistanceKm(selectedUnit, target) : 0; const application = target ? damageSourceApplication(selectedUnit, source, target, range) : 0; return { source, target, range, application }; }) ?? [];
+  const selectedSourceWeight = selectedSourceStats.reduce((sum, row) => sum + Math.max(0, row.source.dpsPerShip), 0);
+  const selectedApplication = selectedSourceStats.length ? selectedSourceStats.reduce((sum, row) => sum + row.application * Math.max(0, row.source.dpsPerShip), 0) / Math.max(1e-12, selectedSourceWeight) : selectedUnit && selectedTarget ? weaponApplication(selectedUnit, selectedTarget, selectedTargetRange ?? undefined) : (selectedUnit?.application ?? 0);
   const selectedRangeRate = selectedUnit && selectedTarget ? rangeRateMps(selectedUnit, selectedTarget) : null;
   const selectedRepTarget = selectedUnit?.repTargetId ? units.find((unit) => unit.id === selectedUnit.repTargetId) : undefined;
   const selectedWebbers = selectedUnit ? units.filter((unit) => unit.side !== selectedUnit.side && unit.ehp > 0 && unit.webStrength && unit.webRange && unit.targetId === selectedUnit.id && wargameDistanceKm(unit, selectedUnit) <= unit.webRange) : [];
-  const selectedVolley = selectedUnit && selectedTarget ? ((selectedUnit.volleyPerShip && selectedUnit.volleyPerShip > 0 ? selectedUnit.volleyPerShip * liveShipCount(selectedUnit) : selectedUnit.dps * Math.max(1, selectedUnit.weaponCycle ?? defaultWeaponCycle(selectedUnit)) * (liveShipCount(selectedUnit) / Math.max(1, selectedUnit.count))) * selectedApplication) : 0;
+  const selectedHostiles = selectedUnit ? units.filter((unit) => unit.side !== selectedUnit.side) : [];
+  const selectedFriendlies = selectedUnit ? units.filter((unit) => unit.side === selectedUnit.side && unit.id !== selectedUnit.id) : [];
+  const selectedVolley = selectedUnit ? (selectedSourceStats.length ? selectedSourceStats.reduce((sum, row) => sum + sourcePaperVolley(selectedUnit, row.source) * row.application, 0) : selectedTarget ? ((selectedUnit.volleyPerShip && selectedUnit.volleyPerShip > 0 ? selectedUnit.volleyPerShip * liveShipCount(selectedUnit) : selectedUnit.dps * Math.max(1, selectedUnit.weaponCycle ?? defaultWeaponCycle(selectedUnit)) * (liveShipCount(selectedUnit) / Math.max(1, selectedUnit.count))) * selectedApplication) : 0) : 0;
+  const selectedReadySources = selectedSourceStats.filter((row) => row.target && (row.source.fireCooldown ?? 0) <= 0 && (row.source.lockRemaining ?? 0) <= 0 && (row.source.droneArrivalRemaining ?? 0) <= 0).length;
+
+  const combatEffectLinks = useMemo(() => {
+    type EffectKind = "dps" | "logistics" | "ewar";
+    type EffectLink = { key: string; kind: EffectKind; from: WargameUnit; to: WargameUnit; channels: number };
+    const merged = new Map<string, EffectLink>();
+    const add = (kind: EffectKind, from: WargameUnit, to: WargameUnit) => {
+      if (from.id === to.id || from.ehp <= 0 || to.ehp <= 0 || from.movementState === "warping" || to.movementState === "warping") return;
+      const key = kind + ":" + from.id + ":" + to.id;
+      const current = merged.get(key);
+      if (current) current.channels += 1;
+      else merged.set(key, { key, kind, from, to, channels: 1 });
+    };
+    const friendlySupport = new Set(["remoteShieldRep", "remoteArmorRep", "remoteCapacitor", "remoteSensorBooster", "remoteTrackingComputer"]);
+
+    for (const unit of units) {
+      if (unit.ehp <= 0 || liveShipCount(unit) <= 0 || unit.movementState === "warping") continue;
+
+      if (unit.damageSources?.length) {
+        for (const source of unit.damageSources) {
+          const target = source.targetId ? units.find((candidate) => candidate.id === source.targetId && candidate.side !== unit.side && candidate.ehp > 0) : undefined;
+          if (!target) continue;
+          if (source.kind === "drone" && (source.droneArrivalRemaining ?? 0) > 0) continue;
+          const range = wargameDistanceKm(unit, target);
+          if (damageSourceApplication(unit, source, target, range) > .005) add("dps", unit, target);
+        }
+      } else if (unit.dps > 0 && unit.targetId) {
+        const target = units.find((candidate) => candidate.id === unit.targetId && candidate.side !== unit.side && candidate.ehp > 0);
+        if (target && weaponApplication(unit, target, wargameDistanceKm(unit, target)) > .005) add("dps", unit, target);
+      }
+
+      for (let index = 0; index < (unit.supportSystems?.length ?? 0); index += 1) {
+        const system = unit.supportSystems![index];
+        const side = wargameSupportTargetSide(system.kind);
+        if (side === "none") continue;
+        const supportKey = wargameSupportSystemKey(system, index);
+        const assigned = Object.prototype.hasOwnProperty.call(unit.supportTargetIds ?? {}, supportKey);
+        const targetId = assigned ? unit.supportTargetIds?.[supportKey] : side === "friendly" ? unit.repTargetId : unit.targetId;
+        const target = targetId ? units.find((candidate) => candidate.id === targetId && candidate.ehp > 0) : undefined;
+        if (!target || (side === "friendly" ? target.side !== unit.side : target.side === unit.side)) continue;
+        const range = wargameDistanceKm(unit, target);
+        const optimal = Math.max(0, Number(system.optimalM) || 0) / 1000;
+        const falloff = Math.max(0, Number(system.falloffM) || 0) / 1000;
+        if (range > Math.max(.1, optimal + falloff * 2)) continue;
+        add(friendlySupport.has(system.kind) ? "logistics" : "ewar", unit, target);
+      }
+
+      if (!(unit.supportSystems?.some((system) => system.kind === "remoteShieldRep" || system.kind === "remoteArmorRep")) && (unit.repPerSecond ?? 0) > 0 && unit.repTargetId) {
+        const target = units.find((candidate) => candidate.id === unit.repTargetId && candidate.side === unit.side && candidate.ehp > 0);
+        if (target && wargameDistanceKm(unit, target) <= Math.max(.1, unit.repRange ?? 0)) add("logistics", unit, target);
+      }
+      if (!(unit.supportSystems?.some((system) => ["web", "tackle", "targetPainter", "sensorDamp", "trackingDisruptor", "ecm", "energyNeutralizer", "energyNosferatu"].includes(system.kind))) && unit.targetId) {
+        const target = units.find((candidate) => candidate.id === unit.targetId && candidate.side !== unit.side && candidate.ehp > 0);
+        if (target) {
+          const range = wargameDistanceKm(unit, target);
+          const manualRange = Math.max(unit.webRange ?? 0, unit.tackleRange ?? 0);
+          if (manualRange > 0 && range <= manualRange) add("ewar", unit, target);
+        }
+      }
+    }
+    return [...merged.values()];
+  }, [units]);
 
   return <div className={`fleet-wargame-view ${leftCollapsed ? "assets-collapsed" : ""} ${rightCollapsed ? "inspector-collapsed" : ""}`}>
     <header className="wargame-command-strip">
@@ -1050,7 +910,8 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
         <button type="button" className="wargame-back" onClick={() => onNavigate("doctrines")} title="Return to Fleet Command">‹</button>
         <div><span>TACTICAL WARGAME</span><strong>{corporation.name}</strong></div>
       </div>
-      <div className="wargame-scenario-name"><span>SCENARIO</span><strong>Gate Hold / Volley & Logistics Test</strong><small>{PHASES[phase].short} · T+ {formatTime}</small></div>
+      <div className="wargame-scenario-name"><span>SCENARIO</span><strong>New Tactical Scenario</strong><small>{PHASES[phase].short} · T+ {formatTime}</small></div>
+      <div className={`wargame-red-intel-strip ${aiResponseVisible ? "active" : "disabled"}`}><span>RED TEAM TACTICS</span><strong>{redTacticalSummary}</strong><small>{aiResponseVisible && redMain ? "Projected hostile response · 43%" : "No tactical projection on map"}</small></div>
       <div className="wargame-strip-status"><span className={`wargame-live-dot ${running ? "running" : ""}`} />{running ? "SIM RUNNING" : "SIM PAUSED"}</div>
       <div className="wargame-strip-actions">
         <button type="button" onClick={() => onNavigate("jump-map")}>Jump Map</button>
@@ -1072,6 +933,19 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
           <button type="button" className={deploymentSide === "blue" ? "active blue" : ""} onClick={() => setDeploymentSide("blue")}><i />BLUE</button>
           <button type="button" className={deploymentSide === "red" ? "active red" : ""} onClick={() => setDeploymentSide("red")}><i />RED</button>
         </div>
+
+        <section className="wargame-system-effects">
+          <div className="wargame-section-title"><span>SYSTEM EFFECTS</span><small>environment / system-wide DOGMA</small></div>
+          <div className="wargame-system-effect-add">
+            <input list="wargame-system-effect-presets" value={systemEffectDraft} onChange={(event) => setSystemEffectDraft(event.target.value)} placeholder="Class 5 Magnetar Effects..." />
+            <datalist id="wargame-system-effect-presets">{COMMON_WARGAME_SYSTEM_EFFECTS.map((effect) => <option key={effect.typeId} value={effect.name} />)}</datalist>
+            <button type="button" disabled={!systemEffectDraft.trim() || systemEffectBusy} onClick={() => void addScenarioSystemEffect()}>{systemEffectBusy ? "Applying..." : "Apply"}</button>
+          </div>
+          <div className="wargame-system-effect-list">
+            {systemEffects.length ? systemEffects.map((effect) => <button type="button" key={effect.typeId} onClick={() => void removeScenarioSystemEffect(effect.typeId)} title="Remove system effect"><span>{effect.name}</span><b>×</b></button>) : <small>Normal-space baseline. Add wormhole, incursion or another CCP environment effect.</small>}
+          </div>
+          <small className="wargame-system-note">Fit-linked formations are recalculated through Sage DOGMA when this changes.</small>
+        </section>
 
         {assetTab === "ships" && <>
           <label className="wargame-search"><span>⌕</span><input value={shipFilter} onChange={(event) => setShipFilter(event.target.value)} placeholder="Search every EVE hull..." /></label>
@@ -1119,8 +993,20 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
         onDragOver={(event) => event.preventDefault()}
         onDrop={handleDrop}
         onClick={handleCanvasClick}
+        onWheel={handleMapWheel}
       >
-        <div className="wargame-grid-glow" />
+
+        <div className="wargame-map-toolbar" onClick={(event) => event.stopPropagation()}>
+          <button type="button" className={orderMode === "move" ? "active" : ""} disabled={!selectedUnit} onClick={() => { setOrderMode(orderMode === "move" ? null : "move"); setMovePreview(null); }}>↗ Plot move</button>
+          <button type="button" className={orderMode === "engage" ? "active danger" : ""} disabled={!selectedUnit} onClick={() => { setOrderMode(orderMode === "engage" ? null : "engage"); setMovePreview(null); }}>◎ Set target</button>
+          <button type="button" onClick={() => { setMovePreview(null); setOrderMode(null); if (selectedUnit) { assignAllOffence(selectedUnit.id, undefined); updateUnit(selectedUnit.id, { targetId: undefined, destinationX: undefined, destinationY: undefined, movementPropulsion: undefined }); } }}>■ Hold</button>
+          <span>{orderMode === "move" ? "CLICK MAP TO PLOT DESTINATION" : orderMode === "engage" ? "CLICK A HOSTILE TO FULL ENGAGE" : orderMode === "logistics" ? "CLICK A FRIENDLY TO ASSIGN REPS" : orderMode === "tackle" ? "CLICK A HOSTILE TO ASSIGN TACKLE / WEBS" : orderMode === "ewar" ? "CLICK A HOSTILE TO ASSIGN EWAR" : orderMode === "align" ? "CLICK A FLEET OR FC-PLACED OBJECT TO ALIGN" : orderMode === "warp" ? "CHOOSE BELOW OR CLICK AN FC-PLACED WARP TARGET" : "DRAG ASSETS - CLICK UNIT TO COMMAND"}</span>
+        </div>
+
+        <div className="wargame-map-scale"><span>TACTICAL GRID</span><strong>250 km × 250 km</strong><small>ZOOM {Math.round(mapCamera.zoom * 100)}% · mouse wheel</small><button type="button" onClick={(event) => { event.stopPropagation(); nudgeMapZoom(1 / 1.35); }}>−</button><button type="button" onClick={(event) => { event.stopPropagation(); nudgeMapZoom(1.35); }}>+</button><button type="button" onClick={(event) => { event.stopPropagation(); resetMapCamera(); }}>RESET</button></div>
+        <div className="wargame-combat-fx-legend" aria-hidden="true"><span className="dps"><i />DPS</span><span className="logistics"><i />LOGISTICS</span><span className="ewar"><i />EWAR</span></div>
+
+        <div className="wargame-map-camera" style={{ transform: `translate3d(${mapCamera.panX}px, ${mapCamera.panY}px, 0) scale(${mapCamera.zoom})` }}>        <div className="wargame-grid-glow" />
         <div className="wargame-range-ring ring-a"><span>50 KM</span></div>
         <div className="wargame-range-ring ring-b"><span>100 KM</span></div>
         <div className="wargame-range-ring ring-c"><span>150 KM</span></div>
@@ -1133,14 +1019,7 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
         <span className="wargame-quadrant q3">VECTOR 210</span>
         <span className="wargame-quadrant q4">VECTOR 150</span>
 
-        <div className="wargame-map-toolbar" onClick={(event) => event.stopPropagation()}>
-          <button type="button" className={orderMode === "move" ? "active" : ""} disabled={!selectedUnit} onClick={() => { setOrderMode(orderMode === "move" ? null : "move"); setMovePreview(null); }}>↗ Plot move</button>
-          <button type="button" className={orderMode === "engage" ? "active danger" : ""} disabled={!selectedUnit} onClick={() => { setOrderMode(orderMode === "engage" ? null : "engage"); setMovePreview(null); }}>◎ Set target</button>
-          <button type="button" onClick={() => { setMovePreview(null); setOrderMode(null); if (selectedUnit) updateUnit(selectedUnit.id, { targetId: undefined, destinationX: undefined, destinationY: undefined }); }}>■ Hold</button>
-          <span>{orderMode === "move" ? "CLICK MAP TO PLOT DESTINATION" : orderMode === "engage" ? "CLICK A HOSTILE TO ASSIGN TARGET" : "DRAG ASSETS · CLICK UNIT TO COMMAND"}</span>
-        </div>
 
-        <div className="wargame-map-scale"><span>TACTICAL GRID</span><strong>250 km × 250 km</strong><small>Planar command projection · relative positions</small></div>
 
         {selectedUnit && selectedUnit.ehp > 0 && <>
           <div className={`wargame-selected-range-ring weapon ${selectedUnit.side}`} style={{ left: `${selectedUnit.x}%`, top: `${selectedUnit.y}%`, width: `${Math.min(95, selectedUnit.range * .8)}%`, aspectRatio: "1" }}><span>{Math.round(selectedUnit.range)} km WEAPONS</span></div>
@@ -1153,18 +1032,51 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
             <marker id="red-arrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto"><path d="M0,0 L5,2.5 L0,5 Z" /></marker>
           </defs>
           {units.map((unit) => unit.destinationX != null && unit.destinationY != null && unit.ehp > 0 ? <line key={`${unit.id}-move`} className={`move-vector active ${unit.side}`} x1={unit.x} y1={unit.y} x2={unit.destinationX} y2={unit.destinationY} markerEnd={`url(#${unit.side}-arrow)`} /> : null)}
-          {units.map((unit) => {
+          {units.flatMap((unit) => {
+            const sourceLines = (unit.damageSources ?? []).flatMap((source) => {
+              const target = source.targetId ? units.find((candidate) => candidate.id === source.targetId) : null;
+              return target ? [<line key={unit.id + "-source-" + source.id} className={"attack-vector " + unit.side + " source-" + source.kind} x1={unit.x} y1={unit.y} x2={target.x} y2={target.y} markerEnd={"url(#" + unit.side + "-arrow)"} />] : [];
+            });
+            const supportLines=(unit.supportSystems ?? []).flatMap((system,supportIndex)=>{
+              const side=wargameSupportTargetSide(system.kind); if(side === "none")return [];
+              const key=wargameSupportSystemKey(system,supportIndex); const hasAssigned=Object.prototype.hasOwnProperty.call(unit.supportTargetIds??{},key);
+              const targetId=hasAssigned ? unit.supportTargetIds?.[key] : side === "friendly" ? unit.repTargetId : unit.targetId;
+              const target=targetId ? units.find((candidate)=>candidate.id===targetId) : null;
+              return target ? [<line key={unit.id+"-support-"+key} className={"attack-vector "+unit.side+" source-support source-"+system.kind} x1={unit.x} y1={unit.y} x2={target.x} y2={target.y} markerEnd={"url(#"+unit.side+"-arrow)"}/>] : [];
+            });
+            if(sourceLines.length || supportLines.length)return [...sourceLines,...supportLines];
             const target = unit.targetId ? units.find((candidate) => candidate.id === unit.targetId) : null;
-            return target ? <line key={`${unit.id}-target`} className={`attack-vector ${unit.side}`} x1={unit.x} y1={unit.y} x2={target.x} y2={target.y} markerEnd={`url(#${unit.side}-arrow)`} /> : null;
+            return target ? [<line key={unit.id + "-target"} className={"attack-vector " + unit.side} x1={unit.x} y1={unit.y} x2={target.x} y2={target.y} markerEnd={"url(#" + unit.side + "-arrow)"} />] : [];
           })}
           {movePreview && (() => {
             const unit = units.find((candidate) => candidate.id === movePreview.unitId);
             return unit ? <line className={`move-vector ${unit.side}`} x1={unit.x} y1={unit.y} x2={movePreview.x} y2={movePreview.y} markerEnd={`url(#${unit.side}-arrow)`} /> : null;
           })()}
-          {aiResponseVisible && redMain && aiGhost && <line className="ai-response-vector" x1={redMain.x} y1={redMain.y} x2={aiGhost.x} y2={aiGhost.y} markerEnd="url(#red-arrow)" />}
+          {running && combatEffectLinks.flatMap((link) => {
+            const dx = link.to.x - link.from.x;
+            const dy = link.to.y - link.from.y;
+            const length = Math.max(.001, Math.hypot(dx, dy));
+            const nx = -dy / length;
+            const ny = dx / length;
+            const streaks = Math.max(2, Math.min(5, 2 + Math.floor(Math.log2(Math.max(1, link.channels)))));
+            return Array.from({ length: streaks }, (_, streakIndex) => {
+              const lane = (streakIndex - (streaks - 1) / 2) * .18;
+              const duration = link.kind === "dps" ? .68 : link.kind === "logistics" ? 1.08 : .86;
+              return <line
+                key={link.key + "-fx-" + streakIndex}
+                className={"combat-effect-streak " + link.kind}
+                pathLength={100}
+                x1={link.from.x + nx * lane}
+                y1={link.from.y + ny * lane}
+                x2={link.to.x + nx * lane}
+                y2={link.to.y + ny * lane}
+                style={{ animationDelay: (-streakIndex * duration / streaks) + "s", animationDuration: duration + "s" }}
+              />;
+            });
+          })}
         </svg>
 
-        {terrain.map((object) => <div className={`wargame-terrain-object terrain-${object.kind}`} key={object.id} style={{ left: `${object.x}%`, top: `${object.y}%` }} title={object.label}>
+        {terrain.map((object) => <div className={`wargame-terrain-object terrain-${object.kind} ${(orderMode === "align" || orderMode === "warp") ? "targetable" : ""}`} key={object.id} style={{ left: `${object.x}%`, top: `${object.y}%` }} title={object.label} role={(orderMode === "align" || orderMode === "warp") ? "button" : undefined} onClick={(event) => { event.stopPropagation(); if ((orderMode === "align" || orderMode === "warp") && selectedUnit) { executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: selectedUnit.id, mode: orderMode, x: object.x, y: object.y, rangeKm: 0, warpRangeKm: orderMode === "warp" ? warpRangeDraft : 0 }); pushCombatEvents(`${selectedUnit.name}: ${orderMode} order to ${object.label}${orderMode === "warp" ? ` at ${warpRangeDraft} km` : ""}.`); setOrderMode(null); setPhase((current) => current < 1 ? 1 : current); } }}>
           <b>{object.glyph}</b><span>{object.label}</span>
         </div>)}
 
@@ -1172,13 +1084,13 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
           type="button"
           draggable
           key={unit.id}
-          className={`wargame-map-unit ${unit.side} ${selectedUnitId === unit.id ? "selected" : ""} ${unit.ehp <= 0 ? "destroyed" : ""} ${orderMode === "engage" && selectedUnitId !== unit.id ? "targetable" : ""}`}
+          className={`wargame-map-unit ${unit.side} ${selectedUnitId === unit.id ? "selected" : ""} ${unit.ehp <= 0 ? "destroyed" : ""} ${unit.movementState === "warping" ? "warping" : unit.movementState === "aligning" ? "aligning" : ""} ${selectedUnitId !== unit.id && ((orderMode === "engage" && selectedUnit?.side !== unit.side) || (orderMode === "logistics" && selectedUnit?.side === unit.side) || ((orderMode === "tackle" || orderMode === "ewar") && selectedUnit?.side !== unit.side) || orderMode === "align" || orderMode === "warp") ? "targetable" : ""}`}
           style={{ left: `${unit.x}%`, top: `${unit.y}%` }}
           onClick={(event) => handleUnitClick(event, unit)}
           onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.setData("application/x-wargame-unit", unit.id); }}
         >
           <span className="wargame-unit-glyph"><i /><b>{liveShipCount(unit) > 1 ? liveShipCount(unit) : ""}</b></span>
-          <span className="wargame-unit-copy"><strong>{unit.name}</strong><small>{unit.ehp <= 0 ? "DESTROYED" : `${liveShipCount(unit)} / ${unit.count} ships · ${unit.role}`}</small></span>
+          <span className="wargame-unit-copy"><strong>{unit.name}</strong><small>{unit.ehp <= 0 ? "DESTROYED" : `${liveShipCount(unit)} / ${unit.count} ships · ${unit.movementState && unit.movementState !== "idle" ? unit.movementState.toUpperCase() + " · " : ""}${unit.role}`}</small></span>
           <span className="wargame-unit-health"><i style={{ width: `${healthPercent(unit)}%` }} /></span>
         </button>)}
 
@@ -1190,11 +1102,8 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
           </button> : null;
         })()}
 
-        {aiResponseVisible && redMain && aiGhost && <div className="wargame-ai-ghost" style={{ left: `${aiGhost.x}%`, top: `${aiGhost.y}%` }}>
-          <span className="wargame-ai-ghost-glyph" />
-          <strong>RED RESPONSE A</strong>
-          <small>Pressure Blue logistics · 43%</small>
-        </div>}
+
+        </div>
 
         {movePreview && <div className="wargame-order-commit" onClick={(event) => event.stopPropagation()}>
           <div><span>ORDER PREVIEW</span><strong>Move {units.find((unit) => unit.id === movePreview.unitId)?.name}</strong><small>Ghost position is not committed to simulation state.</small></div>
@@ -1219,21 +1128,92 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
 
           <div className="wargame-quick-orders">
             <button type="button" className={orderMode === "move" ? "active" : ""} onClick={() => { setOrderMode("move"); setMovePreview(null); }}><span>↗</span>Move</button>
-            <button type="button" className={orderMode === "engage" ? "active danger" : ""} onClick={() => setOrderMode("engage")}><span>◎</span>Engage</button>
-            <button type="button" onClick={() => { updateUnit(selectedUnit.id, { targetId: undefined, destinationX: undefined, destinationY: undefined }); setOrderMode(null); setMovePreview(null); }}><span>■</span>Hold</button>
+            <button type="button" className={orderMode === "engage" ? "active danger" : ""} onClick={() => setOrderMode("engage")}><span>◆</span>Engage</button>
+            <button type="button" className={orderMode === "align" ? "active" : ""} onClick={() => { setOrderMode("align"); setMovePreview(null); }}><span>→</span>Align</button>
+            <button type="button" className={orderMode === "warp" ? "active warp" : ""} onClick={() => { setOrderMode("warp"); setMovePreview(null); }}><span>✦</span>Warp</button>
+            <button type="button" className={orderMode === "logistics" ? "active logistics" : ""} onClick={() => setOrderMode("logistics")}><span>＋</span>Logi</button>
+            <button type="button" className={orderMode === "tackle" ? "active tackle" : ""} onClick={() => setOrderMode("tackle")}><span>◎</span>Tackle</button>
+            <button type="button" className={orderMode === "ewar" ? "active ewar" : ""} onClick={() => setOrderMode("ewar")}><span>⌁</span>EWAR</button>
+            <button type="button" onClick={() => { assignAllOffence(selectedUnit.id, undefined); executeWargameCommand({ id: `nav-${sessionRef.current.revision + 1}`, kind: "movement-order", source: "human", unitId: selectedUnit.id, mode: "hold" }); setOrderMode(null); setMovePreview(null); }}><span>■</span>Hold</button>
             <button type="button" onClick={startRetreat}><span>⇥</span>Retreat</button>
           </div>
+          {orderMode === "warp" && <div className="wargame-warp-picker">
+            <div><span>WARP DESTINATION</span><small>only FC-placed objects are available</small></div>
+            <label><span>Land at</span><select value={warpRangeDraft} onChange={(event) => setWarpRangeDraft(Math.max(0, Math.min(100, Number(event.target.value) || 0)))}>{[0,10,20,30,50,70,100].map((range) => <option key={range} value={range}>{range} km</option>)}</select></label>
+            <label><span>Warp where</span><select defaultValue="" onChange={(event) => issueWarpDestination(event.target.value)}>
+              <option value="">Choose destination...</option>
+              {units.filter((target) => target.id !== selectedUnit.id && target.ehp > 0).length > 0 && <optgroup label="FLEETS">{units.filter((target) => target.id !== selectedUnit.id && target.ehp > 0).map((target) => <option key={target.id} value={`unit:${target.id}`}>{target.side === selectedUnit.side ? "ALLY" : "HOSTILE"} - {target.name}</option>)}</optgroup>}
+              {terrain.some((item) => item.kind === "stargate") && <optgroup label="GATES">{terrain.filter((item) => item.kind === "stargate").map((item) => <option key={item.id} value={`terrain:${item.id}`}>{item.label}</option>)}</optgroup>}
+              {terrain.some((item) => item.kind === "station" || item.kind === "upwell") && <optgroup label="STRUCTURES">{terrain.filter((item) => item.kind === "station" || item.kind === "upwell").map((item) => <option key={item.id} value={`terrain:${item.id}`}>{item.label}</option>)}</optgroup>}
+              {terrain.some((item) => !["stargate","station","upwell","bubble"].includes(item.kind)) && <optgroup label="CELESTIALS / TACTICAL">{terrain.filter((item) => !["stargate","station","upwell","bubble"].includes(item.kind)).map((item) => <option key={item.id} value={`terrain:${item.id}`}>{item.label}</option>)}</optgroup>}
+            </select></label>
+          </div>}
+
+          <section className="wargame-order-chain">
+            <div className="wargame-section-title"><span>FC ORDER CHAIN</span><small>sequential tactical instructions</small></div>
+            <div className="wargame-order-draft">
+              <label><span>Default hostile</span><select value={orderDraftTarget} onChange={(event) => setOrderDraftTarget(event.target.value)}><option value="">Choose target...</option>{selectedHostiles.map((target) => <option key={target.id} value={target.id}>{target.name} ×{liveShipCount(target)}</option>)}</select></label>
+              <label><span>Advance when</span><select value={orderDraftCompletionTarget} onChange={(event) => setOrderDraftCompletionTarget(event.target.value)}><option value="">Same target destroyed</option>{selectedHostiles.map((target) => <option key={target.id} value={target.id}>{target.name} destroyed</option>)}</select></label>
+              <label><span>Movement</span><select value={orderDraftPropulsion} onChange={(event) => setOrderDraftPropulsion(event.target.value as WargamePropulsionOrder)}><option value="cruise">Cruise / prop conservative</option><option value="prop-on">Prop ON / MWD-AB full</option></select></label>
+              <button type="button" className="primary" onClick={() => addOrderStep(selectedUnit)}>+ Add order step</button>
+              {(selectedUnit.orderChain?.length ?? 0) > 0 && (selectedUnit.activeOrderIndex ?? 0) < (selectedUnit.orderChain?.length ?? 0) && <button type="button" onClick={() => advanceOrderChain(selectedUnit)}>Advance now</button>}
+              {(selectedUnit.orderChain?.length ?? 0) > 0 && <button type="button" onClick={() => clearOrderChain(selectedUnit)}>Clear chain</button>}
+            </div>
+            <div className="wargame-order-chain-list">
+              {(selectedUnit.orderChain ?? []).map((step, stepIndex) => {
+                const active = stepIndex === (selectedUnit.activeOrderIndex ?? 0);
+                return <article key={step.id} className={active ? "active" : ""}>
+                  <header><b>{stepIndex + 1}</b><input value={step.label} onChange={(event) => updateOrderStep(selectedUnit, step.id, { label: event.target.value })} /><span>{active ? "EXECUTING" : stepIndex < (selectedUnit.activeOrderIndex ?? 0) ? "COMPLETE" : "QUEUED"}</span><button type="button" disabled={stepIndex === 0} onClick={() => moveOrderStep(selectedUnit, step.id, -1)}>↑</button><button type="button" disabled={stepIndex === (selectedUnit.orderChain?.length ?? 1) - 1} onClick={() => moveOrderStep(selectedUnit, step.id, 1)}>↓</button><button type="button" onClick={() => removeOrderStep(selectedUnit, step.id)}>×</button></header>
+                  <div className="wargame-order-fire-grid">
+                    {(selectedUnit.damageSources ?? []).map((source) => <label key={source.id}><span>{source.kind.toUpperCase()} · {source.name}</span><select value={step.sourceTargets[source.id] ?? ""} onChange={(event) => updateOrderSourceTarget(selectedUnit, step.id, source.id, event.target.value || undefined)}><option value="">Hold fire</option>{selectedHostiles.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>)}
+                    {!(selectedUnit.damageSources?.length) && <label><span>PRIMARY / LEGACY DAMAGE</span><select value={step.tackleTargetId ?? ""} onChange={(event) => updateOrderStep(selectedUnit, step.id, { tackleTargetId: event.target.value || undefined })}><option value="">No target</option>{selectedHostiles.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>}
+                    {(selectedUnit.supportSystems ?? []).map((system, supportIndex) => {
+                      const supportKey=wargameSupportSystemKey(system,supportIndex); const side=wargameSupportTargetSide(system.kind);
+                      if(side === "none") return <label key={supportKey} className="wargame-command-burst-channel"><span>{system.name}</span><small>Fleet aura · no direct target</small></label>;
+                      const choices=side === "friendly" ? selectedFriendlies : selectedHostiles;
+                      return <label key={supportKey}><span>{system.kind.replace(/([A-Z])/g," $1").toUpperCase()} · {system.name}</span><select value={step.supportTargets?.[supportKey] ?? ""} onChange={(event) => updateOrderSupportTarget(selectedUnit, step.id, supportKey, event.target.value || undefined)}><option value="">{side === "friendly" ? "Auto / unassigned" : "No target"}</option>{choices.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>;
+                    })}
+                    {!(selectedUnit.supportSystems?.length) && <><label><span>TACKLE / OFFENSIVE EWAR</span><select value={step.tackleTargetId ?? ""} onChange={(event) => updateOrderStep(selectedUnit, step.id, { tackleTargetId: event.target.value || undefined })}><option value="">None</option>{selectedHostiles.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label><label><span>REMOTE REPS</span><select value={step.repTargetId ?? ""} onChange={(event) => updateOrderStep(selectedUnit, step.id, { repTargetId: event.target.value || undefined })}><option value="">Auto logistics</option>{selectedFriendlies.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label></>}
+                    <label><span>MOVEMENT ORDER</span><select value={step.movement ?? "legacy"} onChange={(event) => updateOrderStep(selectedUnit, step.id, { movement: event.target.value as WargameMovementOrder })}><option value="legacy">Legacy stance movement</option><option value="approach">Approach</option><option value="orbit">Orbit</option><option value="keep-range">Keep at range</option><option value="anchor">Anchor on</option><option value="align">Align to</option><option value="warp">Warp to</option><option value="disengage">Disengage / burn away</option><option value="hold">Hold position</option></select></label>
+                    <label><span>NAV TARGET</span><select value={step.moveTargetId ? `unit:${step.moveTargetId}` : step.moveTerrainId ? `terrain:${step.moveTerrainId}` : ""} onChange={(event) => { const value = event.target.value; if (value.startsWith("unit:")) updateOrderStep(selectedUnit, step.id, { moveTargetId: value.slice(5), moveTerrainId: undefined, moveX: undefined, moveY: undefined }); else if (value.startsWith("terrain:")) { const object = terrain.find((item) => item.id === value.slice(8)); if (object) updateOrderStep(selectedUnit, step.id, { moveTargetId: undefined, moveTerrainId: object.id, moveX: object.x, moveY: object.y }); } else updateOrderStep(selectedUnit, step.id, { moveTargetId: undefined, moveTerrainId: undefined, moveX: undefined, moveY: undefined }); }}><option value="">No navigation target</option>{units.filter((target) => target.id !== selectedUnit.id).map((target) => <option key={target.id} value={`unit:${target.id}`}>{target.side === selectedUnit.side ? "ALLY" : "HOSTILE"} · {target.name}</option>)}{terrain.map((object) => <option key={object.id} value={`terrain:${object.id}`}>TERRAIN · {object.label}</option>)}</select></label>
+                    {step.movement && !["legacy", "hold", "align"].includes(step.movement) && <label><span>{step.movement === "warp" ? "WARP IN RANGE" : "NAV RANGE"}</span><input type="number" min="0" max={step.movement === "warp" ? 100 : undefined} value={step.movement === "warp" ? (step.warpRangeKm ?? 0) : (step.movementRangeKm ?? 0)} onChange={(event) => step.movement === "warp" ? updateOrderStep(selectedUnit, step.id, { warpRangeKm: Math.max(0, Math.min(100, Number(event.target.value) || 0)) }) : updateOrderStep(selectedUnit, step.id, { movementRangeKm: Math.max(0, Number(event.target.value) || 0) })}/><small>km</small></label>}
+                    <label><span>PROPULSION</span><select value={step.propulsion ?? "cruise"} onChange={(event) => updateOrderStep(selectedUnit, step.id, { propulsion: event.target.value as WargamePropulsionOrder })}><option value="cruise">Cruise</option><option value="prop-on">Prop ON {selectedUnit.propulsionKind ? "(" + selectedUnit.propulsionKind.toUpperCase() + ")" : "(MWD/AB)"}</option></select></label>
+                    <label><span>STANCE</span><select value={step.stance ?? selectedUnit.stance ?? "kite"} onChange={(event) => updateOrderStep(selectedUnit, step.id, { stance: event.target.value as WargameStance })}><option value="pursue">Pursue</option><option value="kite">Kite</option><option value="brawl">Brawl</option><option value="screen">Screen</option><option value="support">Support</option><option value="hold">Hold</option></select></label>
+                    <label><span>STEP COMPLETE</span><select value={step.completion} onChange={(event) => updateOrderStep(selectedUnit, step.id, { completion: event.target.value as WargameOrderStep["completion"] })}><option value="target-destroyed">When target destroyed</option><option value="arrived">When movement arrives</option><option value="after-seconds">After N seconds</option><option value="manual">Manual</option></select></label>
+                    {step.completion === "target-destroyed" && <label><span>COMPLETION TARGET</span><select value={step.completionTargetId ?? ""} onChange={(event) => updateOrderStep(selectedUnit, step.id, { completionTargetId: event.target.value || undefined })}><option value="">Choose...</option>{selectedHostiles.map((target) => <option key={target.id} value={target.id}>{target.name}</option>)}</select></label>}
+                    {step.completion === "after-seconds" && <label><span>DURATION</span><input type="number" min="1" value={step.completionSeconds ?? orderDraftSeconds} onChange={(event) => updateOrderStep(selectedUnit, step.id, { completionSeconds: Math.max(1, Number(event.target.value) || 1) })} /><small>s</small></label>}
+                    <div className="wargame-order-condition-grid">
+                      <label><span>START WHEN</span><select value={step.startWhen?.kind ?? "always"} onChange={(event) => { const kind=event.target.value as WargameOrderCondition["kind"]; updateOrderCondition(selectedUnit,step.id,"startWhen",kind === "always" ? undefined : {kind}); }}><option value="always">Immediately</option>{WARGAME_CONDITION_OPTIONS.filter((item)=>item.value!=="always"&&item.value!=="manual"&&item.value!=="arrived").map((item)=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+                      {step.startWhen && wargameConditionUsesTarget(step.startWhen.kind) && <label><span>START TARGET</span><select value={step.startWhen.targetId ?? ""} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"startWhen",{targetId:event.target.value||undefined})}><option value="">Choose target...</option>{units.filter((candidate)=>candidate.id!==selectedUnit.id).map((target)=><option key={target.id} value={target.id}>{target.name}</option>)}</select></label>}
+                      {step.startWhen && wargameConditionUsesThreshold(step.startWhen.kind) && <label><span>START VALUE</span><input type="number" value={step.startWhen.threshold ?? (step.startWhen.kind.includes("health")||step.startWhen.kind.includes("cap")?50:20)} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"startWhen",{threshold:Number(event.target.value)||0})}/></label>}
+                      {step.startWhen && wargameConditionUsesSeconds(step.startWhen.kind) && <label><span>START DELAY</span><input type="number" min="0" value={step.startWhen.seconds ?? 10} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"startWhen",{seconds:Math.max(0,Number(event.target.value)||0)})}/><small>s</small></label>}
+                      <label><span>ADVANCED COMPLETE</span><select value={step.completeWhen?.kind ?? ""} onChange={(event)=>{const value=event.target.value;updateOrderCondition(selectedUnit,step.id,"completeWhen",value?{kind:value as WargameOrderCondition["kind"]}:undefined);}}><option value="">Use Step Complete above</option>{WARGAME_CONDITION_OPTIONS.filter((item)=>item.value!=="always").map((item)=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+                      {step.completeWhen && wargameConditionUsesTarget(step.completeWhen.kind) && <label><span>COMPLETE TARGET</span><select value={step.completeWhen.targetId ?? ""} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"completeWhen",{targetId:event.target.value||undefined})}><option value="">Choose target...</option>{units.filter((candidate)=>candidate.id!==selectedUnit.id).map((target)=><option key={target.id} value={target.id}>{target.name}</option>)}</select></label>}
+                      {step.completeWhen && wargameConditionUsesThreshold(step.completeWhen.kind) && <label><span>COMPLETE VALUE</span><input type="number" value={step.completeWhen.threshold ?? (step.completeWhen.kind.includes("health")||step.completeWhen.kind.includes("cap")?50:20)} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"completeWhen",{threshold:Number(event.target.value)||0})}/></label>}
+                      {step.completeWhen && wargameConditionUsesSeconds(step.completeWhen.kind) && <label><span>COMPLETE DELAY</span><input type="number" min="0" value={step.completeWhen.seconds ?? 10} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"completeWhen",{seconds:Math.max(0,Number(event.target.value)||0)})}/><small>s</small></label>}
+                      <label><span>BRANCH IF</span><select value={step.branchWhen?.kind ?? ""} onChange={(event)=>{const value=event.target.value;updateOrderCondition(selectedUnit,step.id,"branchWhen",value?{kind:value as WargameOrderCondition["kind"]}:undefined);}}><option value="">No conditional branch</option>{WARGAME_CONDITION_OPTIONS.filter((item)=>!["always","manual","arrived"].includes(item.value)).map((item)=><option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+                      {step.branchWhen && wargameConditionUsesTarget(step.branchWhen.kind) && <label><span>BRANCH TARGET</span><select value={step.branchWhen.targetId ?? ""} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"branchWhen",{targetId:event.target.value||undefined})}><option value="">Choose target...</option>{units.filter((candidate)=>candidate.id!==selectedUnit.id).map((target)=><option key={target.id} value={target.id}>{target.name}</option>)}</select></label>}
+                      {step.branchWhen && wargameConditionUsesThreshold(step.branchWhen.kind) && <label><span>BRANCH VALUE</span><input type="number" value={step.branchWhen.threshold ?? (step.branchWhen.kind.includes("health")||step.branchWhen.kind.includes("cap")?50:20)} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"branchWhen",{threshold:Number(event.target.value)||0})}/></label>}
+                      {step.branchWhen && wargameConditionUsesSeconds(step.branchWhen.kind) && <label><span>BRANCH TIME</span><input type="number" min="0" value={step.branchWhen.seconds ?? 10} onChange={(event)=>updateOrderCondition(selectedUnit,step.id,"branchWhen",{seconds:Math.max(0,Number(event.target.value)||0)})}/><small>s</small></label>}
+                      {step.branchWhen && <><label><span>IF TRUE →</span><select value={step.nextStepId ?? ""} onChange={(event)=>updateOrderStep(selectedUnit,step.id,{nextStepId:event.target.value||undefined})}><option value="">Next step</option>{(selectedUnit.orderChain??[]).filter((candidate)=>candidate.id!==step.id).map((candidate)=><option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}<option value="__end__">End chain</option></select></label><label><span>IF FALSE →</span><select value={step.elseStepId ?? ""} onChange={(event)=>updateOrderStep(selectedUnit,step.id,{elseStepId:event.target.value||undefined})}><option value="">Next step</option>{(selectedUnit.orderChain??[]).filter((candidate)=>candidate.id!==step.id).map((candidate)=><option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}<option value="__end__">End chain</option></select></label></>}
+                    </div>
+                  </div>
+                </article>;
+              })}
+              {!(selectedUnit.orderChain?.length) && <small className="wargame-order-empty">No chain queued. A direct Engage order still works; add steps when you want FC-style sequencing.</small>}
+            </div>
+          </section>
 
           <section className="wargame-stat-editor">
-            <div className="wargame-section-title"><span>SIMULATION VALUES</span><small>Overrides are scenario-local</small></div>
-            <div className="wargame-stat-grid">
+            <div className="wargame-section-title"><span>SIMULATION VALUES</span><small>{selectedUnit.simulationReady === false ? "No fit - combat disabled" : "Overrides are scenario-local"}</small></div>
+            {selectedUnit.simulationReady === false ? <div className="wargame-unconfigured-state"><strong>FIT REQUIRED FOR COMBAT</strong><span>Weapons, drones, reps, tackle and EWAR are disabled until a fit is linked. Movement, align and warp use the real bare-hull navigation profile from Sage DOGMA.</span></div> : <div className="wargame-stat-grid">
               <label><span>Ships</span><input type="number" min="1" value={selectedUnit.count} onChange={(event) => { const count = Math.max(1, Number(event.target.value) || 1); const total = selectedUnit.maxEhp ?? selectedUnit.ehp; updateUnit(selectedUnit.id, { count, shipsAlive: count, primaryEhp: total / count, ehp: total }); }} /></label>
               <label><span>DPS</span><input type="number" value={selectedUnit.dps} onChange={(event) => updateUnit(selectedUnit.id, { dps: Number(event.target.value) || 0 })} /></label>
               <label><span>EHP</span><input type="number" value={selectedUnit.maxEhp ?? selectedUnit.ehp} onChange={(event) => { const value = Math.max(0, Number(event.target.value) || 0); updateUnit(selectedUnit.id, { ehp: value, maxEhp: value, shipsAlive: selectedUnit.count, primaryEhp: value / Math.max(1, selectedUnit.count) }); }} /><small>{Math.round(selectedUnit.ehp).toLocaleString()} remaining</small></label>
               <label><span>Top speed</span><input type="number" value={selectedUnit.speed} onChange={(event) => updateUnit(selectedUnit.id, { speed: Number(event.target.value) || 0 })} /><small>m/s</small></label>
               <label><span>Combat range</span><input type="number" value={selectedUnit.range} onChange={(event) => updateUnit(selectedUnit.id, { range: Number(event.target.value) || 0 })} /><small>km</small></label>
               <label><span>Role</span><input value={selectedUnit.role} onChange={(event) => updateUnit(selectedUnit.id, { role: event.target.value })} /></label>
-            </div>
+            </div>}
           </section>
 
           <section className="wargame-tactical-systems">
@@ -1252,6 +1232,24 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
               <label><span>Web strength</span><input type="number" min="0" max="90" value={Math.round((selectedUnit.webStrength ?? 0) * 100)} onChange={(event) => updateUnit(selectedUnit.id, { webStrength: Math.max(0, Math.min(.9, (Number(event.target.value) || 0) / 100)) })}/><small>%</small></label>
               <label><span>Web range</span><input type="number" min="0" value={selectedUnit.webRange ?? 0} onChange={(event) => updateUnit(selectedUnit.id, { webRange: Math.max(0, Number(event.target.value) || 0) })}/><small>km</small></label>
               <label><span>Tackle range</span><input type="number" min="0" value={selectedUnit.tackleRange ?? 0} onChange={(event) => updateUnit(selectedUnit.id, { tackleRange: Math.max(0, Number(event.target.value) || 0) })}/><small>km</small></label>
+              <label><span>Align time</span><input type="number" min="0.1" step="0.1" value={selectedUnit.alignTimeSeconds ?? 6} onChange={(event) => updateUnit(selectedUnit.id, { alignTimeSeconds: Math.max(.1, Number(event.target.value) || .1) })}/><small>s</small></label>
+              <label><span>Warp speed</span><input type="number" min="0.1" step="0.1" value={selectedUnit.warpSpeedAuPerSecond ?? 3} onChange={(event) => updateUnit(selectedUnit.id, { warpSpeedAuPerSecond: Math.max(.1, Number(event.target.value) || .1) })}/><small>AU/s</small></label>
+              <label><span>Warp core</span><input type="number" min="0" step="1" value={selectedUnit.warpCoreStrength ?? 0} onChange={(event) => updateUnit(selectedUnit.id, { warpCoreStrength: Math.max(0, Number(event.target.value) || 0) })}/><small>strength</small></label>
+              <label><span>Interdiction field</span><input type="number" min="0" value={selectedUnit.interdictionRadiusKm ?? 0} onChange={(event) => updateUnit(selectedUnit.id, { interdictionRadiusKm: Math.max(0, Number(event.target.value) || 0) })}/><small>km</small></label>
+            </div>
+            <div className="wargame-fire-control">
+              <div className="wargame-support-stack-head"><span>FIRE CONTROL</span><small>independent damage channels</small></div>
+              {(selectedUnit.damageSources ?? []).length ? (selectedUnit.damageSources ?? []).map((source) => {
+                const target = source.targetId ? units.find((candidate) => candidate.id === source.targetId) : undefined;
+                const range = target ? wargameDistanceKm(selectedUnit, target) : null;
+                const application = target ? damageSourceApplication(selectedUnit, source, target, range ?? undefined) : 0;
+                return <div className={"wargame-damage-source " + source.kind} key={source.id}>
+                  <div><strong>{source.name}</strong><small>{source.kind.toUpperCase()} · {Math.round(source.dpsPerShip).toLocaleString()} DPS/ship · {Math.round(source.volleyPerShip).toLocaleString()} volley</small></div>
+                  <select value={source.targetId ?? ""} onChange={(event) => updateDamageSourceTarget(selectedUnit.id, source.id, event.target.value || undefined)}><option value="">HOLD FIRE</option>{selectedHostiles.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select>
+                  <span>{target ? (range?.toFixed(1) + " km · " + Math.round(application * 100) + "% app") : "No target"}{source.kind === "drone" && source.droneArrivalRemaining ? " · drones " + Math.ceil(source.droneArrivalRemaining) + "s out" : ""}</span>
+                </div>;
+              }) : <small className="wargame-order-empty">Scenario-only formation: one legacy damage channel. Link an EVE fit to split guns, missiles and drones.</small>}
+              {(selectedUnit.damageSources?.length ?? 0) > 1 && <small className="wargame-fire-control-note">Damage sources may be assigned to different primaries. Engage on the map assigns every channel together; use these controls or the order chain to split them.</small>}
             </div>
             <div className="wargame-tactical-telemetry">
               <div><span>TARGET</span><strong>{selectedTarget ? selectedTarget.name : "None"}</strong><small>{selectedTargetRange == null ? "No firing solution" : `${selectedTargetRange.toFixed(1)} km`}</small></div>
@@ -1259,12 +1257,15 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
               <div><span>FORMATION VOLLEY</span><strong>{selectedUnit.volleyPerShip ? Math.round(selectedUnit.volleyPerShip * liveShipCount(selectedUnit)).toLocaleString() : Math.round((selectedUnit.dps || 0) * (selectedUnit.weaponCycle ?? defaultWeaponCycle(selectedUnit)) * (liveShipCount(selectedUnit) / Math.max(1, selectedUnit.count))).toLocaleString()}</strong><small>{selectedUnit.fitName ? "fit-derived paper volley" : "scenario estimate"}</small></div>
               <div><span>WEAPON ENVELOPE</span><strong>{selectedUnit.optimalRange != null ? `${selectedUnit.optimalRange.toFixed(1)} + ${(selectedUnit.falloffRange ?? 0).toFixed(1)} km` : `${Math.round(selectedUnit.range)} km`}</strong><small>{selectedUnit.fitName ? "CCP DOGMA / loaded ammo" : "scenario range"}</small></div>
               <div><span>CURRENT PRIMARY</span><strong>{liveShipCount(selectedUnit) ? `${Math.round(primaryEhp(selectedUnit)).toLocaleString()} / ${Math.round(perShipEhp(selectedUnit)).toLocaleString()} EHP` : "DESTROYED"}</strong><small>{liveShipCount(selectedUnit)} of {selectedUnit.count} ships active</small></div>
-              <div><span>NEXT VOLLEY</span><strong>{selectedUnit.dps > 0 ? `${Math.round(selectedVolley).toLocaleString()} EHP` : "-"}</strong><small>{selectedUnit.lockRemaining && selectedUnit.lockRemaining > 0 ? `LOCKING ${selectedUnit.lockRemaining.toFixed(1)}s` : selectedUnit.fireCooldown && selectedUnit.fireCooldown > 0 ? `CYCLE ${selectedUnit.fireCooldown.toFixed(1)}s` : "READY"}</small></div>
+              <div><span>NEXT VOLLEY</span><strong>{selectedUnit.dps > 0 ? `${Math.round(selectedVolley).toLocaleString()} raw` : "-"}</strong><small>{selectedSourceStats.length ? `${selectedReadySources}/${selectedSourceStats.length} damage channels ready` : selectedUnit.lockRemaining && selectedUnit.lockRemaining > 0 ? `LOCKING ${selectedUnit.lockRemaining.toFixed(1)}s` : selectedUnit.fireCooldown && selectedUnit.fireCooldown > 0 ? `CYCLE ${selectedUnit.fireCooldown.toFixed(1)}s` : "READY"}</small></div>
               <div><span>MOTION</span><strong>{Math.round(selectedUnit.effectiveSpeed ?? velocityMps(selectedUnit)).toLocaleString()} m/s</strong><small>{selectedWebbers.length ? `WEBBED by ${selectedWebbers.map((unit) => unit.name).join(", ")}` : "No hostile web"}</small></div>
               <div><span>RANGE CONTROL</span><strong>{selectedRangeRate == null ? "-" : `${Math.abs(Math.round(selectedRangeRate)).toLocaleString()} m/s`}</strong><small>{selectedRangeRate == null ? "No target" : selectedRangeRate > 60 ? "OPENING" : selectedRangeRate < -60 ? "CLOSING" : "STABLE"}{selectedTarget && (selectedUnit.stance ?? "kite") === "kite" && (selectedUnit.effectiveSpeed ?? selectedUnit.speed) < (selectedTarget.effectiveSpeed ?? selectedTarget.speed) ? " · PURSUER FASTER" : ""}</small></div>
               <div><span>REMOTE REPS</span><strong>{selectedRepTarget ? selectedRepTarget.name : (selectedUnit.repPerSecond ? "Idle" : "None")}</strong><small>{selectedUnit.repPerSecond ? `${Math.round(selectedUnit.repPerSecond).toLocaleString()} HP/s · ${(selectedUnit.repRange ?? 0).toFixed(1)} km` : "No logistics output"}</small></div>
               <div><span>CAPACITOR</span><strong>{selectedUnit.capacitorCapacity ? `${Math.round(((selectedUnit.capacitorCurrent ?? selectedUnit.capacitorCapacity) / selectedUnit.capacitorCapacity) * 100)}%` : "-"}</strong><small>{selectedUnit.capacitorCapacity ? `${Math.round(selectedUnit.capacitorCurrent ?? selectedUnit.capacitorCapacity).toLocaleString()} / ${Math.round(selectedUnit.capacitorCapacity).toLocaleString()} GJ${selectedUnit.neutPressureGjPerSecond ? ` · -${selectedUnit.neutPressureGjPerSecond.toFixed(1)} GJ/s hostile` : ""}` : "No fit capacitor data"}</small></div>
               <div><span>EWAR STATE</span><strong>{selectedUnit.jamRemaining ? "JAMMED" : selectedUnit.scrammed ? "SCRAMMED" : selectedWebbers.length ? "WEBBED" : "CLEAR"}</strong><small>{selectedUnit.jamRemaining ? `${selectedUnit.jamRemaining.toFixed(0)}s remaining` : `${Math.round((selectedUnit.ewarSignatureMultiplier ?? 1) * 100)}% sig · ${Math.round((selectedUnit.ewarTrackingMultiplier ?? 1) * 100)}% tracking · ${Math.round((selectedUnit.ewarTargetingRangeMultiplier ?? 1) * 100)}% lock range`}</small></div>
+              <div><span>NAVIGATION</span><strong>{(selectedUnit.movementState ?? "idle").toUpperCase()}</strong><small>{selectedUnit.movementState === "aligning" ? `${Math.max(0, (selectedUnit.alignTimeSeconds ?? 6) - (selectedUnit.alignElapsedSeconds ?? 0)).toFixed(1)}s to align` : selectedUnit.movementState === "warping" ? `${(selectedUnit.warpRemainingSeconds ?? 0).toFixed(1)}s in warp` : selectedUnit.warpBlockedReason ? selectedUnit.warpBlockedReason : `${(selectedUnit.alignTimeSeconds ?? 6).toFixed(1)}s align · ${(selectedUnit.warpSpeedAuPerSecond ?? 3).toFixed(1)} AU/s`}</small></div>
+              <div><span>WARP CONTROL</span><strong>{(selectedUnit.warpDisruptionStrength ?? 0) > (selectedUnit.warpCoreStrength ?? 0) ? "TACKLED" : selectedUnit.interdictionNullified ? "NULLIFIED" : "CLEAR"}</strong><small>{`${Math.round(selectedUnit.warpDisruptionStrength ?? 0)} point strength · ${Math.round(selectedUnit.warpCoreStrength ?? 0)} core${selectedUnit.tackleSourceIds?.length ? ` · ${selectedUnit.tackleSourceIds.length} source(s)` : ""}`}</small></div>
+              <div><span>COMMAND BURSTS</span><strong>{selectedUnit.burstSourceNames?.length ? selectedUnit.burstSourceNames.join(", ") : "NONE"}</strong><small>{selectedUnit.burstSourceNames?.length ? `in-range fleet boosts · ${Math.round((selectedUnit.burstPropulsionSpeedMultiplier ?? 1)*100)}% prop · ${Math.round((selectedUnit.burstSensorStrengthMultiplier ?? 1)*100)}% sensor` : "No friendly burst source in range"}</small></div>
             </div>
           </section>
 
@@ -1273,6 +1274,7 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
               {selectedUnit.supportSystems.map((system, index) => <div className={`wargame-support-system ${system.kind}`} key={`${system.kind}-${system.typeId}-${index}`}>
                 <div><strong>{system.name}{system.quantity > 1 ? ` ×${system.quantity}` : ""}</strong><small>{system.kind.replace(/([A-Z])/g, " $1")}</small></div>
                 <span>{supportSystemDetail(system)}</span>
+                {wargameSupportTargetSide(system.kind) !== "none" && (()=>{ const supportKey=wargameSupportSystemKey(system,index); const side=wargameSupportTargetSide(system.kind); const choices=side === "friendly" ? selectedFriendlies : selectedHostiles; return <select value={selectedUnit.supportTargetIds?.[supportKey] ?? ""} onChange={(event)=>updateSupportSystemTarget(selectedUnit.id,supportKey,event.target.value||undefined)}><option value="">{side === "friendly" ? "AUTO / UNASSIGNED" : "NO TARGET"}</option>{choices.map((target)=><option key={target.id} value={target.id}>{target.name}</option>)}</select>; })()}
               </div>)}
             </div> : null}
 
@@ -1282,8 +1284,9 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
           </section>
 
           <section className="wargame-fit-bridge">
-            <div className="wargame-section-title"><span>FIT / DATA SOURCE</span><small>{selectedUnit.fitName ? "Sage DOGMA linked" : "Scenario values"}</small></div>
+            <div className="wargame-section-title"><span>FIT / DATA SOURCE</span><small>{selectedUnit.simulationReady === false ? "FIT REQUIRED FOR COMBAT" : selectedUnit.fitName ? "Sage DOGMA linked" : "Scenario / manual values"}</small></div>
             <div className="wargame-fit-actions"><button type="button" onClick={() => setFitImportOpen((value) => !value)}>Import EVE fit</button><button type="button" disabled={!selectedUnit.fitName}>{selectedUnit.fitName ? "Fit linked" : "No fit linked"}</button></div>
+            <div className="wargame-saved-fit-import"><select defaultValue="" disabled={fitImportBusy || !savedFits.some((fit) => fit.hullTypeId === selectedUnit.typeId || (!fit.hullTypeId && fit.hullName.toLowerCase() === selectedUnit.name.toLowerCase()))} onChange={(event) => { const value=event.target.value; if(value) void applySavedFitToSelected(value); event.currentTarget.value=""; }}><option value="">Saved fit for this hull...</option>{savedFits.filter((fit) => fit.hullTypeId === selectedUnit.typeId || (!fit.hullTypeId && fit.hullName.toLowerCase() === selectedUnit.name.toLowerCase())).map((fit) => <option key={fit.id} value={fit.id}>{fit.name} [{fit.source}]</option>)}</select><small>{savedFitsStatus}</small></div>
             {selectedUnit.fitName && <div className="wargame-fit-source"><span>FIT-LINKED</span><strong>{selectedUnit.fitName}</strong><small>{selectedUnit.fitSourceSummary ?? selectedUnit.fitCharacter}</small></div>}
             {fitImportStatus && <small className="wargame-fit-status">{fitImportStatus}</small>}
             {fitImportOpen && <div className="wargame-fit-import"><textarea value={fitImportText} onChange={(event) => setFitImportText(event.target.value)} placeholder="Paste EFT / PYFA or Sage JSON fit here..." /><button type="button" disabled={!fitImportText.trim() || fitImportBusy} onClick={() => void applyFitToSelected()}>{fitImportBusy ? "Calculating through Sage..." : "Apply real fit stats"}</button><small>Uses {corporation.characterName}'s current synced skills and Sage's existing fitting/DOGMA engine.</small></div>}
@@ -1317,7 +1320,7 @@ function WargameMap({ corporation, onNavigate }: { corporation: FleetCorporation
   </div>;
 }
 
-export function FleetCommand({ onWargameActiveChange }: { onWargameActiveChange?: (active: boolean) => void }) {
+export function FleetCommand({ onWargameActiveChange, active = true }: { onWargameActiveChange?: (active: boolean) => void; active?: boolean }) {
   const [snapshots, setSnapshots] = useState<any[]>([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   const [tab, setTab] = useState<FleetCommandTab>("doctrines");
@@ -1326,6 +1329,8 @@ export function FleetCommand({ onWargameActiveChange }: { onWargameActiveChange?
   const [jumpLocationError, setJumpLocationError] = useState("");
   const [followCharacter, setFollowCharacter] = useState(false);
   const [jumpSelectedSystem, setJumpSelectedSystem] = useState<NavigationSystem | null>(null);
+  const mountedTabs = useRef(new Set<FleetCommandTab>(["doctrines"]));
+  mountedTabs.current.add(tab);
 
   async function reloadSnapshots() {
     try {
@@ -1338,9 +1343,9 @@ export function FleetCommand({ onWargameActiveChange }: { onWargameActiveChange?
 
   useEffect(() => { void reloadSnapshots(); }, []);
   useEffect(() => {
-    onWargameActiveChange?.(tab === "wargame");
+    onWargameActiveChange?.(active && tab === "wargame");
     return () => onWargameActiveChange?.(false);
-  }, [tab, onWargameActiveChange]);
+  }, [active, tab, onWargameActiveChange]);
 
   const corporations = useMemo<FleetCorporation[]>(() => snapshots.flatMap((snapshot) => {
     const corporationId = Number(snapshot?.character?.corporation_id ?? 0);
@@ -1429,29 +1434,14 @@ export function FleetCommand({ onWargameActiveChange }: { onWargameActiveChange?
       </div>
     </>}
 
-    {corporation
-      ? tab === "doctrines"
-        ? <CorporationDoctrines corporation={corporation} snapshots={snapshots} />
-        : tab === "jump-map"
-          ? <div className="fleet-jump-map-view">
-              <div className="fleet-jump-map-location">
-                <div><span>CURRENT CHARACTER</span><strong>{corporation.characterName}</strong><small>{jumpLocation ? `${jumpLocation.systemName} / ${jumpLocation.source === "live-esi" ? "LIVE ESI" : "SYNCED SNAPSHOT"}` : "Location not loaded"}</small></div>
-                <button type="button" disabled={jumpLocationBusy} onClick={() => void refreshJumpLocation(true)}>{jumpLocationBusy ? "Checking..." : "Refresh location"}</button>
-              </div>
-              {jumpLocationError && <div className="on-the-fly-warning">{jumpLocationError}</div>}
-              <OnTheFlyJumpMap
-                route={null}
-                routeIntelligence={null}
-                characterLocation={jumpLocation}
-                followCharacter={followCharacter}
-                setFollowCharacter={setFollowCharacter}
-                hasSelectedCharacter={Boolean(corporation.characterId)}
-                selectedSystem={jumpSelectedSystem}
-                onSelectSystem={setJumpSelectedSystem}
-                specialConnections={[]}
-              />
-            </div>
-          : <WargameMap corporation={corporation} onNavigate={setTab} />
-      : <div className="corp-data-view"><p className="eyebrow">FLEET COMMAND</p><h3>Connect a corporation character</h3><p>Sync a connected EVE character to load corporation doctrine and tactical data.</p></div>}
+    {corporation ? <>
+      {mountedTabs.current.has("doctrines") && <div className="fleet-command-cached-tab" hidden={tab !== "doctrines"}><CorporationDoctrines corporation={corporation} snapshots={snapshots} /></div>}
+      {mountedTabs.current.has("jump-map") && <div className="fleet-command-cached-tab" hidden={tab !== "jump-map"}><div className="fleet-jump-map-view">
+        <div className="fleet-jump-map-location"><div><span>CURRENT CHARACTER</span><strong>{corporation.characterName}</strong><small>{jumpLocation ? `${jumpLocation.systemName} / ${jumpLocation.source === "live-esi" ? "LIVE ESI" : "SYNCED SNAPSHOT"}` : "Location not loaded"}</small></div><button type="button" disabled={jumpLocationBusy} onClick={() => void refreshJumpLocation(true)}>{jumpLocationBusy ? "Checking..." : "Refresh location"}</button></div>
+        {jumpLocationError && <div className="on-the-fly-warning">{jumpLocationError}</div>}
+        <OnTheFlyJumpMap route={null} routeIntelligence={null} characterLocation={jumpLocation} followCharacter={followCharacter} setFollowCharacter={setFollowCharacter} hasSelectedCharacter={Boolean(corporation.characterId)} selectedSystem={jumpSelectedSystem} onSelectSystem={setJumpSelectedSystem} specialConnections={[]} />
+      </div></div>}
+      {mountedTabs.current.has("wargame") && <div className="fleet-command-cached-tab fleet-command-cached-wargame" hidden={tab !== "wargame"}><WargameMap corporation={corporation} onNavigate={setTab} active={active && tab === "wargame"} /></div>}
+    </> : <div className="corp-data-view"><p className="eyebrow">FLEET COMMAND</p><h3>Connect a corporation character</h3><p>Sync a connected EVE character to load corporation doctrine and tactical data.</p></div>}
   </section>;
 }

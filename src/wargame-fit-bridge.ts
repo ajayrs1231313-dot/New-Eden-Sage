@@ -1,5 +1,8 @@
 import { parseFits, type Fit, type FitItem } from "./fitting-engine";
 import { canonicalizeFittingPlacement } from "./fitting-rack-normalization";
+import type { WargameDamageSource } from "./wargame-command-model";
+import type { WargameSupportSystem } from "./wargame-types";
+export type { WargameSupportSystem } from "./wargame-types";
 
 type ResolvedFitItem = FitItem & { activeQuantity?: number };
 type ResolvedFit = Omit<Fit, "hull" | "low" | "mid" | "high" | "rig" | "subsystem" | "drones" | "fighters" | "cargo" | "implants" | "boosters"> & {
@@ -18,14 +21,6 @@ type ResolvedFit = Omit<Fit, "hull" | "low" | "mid" | "high" | "rig" | "subsyste
 
 type DamageProfile = { em: number; thermal: number; kinetic: number; explosive: number };
 type ResistVector = [number, number, number, number];
-
-export type WargameSupportSystem = {
-  typeId: number; name: string; groupId: number; quantity: number; state?: string; kind: string;
-  cycleSeconds: number; optimalM: number; falloffM: number; chargeTypeId?: number;
-  amountPerCycle?: number; perSecond?: number; strength?: number; warpStrength?: number; mwdShutdown?: boolean;
-  signatureBonus?: number; maxTargetRangeBonus?: number; scanResolutionBonus?: number; sensorStrengthBonus?: number;
-  optimalBonus?: number; falloffBonus?: number; trackingBonus?: number; sensorStrengths?: number[];
-};
 
 export type WargameFitResult = {
   fitName: string;
@@ -61,11 +56,15 @@ export type WargameFitResult = {
   webRangeKm: number;
   tackleRangeKm: number;
   supportSystems: WargameSupportSystem[];
+  damageSources: WargameDamageSource[];
+  environmentSources: Array<{ typeId: number; name: string }>;
   capacitorCapacityGj: number;
   capacitorRechargeSeconds: number;
   capacitorDemandGjPerSecond: number;
   capacitorInjectedGjPerSecond: number;
   baseSpeedMps: number;
+  alignTimeSeconds: number;
+  warpSpeedAuPerSecond: number;
   propulsionKind?: "ab" | "mwd";
   targetingRangeKm: number;
   scanResolution: number;
@@ -199,7 +198,7 @@ async function supportProfile(fit: ResolvedFit) {
   return { repPerSecond, repRangeKm, repCycle, webStrength, webRangeKm, tackleRangeKm };
 }
 
-export async function analyzeWargameFit(text: string, characterId: string): Promise<WargameFitResult> {
+export async function analyzeWargameFit(text: string, characterId: string, environmentTypeIds: number[] = []): Promise<WargameFitResult> {
   const fit = await resolveFit(text);
   const rackItems = (["low", "mid", "high", "rig", "subsystem"] as const).flatMap((rack) =>
     fit[rack].flatMap((item) => item.typeId ? [{
@@ -226,10 +225,73 @@ export async function analyzeWargameFit(text: string, characterId: string): Prom
     damageProfile: { em: .25, thermal: .25, kinetic: .25, explosive: .25 },
     implantTypeIds: fit.implants.flatMap((item) => item.typeId ? [item.typeId] : []),
     boosterTypeIds: fit.boosters.flatMap((item) => item.typeId ? [item.typeId] : []),
+    environmentTypeIds,
   });
   const weaponProfiles = Array.isArray(analysis?.damage?.weaponProfiles) ? analysis.damage.weaponProfiles : [];
   const dominantWeapon = [...weaponProfiles].sort((a, b) => Number(b.paperDps ?? 0) - Number(a.paperDps ?? 0))[0];
   const activeDrones = Array.isArray(analysis?.damage?.activeDrones) ? analysis.damage.activeDrones : [];
+  const profileFromVector = (vector: unknown) => normalizedDamageVector([vector]);
+  const weaponDamageSources: WargameDamageSource[] = weaponProfiles.map((profile: any, index: number) => {
+    const kind = profile?.kind === "missile" ? "missile" : "turret";
+    const optimalKm = kind === "turret" ? Math.max(0, Number(profile.optimalM) || 0) / 1000 : undefined;
+    const falloffKm = kind === "turret" ? Math.max(0, Number(profile.falloffM) || 0) / 1000 : undefined;
+    const maxRangeKm = kind === "turret"
+      ? Math.max(0.1, (Number(profile.optimalM) || 0) / 1000 + ((Number(profile.falloffM) || 0) / 1000) * 2)
+      : Math.max(0.1, (Number(profile.maximumRangeM) || 0) / 1000);
+    return {
+      id: `weapon-${Number(profile.typeId) || 0}-${Number(profile.chargeTypeId) || String(profile.charge ?? "loaded").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${index}`,
+      name: `${String(profile.name ?? "Weapon")}${profile.charge ? ` / ${profile.charge}` : ""}`,
+      kind,
+      dpsPerShip: Math.max(0, Number(profile.paperDps) || 0),
+      volleyPerShip: Math.max(0, Number(profile.volley) || 0),
+      cycleSeconds: Math.max(0.1, Number(profile.cycleSeconds) || 1),
+      maxRangeKm,
+      optimalKm,
+      falloffKm,
+      tracking: kind === "turret" ? Math.max(0, Number(profile.tracking) || 0) : undefined,
+      signatureResolutionM: kind === "turret" ? Math.max(0, Number(profile.signatureResolutionM) || 0) : undefined,
+      explosionRadiusM: kind === "missile" ? Math.max(0, Number(profile.explosionRadiusM) || 0) : undefined,
+      explosionVelocityMps: kind === "missile" ? Math.max(0, Number(profile.explosionVelocity) || 0) : undefined,
+      damageReductionFactor: kind === "missile" ? Math.max(0, Number(profile.damageReductionFactor) || 0) : undefined,
+      damageProfile: profileFromVector(profile.damageVector),
+    };
+  });
+  const droneGroups = new Map<string, WargameDamageSource & { activeCount: number }>();
+  for (const drone of activeDrones) {
+    const key = String(Number(drone.typeId) || drone.name || "drone");
+    const existing = droneGroups.get(key);
+    if (existing) {
+      existing.activeCount += 1;
+      existing.dpsPerShip += Math.max(0, Number(drone.dps) || 0);
+      existing.volleyPerShip += Math.max(0, Number(drone.volley) || 0);
+      continue;
+    }
+    const optimalKm = Math.max(0, Number(drone.optimalM) || 0) / 1000;
+    const falloffKm = Math.max(0, Number(drone.falloffM) || 0) / 1000;
+    const droneControlKm = Math.max(0, Number(analysis?.damage?.droneControlDistanceM) || 0) / 1000;
+    droneGroups.set(key, {
+      id: `drone-${key}`,
+      name: String(drone.name ?? "Drone flight"),
+      kind: "drone",
+      dpsPerShip: Math.max(0, Number(drone.dps) || 0),
+      volleyPerShip: Math.max(0, Number(drone.volley) || 0),
+      cycleSeconds: Math.max(0.1, Number(drone.volley) > 0 && Number(drone.dps) > 0 ? Number(drone.volley) / Number(drone.dps) : 2),
+      maxRangeKm: Math.max(0.1, droneControlKm, optimalKm + falloffKm * 2),
+      optimalKm,
+      falloffKm,
+      tracking: Math.max(0, Number(drone.tracking) || 0),
+      signatureResolutionM: Math.max(0, Number(drone.signatureResolutionM) || 0),
+      droneMaximumVelocityMps: Math.max(0, Number(drone.maximumVelocityMps) || 0),
+      droneControlRangeKm: droneControlKm,
+      droneOrbitVelocityMps: Math.max(0, Number(drone.orbitVelocityMps) || 0),
+      droneOrbitRangeKm: Math.max(0, Number(drone.orbitRangeM) || 0) / 1000,
+      sentry: Boolean(drone.sentry),
+      damageProfile: profileFromVector(drone.damageVector),
+      activeCount: 1,
+    });
+  }
+  const droneDamageSources: WargameDamageSource[] = [...droneGroups.values()].map(({ activeCount, ...source }) => ({ ...source, name: activeCount > 1 ? `${source.name} x${activeCount}` : source.name }));
+  const damageSources: WargameDamageSource[] = [...weaponDamageSources, ...droneDamageSources];
   const weaponDps = Math.max(0, Number(analysis?.damage?.weaponDps) || 0);
   const droneDps = Math.max(0, Number(analysis?.damage?.droneDps) || 0);
   const perShipDps = Math.max(0, Number(analysis?.damage?.totalDps) || 0);
@@ -296,11 +358,15 @@ export async function analyzeWargameFit(text: string, characterId: string): Prom
     webRangeKm,
     tackleRangeKm,
     supportSystems,
+    damageSources,
+    environmentSources: Array.isArray(analysis?.environmentSources) ? analysis.environmentSources.map((source: any) => ({ typeId: Number(source.typeId), name: String(source.name ?? source.typeId) })) : [],
     capacitorCapacityGj: Math.max(0, Number(analysis?.capacitor?.capacityGj) || 0),
     capacitorRechargeSeconds: Math.max(0, Number(analysis?.capacitor?.rechargeSeconds) || 0),
     capacitorDemandGjPerSecond: Math.max(0, Number(analysis?.capacitor?.demandGjPerSecond) || 0),
     capacitorInjectedGjPerSecond: Math.max(0, Number(analysis?.capacitor?.injectedGjPerSecond) || 0),
     baseSpeedMps: Math.max(0, Number(analysis?.navigation?.baseMaximumVelocity) || 0),
+    alignTimeSeconds: Math.max(0.1, Number(analysis?.navigation?.alignSeconds) || 6),
+    warpSpeedAuPerSecond: Math.max(0.1, Number(analysis?.navigation?.warpSpeedAuPerSecond) || 3),
     propulsionKind: Array.isArray(analysis?.navigation?.activePropulsion) && analysis.navigation.activePropulsion.length ? analysis.navigation.activePropulsion[0].kind : undefined,
     targetingRangeKm: Math.max(0, Number(analysis?.targeting?.maximumRangeM) || 0) / 1000,
     scanResolution: Math.max(0, Number(analysis?.targeting?.scanResolution) || 0),
