@@ -11,6 +11,9 @@ export interface PublicConfig {
   eveClientId: string;
   callbackUrl: string;
   connectedCharacterIds: string[];
+  esiScopeSchemaVersion: number;
+  reauthorizationRequiredCharacterIds: string[];
+  eveAuthorizations: Record<string, { scopeSchemaVersion:number; authorisedAt:string; grantedScopes:string[]; lastFullPrivateSyncAt?:string; lastRefreshStatus?:"ready"|"error"; lastRefreshError?:string }>;
   sageOnlineConnected: boolean;
   identitySchemaVersion: number;
   sageAccountId: string | null;
@@ -89,6 +92,7 @@ export interface CharacterSnapshot {
       ownedShips?: Array<{ item: string; quantity: number }>;
     };
     currentShipFit?: Array<{ item_id:number; type_id:number; location_id:number; location_flag:string; quantity:number; item?:string; category_id?:number }>;
+    privateDataStatus?: Array<{ datasetId:string; state:string; scopeRequired:string|null; requestCount:number; lastSuccessAt:string|null; lastAttemptAt:string|null; lastError:string|null; failureKind:string|null; lastHttpStatus:number|null }>;
     walletTransactions?: Array<{ transaction_id:number; journal_ref_id:number; date:string; is_buy:boolean; is_personal?:boolean; location_id:number; quantity:number; type_id:number; unit_price:number }>;
     walletJournal?: Array<{ id:number; amount?:number; balance?:number; context_id?:number; context_id_type?:string; date:string; description?:string; first_party_id?:number; reason?:string; ref_type?:string; second_party_id?:number; tax?:number; tax_receiver_id?:number }>;
   };
@@ -1338,6 +1342,9 @@ declare global {
         primaryCharacterId: string;
         onlineIdentitySynced: boolean;
         onlineIdentityError?: string;
+        reauthorized: boolean;
+        scopeManifestVersion: number;
+        coverage: { mailPermissionGranted:boolean; mailHeadersCaptured:number; mailBodiesCaptured:number; assetsCaptured:number; walletJournalCaptured:number; walletTransactionsCaptured:number; contractsCaptured:number; corporationDatasets:number };
       }>;
       refreshCharacter(characterId: string): Promise<CharacterSnapshot>;
       refreshCurrentShip(characterId: string): Promise<CharacterSnapshot>;

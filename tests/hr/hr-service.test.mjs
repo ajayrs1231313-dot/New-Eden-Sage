@@ -73,8 +73,9 @@ test("Mail is an explicit supported read-only HR category", () => {
   assert.equal(mail.supported, true);
   assert.equal(mail.source, "esi-private");
   const eve = fs.readFileSync(new URL("../../electron/eve.ts", import.meta.url), "utf8");
-  assert.match(eve, /esi-mail\.read_mail\.v1/);
-  assert.doesNotMatch(eve, /esi-mail\.(?:send_mail|organize_mail)\.v1/);
+  const scopeManifest = fs.readFileSync(new URL("../../electron/esi-scope-manifest.ts", import.meta.url), "utf8");
+  assert.match(scopeManifest, /esi-mail\.read_mail\.v1/);
+  assert.doesNotMatch(scopeManifest, /esi-mail\.(?:send_mail|organize_mail)\.v1/);
   assert.match(eve, /captureMailHeaders\(250\)/);
   assert.match(eve, /slice\(0, 100\)/);
 });

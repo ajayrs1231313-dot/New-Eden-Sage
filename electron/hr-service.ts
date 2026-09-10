@@ -37,7 +37,7 @@ export type HrApplicationStatus =
   | "archived";
 
 export type HrSubmissionMethod = "sage-desktop" | "sage-website";
-export type HrCategoryState = "provided" | "withheld" | "unavailable" | "error" | "not-requested";
+export type HrCategoryState = "provided" | "stale" | "permission-missing" | "role-missing" | "rate-limited" | "authorization-error" | "endpoint-error" | "withheld" | "unavailable" | "error" | "not-requested";
 
 export type HrDataCategory = {
   id: HrDataCategoryId;
@@ -219,6 +219,43 @@ function isUnavailable(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && (value as Record<string, unknown>).unavailable === true);
 }
 
+const HR_CATEGORY_DATASETS: Partial<Record<HrDataCategoryId, string[]>> = {
+  skills: ["character.skills", "character.skillqueue"],
+  "kill-loss": ["character.killmails"],
+  "contacts-standings": ["character.contacts", "character.standings"],
+  wallet: ["character.wallet.balance", "character.wallet.journal", "character.wallet.transactions"],
+  contracts: ["character.contracts", "character.contract.items"],
+  assets: ["character.assets"],
+  mail: ["character.mail.headers", "character.mail.bodies", "character.mail.labels", "character.mail.lists"],
+  notifications: ["character.notifications"],
+  market: ["character.market_orders"],
+  industry: ["character.industry_jobs"],
+  "fittings-ships": ["character.fittings", "character.ship"],
+};
+
+function hrPrivateDatasetState(snapshot: any, categoryId: HrDataCategoryId): { state: HrCategoryState; detail: string } | null {
+  const wanted = new Set(HR_CATEGORY_DATASETS[categoryId] ?? []);
+  if (!wanted.size) return null;
+  const rows = (Array.isArray(snapshot?.extended?.privateDataStatus) ? snapshot.extended.privateDataStatus : []).filter((row:any) => wanted.has(String(row?.datasetId ?? "")));
+  if (!rows.length) return null;
+  const rank: Record<string, number> = { fresh:0, stale:1, "rate-limited":2, "endpoint-error":3, "role-missing":4, "authorization-error":5, "permission-missing":6, "never-collected":7 };
+  const row = rows.slice().sort((a:any,b:any) => (rank[String(b?.state)] ?? -1) - (rank[String(a?.state)] ?? -1))[0];
+  const rawState = String(row?.state ?? "fresh");
+  if (rawState === "fresh") return null;
+  const state: HrCategoryState = rawState === "never-collected" ? "unavailable" : rawState as HrCategoryState;
+  const reason = row?.failureKind === "permission-missing"
+    ? "OAuth scope missing" + (row?.scopeRequired ? " (" + row.scopeRequired + ")" : "")
+    : row?.failureKind === "role-missing" ? "EVE corporation role missing"
+    : row?.failureKind === "rate-limited" ? "ESI rate limited"
+    : row?.failureKind === "authorization-error" ? "EVE authorization rejected"
+    : row?.failureKind === "endpoint-error" ? "ESI endpoint failed"
+    : rawState === "stale" ? "Last-known-good local data retained"
+    : "Private ESI data has not been collected";
+  const when = row?.lastSuccessAt ? " Last successful refresh: " + row.lastSuccessAt + "." : "";
+  const error = row?.lastError ? " " + row.lastError : "";
+  return { state, detail: ((rawState === "stale" ? "STALE BUT USABLE — " : "") + reason + "." + when + error).trim() };
+}
+
 function scrubSecrets(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(scrubSecrets);
   if (!value || typeof value !== "object") return value;
@@ -292,7 +329,7 @@ function sectionPayload(snapshot: any, categoryId: HrDataCategoryId): { data?: u
     }
     case "mail": {
       const data = extended?.mail;
-      if (isUnavailable(data) || !data) return { summary: "Mail was unavailable in the source snapshot. The character may need to be reconnected with the read-only mail scope and manually synced again.", unavailable: true };
+      if (isUnavailable(data) || !data) return { summary: "Mail was unavailable in the source snapshot. Authorization, EVE role and endpoint status are shown separately when Sage has them.", unavailable: true };
       const headers = Array.isArray(data?.headers) ? data.headers : [];
       const details = Array.isArray(data?.details) ? data.details : [];
       return { summary: `${headers.length} recent mail headers and ${details.length} message bodies captured from the applicant's manual Sage sync.`, data };
@@ -325,7 +362,7 @@ function sectionPayload(snapshot: any, categoryId: HrDataCategoryId): { data?: u
 }
 
 function deriveHrReviewEvidence(input: { characterSnapshot:any; sections:HrSnapshotSection[]; evidence:HrEvidenceItem[]; reviewFlags:HrReviewFlag[]; now:Date }) {
-  const provided = new Map(input.sections.filter(section => section.state === "provided").map(section => [section.categoryId, section]));
+  const provided = new Map(input.sections.filter(section => section.state === "provided" || section.state === "stale").map(section => [section.categoryId, section]));
   const add = (categoryId:HrDataCategoryId, id:string, label:string, detail:string, severity:"info"|"review"="info") => {
     const evidenceId = `evidence-derived-${id}`;
     input.evidence.push({ id:evidenceId, categoryId, label, detail });
@@ -413,12 +450,14 @@ export function buildHrApplicantSnapshot(input: {
     }
     try {
       const payload = sectionPayload(input.characterSnapshot, category.id);
+      const privateState = category.source === "esi-private" ? hrPrivateDatasetState(input.characterSnapshot, category.id) : null;
       if (payload.unavailable || !category.supported) {
         unavailable.push(category.id);
-        sections.push({ categoryId: category.id, title: category.label, state: "unavailable", summary: payload.summary });
+        sections.push({ categoryId: category.id, title: category.label, state: privateState?.state ?? "unavailable", summary: privateState ? privateState.detail + " " + payload.summary : payload.summary });
       } else {
         provided.push(category.id);
-        sections.push({ categoryId: category.id, title: category.label, state: "provided", summary: payload.summary, data: scrubSecrets(payload.data) });
+        const state: HrCategoryState = privateState?.state === "stale" ? "stale" : "provided";
+        sections.push({ categoryId: category.id, title: category.label, state, summary: privateState ? privateState.detail + " " + payload.summary : payload.summary, data: scrubSecrets(payload.data) });
       }
     } catch (error) {
       errors.push(category.id);

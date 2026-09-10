@@ -2907,6 +2907,35 @@ export async function analyzeFittingDogma(input: {
     structureRepair += structurePerSecond * duty;
   }
 
+  // Expose support/ewar modules using the same skill-, hull-, script- and heat-adjusted
+  // DOGMA attributes used by the fitter. Wargame consumes this instead of raw SDE stats.
+  const supportSystems = online.flatMap((item) => {
+    if (item.state !== "active" && item.state !== "overheated") return [];
+    const source = moduleDogmaFor(item);
+    if (!source) return [];
+    const groupId = groups.get(item.typeId) ?? 0;
+    const quantity = Math.max(1, item.quantity ?? 1);
+    const cycleSeconds = Math.max(0, (effectiveItemAttr(source, 73, item.typeId) || effectiveItemAttr(source, 51, item.typeId)) / 1000);
+    const optimalM = Math.max(0, effectiveItemAttr(source, 54, item.typeId));
+    const falloffM = Math.max(0, effectiveItemAttr(source, 2044, item.typeId));
+    const common = { typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, groupId, quantity, state:item.state, cycleSeconds, optimalM, falloffM, chargeTypeId:item.chargeTypeId };
+    if (groupId === 41) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,68,item.typeId))*quantity; return [{...common,kind:"remoteShieldRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 325) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,84,item.typeId))*quantity; return [{...common,kind:"remoteArmorRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 65) return [{...common,kind:"web",strength:Math.min(.95,Math.abs(effectiveItemAttr(source,20,item.typeId))/100)}];
+    if (groupId === 52) return [{...common,kind:"tackle",warpStrength:Math.max(0,effectiveItemAttr(source,105,item.typeId)),mwdShutdown:(names.get(item.typeId)??"").toLowerCase().includes("scrambler")}];
+    if (groupId === 379) return [{...common,kind:"targetPainter",signatureBonus:Math.max(0,effectiveItemAttr(source,554,item.typeId))/100}];
+    if (groupId === 208) return [{...common,kind:"sensorDamp",maxTargetRangeBonus:effectiveItemAttr(source,309,item.typeId)/100,scanResolutionBonus:effectiveItemAttr(source,566,item.typeId)/100}];
+    if (groupId === 291) return [{...common,kind:"trackingDisruptor",optimalBonus:effectiveItemAttr(source,351,item.typeId)/100,falloffBonus:effectiveItemAttr(source,349,item.typeId)/100,trackingBonus:effectiveItemAttr(source,767,item.typeId)/100}];
+    if (groupId === 201) { const sensorStrengths=[238,239,240,241].map((attributeId)=>Math.max(0,effectiveItemAttr(source,attributeId,item.typeId))); return [{...common,kind:"ecm",sensorStrengths,strength:Math.max(...sensorStrengths)}]; }
+    if (groupId === 71) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,97,item.typeId))*quantity; return [{...common,kind:"energyNeutralizer",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 68) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,90,item.typeId))*quantity; return [{...common,kind:"energyNosferatu",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 67) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,90,item.typeId))*quantity; return [{...common,kind:"remoteCapacitor",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 290) return [{...common,kind:"remoteSensorBooster",maxTargetRangeBonus:effectiveItemAttr(source,309,item.typeId)/100,scanResolutionBonus:effectiveItemAttr(source,566,item.typeId)/100,sensorStrengthBonus:Math.max(...[1027,1028,1029,1030].map((attributeId)=>effectiveItemAttr(source,attributeId,item.typeId)/100))}];
+    if (groupId === 209) return [{...common,kind:"remoteTrackingComputer",optimalBonus:effectiveItemAttr(source,351,item.typeId)/100,falloffBonus:effectiveItemAttr(source,349,item.typeId)/100,trackingBonus:effectiveItemAttr(source,767,item.typeId)/100}];
+    if (groupId === 1770) return [{...common,kind:"commandBurst"}];
+    return [];
+  });
+
   const shieldRechargeSeconds = shipAttr(479) / 1000;
   const passiveShieldPeak =
     shieldRechargeSeconds > 0 ? (2.5 * shieldHp) / shieldRechargeSeconds : 0;
@@ -3332,6 +3361,7 @@ export async function analyzeFittingDogma(input: {
     enhancements: enhancementSources.map((enhancement) => ({ typeId: enhancement.typeId, name: names.get(enhancement.typeId) ?? `Type ${enhancement.typeId}`, kind: enhancement.kind })),
     projectedSources,
     commandBurstSources,
+    supportSystems,
     environmentSources: environmentSources.map((environment) => ({ typeId: environment.typeId, name: environment.name })),
     abyss: abyssAnalysis,
     source: "CCP EVE static data (offline)",

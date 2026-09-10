@@ -12,13 +12,19 @@ import {
   publicConfig,
   readConfig,
   writeConfig,
+  getOrCreatePrivateDataEncryptionKey,
   CURRENT_IDENTITY_SCHEMA_VERSION,
 } from "./config";
 import { createConnectedCharacterBootstrapSnapshot, fetchCharacterCoreSnapshot, fetchCharacterCurrentLocationSnapshot, fetchCharacterCurrentShipSnapshot, fetchCharacterSnapshot, fetchWalletOnlySnapshot, loginWithEve, refreshEveToken } from "./eve";
+import { CURRENT_ESI_SCOPE_SCHEMA_VERSION, EVE_SCOPES } from "./esi-scope-manifest";
+import { sageMcpLaunch } from "./mcp-launch";
+import { configureSnapshotEncryptionKey } from "./snapshot-crypto";
+import { configurePrivateEsiEncryptionKey, migrateLegacyPrivateEsiCache } from "./private-esi-cache";
 import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
 import {
   addImportedInformation,
-  clearCharacterSnapshots,
+  deletePrivateEsiDatasetRecords,
+  migratePlaintextSnapshotsToEncrypted,
   deleteSnapshot,
   exportDatabaseData,
   getSnapshot,
@@ -783,23 +789,29 @@ function eveFittingPayload(fit: any) {
     items,
   };
 }
+function mergeReauthorizationIds(config: Awaited<ReturnType<typeof readConfig>>, ids: string[]) {
+  config.reauthorizationRequiredCharacterIds = [...new Set([
+    ...config.reauthorizationRequiredCharacterIds,
+    ...ids.map(String).filter(Boolean),
+  ])];
+}
+
 async function ensurePrimaryIdentityMigration() {
   if (!app.isPackaged) return;
   const config = await readConfig();
   if (config.identitySchemaVersion >= CURRENT_IDENTITY_SCHEMA_VERSION) return;
 
   const disconnectedCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  mergeReauthorizationIds(config, disconnectedCharacterIds);
   config.encryptedRefreshTokens = {};
   config.encryptedSageSessionToken = undefined;
-  config.sageAccountId = undefined;
-  config.primaryCharacterId = undefined;
   config.identitySchemaVersion = CURRENT_IDENTITY_SCHEMA_VERSION;
   config.identityMigratedAt = new Date().toISOString();
   await writeConfig(config);
-  clearCharacterSnapshots();
-  await logEvent("info", "identity.migration.reset-characters", {
+  await logEvent("info", "identity.migration.authorization-reset", {
     identitySchemaVersion: CURRENT_IDENTITY_SCHEMA_VERSION,
     disconnectedCharacters: disconnectedCharacterIds.length,
+    localSnapshotsPreserved: true,
   });
 }
 
@@ -811,17 +823,35 @@ async function ensureOneTimeCharacterResetMigration() {
   if (config.characterResetMigrationId === ONE_TIME_CHARACTER_RESET_MIGRATION_ID) return;
 
   const disconnectedCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  mergeReauthorizationIds(config, disconnectedCharacterIds);
   config.encryptedRefreshTokens = {};
   config.encryptedSageSessionToken = undefined;
-  config.sageAccountId = undefined;
-  config.primaryCharacterId = undefined;
   config.characterResetMigrationId = ONE_TIME_CHARACTER_RESET_MIGRATION_ID;
   config.characterResetMigratedAt = new Date().toISOString();
   await writeConfig(config);
-  clearCharacterSnapshots();
-  await logEvent("info", "identity.migration.one-time-character-reset", {
+  await logEvent("info", "identity.migration.one-time-authorization-reset", {
     migrationId: ONE_TIME_CHARACTER_RESET_MIGRATION_ID,
     disconnectedCharacters: disconnectedCharacterIds.length,
+    localSnapshotsPreserved: true,
+  });
+}
+
+async function ensureEsiScopeSchemaMigration() {
+  const config = await readConfig();
+  if (config.esiScopeSchemaVersion >= CURRENT_ESI_SCOPE_SCHEMA_VERSION) return;
+
+  const snapshotCharacterIds = listSnapshots().map((snapshot: any) => String(snapshot?.characterId ?? "")).filter(Boolean);
+  const authorizedCharacterIds = Object.keys(config.encryptedRefreshTokens);
+  mergeReauthorizationIds(config, [...snapshotCharacterIds, ...authorizedCharacterIds]);
+  config.encryptedRefreshTokens = {};
+  config.encryptedSageSessionToken = undefined;
+  config.esiScopeSchemaVersion = CURRENT_ESI_SCOPE_SCHEMA_VERSION;
+  config.esiScopeMigratedAt = new Date().toISOString();
+  await writeConfig(config);
+  await logEvent("info", "esi.scope_schema.authorization_reset", {
+    scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
+    affectedCharacters: config.reauthorizationRequiredCharacterIds.length,
+    snapshotsPreserved: snapshotCharacterIds.length,
   });
 }
 
@@ -1053,8 +1083,14 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    const privateDataKey = await getOrCreatePrivateDataEncryptionKey();
+    configurePrivateEsiEncryptionKey(privateDataKey);
+    configureSnapshotEncryptionKey(privateDataKey);
+    migratePlaintextSnapshotsToEncrypted();
+    await migrateLegacyPrivateEsiCache();
     await ensurePrimaryIdentityMigration();
     await ensureOneTimeCharacterResetMigration();
+    await ensureEsiScopeSchemaMigration();
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
   registerWormholeCommandIpc();
   ipcMain.handle("wormhole:reference-list", () => getWormholeReference());
@@ -1113,15 +1149,12 @@ if (!hasSingleInstanceLock) {
     return shell.openExternal(url);
   });
   ipcMain.handle("mcp:get-setup", () => {
-    const command = app.getPath("exe");
-    const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
-    const args = [script];
-    const env = { ELECTRON_RUN_AS_NODE: "1" };
+    const { command, args, env } = sageMcpLaunch();
     return {
       command,
       args,
       json: JSON.stringify({ mcpServers: { "new-eden-sage": { command, args, env } } }, null, 2),
-      codex: `[mcp_servers.new-eden-sage]\ncommand = ${JSON.stringify(command)}\nargs = [${JSON.stringify(script)}]\nenv = { ELECTRON_RUN_AS_NODE = "1" }`,
+      codex: `[mcp_servers.new-eden-sage]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}\nenv = { ${Object.entries(env).map(([name, value]) => `${name} = ${JSON.stringify(value)}`).join(", ")} }`,
       access: "Local read access plus explicit fitting write actions. Live EVE writes require Sage to be open and a reconnected character. Credentials, tokens, secrets and encrypted values are never exposed.",
       claudeDesktop: claudeSetupText().desktopJson,
       claudeCode: claudeSetupText().claudeCodeCommand,
@@ -1849,9 +1882,22 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("eve:login", async () => {
     const config = await readConfig();
     const login = await loginWithEve(config.eveClientId, config.callbackUrl);
-    config.encryptedRefreshTokens[login.characterId] = encrypt(
-      login.refreshToken,
-    );
+    const missingScopes = EVE_SCOPES.filter((scope) => !login.scopes.includes(scope));
+    if (missingScopes.length) {
+      throw new Error(`EVE did not grant ${missingScopes.length} of Sage's required ESI permissions. Nothing was connected or replaced. Missing: ${missingScopes.join(", ")}`);
+    }
+
+    const authorisedAt = new Date().toISOString();
+    const reauthorized = config.reauthorizationRequiredCharacterIds.includes(login.characterId);
+    config.encryptedRefreshTokens[login.characterId] = encrypt(login.refreshToken);
+    config.eveAuthorizations[login.characterId] = {
+      scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
+      authorisedAt,
+      grantedScopes: [...login.scopes].sort(),
+      lastRefreshStatus: undefined,
+      lastRefreshError: undefined,
+      lastFullPrivateSyncAt: config.eveAuthorizations[login.characterId]?.lastFullPrivateSyncAt,
+    };
     const becamePrimaryIdentity = !config.primaryCharacterId;
     if (becamePrimaryIdentity) {
       config.primaryCharacterId = login.characterId;
@@ -1864,22 +1910,29 @@ if (!hasSingleInstanceLock) {
       ? "Reconnect the primary Sage character to restore the online session before linking additional characters."
       : undefined;
     await writeConfig(config);
-    // Add Character is an authentication/registration boundary only. Persist a
-    // usable local bootstrap immediately after SSO succeeds; private ESI refreshes
-    // are explicit and must never make a successful character authorization look
-    // like it failed because one downstream endpoint is slow or temporarily down.
-    const snapshot = createConnectedCharacterBootstrapSnapshot(
+
+    const bootstrap = createConnectedCharacterBootstrapSnapshot(
       login.characterId,
       login.characterName,
       getSnapshot(login.characterId),
     );
-    saveSnapshot(snapshot);
-    void logEvent("info", "character.add.connected", {
+    saveSnapshot(bootstrap);
+    await logEvent("info", "character.authorization.current_scope_grant", {
       characterId: login.characterId,
-      snapshotState: snapshot.snapshotState,
+      scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
+      grantedScopes: login.scopes.length,
+      reauthorized,
     });
-    // Sage Online linking is useful, but it is not part of the Add Character critical path.
-    // The character is already registered locally; finish cloud identity work in the background.
+
+    const refreshResult = await runMasterUpdate((progress) => {
+      window?.webContents.send("master:update-progress", progress);
+    }, [login.characterId]);
+    if (refreshResult.failures.length) {
+      const reason = refreshResult.failures.map((item) => item.error || item.name).join(" | ");
+      throw new Error(`EVE authorization was saved, but the required full private sync did not complete: ${reason}. Existing local data was preserved.`);
+    }
+    const snapshot = getSnapshot(login.characterId) ?? bootstrap;
+
     if (!onlineIdentityError) {
       void (async () => {
         try {
@@ -1893,8 +1946,11 @@ if (!hasSingleInstanceLock) {
               latest.encryptedSageSessionToken = encrypt(claimed.session_token);
               await writeConfig(latest);
             }
-          } else if (config.encryptedSageSessionToken) {
-            await linkSageCharacter(decrypt(config.encryptedSageSessionToken), login.accessToken);
+          } else {
+            const latest = await readConfig();
+            if (latest.encryptedSageSessionToken) {
+              await linkSageCharacter(decrypt(latest.encryptedSageSessionToken), login.accessToken);
+            }
           }
           await logEvent("info", "sage-online.identity-linked", { characterId: login.characterId });
         } catch (error) {
@@ -1905,6 +1961,9 @@ if (!hasSingleInstanceLock) {
         }
       })();
     }
+
+    const mailCoverage = (snapshot as any)?.extended?.mail?.coverage;
+    const corporationStatus = ((snapshot as any)?.extended?.privateDataStatus ?? []).filter((item: any) => String(item?.datasetId ?? "").startsWith("corporation."));
     return {
       characterId: login.characterId,
       characterName: login.characterName,
@@ -1914,6 +1973,18 @@ if (!hasSingleInstanceLock) {
       primaryCharacterId: config.primaryCharacterId ?? login.characterId,
       onlineIdentitySynced,
       onlineIdentityError,
+      reauthorized,
+      scopeManifestVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
+      coverage: {
+        mailPermissionGranted: login.scopes.includes("esi-mail.read_mail.v1"),
+        mailHeadersCaptured: Number(mailCoverage?.headersCaptured ?? 0),
+        mailBodiesCaptured: Number(mailCoverage?.bodiesCaptured ?? 0),
+        assetsCaptured: Array.isArray((snapshot as any)?.extended?.assets) ? (snapshot as any).extended.assets.length : 0,
+        walletJournalCaptured: Array.isArray((snapshot as any)?.extended?.walletJournal) ? (snapshot as any).extended.walletJournal.length : 0,
+        walletTransactionsCaptured: Array.isArray((snapshot as any)?.extended?.walletTransactions) ? (snapshot as any).extended.walletTransactions.length : 0,
+        contractsCaptured: Array.isArray((snapshot as any)?.extended?.contracts) ? (snapshot as any).extended.contracts.length : 0,
+        corporationDatasets: corporationStatus.length,
+      },
     };
   });
   ipcMain.handle("eve:refresh", async (_event, characterId: string) => {
@@ -1961,9 +2032,12 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("character:remove", async (_event, characterId: string) => {
     const config = await readConfig();
     delete config.encryptedRefreshTokens[characterId];
+    delete config.eveAuthorizations[characterId];
+    config.reauthorizationRequiredCharacterIds = config.reauthorizationRequiredCharacterIds.filter((id) => id !== characterId);
     await writeConfig(config);
     deleteSnapshot(characterId);
-    await logEvent("info", "character.removed", { characterId });
+    deletePrivateEsiDatasetRecords(characterId);
+    await logEvent("info", "character.removed", { characterId, privateDatasetsDeleted: true });
     return listSnapshots();
   });
   ipcMain.handle(

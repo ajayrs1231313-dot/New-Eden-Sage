@@ -3,11 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { app, crashReporter, ipcMain } from "electron";
 import { LOG_ROOT, installProcessErrorLogging, logCrash, logEvent } from "./logger";
-
-// TEMP_VISUAL_VERIFY
-app.commandLine.appendSwitch("remote-debugging-port", "9231");
+import { getOrCreatePrivateDataEncryptionKey } from "./config";
+import { configureSnapshotEncryptionKey } from "./snapshot-crypto";
 
 const MCP_MODE = process.argv.includes("--mcp");
+
+// TEMP_VISUAL_VERIFY — desktop only; MCP stdio mode must not bind a DevTools port.
+if (!MCP_MODE) app.commandLine.appendSwitch("remote-debugging-port", "9231");
 const DESKTOP_SINGLE_INSTANCE_LOCK = MCP_MODE ? true : app.requestSingleInstanceLock();
 (globalThis as typeof globalThis & { __sageSingleInstanceLockHeld?: boolean }).__sageSingleInstanceLockHeld = DESKTOP_SINGLE_INSTANCE_LOCK;
 
@@ -129,6 +131,8 @@ if (!DESKTOP_SINGLE_INSTANCE_LOCK) {
   // The existing desktop instance receives Electron's second-instance event.
 } else if (MCP_MODE) {
   void app.whenReady().then(async () => {
+    const privateDataKey = await getOrCreatePrivateDataEncryptionKey();
+    configureSnapshotEncryptionKey(privateDataKey);
     const { startMcpServer } = await import("./mcp-server.js");
     await startMcpServer();
   });

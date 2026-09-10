@@ -4,57 +4,13 @@ import http from "node:http";
 import { itemCategoryIds, itemVolumes } from "./type-volumes";
 import { trainingTimesToLevels } from "./skill-training";
 import { getLocalSkillDogmaMetadata } from "./skill-static";
-import { privateEsiJson, privateEsiPagedJson } from "./private-esi-cache";
+import { listPrivateEsiDatasetStatus, privateEsiErrorDetails, privateEsiJson, privateEsiPagedJson } from "./private-esi-cache";
+import { EVE_SCOPES } from "./esi-scope-manifest";
+export { EVE_SCOPES } from "./esi-scope-manifest";
 import { loadSharedPublicSource } from "./shared-market-data";
 import { blueprintRecordsByItemId, summarizeAssets, valueAssetWithBlueprintIdentity, type AssetMarketPriceSource } from "./asset-valuation";
 import { blueprintContractQueryForRecord, blueprintContractQueryKey, loadBlueprintContractValuations } from "./blueprint-contract-history";
 
-export const EVE_SCOPES = [
-  "esi-assets.read_assets.v1",
-  "esi-characters.read_blueprints.v1",
-  "esi-characters.read_contacts.v1",
-  "esi-characters.read_fatigue.v1",
-  "esi-characters.read_loyalty.v1",
-  "esi-characters.read_notifications.v1",
-  "esi-characters.read_standings.v1",
-  "esi-clones.read_clones.v1",
-  "esi-clones.read_implants.v1",
-  "esi-contracts.read_character_contracts.v1",
-  "esi-fittings.read_fittings.v1",
-  "esi-fittings.write_fittings.v1",
-  "esi-ui.write_waypoint.v1",
-  "esi-ui.open_window.v1",
-  "esi-industry.read_character_jobs.v1",
-  "esi-killmails.read_killmails.v1",
-  "esi-mail.read_mail.v1",
-  "esi-location.read_location.v1",
-  "esi-location.read_online.v1",
-  "esi-location.read_ship_type.v1",
-  "esi-markets.read_character_orders.v1",
-  "esi-planets.manage_planets.v1",
-  "esi-characters.read_corporation_roles.v1",
-  "esi-characters.read_titles.v1",
-  "esi-corporations.read_corporation_membership.v1",
-  "esi-corporations.read_titles.v1",
-  "esi-corporations.read_divisions.v1",
-  "esi-assets.read_corporation_assets.v1",
-  "esi-corporations.read_blueprints.v1",
-  "esi-corporations.read_contacts.v1",
-  "esi-corporations.read_facilities.v1",
-  "esi-corporations.read_medals.v1",
-  "esi-corporations.read_standings.v1",
-  "esi-corporations.read_starbases.v1",
-  "esi-corporations.read_structures.v1",
-  "esi-contracts.read_corporation_contracts.v1",
-  "esi-industry.read_corporation_jobs.v1",
-  "esi-markets.read_corporation_orders.v1",
-  "esi-wallet.read_corporation_wallets.v1",
-  "esi-skills.read_skills.v1",
-  "esi-skills.read_skillqueue.v1",
-  "esi-universe.read_structures.v1",
-  "esi-search.search_structures.v1",
-  "esi-wallet.read_character_wallet.v1",
-];
 
 const SSO = "https://login.eveonline.com";
 let activeLoginServer: http.Server | null = null;
@@ -100,6 +56,7 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
     refreshToken: string;
     characterId: string;
     characterName: string;
+    scopes: string[];
   }>((resolve, reject) => {
     const server = http.createServer(async (request, response) => {
       try {
@@ -153,6 +110,7 @@ export async function loginWithEve(clientId: string, callbackUrl: string) {
           refreshToken: tokens.refresh_token,
           characterId,
           characterName: claims.name,
+          scopes: Array.isArray(claims.scp) ? claims.scp : [],
         };
         // Token exchange is complete. Unblock the renderer immediately; server close is cleanup only.
         if (activeLoginServer === server) activeLoginServer = null;
@@ -432,7 +390,7 @@ export async function fetchWalletOnlySnapshot(
         ? await privateEsiPagedJson<unknown>(characterId, requestPath, accessToken, 4)
         : (await privateEsiJson<unknown>(characterId, requestPath, accessToken)).data;
     } catch (error) {
-      return { unavailable: true, endpoint: requestPath, error: error instanceof Error ? error.message : String(error) };
+      return { endpoint: requestPath, ...privateEsiErrorDetails(error) };
     }
   };
   const corporationId = Number(existingSnapshot?.character?.corporation_id ?? 0);
@@ -479,6 +437,7 @@ export async function fetchCharacterSnapshot(
   characterId: string,
   accessToken: string,
   onProgress?: (progress: CharacterSnapshotProgress) => void,
+  existingSnapshot?: any,
 ) {
   const report = (stage: string, percent: number, message: string) => onProgress?.({ stage, percent, message });
   report("core", 3, "Loading core character data.");
@@ -494,7 +453,7 @@ export async function fetchCharacterSnapshot(
         ? await privateEsiPagedJson<unknown>(characterId, requestPath, accessToken, 6)
         : (await privateEsiJson<unknown>(characterId, requestPath, accessToken)).data;
     } catch (error) {
-      return { unavailable: true, endpoint: requestPath, error: error instanceof Error ? error.message : String(error) };
+      return { endpoint: requestPath, ...privateEsiErrorDetails(error) };
     }
   };
   const [character, wallet, skills, queue, location, ship, attributes] =
@@ -642,7 +601,7 @@ export async function fetchCharacterSnapshot(
       }
       return headers;
     } catch (error) {
-      return { unavailable: true, endpoint: `/characters/${characterId}/mail/`, error: error instanceof Error ? error.message : String(error) };
+      return { endpoint: `/characters/${characterId}/mail/`, ...privateEsiErrorDetails(error) };
     }
   };
 
@@ -886,7 +845,7 @@ export async function fetchCharacterSnapshot(
     : implants;
   report("enrichment", 96, "Private snapshot prepared for local storage.");
 
-  return {
+  const nextSnapshot = {
     characterId,
     snapshotState: "synced" as const,
     character: {
@@ -946,6 +905,7 @@ export async function fetchCharacterSnapshot(
       planets,
       planetDetails,
       currentShipFit: enrichedCurrentShipFit,
+      privateDataStatus: listPrivateEsiDatasetStatus(characterId),
       corporation: {
         publicData: corporation,
         history: corporationHistory,
@@ -974,6 +934,17 @@ export async function fetchCharacterSnapshot(
     },
     updatedAt: new Date().toISOString(),
   };
+  return existingSnapshot ? preserveUnavailableWithPrevious(nextSnapshot, existingSnapshot) : nextSnapshot;
+}
+
+function preserveUnavailableWithPrevious(next: any, previous: any): any {
+  if (next && typeof next === "object" && !Array.isArray(next) && next.unavailable === true && previous !== undefined) return previous;
+  if (!next || typeof next !== "object" || Array.isArray(next) || !previous || typeof previous !== "object" || Array.isArray(previous)) return next;
+  const merged: Record<string, unknown> = { ...next };
+  for (const [key, value] of Object.entries(next)) {
+    merged[key] = preserveUnavailableWithPrevious(value, previous[key]);
+  }
+  return merged;
 }
 
 type AssetRecord = {

@@ -2,6 +2,7 @@
 import path from "node:path";
 import { USER_DATA_ROOT } from "./data-paths";
 import { normalizeSnapshotBlueprintAssetValuation } from "./asset-valuation";
+import { decryptSnapshotPayload, encryptSnapshotPayload, isEncryptedSnapshotPayload, snapshotEncryptionFingerprint } from "./snapshot-crypto";
 
 let database: DatabaseSync | undefined;
 
@@ -18,6 +19,32 @@ function db() {
         payload TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS private_esi_datasets (
+        character_id TEXT NOT NULL,
+        request_path TEXT NOT NULL,
+        dataset_id TEXT NOT NULL,
+        scope_required TEXT,
+        encrypted_payload TEXT NOT NULL,
+        encryption_version INTEGER NOT NULL,
+        key_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        last_http_status INTEGER,
+        fetched_at TEXT,
+        last_attempt_at TEXT NOT NULL,
+        last_success_at TEXT,
+        next_eligible_at TEXT,
+        etag TEXT,
+        last_modified TEXT,
+        cache_control TEXT,
+        expires TEXT,
+        rate_group TEXT,
+        x_pages INTEGER,
+        last_error TEXT,
+        failure_kind TEXT,
+        schema_version INTEGER NOT NULL,
+        PRIMARY KEY(character_id, request_path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_private_esi_dataset_id ON private_esi_datasets(character_id, dataset_id);
       CREATE TABLE IF NOT EXISTS imported_information (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         source_name TEXT NOT NULL,
@@ -97,7 +124,7 @@ export function saveSnapshot(snapshot: {
     .run(
       normalized.characterId,
       normalized.character.name,
-      JSON.stringify(normalized),
+      encryptSnapshotPayload(normalized),
       normalized.updatedAt,
     );
 }
@@ -106,7 +133,7 @@ export function listSnapshots() {
   const rows = db()
     .prepare("SELECT payload FROM character_snapshots ORDER BY updated_at DESC")
     .all() as Array<{ payload: string }>;
-  return rows.map((row) => normalizeSnapshotBlueprintAssetValuation(JSON.parse(row.payload) as unknown));
+  return rows.map((row) => normalizeSnapshotBlueprintAssetValuation(decryptSnapshotPayload<unknown>(row.payload)));
 }
 
 export function getSnapshot(characterId?: string) {
@@ -122,8 +149,45 @@ export function getSnapshot(characterId?: string) {
         )
         .get();
   return row
-    ? normalizeSnapshotBlueprintAssetValuation(JSON.parse((row as { payload: string }).payload) as unknown)
+    ? normalizeSnapshotBlueprintAssetValuation(decryptSnapshotPayload<unknown>((row as { payload: string }).payload))
     : null;
+}
+
+export function migratePlaintextSnapshotsToEncrypted() {
+  const rows = db().prepare("SELECT character_id, payload FROM character_snapshots").all() as Array<{ character_id:string; payload:string }>;
+  const update = db().prepare("UPDATE character_snapshots SET payload = ? WHERE character_id = ?");
+  let migrated = 0;
+  for (const row of rows) {
+    if (isEncryptedSnapshotPayload(row.payload)) continue;
+    const parsed = JSON.parse(row.payload) as unknown;
+    update.run(encryptSnapshotPayload(parsed), row.character_id);
+    migrated += 1;
+  }
+  return migrated;
+}
+
+export function exportEncryptedSnapshotRecords() {
+  return (db().prepare("SELECT character_id, character_name, payload, updated_at FROM character_snapshots ORDER BY updated_at DESC").all() as Array<any>).map((row) => ({
+    characterId: String(row.character_id),
+    characterName: String(row.character_name),
+    encryptedPayload: String(row.payload),
+    updatedAt: String(row.updated_at),
+    keyFingerprint: snapshotEncryptionFingerprint(),
+  }));
+}
+
+export function importEncryptedSnapshotRecords(records: Array<{ characterId:string; characterName:string; encryptedPayload:string; updatedAt:string; keyFingerprint?:string }>) {
+  const insert = db().prepare(`INSERT INTO character_snapshots (character_id, character_name, payload, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(character_id) DO UPDATE SET character_name=excluded.character_name, payload=excluded.payload, updated_at=excluded.updated_at`);
+  let imported = 0;
+  for (const record of records ?? []) {
+    if (!record?.characterId || !record?.characterName || !record?.encryptedPayload || !record?.updatedAt) continue;
+    if (!isEncryptedSnapshotPayload(record.encryptedPayload)) continue;
+    if (record.keyFingerprint && record.keyFingerprint !== snapshotEncryptionFingerprint()) throw new Error("Encrypted Sage backup belongs to a different local data key.");
+    decryptSnapshotPayload(record.encryptedPayload);
+    insert.run(record.characterId, record.characterName, record.encryptedPayload, record.updatedAt);
+    imported += 1;
+  }
+  return imported;
 }
 
 export function deleteSnapshot(characterId: string) {
@@ -134,6 +198,98 @@ export function deleteSnapshot(characterId: string) {
 
 export function clearCharacterSnapshots() {
   db().prepare("DELETE FROM character_snapshots").run();
+}
+
+export type PrivateEsiDatasetRecord = {
+  characterId: string;
+  requestPath: string;
+  datasetId: string;
+  scopeRequired?: string | null;
+  encryptedPayload: string;
+  encryptionVersion: number;
+  keyFingerprint: string;
+  status: string;
+  lastHttpStatus?: number | null;
+  fetchedAt?: string | null;
+  lastAttemptAt: string;
+  lastSuccessAt?: string | null;
+  nextEligibleAt?: string | null;
+  etag?: string | null;
+  lastModified?: string | null;
+  cacheControl?: string | null;
+  expires?: string | null;
+  rateGroup?: string | null;
+  xPages?: number | null;
+  lastError?: string | null;
+  failureKind?: string | null;
+  schemaVersion: number;
+};
+
+function privateEsiRow(row: any): PrivateEsiDatasetRecord {
+  return {
+    characterId: String(row.character_id),
+    requestPath: String(row.request_path),
+    datasetId: String(row.dataset_id),
+    scopeRequired: row.scope_required == null ? null : String(row.scope_required),
+    encryptedPayload: String(row.encrypted_payload),
+    encryptionVersion: Number(row.encryption_version),
+    keyFingerprint: String(row.key_fingerprint),
+    status: String(row.status),
+    lastHttpStatus: row.last_http_status == null ? null : Number(row.last_http_status),
+    fetchedAt: row.fetched_at == null ? null : String(row.fetched_at),
+    lastAttemptAt: String(row.last_attempt_at),
+    lastSuccessAt: row.last_success_at == null ? null : String(row.last_success_at),
+    nextEligibleAt: row.next_eligible_at == null ? null : String(row.next_eligible_at),
+    etag: row.etag == null ? null : String(row.etag),
+    lastModified: row.last_modified == null ? null : String(row.last_modified),
+    cacheControl: row.cache_control == null ? null : String(row.cache_control),
+    expires: row.expires == null ? null : String(row.expires),
+    rateGroup: row.rate_group == null ? null : String(row.rate_group),
+    xPages: row.x_pages == null ? null : Number(row.x_pages),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    failureKind: row.failure_kind == null ? null : String(row.failure_kind),
+    schemaVersion: Number(row.schema_version),
+  };
+}
+
+export function savePrivateEsiDatasetRecord(record: PrivateEsiDatasetRecord) {
+  db().prepare(`
+    INSERT INTO private_esi_datasets (
+      character_id, request_path, dataset_id, scope_required, encrypted_payload, encryption_version, key_fingerprint,
+      status, last_http_status, fetched_at, last_attempt_at, last_success_at, next_eligible_at, etag, last_modified,
+      cache_control, expires, rate_group, x_pages, last_error, failure_kind, schema_version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(character_id, request_path) DO UPDATE SET
+      dataset_id=excluded.dataset_id, scope_required=excluded.scope_required, encrypted_payload=excluded.encrypted_payload,
+      encryption_version=excluded.encryption_version, key_fingerprint=excluded.key_fingerprint, status=excluded.status,
+      last_http_status=excluded.last_http_status, fetched_at=excluded.fetched_at, last_attempt_at=excluded.last_attempt_at,
+      last_success_at=excluded.last_success_at, next_eligible_at=excluded.next_eligible_at, etag=excluded.etag,
+      last_modified=excluded.last_modified, cache_control=excluded.cache_control, expires=excluded.expires,
+      rate_group=excluded.rate_group, x_pages=excluded.x_pages, last_error=excluded.last_error,
+      failure_kind=excluded.failure_kind, schema_version=excluded.schema_version
+  `).run(
+    record.characterId, record.requestPath, record.datasetId, record.scopeRequired ?? null, record.encryptedPayload,
+    record.encryptionVersion, record.keyFingerprint, record.status, record.lastHttpStatus ?? null, record.fetchedAt ?? null,
+    record.lastAttemptAt, record.lastSuccessAt ?? null, record.nextEligibleAt ?? null, record.etag ?? null,
+    record.lastModified ?? null, record.cacheControl ?? null, record.expires ?? null, record.rateGroup ?? null,
+    record.xPages ?? null, record.lastError ?? null, record.failureKind ?? null, record.schemaVersion,
+  );
+}
+
+export function getPrivateEsiDatasetRecord(characterId: string, requestPath: string) {
+  const row = db().prepare("SELECT * FROM private_esi_datasets WHERE character_id = ? AND request_path = ?").get(characterId, requestPath);
+  return row ? privateEsiRow(row) : null;
+}
+
+export function listPrivateEsiDatasetRecords(characterId?: string) {
+  const rows = characterId
+    ? db().prepare("SELECT * FROM private_esi_datasets WHERE character_id = ? ORDER BY dataset_id, request_path").all(characterId)
+    : db().prepare("SELECT * FROM private_esi_datasets ORDER BY character_id, dataset_id, request_path").all();
+  return (rows as any[]).map(privateEsiRow);
+}
+
+export function deletePrivateEsiDatasetRecords(characterId: string) {
+  db().prepare("DELETE FROM private_esi_datasets WHERE character_id = ?").run(characterId);
 }
 
 export function addImportedInformation(sourceName: string, content: string) {
@@ -353,10 +509,18 @@ export function deleteOpportunityProfitRecord(id: string) {
 }
 export function exportDatabaseData() {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     exportedAt: new Date().toISOString(),
     application: "New Eden Sage",
-    characterSnapshots: listSnapshots(),
+    characterSnapshots: listSnapshots().map((snapshot:any) => ({ characterId:snapshot.characterId, character:{ name:snapshot.character?.name ?? "Unknown", corporation_id:snapshot.character?.corporation_id ?? null, corporation_name:snapshot.character?.corporation_name ?? null }, updatedAt:snapshot.updatedAt, snapshotState:snapshot.snapshotState })),
+    encryptedCharacterSnapshots: exportEncryptedSnapshotRecords(),
+    privateEsiDatasets: listPrivateEsiDatasetRecords(),
+    privateDataProtection: {
+      encrypted: true,
+      algorithm: "AES-256-GCM",
+      keyStorage: "Electron safeStorage / installation-bound",
+      note: "Private ESI payloads and complete character snapshots are included as ciphertext. Public snapshot identity metadata remains readable; the local data-encryption key is never exported.",
+    },
     importedInformation: listImportedInformation(),
     planetaryPlans: listPlanetaryPlans(),
     planetaryResourceObservations: listPlanetaryResourceObservations(),
@@ -368,6 +532,8 @@ export function exportDatabaseData() {
 
 export function importDatabaseData(data: {
   characterSnapshots?: unknown[];
+  encryptedCharacterSnapshots?: Array<{ characterId:string; characterName:string; encryptedPayload:string; updatedAt:string; keyFingerprint?:string }>;
+  privateEsiDatasets?: PrivateEsiDatasetRecord[];
   importedInformation?: Array<{
     source_name?: string;
     sourceName?: string;
@@ -381,7 +547,8 @@ export function importDatabaseData(data: {
 }) {
   let snapshots = 0;
   let information = 0;
-  for (const item of data.characterSnapshots ?? []) {
+  if (data.encryptedCharacterSnapshots?.length) snapshots += importEncryptedSnapshotRecords(data.encryptedCharacterSnapshots);
+  for (const item of data.encryptedCharacterSnapshots?.length ? [] : (data.characterSnapshots ?? [])) {
     const snapshot = item as {
       characterId?: string;
       character?: { name?: string };
@@ -402,6 +569,11 @@ export function importDatabaseData(data: {
       snapshots += 1;
     }
   }
+  for (const record of data.privateEsiDatasets ?? []) {
+    if (record?.characterId && record?.requestPath && record?.encryptedPayload && record?.keyFingerprint) {
+      savePrivateEsiDatasetRecord(record);
+    }
+  }
   for (const item of data.importedInformation ?? []) {
     if (item.content) {
       addImportedInformation(
@@ -420,7 +592,7 @@ export function importDatabaseData(data: {
   if (data.planetaryAlertSettings) savePlanetaryAlertSettings(data.planetaryAlertSettings);
   for (const record of data.opportunityProfitRecords ?? []) saveOpportunityProfitRecord(record);
   for (const project of data.projectFoundryProjects ?? []) saveProjectFoundryProject(project);
-  return { snapshots, information, opportunityProfitRecords: (data.opportunityProfitRecords ?? []).length, projectFoundryProjects: (data.projectFoundryProjects ?? []).length, planetaryPlans: (data.planetaryPlans ?? []).length, planetaryResourceObservations: (data.planetaryResourceObservations ?? []).length, planetaryAlertSettings: Boolean(data.planetaryAlertSettings) };
+  return { snapshots, information, privateEsiDatasets: (data.privateEsiDatasets ?? []).length, opportunityProfitRecords: (data.opportunityProfitRecords ?? []).length, projectFoundryProjects: (data.projectFoundryProjects ?? []).length, planetaryPlans: (data.planetaryPlans ?? []).length, planetaryResourceObservations: (data.planetaryResourceObservations ?? []).length, planetaryAlertSettings: Boolean(data.planetaryAlertSettings) };
 }
 
 export function saveMarketSummary(summary: {

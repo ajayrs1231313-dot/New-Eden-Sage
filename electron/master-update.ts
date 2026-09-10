@@ -3,7 +3,7 @@ import { availableParallelism } from "node:os";
 import path from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
 import { app } from "electron";
-import { decrypt, encrypt, readConfig, writeConfig } from "./config";
+import { decrypt, encrypt, getOrCreatePrivateDataEncryptionKey, readConfig, writeConfig } from "./config";
 import { refreshEveToken } from "./eve";
 import { logEvent } from "./logger";
 
@@ -38,6 +38,7 @@ export function disposePrivateRefreshProcess() {
 
 async function runPrivateRefreshProcess(
   characters: Array<{ characterId: string; accessToken: string }>,
+  privateDataKey: string,
   onProgress: (progress: WorkerProgress) => void,
 ): Promise<WorkerResult> {
   if (!characters.length) return { refreshed: 0, failed: [] };
@@ -104,7 +105,7 @@ async function runPrivateRefreshProcess(
     });
 
     try {
-      child.send({ characters });
+      child.send({ characters, privateDataKey });
     } catch (error) {
       finish(() => reject(error));
     }
@@ -131,6 +132,7 @@ async function refreshConnectedCharacters(
 
   const failed: PrivateRefreshFailure[] = [];
   const prepared: Array<{ characterId: string; accessToken: string }> = [];
+  const privateDataKey = await getOrCreatePrivateDataEncryptionKey();
   let authCompleted = 0;
   let configChanged = false;
 
@@ -165,7 +167,7 @@ async function refreshConnectedCharacters(
 
   let refreshed = 0;
   if (prepared.length) {
-    const workerResult = await runPrivateRefreshProcess(prepared, (progress) => {
+    const workerResult = await runPrivateRefreshProcess(prepared, privateDataKey, (progress) => {
       const workerPercent = Math.max(0, Math.min(100, Number(progress.percent ?? 0)));
       onProgress({
         ...progress,
@@ -176,6 +178,21 @@ async function refreshConnectedCharacters(
     refreshed = workerResult.refreshed;
     failed.push(...workerResult.failed);
   }
+
+  const completedAt = new Date().toISOString();
+  const latestConfig = await readConfig();
+  const failedByCharacter = new Map(failed.map((item) => [item.characterId, item.error]));
+  for (const characterId of characterIds) {
+    const previous = latestConfig.eveAuthorizations[characterId];
+    if (!previous) continue;
+    const error = failedByCharacter.get(characterId);
+    latestConfig.eveAuthorizations[characterId] = {
+      ...previous,
+      ...(error ? { lastRefreshStatus: "error" as const, lastRefreshError: error } : { lastFullPrivateSyncAt: completedAt, lastRefreshStatus: "ready" as const, lastRefreshError: undefined }),
+    };
+    if (!error) latestConfig.reauthorizationRequiredCharacterIds = latestConfig.reauthorizationRequiredCharacterIds.filter((id) => id !== characterId);
+  }
+  await writeConfig(latestConfig);
 
   onProgress({
     stage: failed.length ? "private-complete-with-errors" : "private-complete",

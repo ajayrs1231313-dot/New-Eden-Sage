@@ -124,6 +124,7 @@ const RetainedWormholeCommand = memo(WormholeCommand, (a, b) => a.snapshots === 
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
+  const [fleetWargameActive, setFleetWargameActive] = useState(false);
   const [fitToMonitor, setFitToMonitor] = useState(false);
   const [assetCommandTab, setAssetCommandTab] = useState<AssetCommandTab>("loot");
   const [walletCommandView, setWalletCommandView] = useState<WalletCommandView>("full");
@@ -336,7 +337,7 @@ export default function App() {
       setView("overview");
       setMessage(result.onlineIdentityError
         ? `${result.characterName} connected locally - ${result.onlineIdentityError}`
-        : `${result.characterName} connected - ready for private data refresh`);
+        : `${result.characterName} connected - full private ESI sync complete (${result.coverage.mailHeadersCaptured} mail headers / ${result.coverage.mailBodiesCaptured} bodies)`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "EVE login failed");
     } finally {
@@ -459,7 +460,7 @@ export default function App() {
   );
 
   return (
-    <div className={`app-shell ${view === "fittings" ? "fittings-shell-active" : ""}`}>
+    <div className={`app-shell ${view === "fittings" ? "fittings-shell-active" : ""} ${view === "fleet" && fleetWargameActive ? "wargame-shell-active" : ""}`}>
       {(!initialSetupComplete && !syncProgress?.running) && (
         <div className="sync-overlay" role="status" aria-live="polite">
           <div className="sync-dialog">
@@ -645,7 +646,7 @@ export default function App() {
             <div className="fitting-shell-tools"><input className="fitting-shell-search" aria-label="Search fitting catalogue" placeholder="Search ships, items, or fitting ideas..." onChange={(event) => window.dispatchEvent(new CustomEvent("sage:fitter-search", { detail: event.target.value }))} /><div className="fitting-shell-status"><span>LOCAL</span><time>{new Date().toLocaleTimeString("en-GB", { hour12: false })}</time><button type="button" title="Open Sage settings" aria-label="Open Sage settings" onClick={() => setView("settings")}>&#9881;</button></div></div>
           </div>
         )}
-        <CharacterCommandHeader
+        {!(view === "fleet" && fleetWargameActive) && <CharacterCommandHeader
           title={nav.find((item) => item.id === view)?.label ?? "New Eden Sage"}
           subtitle={
             view === "overview"
@@ -663,7 +664,7 @@ export default function App() {
           onRefreshPrivate={refreshPrivateData}
           onAddCharacter={connect}
           onSupportDeveloper={() => window.sage.openSupportPage()}
-        />
+        />}
         {mountedViews.current.has("overview") && (
           <div className="cached-view" hidden={view !== "overview"}>
             <CharacterCommand
@@ -679,7 +680,7 @@ export default function App() {
           </div>
         )}
         {view === "settings" && (
-          <Settings config={config} onSaved={setConfig} />
+          <Settings config={config} snapshots={snapshots} onSaved={setConfig} />
         )}
         {mountedViews.current.has("skills") && (
           <div className="cached-view" hidden={view !== "skills"}>
@@ -745,7 +746,7 @@ export default function App() {
           </div>
         )}
         {view === "corporation" && <CorporationManagement />}
-        {view === "fleet" && <FleetCommand />}
+        {view === "fleet" && <FleetCommand onWargameActiveChange={setFleetWargameActive} />}
         <footer>
           <span className="pulse" />
           {message}
@@ -1349,8 +1350,10 @@ function Metric({
 
 function Settings({
   config,
+  snapshots,
 }: {
   config: PublicConfig;
+  snapshots: CharacterSnapshot[];
   onSaved(config: PublicConfig): void;
 }) {
   const [mcpSetup, setMcpSetup] = useState<{ command: string; args: string[]; json: string; codex: string; access: string; claudeDesktop: string; claudeCode: string } | null>(null);
@@ -1445,6 +1448,20 @@ function Settings({
           <div className="settings-detail-row"><span>Authorization</span><strong>Secure desktop OAuth / ESI</strong></div>
           <div className="settings-detail-row"><span>Token storage</span><strong>Windows secure storage / local only</strong></div>
           <div className="settings-callback"><span>Callback URL</span><code>{config.callbackUrl}</code></div>
+          <div className="settings-character-auth">
+            <div className="settings-character-auth-head"><div><span>SAVED CHARACTERS</span><strong>ESI authorization state</strong></div><small>Scope schema v{config.esiScopeSchemaVersion}</small></div>
+            {snapshots.length ? <div className="settings-character-auth-list">{snapshots.map((snapshot) => {
+              const authorization = config.eveAuthorizations[snapshot.characterId];
+              const reauthorizationRequired = config.reauthorizationRequiredCharacterIds.includes(snapshot.characterId);
+              const current = Boolean(authorization && authorization.scopeSchemaVersion === config.esiScopeSchemaVersion && !reauthorizationRequired);
+              return <article key={snapshot.characterId}>
+                <div className="settings-character-auth-avatar">{snapshot.character.name.slice(0,1)}</div>
+                <div className="settings-character-auth-copy"><strong>{snapshot.character.name}</strong><span>{snapshot.character.corporation_name ?? "EVE character"}</span><small>{reauthorizationRequired ? "Local data preserved — live private ESI blocked until this character is re-authorised." : current ? `Scope schema current • ${authorization?.grantedScopes.length ?? 0} scopes • Full sync ${authorization?.lastFullPrivateSyncAt ? new Date(authorization.lastFullPrivateSyncAt).toLocaleString() : "pending"}` : "Saved locally — authorization metadata is not current."}</small>{authorization?.lastRefreshStatus === "error" && authorization.lastRefreshError && <small className="settings-auth-error">Last sync: {authorization.lastRefreshError}</small>}</div>
+                <span className={`settings-state ${reauthorizationRequired ? "muted" : current ? "ready" : "muted"}`}>{reauthorizationRequired ? "RE-AUTH REQUIRED" : current ? "CURRENT" : "LOCAL ONLY"}</span>
+              </article>;
+            })}</div> : <div className="settings-character-auth-empty">No EVE characters are saved on this PC.</div>}
+            <p className="settings-character-auth-note">When a scope-schema migration requires re-authorisation, use <strong>Add Character</strong> in the app header and select that saved character. Sage requests the complete current ESI manifest, validates the grant, then automatically runs a full private sync. Existing local snapshots and history remain readable until that succeeds.</p>
+          </div>
         </article>
 
         <article className="settings-connection-card mcp-settings-card settings-ai-card">

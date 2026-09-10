@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { buildClaudeMcpbBuffer } from "./claude-mcpb";
+import { sageMcpLaunch } from "./mcp-launch";
 
 const SERVER_NAME = "new-eden-sage";
 const DISPLAY_NAME = "New Eden Sage";
@@ -47,12 +48,6 @@ export type ClaudeCompatibilityStatus = {
   code: ClaudeClientStatus;
   launch: { command: string; args: string[]; env: Record<string, string> };
 };
-
-export function sageMcpLaunch() {
-  const command = app.getPath("exe");
-  const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
-  return { command, args: [script], env: { ELECTRON_RUN_AS_NODE: "1" } };
-}
 
 function legacyDesktopConfigDirectory() {
   if (process.platform === "win32") {

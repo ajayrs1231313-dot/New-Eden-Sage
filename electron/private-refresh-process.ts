@@ -1,8 +1,11 @@
 import { fetchCharacterSnapshot } from "./eve";
-import { saveSnapshot } from "./database";
+import { getSnapshot, saveSnapshot } from "./database";
+import { configurePrivateEsiEncryptionKey } from "./private-esi-cache";
+import { configureSnapshotEncryptionKey } from "./snapshot-crypto";
 
 type PrivateRefreshInput = {
   characters: Array<{ characterId: string; accessToken: string }>;
+  privateDataKey: string;
 };
 
 type PrivateRefreshFailure = { characterId: string; error: string };
@@ -23,6 +26,8 @@ function finish(message: unknown) {
 }
 
 async function run(input: PrivateRefreshInput) {
+  configurePrivateEsiEncryptionKey(String(input?.privateDataKey ?? ""));
+  configureSnapshotEncryptionKey(String(input?.privateDataKey ?? ""));
   const characters = Array.isArray(input?.characters) ? input.characters : [];
   if (!characters.length) {
     finish({ type: "complete", refreshed: 0, failed: [] });
@@ -46,6 +51,7 @@ async function run(input: PrivateRefreshInput) {
         message: `Refreshing private data ${characterNumber}/${characters.length}.`,
       });
 
+      const existingSnapshot = getSnapshot(character.characterId);
       const snapshot = await fetchCharacterSnapshot(character.characterId, character.accessToken, (progress) => {
         const overall = ((index + Math.max(0, Math.min(100, progress.percent)) / 100) / characters.length) * 100;
         send({
@@ -57,7 +63,7 @@ async function run(input: PrivateRefreshInput) {
           total: characters.length,
           message: progress.message,
         });
-      });
+      }, existingSnapshot);
 
       send({
         type: "progress",

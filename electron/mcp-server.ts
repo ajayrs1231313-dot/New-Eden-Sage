@@ -17,6 +17,7 @@ import { ANALYSIS_CACHE_ROOT, USER_DATA_ROOT } from "./data-paths";
 import { calculateNavigationRoute, getNavigationNeighbours, getNavigationSystem, searchNavigationSystems } from "./universe-route-graph";
 import { getWormholeReference, getWormholeReferenceEntry, getWormholeSystemReferences } from "./wormhole-reference";
 import { PAGE_STATE_CACHE_KIND } from "./page-state-persistence";
+import { getSnapshot as getDatabaseSnapshot, listSnapshots as listDatabaseSnapshots } from "./database";
 import { SAGE_MCP_AI_INSTRUCTIONS, SAGE_CHARACTER_LIST_GUIDANCE, SAGE_CHARACTER_DATA_GUIDANCE, SAGE_SAVED_FITTINGS_GUIDANCE, SAGE_FIT_SKILL_GUIDANCE } from "./mcp-ai-policy";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -77,13 +78,8 @@ async function runWrangler(args: string[], timeoutMs: number) {
   }
 }
 
-function listSnapshots() {
-  return (database.prepare("SELECT payload FROM character_snapshots ORDER BY updated_at DESC").all() as Array<{ payload: string }>).map((row) => JSON.parse(row.payload));
-}
-function getSnapshot(characterId: string) {
-  const row = database.prepare("SELECT payload FROM character_snapshots WHERE character_id = ?").get(characterId) as { payload?: string } | undefined;
-  return row?.payload ? JSON.parse(row.payload) : null;
-}
+function listSnapshots() { return listDatabaseSnapshots(); }
+function getSnapshot(characterId: string) { return getDatabaseSnapshot(characterId); }
 function listImportedInformation() {
   return database.prepare("SELECT id, source_name, content, imported_at FROM imported_information ORDER BY imported_at DESC").all();
 }
