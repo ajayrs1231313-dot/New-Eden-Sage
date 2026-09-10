@@ -26,6 +26,7 @@ export const EVE_SCOPES = [
   "esi-ui.open_window.v1",
   "esi-industry.read_character_jobs.v1",
   "esi-killmails.read_killmails.v1",
+  "esi-mail.read_mail.v1",
   "esi-location.read_location.v1",
   "esi-location.read_online.v1",
   "esi-location.read_ship_type.v1",
@@ -624,6 +625,27 @@ export async function fetchCharacterSnapshot(
     .sort((a, b) => a.name.localeCompare(b.name));
   report("skills", 42, "Skill metadata prepared.");
 
+  const captureMailHeaders = async (limit = 250): Promise<unknown> => {
+    try {
+      const headers: Array<{ mail_id:number; from?:number; is_read?:boolean; labels?:number[]; recipients?:Array<{recipient_id:number;recipient_type:string}>; subject?:string; timestamp?:string }> = [];
+      let lastMailId: number | null = null;
+      while (headers.length < limit) {
+        const suffix: string = lastMailId ? `?last_mail_id=${lastMailId}` : "";
+        const page: Array<{ mail_id:number; from?:number; is_read?:boolean; labels?:number[]; recipients?:Array<{recipient_id:number;recipient_type:string}>; subject?:string; timestamp?:string }> = (await privateEsiJson<Array<{ mail_id:number; from?:number; is_read?:boolean; labels?:number[]; recipients?:Array<{recipient_id:number;recipient_type:string}>; subject?:string; timestamp?:string }>>(characterId, `/characters/${characterId}/mail/${suffix}`, accessToken)).data;
+        if (!Array.isArray(page) || !page.length) break;
+        headers.push(...page.slice(0, Math.max(0, limit - headers.length)));
+        if (page.length < 50) break;
+        const ids: number[] = page.map(item => Number(item?.mail_id ?? 0)).filter(id => id > 0);
+        const next: number = ids.length ? Math.min(...ids) : 0;
+        if (!next || next === lastMailId) break;
+        lastMailId = next;
+      }
+      return headers;
+    } catch (error) {
+      return { unavailable: true, endpoint: `/characters/${characterId}/mail/`, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
   const [
     assets,
     blueprints,
@@ -638,6 +660,9 @@ export async function fetchCharacterSnapshot(
     fittings,
     industryJobs,
     killmails,
+    mailHeaders,
+    mailLabels,
+    mailLists,
     marketOrders,
     walletJournal,
     walletTransactions,
@@ -678,6 +703,9 @@ export async function fetchCharacterSnapshot(
       true,
     ),
     capture(`/characters/${characterId}/killmails/recent/`, true),
+    captureMailHeaders(250),
+    capture(`/characters/${characterId}/mail/labels/`),
+    capture(`/characters/${characterId}/mail/lists/`),
     capture(`/characters/${characterId}/orders/?include_historical=true`, true),
     capture(`/characters/${characterId}/wallet/journal/`, true),
     capture(`/characters/${characterId}/wallet/transactions/`, true),
@@ -763,6 +791,17 @@ export async function fetchCharacterSnapshot(
         }),
       )
     : killmails;
+  const mailDetails = Array.isArray(mailHeaders)
+    ? await mapLimited(
+        (mailHeaders as Array<{ mail_id:number }>).slice(0, 100),
+        6,
+        async (mail) => ({
+          mailId: Number(mail.mail_id),
+          detail: await capture(`/characters/${characterId}/mail/${mail.mail_id}/`),
+        }),
+      )
+    : mailHeaders;
+
   const currentShipFit = Array.isArray(assets)
     ? (
         assets as Array<{
@@ -883,6 +922,19 @@ export async function fetchCharacterSnapshot(
       industryJobs,
       killmails,
       killmailDetails,
+      mail: Array.isArray(mailHeaders) ? {
+        headers: mailHeaders,
+        details: mailDetails,
+        labels: mailLabels,
+        mailingLists: mailLists,
+        coverage: {
+          headersCaptured: mailHeaders.length,
+          bodiesCaptured: Array.isArray(mailDetails) ? mailDetails.length : 0,
+          headerLimit: 250,
+          bodyLimit: 100,
+          note: "Mail is captured only during the user-initiated full Sage sync. HR submission does not refresh ESI and does not transfer credentials.",
+        },
+      } : mailHeaders,
       marketOrders,
       walletJournal,
       walletTransactions,

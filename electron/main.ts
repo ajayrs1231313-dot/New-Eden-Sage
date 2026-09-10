@@ -4,6 +4,9 @@ import path from "node:path";
 import { app, crashReporter, ipcMain } from "electron";
 import { LOG_ROOT, installProcessErrorLogging, logCrash, logEvent } from "./logger";
 
+// TEMP_VISUAL_VERIFY
+app.commandLine.appendSwitch("remote-debugging-port", "9231");
+
 const MCP_MODE = process.argv.includes("--mcp");
 const DESKTOP_SINGLE_INSTANCE_LOCK = MCP_MODE ? true : app.requestSingleInstanceLock();
 (globalThis as typeof globalThis & { __sageSingleInstanceLockHeld?: boolean }).__sageSingleInstanceLockHeld = DESKTOP_SINGLE_INSTANCE_LOCK;

@@ -1,4 +1,4 @@
-import { USER_DATA_ROOT } from "./data-paths";
+import { DATA_ROOT, USER_DATA_ROOT } from "./data-paths";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
@@ -95,6 +95,8 @@ import { getSagePiObject, listSagePiObjects, publishSagePiObject, unpublishSageP
 import { exportNavigationWaypoints } from "./navigation-eve-export";
 import { registerWormholeCommandIpc } from "./wormhole-command-store";
 import { getWormholeReference, getWormholeReferenceEntry, getWormholeRollingShipMass, getWormholeSystemReferences } from "./wormhole-reference";
+import { HR_DATA_CATEGORIES, buildHrApplicantSnapshot, type HrApplicationRequest, type HrApplicationStatus, type HrDataCategoryId } from "./hr-service";
+import { addSageHrNote, createSageHrRequest, listSageHrApplications, resolveSageHrCode, revokeSageHrRequest, setSageHrDecision, submitSageHrSnapshot, withdrawSageHrRequest } from "./hr-online";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "sage-asset",
@@ -122,6 +124,26 @@ function announceInstalledPublicData(result: SharedMarketSyncResult) {
     publicGeneration: result.manifest.generation,
     publicArtifacts: result.changed,
   });
+}
+
+const FITTER_CONTENT_CONFIG_PATH = path.join(DATA_ROOT, "Fitter Content", "fitter-content.json");
+let fitterContentConfigCache: { mtimeMs:number; rules:unknown[] } | null = null;
+
+async function loadFitterContentConfig() {
+  try {
+    const stat = await fs.stat(FITTER_CONTENT_CONFIG_PATH);
+    if (fitterContentConfigCache?.mtimeMs === stat.mtimeMs) return { path:FITTER_CONTENT_CONFIG_PATH, rules:fitterContentConfigCache.rules };
+    const parsed = JSON.parse(await fs.readFile(FITTER_CONTENT_CONFIG_PATH, "utf8")) as { rules?:unknown[] } | unknown[];
+    const rules = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.rules) ? parsed.rules : [];
+    fitterContentConfigCache = { mtimeMs:stat.mtimeMs, rules };
+    return { path:FITTER_CONTENT_CONFIG_PATH, rules };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      await logEvent("warn", "fitter.content_config_load_failed", { path:FITTER_CONTENT_CONFIG_PATH, error:error instanceof Error ? error.message : String(error) });
+    }
+    fitterContentConfigCache = null;
+    return { path:FITTER_CONTENT_CONFIG_PATH, rules:[] };
+  }
 }
 
 async function loadPublicDataStatus() {
@@ -315,11 +337,16 @@ async function runFeaturePrepProcessNow<T = unknown>(
   onProgress?: (progress: { percent?: number; message?: string }) => void,
 ) {
   const task = String(processData?.task ?? "unknown");
-  const headroom = await ensureSyncMemoryHeadroom(`feature-process:${task}`);
-  if (!headroom.ok) {
-    throw new Error(
-      `Not enough memory to start ${task} safely (${headroom.sample.freeSystemMb.toLocaleString()} MB free; ${headroom.minFreeSystemMb.toLocaleString()} MB reserved). Existing prepared data was kept.`,
-    );
+  // Invention cache misses consume the installed server-prepared market index in this isolated
+  // process. The old sync reserve was sized for bulk local crunching and must not block this
+  // prepared-data path; real spawn/allocation/process failures are still handled below.
+  if (task !== "invention") {
+    const headroom = await ensureSyncMemoryHeadroom(`feature-process:${task}`);
+    if (!headroom.ok) {
+      throw new Error(
+        `Not enough memory to start ${task} safely (${headroom.sample.freeSystemMb.toLocaleString()} MB free; ${headroom.minFreeSystemMb.toLocaleString()} MB reserved). Existing prepared data was kept.`,
+      );
+    }
   }
 
   return new Promise<T>((resolve, reject) => {
@@ -878,13 +905,12 @@ async function readDisplayFitMetrics(target: BrowserWindow): Promise<DisplayFitM
       const shellOverflowWidth = shell && shell.scrollWidth > viewportWidth + 1 ? shell.scrollWidth : 0;
       const asideOverflowHeight = aside && aside.scrollHeight > aside.clientHeight + 1 ? aside.scrollHeight : 0;
       const mainHeight = main?.scrollHeight || main?.getBoundingClientRect().height || 0;
-      const activeIskWorkspace = Boolean(document.querySelector(".cached-view:not([hidden]) .isk-lab-v2"));
       return {
         viewportWidth,
         viewportHeight,
         contentWidth: Math.max(1, asideWidth + mainWidth, shellOverflowWidth),
         contentHeight: Math.max(1, mainHeight, asideOverflowHeight),
-        fitHeight: !activeIskWorkspace,
+        fitHeight: false,
       };
     })()`, true) as DisplayFitMetrics;
   } catch {
@@ -929,11 +955,6 @@ function scheduleResponsiveDisplayScale(target: BrowserWindow, delay = 120) {
   }, delay);
 }
 
-function enableDisplayFitForFullscreen(target: BrowserWindow) {
-  displayFitEnabled = true;
-  if (!target.webContents.isDestroyed()) target.webContents.send("display-fit:changed", true);
-  scheduleResponsiveDisplayScale(target, 20);
-}
 
 function createWindow() {
   const createdWindow = new BrowserWindow({
@@ -954,9 +975,9 @@ function createWindow() {
 
   void applyResponsiveDisplayScale(createdWindow);
   createdWindow.on("resize", () => scheduleResponsiveDisplayScale(createdWindow));
-  createdWindow.on("maximize", () => enableDisplayFitForFullscreen(createdWindow));
+  createdWindow.on("maximize", () => scheduleResponsiveDisplayScale(createdWindow));
   createdWindow.on("unmaximize", () => scheduleResponsiveDisplayScale(createdWindow));
-  createdWindow.on("enter-full-screen", () => enableDisplayFitForFullscreen(createdWindow));
+  createdWindow.on("enter-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
   createdWindow.on("leave-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
   createdWindow.webContents.on("did-finish-load", () => void applyResponsiveDisplayScale(createdWindow));
 
@@ -969,18 +990,57 @@ function createWindow() {
           devSession.clearCodeCaches({ urls: [] }),
         ]);
       } catch {
-        // Development cache cleanup is best-effort; Vite can still serve a fresh page.
+        // Development cache cleanup is best-effort; renderer recovery below is the important part.
       }
-      if (!createdWindow.isDestroyed()) {
-        await createdWindow.loadURL(`http://localhost:42814/?electron=${Date.now()}`);
+
+      let lastDevLoadError: unknown = null;
+      for (let attempt = 1; attempt <= 20; attempt += 1) {
+        if (createdWindow.isDestroyed()) return;
+        try {
+          await createdWindow.loadURL(`http://localhost:42814/?electron=${Date.now()}&attempt=${attempt}`);
+          if (!createdWindow.isDestroyed()) {
+            if (!createdWindow.isVisible()) createdWindow.show();
+            createdWindow.focus();
+          }
+          return;
+        } catch (error) {
+          lastDevLoadError = error;
+          if (attempt < 20) await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+
+      await logEvent("warn", "renderer.dev_load_failed_fallback", {
+        error: lastDevLoadError instanceof Error ? lastDevLoadError.message : String(lastDevLoadError),
+      });
+      if (createdWindow.isDestroyed()) return;
+      try {
+        await createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+        if (!createdWindow.isDestroyed()) {
+          if (!createdWindow.isVisible()) createdWindow.show();
+          createdWindow.focus();
+        }
+      } catch (fallbackError) {
+        await logEvent("error", "renderer.dev_fallback_load_failed", {
+          error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+        });
       }
     })();
-  } else createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+  } else {
+    createdWindow.loadFile(path.join(__dirname, "../dist/index.html"));
+  }
 }
 
 const hasSingleInstanceLock =
   (globalThis as typeof globalThis & { __sageSingleInstanceLockHeld?: boolean }).__sageSingleInstanceLockHeld
   ?? app.requestSingleInstanceLock();
+
+function hrWorkspaceAuthority(workspace:any) {
+  const legacyDefault = Boolean(workspace?.can_configure_permissions || workspace?.is_corporation_ceo || (Array.isArray(workspace?.roles) && workspace.roles.includes("Personnel_Manager")));
+  return {
+    canManage: typeof workspace?.can_manage_hr === "boolean" ? workspace.can_manage_hr : legacyDefault,
+    canReview: typeof workspace?.can_review_hr === "boolean" ? workspace.can_review_hr : legacyDefault,
+  };
+}
 
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -1038,6 +1098,11 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("external:open-support", () =>
     shell.openExternal("https://www.paypal.com/donate/?hosted_button_id=5ZE4R48W6UWMC"),
   );
+  ipcMain.handle("external:open-url", (_event, raw:string) => {
+    const url = new URL(String(raw ?? ""));
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("Only HTTP(S) links may be opened from fitter content.");
+    return shell.openExternal(url.toString());
+  });
   ipcMain.handle("external:open-discord-url", (_event, raw:string) => {
     const url=new URL(String(raw??""));
     if(url.protocol!=="https:" || (url.hostname!=="discord.com" && url.hostname!=="www.discord.com")) throw new Error("Only Discord HTTPS links may be opened from Discord Integration.");
@@ -1189,6 +1254,52 @@ if (!hasSingleInstanceLock) {
     const policy=await updateSageCorporationPermission(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.permissionKey??""),authorities);
     return {workspace,policy};
   });
+  ipcMain.handle("corp:hr-state", async (_event, characterId:string) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
+    const authority=hrWorkspaceAuthority(workspace);
+    if(!authority.canManage && !authority.canReview) throw new Error("Corporation HR authority is required to open applicant command data.");
+    const remote=await listSageHrApplications(sessionToken,workspace.workspace_id,Number(workspace.character_id));
+    return {workspace:{...workspace,can_manage_hr:authority.canManage,can_review_hr:authority.canReview},categories:HR_DATA_CATEGORIES,applications:remote.applications,transport:remote.transport};
+  });
+  ipcMain.handle("corp:hr-create", async (_event, input:{characterId:string;requestedCategories:HrDataCategoryId[];expiresInHours?:number}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const authority=hrWorkspaceAuthority(workspace);
+    if(!authority.canManage) throw new Error("HR request management authority is required to create applicant vetting requests.");
+    return createSageHrRequest(sessionToken,workspace.workspace_id,Number(workspace.character_id),{requestedCategories:Array.isArray(input?.requestedCategories)?input.requestedCategories:[],expiresInHours:Number(input?.expiresInHours||0)||undefined});
+  });
+  ipcMain.handle("corp:hr-revoke", async (_event, input:{characterId:string;applicationId:string}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const authority=hrWorkspaceAuthority(workspace);
+    if(!authority.canManage) throw new Error("HR request management authority is required to revoke applicant codes.");
+    return revokeSageHrRequest(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.applicationId??""));
+  });
+  ipcMain.handle("corp:hr-resolve-code", async (_event, code:string) => {
+    const sessionToken=await sageOnlineSessionTokenOnly();
+    const resolved=await resolveSageHrCode(sessionToken,String(code??""));
+    return {...resolved,categories:HR_DATA_CATEGORIES};
+  });
+  ipcMain.handle("corp:hr-submit-snapshot", async (_event, input:{code:string;characterId:string;selectedCategories:HrDataCategoryId[]}) => {
+    const sessionToken=await sageOnlineSessionTokenOnly();
+    const snapshot=getSnapshot(String(input?.characterId??""));
+    if(!snapshot) throw new Error("No local Sage snapshot exists for the selected applicant character.");
+    const resolved=await resolveSageHrCode(sessionToken,String(input?.code??""));
+    const request:HrApplicationRequest={applicationId:String(resolved.applicationId??""),codeHash:"",codeHint:"",corporationId:Number(resolved.corporationId??0),corporationName:String(resolved.corporationName??""),recruiterCharacterId:String(resolved.recruiterCharacterId??""),recruiterName:String(resolved.recruiterName??""),requestedCategories:Array.isArray(resolved.requestedCategories)?resolved.requestedCategories:[],createdAt:String(resolved.createdAt??""),expiresAt:String(resolved.expiresAt??""),status:String(resolved.status??"awaiting-applicant") as HrApplicationStatus};
+    const report=buildHrApplicantSnapshot({request,characterSnapshot:snapshot,selectedCategories:Array.isArray(input?.selectedCategories)?input.selectedCategories:[],submissionMethod:"sage-desktop"});
+    return submitSageHrSnapshot(sessionToken,String(input?.code??""),Number(input?.characterId??0),report as unknown as Record<string,unknown>);
+  });
+  ipcMain.handle("corp:hr-withdraw", async (_event, code:string) => withdrawSageHrRequest(await sageOnlineSessionTokenOnly(),String(code??"")));
+  ipcMain.handle("corp:hr-note", async (_event, input:{characterId:string;applicationId:string;text:string}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const authority=hrWorkspaceAuthority(workspace);
+    if(!authority.canManage && !authority.canReview) throw new Error("HR review authority is required to add recruiter notes.");
+    return addSageHrNote(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.applicationId??""),String(input?.text??""));
+  });
+  ipcMain.handle("corp:hr-decision", async (_event, input:{characterId:string;applicationId:string;status:HrApplicationStatus}) => {
+    const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
+    const authority=hrWorkspaceAuthority(workspace);
+    if(!authority.canManage && !authority.canReview) throw new Error("HR review authority is required to record an application decision.");
+    return setSageHrDecision(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.applicationId??""),String(input?.status??""));
+  });
   ipcMain.handle("market:global-quotes", (_event, typeIds:number[]) => loadGlobalMarketQuotes(Array.isArray(typeIds) ? typeIds : []));
   ipcMain.handle("lp-store:corporations", (_event, corporationIds:number[]) => resolveLpCorporations(Array.isArray(corporationIds) ? corporationIds : []));
   ipcMain.handle("lp-store:offers", (_event, corporationId:number, marketRevision:number) => analyzeLpCorporation(Number(corporationId), Number(marketRevision)));
@@ -1307,6 +1418,7 @@ if (!hasSingleInstanceLock) {
     const plan=listPlanetaryPlans().find(row=>row.id===String(input?.planId??""));
     return plan?savePlanetaryPlan({...plan,scope:"personal",publishedObjectId:undefined,publishedVersion:undefined,publishedAt:undefined}):true;
   });
+  ipcMain.handle("fitting:content-config", () => loadFitterContentConfig());
   ipcMain.handle("fitting:augment-guide", (_event, installedTypeIds:number[]) => runFittingWorker("augment-guide", { installedTypeIds:Array.isArray(installedTypeIds)?installedTypeIds:[] }));
   ipcMain.handle("fitting:booster-side-effects-local", (_event, boosterTypeIds:number[]) => runFittingWorker("booster-side-effects", { boosterTypeIds:Array.isArray(boosterTypeIds)?boosterTypeIds:[] }));
   ipcMain.handle("clipboard:write", (_event, value: string) => {

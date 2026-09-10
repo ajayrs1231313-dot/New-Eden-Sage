@@ -3,6 +3,7 @@ import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, verifyEve
 import type { EventEnvelope, Principal, SageEnv } from "./types";
 import { deleteDiscordChannelMessage, discordBotRequest, discordGuildInviteUrl, discordInstallationState, findDiscordOperationAnnouncement, readDiscordGuildStructure, sendDiscordChannelMessage, sendDiscordDmToCharacter } from "./discord/service";
 import { cleanupDiscordSecurity, consumeDiscordActionTicket, issueDiscordActionTicket, registerDiscordDevice } from "./discord/security";
+import { handleHrApplicantApi, handleHrWorkspaceApi } from "./hr";
 
 export { WorkspaceHub };
 
@@ -223,6 +224,11 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
         ).bind(`perm_${workspaceId}_${permission.replace(/[^a-z0-9]+/gi, "_")}_${roleKey.toLowerCase()}`, workspaceId, permission, roleKey));
       }
     }
+    for (const permission of ["hr.manage", "hr.review"]) {
+      statements.push(env.DB.prepare(
+        `INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, ?3, 'eve_role', 'Personnel_Manager')`,
+      ).bind(`perm_${workspaceId}_${permission.replace(/[^a-z0-9]+/gi, "_")}_personnel_manager`, workspaceId, permission));
+    }
   }
   if (isNew) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'route.publish', 'account', ?3)`).bind(`perm_${workspaceId}_route_bootstrap`, workspaceId, principal.accountId));
   if (isNew) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'wormholes.manage', 'account', ?3)`).bind(`perm_${workspaceId}_wormholes_bootstrap`, workspaceId, principal.accountId));
@@ -231,10 +237,12 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
   const canManageWormholes = await hasPermission(env, workspaceId, principal.accountId, "wormholes.manage", identity.characterId);
   const canManageFleetOps = await hasPermission(env, workspaceId, principal.accountId, "fleet.manage", identity.characterId);
   const canApproveFleetOps = await hasPermission(env, workspaceId, principal.accountId, "fleet.approve", identity.characterId);
+  const canManageHr = await hasPermission(env, workspaceId, principal.accountId, "hr.manage", identity.characterId);
+  const canReviewHr = await hasPermission(env, workspaceId, principal.accountId, "hr.review", identity.characterId);
   const canManageDiscord = canManageFleetOps;
   const membership = await getActiveMembership(env, workspaceId, principal.accountId, identity.characterId);
   const administrator = await corporationAdministratorStatus(env, workspaceId, membership);
-  return json({ workspace_id: workspaceId, workspace_type: "corporation", corporation_id: identity.corporationId, corporation_name: corporationName, character_id: identity.characterId, character_name: identity.characterName, can_publish_routes: canPublishRoutes, can_manage_wormholes: canManageWormholes, can_manage_fleet_ops: canManageFleetOps, can_approve_fleet_ops: canApproveFleetOps, can_manage_discord: canManageDiscord, can_configure_permissions: administrator.canConfigure, is_corporation_ceo: administrator.isCeo, roles: [...roles], titles: [...titles], member_access: "active" }, isNew ? 201 : 200);
+  return json({ workspace_id: workspaceId, workspace_type: "corporation", corporation_id: identity.corporationId, corporation_name: corporationName, character_id: identity.characterId, character_name: identity.characterName, can_publish_routes: canPublishRoutes, can_manage_wormholes: canManageWormholes, can_manage_fleet_ops: canManageFleetOps, can_approve_fleet_ops: canApproveFleetOps, can_manage_hr: canManageHr, can_review_hr: canReviewHr, can_manage_discord: canManageDiscord, can_configure_permissions: administrator.canConfigure, is_corporation_ceo: administrator.isCeo, roles: [...roles], titles: [...titles], member_access: "active" }, isNew ? 201 : 200);
 }
 
 
@@ -248,6 +256,8 @@ const DEFAULT_OPERATION_AUTHORITY_ROLES = [
 const CORPORATION_PERMISSION_DEFINITIONS = [
   { key: "fleet.manage", label: "Create / Manage Operations", description: "Create, broadcast, edit and manage corporation operations.", defaultRoles: DEFAULT_OPERATION_AUTHORITY_ROLES },
   { key: "fleet.approve", label: "Approve / Deny Operation Applications", description: "Review member role requests when an operation requires leadership approval.", defaultRoles: DEFAULT_OPERATION_AUTHORITY_ROLES },
+  { key: "hr.manage", label: "HR - Create / Manage Vetting Requests", description: "Create and revoke one-time applicant vetting requests and issue recruitment codes.", defaultRoles: ["Personnel_Manager"] as const },
+  { key: "hr.review", label: "HR - Review Applicant Dossiers", description: "Read submitted applicant snapshots, add recruiter notes and record HR decisions.", defaultRoles: ["Personnel_Manager"] as const },
 ] as const;
 
 type CorporationAuthorityType = "eve_role" | "eve_title";
@@ -1029,6 +1039,9 @@ async function handleWorkspaceApi(request: Request, env: SageEnv, url: URL): Pro
     return error(403, "workspace_access_denied", "Active verified workspace membership is required.");
   }
 
+  const hrResponse = await handleHrWorkspaceApi(request, env, url, principal, workspaceId, tail, (permission, characterId) => hasPermission(env, workspaceId, principal.accountId, permission, characterId));
+  if (hrResponse) return hrResponse;
+
   if (tail === "permissions" && request.method === "GET") return json(await corporationPermissionState(env, principal, workspaceId, Number(url.searchParams.get("character_id") ?? 0) || undefined));
   const permissionPolicyMatch = tail.match(/^permissions\/(.+)$/);
   if (permissionPolicyMatch && request.method === "PUT") return updateCorporationPermissionPolicy(request, env, principal, workspaceId, decodeURIComponent(permissionPolicyMatch[1]));
@@ -1276,6 +1289,13 @@ export default {
 
     if (url.pathname === "/v1/identity" && request.method === "GET") {
       return getSageIdentity(request, env);
+    }
+
+    if (url.pathname.startsWith("/v1/hr/applications/")) {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      const hrResponse = await handleHrApplicantApi(request, env, url, principal);
+      if (hrResponse) return hrResponse;
     }
 
     if (url.pathname === "/v1/workspaces/corporation/ensure" && request.method === "POST") {

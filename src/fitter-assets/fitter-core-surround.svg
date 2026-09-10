@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640" fill="none">
+<defs>
+  <filter id="soft"><feGaussianBlur stdDeviation="3"/></filter>
+  <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#7af7ec"/><stop offset=".55" stop-color="#18b9b5"/><stop offset="1" stop-color="#0f6169"/></linearGradient>
+  <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#efb64f"/><stop offset=".6" stop-color="#b87620"/><stop offset="1" stop-color="#5e3c16"/></linearGradient>
+</defs>
+<!-- faint halo only; centre remains transparent -->
+<circle cx="320" cy="320" r="250" stroke="#3bc5c2" stroke-opacity=".09" stroke-width="16" filter="url(#soft)"/>
+<circle cx="320" cy="320" r="256" stroke="#143c45" stroke-width="7"/>
+<circle cx="320" cy="320" r="248" stroke="#347c83" stroke-opacity=".56" stroke-width="1.6"/>
+<circle cx="320" cy="320" r="236" stroke="#52d6cf" stroke-opacity=".23" stroke-width="1" stroke-dasharray="3 8"/>
+<circle cx="320" cy="320" r="263" pathLength="100" stroke="url(#cyan)" stroke-width="4" stroke-linecap="round" stroke-dasharray="18 9 12 61" transform="rotate(-31 320 320)"/>
+<circle cx="320" cy="320" r="263" pathLength="100" stroke="url(#amber)" stroke-width="4" stroke-linecap="round" stroke-dasharray="8 34 9 49" transform="rotate(9 320 320)"/>
+<circle cx="320" cy="320" r="272" pathLength="100" stroke="#3dbab7" stroke-opacity=".18" stroke-width="1" stroke-dasharray="5 15 2 78" transform="rotate(68 320 320)"/>
+<g stroke="#69ded6" stroke-opacity=".44" stroke-width="1.5">
+ <path d="M320 39v22M320 579v22M39 320h22M579 320h22"/>
+ <path d="M121 121l15 15M504 504l15 15M519 121l-15 15M136 504l-15 15" stroke-opacity=".15"/>
+</g>
+<g fill="#8af3ea" fill-opacity=".52"><circle cx="320" cy="48" r="2.2"/><circle cx="592" cy="320" r="2.2"/><circle cx="320" cy="592" r="2.2"/></g>
+</svg>

@@ -34,6 +34,15 @@ import "./character-command.css";
 import { MarketWorkspaceV2 } from "./MarketWorkspaceV2";
 import { OPEN_SHOPPING_LIST_EVENT, OPEN_SHOPPING_LIST_PENDING_KEY } from "./shopping-list";
 import { OPEN_NAVIGATION_ROUTE_EVENT } from "./navigation-intent";
+import {
+  SIDEBAR_AUTO_HIDE_ONBOARDING_STORAGE_KEY,
+  SIDEBAR_HIDE_DELAY_MS,
+  SIDEBAR_PINNED_STORAGE_KEY,
+  createSidebarAutoHideState,
+  createSidebarHideScheduler,
+  transitionSidebarAutoHide,
+  type SidebarHideScheduler,
+} from "./sidebar-auto-hide-state";
 
 type View =
   | "overview"
@@ -119,6 +128,54 @@ export default function App() {
   const [assetCommandTab, setAssetCommandTab] = useState<AssetCommandTab>("loot");
   const [walletCommandView, setWalletCommandView] = useState<WalletCommandView>("full");
   const [activityCommandTab, setActivityCommandTab] = useState<SkillsTab>("activity-planner");
+  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarEdgeTriggerRef = useRef<HTMLButtonElement>(null);
+  const [sidebarNavigation, setSidebarNavigation] = useState(() => {
+    try {
+      const onboardingSeen = localStorage.getItem(SIDEBAR_AUTO_HIDE_ONBOARDING_STORAGE_KEY) === "true";
+      const pinned = localStorage.getItem(SIDEBAR_PINNED_STORAGE_KEY) === "true";
+      return createSidebarAutoHideState(onboardingSeen, pinned);
+    } catch {
+      return createSidebarAutoHideState(false, false);
+    }
+  });
+  const focusSidebarEdgeIfNeeded = () => {
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && sidebarRef.current?.contains(activeElement)) {
+      sidebarEdgeTriggerRef.current?.focus({ preventScroll: true });
+    }
+  };
+  const sidebarHideSchedulerRef = useRef<SidebarHideScheduler | null>(null);
+  if (!sidebarHideSchedulerRef.current) {
+    sidebarHideSchedulerRef.current = createSidebarHideScheduler(() => {
+      focusSidebarEdgeIfNeeded();
+      setSidebarNavigation((current) => transitionSidebarAutoHide(current, { type: "hide" }));
+    }, SIDEBAR_HIDE_DELAY_MS);
+  }
+  const persistSidebarFlag = (key: string, value: boolean) => {
+    try { localStorage.setItem(key, String(value)); } catch { /* Navigation preferences are non-fatal. */ }
+  };
+  const openSidebar = () => {
+    sidebarHideSchedulerRef.current?.cancel();
+    setSidebarNavigation((current) => transitionSidebarAutoHide(current, { type: "edge-open" }));
+  };
+  const scheduleSidebarHide = () => {
+    if (!sidebarNavigation.onboardingSeen || sidebarNavigation.pinned) return;
+    sidebarHideSchedulerRef.current?.schedule();
+  };
+  const toggleSidebarPin = () => {
+    const nextPinned = !sidebarNavigation.pinned;
+    sidebarHideSchedulerRef.current?.cancel();
+    persistSidebarFlag(SIDEBAR_PINNED_STORAGE_KEY, nextPinned);
+    if (!nextPinned) focusSidebarEdgeIfNeeded();
+    setSidebarNavigation((current) => transitionSidebarAutoHide(current, { type: nextPinned ? "pin" : "unpin" }));
+  };
+  const confirmSidebarOnboarding = () => {
+    sidebarHideSchedulerRef.current?.cancel();
+    persistSidebarFlag(SIDEBAR_AUTO_HIDE_ONBOARDING_STORAGE_KEY, true);
+    persistSidebarFlag(SIDEBAR_PINNED_STORAGE_KEY, false);
+    setSidebarNavigation((current) => transitionSidebarAutoHide(current, { type: "confirm-onboarding" }));
+  };
   const [visitedCommandViews, setVisitedCommandViews] = useState<Set<View>>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(COMMAND_VISIT_STORAGE_KEY) ?? "[]");
@@ -138,6 +195,26 @@ export default function App() {
       return next;
     });
   }, [view]);
+  useEffect(() => () => sidebarHideSchedulerRef.current?.dispose(), []);
+  useEffect(() => {
+    const sidebar = sidebarRef.current;
+    if (!sidebar) return;
+    if (sidebarNavigation.open) sidebar.removeAttribute("inert");
+    else sidebar.setAttribute("inert", "");
+  }, [sidebarNavigation.open]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !sidebarNavigation.open || sidebarNavigation.pinned || !sidebarNavigation.onboardingSeen) return;
+      const dialogOwnsEscape = document.querySelector('dialog[open], [role="dialog"][aria-modal="true"], .sync-overlay');
+      if (dialogOwnsEscape) return;
+      event.preventDefault();
+      sidebarHideSchedulerRef.current?.cancel();
+      focusSidebarEdgeIfNeeded();
+      setSidebarNavigation((current) => transitionSidebarAutoHide(current, { type: "escape" }));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sidebarNavigation.onboardingSeen, sidebarNavigation.open, sidebarNavigation.pinned]);
   useEffect(() => {
     document.documentElement.dataset.fitToMonitor = fitToMonitor ? "on" : "off";
     void window.sage.setDisplayFitEnabled(fitToMonitor);
@@ -382,7 +459,7 @@ export default function App() {
   );
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${view === "fittings" ? "fittings-shell-active" : ""}`}>
       {(!initialSetupComplete && !syncProgress?.running) && (
         <div className="sync-overlay" role="status" aria-live="polite">
           <div className="sync-dialog">
@@ -401,7 +478,35 @@ export default function App() {
           </div>
         </div>
       )}
-      <aside>
+      <button
+        ref={sidebarEdgeTriggerRef}
+        type="button"
+        className="sidebar-edge-trigger"
+        aria-label="Open Command navigation"
+        aria-expanded={sidebarNavigation.open}
+        onPointerEnter={openSidebar}
+        onClick={openSidebar}
+      />
+      <aside
+        ref={sidebarRef}
+        className={`command-sidebar ${sidebarNavigation.open ? "is-open" : ""} ${sidebarNavigation.pinned ? "is-pinned" : ""}`}
+        aria-label="Command navigation"
+        aria-hidden={!sidebarNavigation.open}
+        onPointerEnter={() => sidebarHideSchedulerRef.current?.cancel()}
+        onPointerLeave={scheduleSidebarHide}
+      >
+        {sidebarNavigation.onboardingSeen && (
+          <button
+            type="button"
+            className={`sidebar-pin-toggle ${sidebarNavigation.pinned ? "active" : ""}`}
+            aria-pressed={sidebarNavigation.pinned}
+            aria-label={sidebarNavigation.pinned ? "Auto-hide navigation" : "Keep navigation open"}
+            title={sidebarNavigation.pinned ? "Auto-hide navigation" : "Keep navigation open"}
+            onClick={toggleSidebarPin}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h8l-1 5 3 3v2h-5v6l-1 1-1-1v-6H6v-2l3-3-1-5Z" /></svg>
+          </button>
+        )}
         <div className="brand">
           <span className="brand-glyph">{"\u2726"}</span>
           <div>
@@ -414,7 +519,11 @@ export default function App() {
             <button
               key={item.id}
               className={view === item.id ? "active" : ""}
-              onClick={() => setView(item.id)}
+              onClick={() => {
+                setView(item.id);
+                focusSidebarEdgeIfNeeded();
+                setSidebarNavigation((current) => transitionSidebarAutoHide(current, { type: "navigation-selected" }));
+              }}
             >
               <SidebarIcon id={item.id} />
               {item.label}
@@ -521,7 +630,21 @@ export default function App() {
           </div>
         </div>
       </aside>
+      {!sidebarNavigation.onboardingSeen && initialSetupComplete && (
+        <div className="sidebar-autohide-onboarding" aria-live="polite">
+          <p className="eyebrow">Navigation bar</p>
+          <strong>More room for Sage</strong>
+          <p>This bar hides automatically to give Sage more screen space. Move your mouse to the very far left edge of the window at any time and the navigation bar will reappear.</p>
+          <button type="button" onClick={confirmSidebarOnboarding}>Got it</button>
+        </div>
+      )}
       <main>
+        {view === "fittings" && (
+          <div className="fitting-shell-topbar">
+            <div className="fitting-shell-brand"><span>&#9671;</span><strong>NEW EDEN SAGE</strong><small>CAPSULEER INTELLIGENCE</small></div>
+            <div className="fitting-shell-tools"><input className="fitting-shell-search" aria-label="Search fitting catalogue" placeholder="Search ships, items, or fitting ideas..." onChange={(event) => window.dispatchEvent(new CustomEvent("sage:fitter-search", { detail: event.target.value }))} /><div className="fitting-shell-status"><span>LOCAL</span><time>{new Date().toLocaleTimeString("en-GB", { hour12: false })}</time><button type="button" title="Open Sage settings" aria-label="Open Sage settings" onClick={() => setView("settings")}>&#9881;</button></div></div>
+          </div>
+        )}
         <CharacterCommandHeader
           title={nav.find((item) => item.id === view)?.label ?? "New Eden Sage"}
           subtitle={
@@ -691,6 +814,7 @@ function CharacterCommand({
             marketDataRevision={effectiveMarketDataRevision}
             onOpenShoppingList={() => onNavigate("asset-market")}
             onOpenIndustry={() => onNavigate("industrial")}
+            onManageStandings={() => setTab("overview")}
           />
         </div>
       )}

@@ -4,12 +4,13 @@ import { CorporationOpPlanner } from "./CorporationOpPlanner";
 import { CorporationRoles } from "./CorporationRoles";
 import { CorporationDiscordIntegration } from "./CorporationDiscordIntegration";
 import { CorporationFindHome } from "./CorporationFindHome";
+import { CorporationHr } from "./CorporationHr";
 import { buildSystemNewsKillmailWindows, mergeSystemNewsKillmails, type KillmailWindowKey } from "./system-news-killmail-windows";
 
 type SystemHit = { systemId: number; name: string; regionName: string; constellationName: string; securityStatus: number };
 type Intel = any;
 type Watched = { systemId: number; name: string };
-type CorpSection = "system-news" | "find-home" | "overview" | "members" | "ops" | "roles" | "structures" | "alliance" | "discord";
+type CorpSection = "system-news" | "find-home" | "overview" | "members" | "ops" | "roles" | "hr" | "structures" | "alliance" | "discord";
 type KillmailStatus = {
   cooldownMs?: number;
   cacheTtlMs?: number;
@@ -214,6 +215,7 @@ export function CorporationManagement() {
       <button className={section === "members" ? "active" : ""} onClick={() => setSection("members")}>Members</button>
       <button className={section === "ops" ? "active" : ""} onClick={() => setSection("ops")}>Op Planner</button>
       <button className={section === "roles" ? "active" : ""} onClick={() => setSection("roles")}>Corp Roles</button>
+      <button className={section === "hr" ? "active" : ""} onClick={() => setSection("hr")}>HR</button>
       <button className={section === "structures" ? "active" : ""} onClick={() => setSection("structures")}>Structures</button>
       <button className={section === "alliance" ? "active" : ""} onClick={() => setSection("alliance")}>Alliance Management</button>
       <button className={section === "discord" ? "active" : ""} onClick={() => setSection("discord")}>Discord Setup</button>
@@ -241,6 +243,8 @@ export function CorporationManagement() {
               ? <CorporationOpPlanner corporation={corporation} snapshots={snapshots} />
               : section === "roles"
                 ? <CorporationRoles corporation={corporation} />
+                : section === "hr"
+                  ? <CorporationHr corporation={corporation} snapshots={snapshots} />
                 : section === "discord"
                 ? <CorporationDiscordIntegration corporation={corporation} />
                 : <CorporationStructures corporation={corporation} />}

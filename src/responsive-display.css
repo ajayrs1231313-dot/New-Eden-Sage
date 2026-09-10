@@ -280,17 +280,18 @@ nav button .nav-icon {
     width: clamp(124px, calc(99.2px + 2.296vmin), 148.8px);
     height: clamp(110px, calc(88px + 2.037vmin), 132px);
   }
-  .character-command .character-queue-summary article {
-    min-height: clamp(74px, calc(59.2px + 1.37vmin), 88.8px);
-    padding: clamp(12px, calc(9.6px + .222vmin), 14.4px) clamp(14px, calc(11.2px + .259vmin), 16.8px);
+  .character-command .character-queue-summary .queue-summary-card {
+    min-height: clamp(98px, calc(78.4px + 1.815vmin), 117.6px);
+    padding: clamp(16px, calc(12.8px + .296vmin), 19.2px) clamp(20px, calc(16px + .37vmin), 24px);
   }
   .character-command .character-queue-title {
-    padding: clamp(11px, calc(8.8px + .204vmin), 13.2px) clamp(13px, calc(10.4px + .241vmin), 15.6px);
+    min-height: clamp(64px, calc(51.2px + 1.185vmin), 76.8px);
+    padding: clamp(12px, calc(9.6px + .222vmin), 14.4px) clamp(15px, calc(12px + .278vmin), 18px);
   }
   .character-command .character-queue-row {
     column-gap: clamp(18px, calc(14.4px + .333vmin), 21.6px);
-    min-height: clamp(58px, calc(46.4px + 1.074vmin), 69.6px);
-    padding: clamp(8px, calc(6.4px + .148vmin), 9.6px) clamp(14px, calc(11.2px + .259vmin), 16.8px);
+    min-height: clamp(52px, calc(41.6px + .963vmin), 62.4px);
+    padding: clamp(6px, calc(4.8px + .111vmin), 7.2px) clamp(12px, calc(9.6px + .222vmin), 14.4px);
   }
   .character-command .character-start-panel > h3,
   .character-command .character-reference-grid .command-panel-heading .eyebrow,

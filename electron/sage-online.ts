@@ -150,6 +150,8 @@ export type SageCorporationWorkspace = {
   can_manage_wormholes?: boolean;
   can_manage_fleet_ops?: boolean;
   can_approve_fleet_ops?: boolean;
+  can_manage_hr?: boolean;
+  can_review_hr?: boolean;
   can_configure_permissions?: boolean;
   is_corporation_ceo?: boolean;
   can_manage_discord?: boolean;

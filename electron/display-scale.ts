@@ -6,7 +6,7 @@ export type ResponsiveDisplayProfile = {
 };
 
 export const DISPLAY_FIT_DEFAULT_ENABLED = false;
-export const DISPLAY_FIT_MIN_ZOOM = 0.72;
+export const DISPLAY_FIT_MIN_ZOOM = 1;
 
 const widthZoom = (width: number) => {
   if (width >= 7000) return 1.5;
@@ -39,49 +39,36 @@ export function responsiveDisplayZoom(width: number, height: number) {
 }
 
 /**
- * Keep Sage inside the current monitor/window without throwing away the larger
- * typography profiles. Fit mode only moves when there is real overflow (or
- * generous spare room after a previous shrink), and never shrinks below the
- * legibility floor. Long workspaces can therefore still scroll when scrolling
- * is genuinely necessary.
+ * Keep Sage inside the current monitor/window without sacrificing legibility.
+ * Fit mode may reduce an enlarged high-DPI profile to resolve genuine horizontal
+ * overflow, but it never drops below 100% and never shrinks a page just because
+ * it is tall. Dense workspaces scroll vertically instead of miniaturising text.
  */
 export function fitDisplayZoom(
   baseZoom: number,
   currentZoom: number,
   viewportWidth: number,
-  viewportHeight: number,
+  _viewportHeight: number,
   contentWidth: number,
-  contentHeight: number,
-  fitHeight = true,
+  _contentHeight: number,
+  _fitHeight = true,
 ) {
   const safeBase = Math.max(DISPLAY_FIT_MIN_ZOOM, Number.isFinite(baseZoom) ? baseZoom : 1);
   const safeCurrent = Math.min(safeBase, Math.max(DISPLAY_FIT_MIN_ZOOM, Number.isFinite(currentZoom) ? currentZoom : safeBase));
   const safeViewportWidth = Math.max(1, Number.isFinite(viewportWidth) ? viewportWidth : 1);
-  const safeViewportHeight = Math.max(1, Number.isFinite(viewportHeight) ? viewportHeight : 1);
   const safeContentWidth = Math.max(1, Number.isFinite(contentWidth) ? contentWidth : safeViewportWidth);
-  const safeContentHeight = Math.max(1, Number.isFinite(contentHeight) ? contentHeight : safeViewportHeight);
   const widthFitRatio = safeViewportWidth / safeContentWidth;
-  const heightFitRatio = fitHeight ? safeViewportHeight / safeContentHeight : Number.POSITIVE_INFINITY;
-  const fitRatio = Math.min(widthFitRatio, heightFitRatio);
 
-  // Data-dense workspaces such as ISK Command are intentionally vertically
-  // scrollable. Recover from a previous height-driven shrink before deciding
-  // whether a small width correction is still needed at the responsive base.
-  if (!fitHeight && safeCurrent < safeBase - 0.001 && widthFitRatio >= 0.96) {
+  // Recover immediately from any legacy sub-base shrink when the content is
+  // already close enough to fitting at the responsive profile.
+  if (safeCurrent < safeBase - 0.001 && widthFitRatio >= 0.96) {
     return Math.round(safeBase * 1000) / 1000;
   }
-  if (!fitHeight && widthFitRatio >= 1) return Math.round(safeBase * 1000) / 1000;
+  if (widthFitRatio >= 1) return Math.round(safeBase * 1000) / 1000;
 
-  if (fitRatio < 1) {
-    const fitted = safeCurrent * fitRatio * 0.99;
+  if (widthFitRatio < 1) {
+    const fitted = safeCurrent * widthFitRatio * 0.99;
     return Math.round(Math.max(DISPLAY_FIT_MIN_ZOOM, Math.min(safeBase, fitted)) * 1000) / 1000;
-  }
-
-  // Hysteresis prevents a one-pixel scrollbar from making zoom bounce. Only
-  // grow again when a view change leaves useful headroom.
-  if (safeCurrent < safeBase - 0.001 && fitRatio > 1.04) {
-    const grown = safeCurrent * fitRatio * 0.99;
-    return Math.round(Math.max(DISPLAY_FIT_MIN_ZOOM, Math.min(safeBase, grown)) * 1000) / 1000;
   }
 
   return Math.round(safeCurrent * 1000) / 1000;

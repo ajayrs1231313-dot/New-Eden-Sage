@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="156" viewBox="0 0 720 156" fill="none" preserveAspectRatio="none">
+<defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#8ba6ad" stop-opacity=".78"/><stop offset=".42" stop-color="#8ba6ad" stop-opacity=".18"/><stop offset="1" stop-color="#8ba6ad" stop-opacity="0"/></linearGradient></defs>
+<!-- open bracket geometry; intentionally no panel fill -->
+<path d="M9 35 28 16h154" stroke="url(#a)" stroke-width="1.6"/>
+<path d="M9 35v92l18 18h142" stroke="#2d5d66" stroke-opacity=".45"/>
+<path d="M711 35 692 16H548" stroke="#2b6971" stroke-opacity=".30"/>
+<path d="M711 35v92l-18 18H552" stroke="#2d5d66" stroke-opacity=".28"/>
+<path d="M28 46h664" stroke="#2a6a72" stroke-opacity=".22"/>
+<path d="M17 58h8M695 58h8" stroke="#8ba6ad" stroke-opacity=".72" stroke-width="2"/>
+<path d="M34 137h83M603 137h83" stroke="#8ba6ad" stroke-opacity=".12"/>
+</svg>

@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
+import { createPortal } from "react-dom";
 import "./fittings-task11.css";
 import { parseFits, prepareImportedFits, validateFit, type FitValidationResult } from "./fitting-engine";
 import { duplicateFit, ensureFitMeta, exportFitJson, filterAndSortFits, renameFit, summarizeFit, type FitLibraryMetaMap, type FitLibrarySort } from "./fitting-library";
 import "./fittings-task12.css";
-import "./fittings-layout-v2.css";
 import type { FitResolutionIntent, FitRemedyCandidate } from "./types";
+import { FITTER_HERO_CONTENT, coerceFitterHeroRules, resolveFactionArtwork, resolveFitterFaction, resolveFitterHero, resolveShipFrame, type FitterHeroRule } from "./fitter-presentation";
+import { advanceFitterActiveQuantity } from "./fitter-quantity";
 import { FittingShowInfo, type ShowInfoTarget } from "./FittingShowInfo";
 import fittingStaticTree from "./fitting-static-tree.json";
 import { appendShoppingList, OPEN_SHOPPING_LIST_EVENT } from "./shopping-list";
@@ -175,7 +177,7 @@ function formatFitIsk(value: number) {
   return `${new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Math.max(0, value))} ISK`;
 }
 
-const FITTING_APP_INSTRUCTIONS = `NEW EDEN SAGE — UNIVERSAL FIT REQUEST FOR ANY LLM
+const FITTING_APP_INSTRUCTIONS = `NEW EDEN SAGE - UNIVERSAL FIT REQUEST FOR ANY LLM
 
 Paste this entire prompt into ChatGPT, Claude, Gemini or another LLM, then add your ship, activity, skills, budget and constraints.
 
@@ -500,13 +502,24 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   const [selectedCharacterId, setSelectedCharacterId] = useState(initialPending?.characterId ?? activeCharacterId ?? "");
   const [doctrineExport, setDoctrineExport] = useState<DoctrineExportDraft | null>(null);
   const [routeOpen, setRouteOpen] = useState(false);
-  const [sideMode, setSideMode] = useState<"build" | "import">("build");
+  const [sideMode, setSideMode] = useState<"build" | "import" | "saved">("build");
+  const [builderBrowseMode, setBuilderBrowseMode] = useState<"catalogue" | "ships">("catalogue");
   const [showInfoTarget, setShowInfoTarget] = useState<ShowInfoTarget | null>(null);
   const [lastValidation, setLastValidation] = useState<FitValidationResult | null>(null);
   const [libraryQuery, setLibraryQuery] = useState("");
   const [librarySort, setLibrarySort] = useState<FitLibrarySort>("recent");
   const [libraryMeta, setLibraryMeta] = useState<FitLibraryMetaMap>({});
   const [persistenceReady, setPersistenceReady] = useState(false);
+  const [issuesDock, setIssuesDock] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const handleShellSearch = (event: Event) => {
+      const query = String((event as CustomEvent<string>).detail ?? "");
+      setSideMode("build");
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent("sage:fitter-search-builder", { detail: query })), 0);
+    };
+    window.addEventListener("sage:fitter-search", handleShellSearch);
+    return () => window.removeEventListener("sage:fitter-search", handleShellSearch);
+  }, []);
   useEffect(() => {
     let cancelled = false;
     void window.sage.loadFittingPersistence(legacyFittingPersistence).then((value) => {
@@ -859,14 +872,19 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
     }));
     setStatus(`${itemName} set ${state}. Performance analysis will use this module state.`);
   }
-  function setActiveBayQuantity(target: "drones" | "fighters", index: number, activeQuantity: number) {
+  function setActiveBayQuantity(target: "drones" | "fighters", index: number, delta: number, baseline: number, maxAllowed: number) {
     if (!active) return;
-    const bayItem = active[target][index];
-    if (!bayItem) return;
-    const quantity = Math.max(0, Math.min(bayItem.quantity, Math.floor(activeQuantity)));
-    setFits((current) => current.map((fit) => fit.id !== active.id ? fit : ({ ...fit, [target]: fit[target].map((item, itemIndex) => itemIndex === index ? { ...item, activeQuantity: quantity } : item) })));
-    setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString() } }));
-    setStatus(`${bayItem.name}: ${quantity} active in ${target} for performance analysis.`);
+    const activeId = active.id;
+    setFits((current) => current.map((fit) => {
+      if (fit.id !== activeId) return fit;
+      return { ...fit, [target]: fit[target].map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const quantity = advanceFitterActiveQuantity(item.activeQuantity, baseline, delta, item.quantity, maxAllowed);
+        return { ...item, activeQuantity: quantity };
+      }) };
+    }));
+    setLibraryMeta((current) => ({ ...current, [activeId]: { ...(current[activeId] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString() } }));
+    setStatus(`Active ${target} selection updated. DPS and bandwidth will recalculate automatically.`);
   }
   function renameActiveFit() {
     if (!active) return;
@@ -950,24 +968,34 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   return (
     <section className="fit-workspace fit-workspace-v2">
       <div className="fit-v2-toolbar">
-        <label>Saved fit<select value={active?.id ?? ""} onChange={(event) => setActiveId(event.target.value)}><option value="">Select fitting...</option>{fits.map((fit) => <option key={fit.id} value={fit.id}>{fit.name} - {fit.hull.name}</option>)}</select></label>
-        <button type="button" className="fit-new-build" onClick={startNewFit} title="Start a clean fitting without deleting any saved fits">+ New Fit</button>
-        <button type="button" className={sideMode === "build" ? "active" : ""} onClick={() => setSideMode("build")}>Modules</button>
-        <button type="button" className={sideMode === "import" ? "active" : ""} onClick={() => setSideMode("import")}>Import</button>
+        <div className="fit-catalogue-title-row"><strong>{sideMode === "import" ? "FIT IMPORT" : sideMode === "saved" ? "SAVED FITS" : builderBrowseMode === "ships" ? "SHIP CATALOGUE" : "MODULE CATALOGUE"}</strong><span aria-hidden="true">~</span></div>
+        <div className="fit-catalogue-mode-tabs" role="tablist" aria-label="Fitting sidebar mode">
+          <button type="button" role="tab" aria-selected={sideMode === "build"} className={sideMode === "build" ? "active" : ""} onClick={() => { setSideMode("build"); window.setTimeout(() => window.dispatchEvent(new CustomEvent("sage:fitter-open-modules")), 0); }}>{sideMode === "build" && builderBrowseMode === "ships" ? "Ships" : "Modules"}</button>
+          <button type="button" role="tab" aria-selected={sideMode === "import"} className={sideMode === "import" ? "active" : ""} onClick={() => setSideMode("import")}>Import</button>
+          <button type="button" role="tab" aria-selected={sideMode === "saved"} className={sideMode === "saved" ? "active" : ""} onClick={() => setSideMode("saved")}>Saved Fits</button>
+        </div>
       </div>
       <aside className="fit-v2-browser">
         {sideMode === "build" ? (
-          <FitBuilder fit={active} characterId={selectedCharacterId} onCreate={createBuilderFit} onAdd={addBuilderItem} onRemove={removeBuilderItem} onQuantity={setBuilderItemQuantity} onState={setBuilderItemState} onCharge={loadBuilderCharge} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} />
+          <FitBuilder fit={active} characterId={selectedCharacterId} onCreate={createBuilderFit} onAdd={addBuilderItem} onRemove={removeBuilderItem} onQuantity={setBuilderItemQuantity} onState={setBuilderItemState} onCharge={loadBuilderCharge} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} onBrowseModeChange={setBuilderBrowseMode} />
+        ) : sideMode === "import" ? (
+          <div className="fit-v2-import"><p className="eyebrow">UNIVERSAL FIT IMPORT</p><h3>Paste a fit from anywhere</h3><button type="button" className="copy-fit-prompt" onClick={() => void copyChatGPTInstructions()}>Copy prompt for any LLM</button><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'Paste PYFA/EFT, XML, ESI JSON, DNA, Sage JSON, or a labelled plain-text fit...'} /><label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.fit,.txt,.json,.xml,.dna" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label><button type="button" onClick={() => void importFit()} disabled={!input.trim()}>Import and display</button><small>{status}</small>{lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}</div>
         ) : (
-          <div className="fit-v2-import"><p className="eyebrow">UNIVERSAL FIT IMPORT</p><h3>Paste a fit from anywhere</h3><button type="button" className="copy-fit-prompt" onClick={() => void copyChatGPTInstructions()}>Copy prompt for any LLM</button><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'Paste PYFA/EFT, XML, ESI JSON, DNA, Sage JSON, or a labelled plain-text fit…'} /><label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.fit,.txt,.json,.xml,.dna" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label><button type="button" onClick={() => void importFit()} disabled={!input.trim()}>Import and display</button><small>{status}</small>{lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}</div>
+          <div className="fit-saved-browser">
+            <div className="fit-saved-browser-head"><span>SAVED FITS</span><button type="button" className="fit-new-build" onClick={startNewFit}>+ New Fit</button></div>
+            <input value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Search saved fits..." />
+            <select value={librarySort} onChange={(event) => setLibrarySort(event.target.value as FitLibrarySort)}><option value="recent">Recently updated</option><option value="name">Name</option><option value="ship">Ship</option><option value="readiness">Readiness</option></select>
+            <div className="fit-saved-list">{filterAndSortFits(fits, libraryMeta, libraryQuery, librarySort).map((saved) => <button type="button" key={saved.id} className={saved.id === activeId ? "active" : ""} onClick={() => { setActiveId(saved.id); setSideMode("build"); }}><img src={imageUrl(saved.hull.typeId,"icon",64)} /><span><strong>{saved.name}</strong><small>{saved.hull.name}</small></span></button>)}</div>
+          </div>
         )}
       </aside>
+      <div className="fit-v2-issues-dock" ref={setIssuesDock} />
       <div className="fit-main">
-        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
+        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} onChangeShip={() => { setSideMode("build"); window.setTimeout(() => window.dispatchEvent(new CustomEvent("sage:fitter-open-ships")), 0); }} issuesDock={issuesDock} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
       </div>
       {doctrineExport && active && <div className="fit-doctrine-export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDoctrineExport(null); }}>
         <section className="fit-doctrine-export-dialog" role="dialog" aria-modal="true" aria-label="Export fitting to doctrine">
-          <div className="fit-doctrine-export-head"><div><p className="eyebrow">CORPORATION - DOCTRINES</p><h3>Export to Doctrine</h3><p>{active.name} - {active.hull.name}</p></div><button className="fit-doctrine-export-close" onClick={() => setDoctrineExport(null)} aria-label="Close">×</button></div>
+          <div className="fit-doctrine-export-head"><div><p className="eyebrow">CORPORATION - DOCTRINES</p><h3>Export to Doctrine</h3><p>{active.name} - {active.hull.name}</p></div><button className="fit-doctrine-export-close" onClick={() => setDoctrineExport(null)} aria-label="Close">X</button></div>
           <div className="fit-doctrine-export-corp"><span>DESTINATION CORPORATION</span><strong>{doctrineExport.corporationName}</strong></div>
           <label><span>Doctrine slot</span><select value={doctrineExport.slot} onChange={(event) => { const slot = Number(event.target.value); const target = doctrineExport.slots.find((item) => item.slot === slot); setDoctrineExport((current) => current ? { ...current, slot, doctrineName: target?.name || active.name } : current); }}>{doctrineExport.slots.map((slot) => <option key={slot.slot} value={slot.slot} disabled={slot.fitCount >= 10}>Slot {slot.slot} - {slot.name || "Empty"} ({slot.fitCount}/10)</option>)}</select></label>
           <label><span>Doctrine name</span><input value={doctrineExport.doctrineName} onChange={(event) => setDoctrineExport((current) => current ? { ...current, doctrineName: event.target.value } : current)} placeholder={active.name} /></label>
@@ -980,7 +1008,7 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
   );
 }
 
-function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, onState, onCharge, onShowInfo }: { fit?: Fit; characterId?: string; onCreate(ship: ShipChoice, name?: string): void; onAdd(target: BuilderTarget, item: FittingSearchResult, mutation?: { option: MutationOption; values: Record<string, number> }): Promise<boolean>; onRemove(target: BuilderTarget, index: number): void; onQuantity(target: "drones" | "cargo", index: number, quantity: number): void; onState(target: FitModuleRack, index: number, state: ModuleState): void; onCharge(target: FitModuleRack, index: number, item: FittingSearchResult): Promise<boolean>; onShowInfo(typeId:number,name?:string):void; }) {
+function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, onState, onCharge, onShowInfo, onBrowseModeChange }: { fit?: Fit; characterId?: string; onCreate(ship: ShipChoice, name?: string): void; onAdd(target: BuilderTarget, item: FittingSearchResult, mutation?: { option: MutationOption; values: Record<string, number> }): Promise<boolean>; onRemove(target: BuilderTarget, index: number): void; onQuantity(target: "drones" | "cargo", index: number, quantity: number): void; onState(target: FitModuleRack, index: number, state: ModuleState): void; onCharge(target: FitModuleRack, index: number, item: FittingSearchResult): Promise<boolean>; onShowInfo(typeId:number,name?:string):void; onBrowseModeChange?(mode:"catalogue"|"ships"):void; }) {
   const [ships, setShips] = useState<ShipChoice[]>(STATIC_SHIPS);
   const [browserTab, setBrowserTab] = useState<"catalogue" | "ships">(fit ? "catalogue" : "ships");
   const [hullQuery, setHullQuery] = useState("");
@@ -992,13 +1020,15 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
   const [catalogue, setCatalogue] = useState<FittingCatalogue>(()=>({groups:STATIC_FITTING_TREE.groups,items:[]}));
   const [catalogueSource, setCatalogueSource] = useState<"tree"|"cached"|"live">(sharedPreparationResult?"live":"tree");
   const [catalogueFilter, setCatalogueFilter] = useState("");
+  const [placementFilter, setPlacementFilter] = useState<"all" | "high" | "mid" | "low" | "rig" | "drone" | "cargo">("all");
+  const [browseCategories, setBrowseCategories] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set());
   const [expandedCategories, setExpandedCategories] = useState<Set<CatalogueCategoryId>>(() => new Set());
   const [mutationMenu, setMutationMenu] = useState<{ x:number; y:number; item:FittingSearchResult }>();
   const [mutationEditor, setMutationEditor] = useState<{ item:FittingSearchResult; options:MutationOption[]; selected:number; values:Record<string,number> }>();
   const [mutationStatus, setMutationStatus] = useState("");
   const [catalogueStatus, setCatalogueStatus] = useState("");
-  const [preparation, setPreparation] = useState<FittingPreparationProgress>(()=>sharedPreparationResult?{percent:100,stage:"ready",message:"Fitting data ready"}:{percent:4,stage:"metadata",message:"Preparing fitting data…"});
+  const [preparation, setPreparation] = useState<FittingPreparationProgress>(()=>sharedPreparationResult?{percent:100,stage:"ready",message:"Fitting data ready"}:{percent:4,stage:"metadata",message:"Preparing fitting data..."});
   const [progressVisible, setProgressVisible] = useState(!sharedPreparationResult);
   const [compatibilityCache, setCompatibilityCache] = useState<Record<string,number[]>>({});
   const [compatibilityPendingKeys, setCompatibilityPendingKeys] = useState<Set<string>>(() => new Set());
@@ -1020,6 +1050,8 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
       setBrowserTab("ships");
       setFitName("");
       setHullQuery("");
+    } else {
+      setBrowserTab("catalogue");
     }
   }, [fit?.id]);
   useEffect(() => {
@@ -1045,6 +1077,31 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
   useEffect(() => {
     localStorage.setItem("new-eden-sage-fitting-recent-types", JSON.stringify(recentTypeIds.slice(0,50)));
   }, [recentTypeIds]);
+  useEffect(() => { onBrowseModeChange?.(browserTab); }, [browserTab, onBrowseModeChange]);
+  useEffect(() => {
+    const openShips = () => setBrowserTab("ships");
+    const openModules = () => setBrowserTab("catalogue");
+    const openDrones = () => { setBrowserTab("catalogue"); setPlacementFilter("drone"); };
+    const openCargo = () => { setBrowserTab("catalogue"); setPlacementFilter("cargo"); };
+    const searchBuilder = (event: Event) => {
+      const query = String((event as CustomEvent<string>).detail ?? "");
+      setBrowserTab("catalogue");
+      setPlacementFilter("all");
+      setCatalogueFilter(query);
+    };
+    window.addEventListener("sage:fitter-open-ships", openShips);
+    window.addEventListener("sage:fitter-open-modules", openModules);
+    window.addEventListener("sage:fitter-open-drones", openDrones);
+    window.addEventListener("sage:fitter-open-cargo", openCargo);
+    window.addEventListener("sage:fitter-search-builder", searchBuilder);
+    return () => {
+      window.removeEventListener("sage:fitter-open-ships", openShips);
+      window.removeEventListener("sage:fitter-open-modules", openModules);
+      window.removeEventListener("sage:fitter-open-drones", openDrones);
+      window.removeEventListener("sage:fitter-open-cargo", openCargo);
+      window.removeEventListener("sage:fitter-search-builder", searchBuilder);
+    };
+  }, []);
   useEffect(() => {
     let cancelled=false;
     const timer=window.setTimeout(()=>{
@@ -1179,10 +1236,11 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
     const compatibleIds=compatibilityKey?compatibilityCache[compatibilityKey]:undefined;
     const compatibilityPending=Boolean(compatibilityKey&&!compatibleIds);
     const compatibleSet=compatibleIds?new Set(compatibleIds):null;
-    const displayItems=compatibilityKey?(compatibleSet?rawItems.filter(item=>compatibleSet.has(item.id)):[]):rawItems;
+    const placementItems=placementFilter==="all"?rawItems:rawItems.filter(item=>item.placement===placementFilter);
+    const displayItems=compatibilityKey?(compatibleSet?placementItems.filter(item=>compatibleSet.has(item.id)):[]):placementItems;
     if(category.dynamic==="recent") return displayItems.length?<div>{displayItems.map(renderItem)}</div>:<div className="fit-category-loading">No recently used fitting items yet.</div>;
     if(category.dynamic==="charges-active"){
-      if(activeChargesPending)return <div className="fit-category-loading">Checking charges for the active fit…</div>;
+      if(activeChargesPending)return <div className="fit-category-loading">Checking charges for the active fit...</div>;
       if(!fittedModuleTypeIds.length)return <div className="fit-category-loading">Fit a charge-using module to see compatible ammo and scripts here.</div>;
       if(typeof window.sage.getFittingChargesForModulesLocal!=="function")return <div className="fit-category-loading">Active-fit charge filtering will be available after the Sage dev window restarts.</div>;
       return displayItems.length?<div>{displayItems.map(renderItem)}</div>:<div className="fit-category-loading">No compatible ammo or scripts found for the active fit.</div>;
@@ -1197,22 +1255,40 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
       const direct=itemsByGroup.get(group.id)??[];
       const isOpen=expandedGroups.has(group.id);
       const hasContent=children.length>0||direct.length>0||catalogue.items.length===0||compatibilityPending;
-      return <div className="fit-catalogue-node" key={group.id}><button type="button" className="fit-catalogue-group" style={{paddingLeft:8+depth*13}} onClick={()=>hasContent&&toggleGroup(group.id)}><span>{hasContent?(isOpen?"▾":"▸"):"·"}</span><strong>{group.name}</strong><small>{direct.length||""}</small></button>{isOpen&&<div>{children.map(child=>renderGroup(child,depth+1))}{direct.map(renderItem)}{!children.length&&!direct.length&&<div className="fit-category-loading">{catalogue.items.length===0||compatibilityPending?"Preparing modules…":fit?.hull.name&&category.hullFiltered?"No items in this group are valid for "+fit.hull.name+".":"No items in this group."}</div>}</div>}</div>;
+      return <div className="fit-catalogue-node" key={group.id}><button type="button" className="fit-catalogue-group" style={{paddingLeft:8+depth*13}} onClick={()=>hasContent&&toggleGroup(group.id)}><span>{hasContent?(isOpen?"v":">"):"-"}</span><strong>{group.name}</strong><small>{direct.length||""}</small></button>{isOpen&&<div>{children.map(child=>renderGroup(child,depth+1))}{direct.map(renderItem)}{!children.length&&!direct.length&&<div className="fit-category-loading">{catalogue.items.length===0||compatibilityPending?"Preparing modules...":fit?.hull.name&&category.hullFiltered?"No items in this group are valid for "+fit.hull.name+".":"No items in this group."}</div>}</div>}</div>;
     };
     const rootChildren=[] as CatalogueGroup[];
     const seen=new Set<number>();
     for(const root of rootGroups)for(const child of childrenByParent.get(root.id)??[]){if(!seen.has(child.id)){seen.add(child.id);rootChildren.push(child);}}
     rootChildren.sort((a,b)=>a.name.localeCompare(b.name));
     const rootDirectItems=rootGroups.flatMap(root=>itemsByGroup.get(root.id)??[]).sort((a,b)=>a.name.localeCompare(b.name));
-    if(!rootGroups.length)return <div className="fit-category-loading">{catalogueSource==="tree"?"Preparing category navigation…":"No current SDE items are available in this category."}</div>;
-    return <div>{rootChildren.map(group=>renderGroup(group,0))}{rootDirectItems.map(renderItem)}{!rootChildren.length&&!rootDirectItems.length&&<div className="fit-category-loading">{catalogue.items.length===0||compatibilityPending?"Preparing modules…":"No items available in this category."}</div>}</div>;
+    if(!rootGroups.length)return <div className="fit-category-loading">{catalogueSource==="tree"?"Preparing category navigation...":"No current SDE items are available in this category."}</div>;
+    return <div>{rootChildren.map(group=>renderGroup(group,0))}{rootDirectItems.map(renderItem)}{!rootChildren.length&&!rootDirectItems.length&&<div className="fit-category-loading">{catalogue.items.length===0||compatibilityPending?"Preparing modules...":"No items available in this category."}</div>}</div>;
   };
 
   const catalogueSearchResults=useMemo(()=>{
     const query=catalogueFilter.trim().toLowerCase();
     if(!query)return [];
-    return catalogue.items.filter(item=>item.placement!=="ship"&&item.name.toLowerCase().includes(query)).sort((a,b)=>a.name.localeCompare(b.name)).slice(0,400);
-  },[catalogue.items,catalogueFilter]);
+    return catalogue.items.filter(item=>item.placement!=="ship"&&(placementFilter==="all"||item.placement===placementFilter)&&item.name.toLowerCase().includes(query)).sort((a,b)=>a.name.localeCompare(b.name)).slice(0,400);
+  },[catalogue.items,catalogueFilter,placementFilter]);
+  const contextualCatalogueItems=useMemo(()=>{
+    const contextIds=[...recentTypeIds,...fittedModuleTypeIds,...(fit?.drones??[]).flatMap(item=>item.typeId?[item.typeId]:[]),...(fit?.cargo??[]).flatMap(item=>item.typeId?[item.typeId]:[])];
+    const seen=new Set<number>();
+    const items:CatalogueItem[]=[];
+    for(const typeId of contextIds){
+      if(seen.has(typeId))continue;
+      seen.add(typeId);
+      const item=itemById.get(typeId);
+      if(!item||item.placement==="ship"||(placementFilter!=="all"&&item.placement!==placementFilter))continue;
+      items.push(item);
+      if(items.length>=7)break;
+    }
+    return items;
+  },[itemById,recentTypeIds.join("|"),fittedModuleTypeIds.join("|"),fit?.id,fit?.drones,fit?.cargo,placementFilter]);
+  const renderCategoryNavigation=()=>PYFA_CATALOGUE_CATEGORIES.map(category=>{
+    const isOpen=expandedCategories.has(category.id);
+    return <div className="fit-catalogue-node fit-catalogue-top-node" key={category.id}><button type="button" className="fit-catalogue-group fit-catalogue-top-group" onClick={()=>toggleCategory(category)}><span>{isOpen?"v":">"}</span><strong>{category.label}</strong><small></small></button>{isOpen&&<div className="fit-catalogue-top-content">{renderCategoryContent(category)}</div>}</div>;
+  });
 
   return <div className="fit-builder fit-catalogue-browser">
     <div className="fit-builder-hull" onContextMenu={(event)=>{if(!fit?.hull.typeId)return;event.preventDefault();onShowInfo(fit.hull.typeId,fit.hull.name);}}><img src={imageUrl(fit?.hull.typeId,"icon",64)}/><span><strong>{fit?.hull.name??"Choose a ship"}</strong><small>Offline SDE fitting catalogue</small></span></div>
@@ -1222,6 +1298,7 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
     </div>
     {progressVisible&&<div className={"fitting-prep-progress "+(preparation.percent>=100?"ready":"")} aria-live="polite"><div><span>{preparation.message}</span><strong>{Math.round(Math.max(0,Math.min(100,preparation.percent)))}%</strong></div><b><i style={{width:Math.max(0,Math.min(100,preparation.percent))+"%"}}/></b></div>}
     {browserTab==="ships" ? <div className="fit-ships-tab">
+      <div className="fit-ship-picker-head"><strong>Ship Catalogue</strong><button type="button" onClick={()=>setBrowserTab("catalogue")}>Return to Modules</button></div>
       <input value={fitName} onChange={event=>setFitName(event.target.value)} placeholder="Optional fit name"/>
       <input value={hullQuery} onChange={event=>setHullQuery(event.target.value)} placeholder="Filter ships..."/>
       <label className="fit-flyable-toggle"><input type="checkbox" checked={onlyFlyableShips} disabled={!characterId} onChange={(event)=>setOnlyFlyableShips(event.target.checked)}/><span>Only ships I can fly</span></label>
@@ -1229,15 +1306,13 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
       <div className="fit-builder-results hull-results">{hullMatches.map(ship=><button type="button" key={ship.typeId} onClick={()=>{onCreate(ship,fitName);setBrowserTab("catalogue");}} onContextMenu={(event)=>{event.preventDefault();onShowInfo(ship.typeId,ship.name);}}><img src={imageUrl(ship.typeId,"icon",64)}/><span><strong>{ship.name}</strong><small>Create fitting - right-click Show Info</small></span></button>)}</div>
     </div> : <div className="fit-catalogue-tab">
       <div className="fit-catalogue-section-row"><strong>Catalogue</strong><small>{catalogueSource==="live"?"Current SDE":catalogueSource==="cached"?"Cached modules":"Navigation ready"}</small></div>
-      <input className="fit-catalogue-filter" value={catalogueFilter} onChange={event=>setCatalogueFilter(event.target.value)} placeholder="Filter catalogue locally..."/>
+      <input className="fit-catalogue-filter" value={catalogueFilter} onChange={event=>setCatalogueFilter(event.target.value)} placeholder="Search modules..."/>
+      <div className="fit-placement-chips" role="group" aria-label="Module slot filter">{([ ["all","All"], ["high","High"], ["mid","Mid"], ["low","Low"], ["rig","Rig"], ["drone","Drone"], ["cargo","Cargo"] ] as const).map(([id,label])=><button type="button" key={id} className={placementFilter===id?"active":""} onClick={()=>setPlacementFilter(id)}>{label}</button>)}</div>
       {catalogueStatus&&<small className="fit-catalogue-action-status">{catalogueStatus}</small>}
-      <div className="fit-catalogue-tree">{catalogueFilter.trim()?catalogue.items.length===0?<div className="fit-category-loading">Preparing modules…</div>:catalogueSearchResults.length?catalogueSearchResults.map(renderItem):<small>No matching catalogue items.</small>:PYFA_CATALOGUE_CATEGORIES.map(category=>{
-        const isOpen=expandedCategories.has(category.id);
-        return <div className="fit-catalogue-node fit-catalogue-top-node" key={category.id}><button type="button" className="fit-catalogue-group fit-catalogue-top-group" onClick={()=>toggleCategory(category)}><span>{isOpen?"▾":"▸"}</span><strong>{category.label}</strong><small></small></button>{isOpen&&<div className="fit-catalogue-top-content">{renderCategoryContent(category)}</div>}</div>;
-      })}</div>
+      <div className="fit-catalogue-tree">{catalogueFilter.trim()?catalogue.items.length===0?<div className="fit-category-loading">Preparing modules...</div>:catalogueSearchResults.length?catalogueSearchResults.map(renderItem):<small>No matching catalogue items.</small>:!browseCategories&&contextualCatalogueItems.length?<><div className="fit-catalogue-context-feed">{contextualCatalogueItems.map(renderItem)}</div><button type="button" className="fit-catalogue-browse-all" onClick={()=>setBrowseCategories(true)}>Browse all categories</button></>:<><button type="button" className="fit-catalogue-browse-all back" onClick={()=>setBrowseCategories(false)}>Contextual modules</button>{renderCategoryNavigation()}</>}</div>
     </div>}
     {mutationMenu&&<div className="mutation-context-menu" style={{left:mutationMenu.x,top:mutationMenu.y}}><button type="button" onClick={()=>{onShowInfo(mutationMenu.item.id,mutationMenu.item.name);setMutationMenu(undefined);}}>Show Info</button>{mutationMenu.item.rack && <button type="button" onClick={()=>void openMutationEditor(mutationMenu.item)}>Mutate...</button>}<button type="button" onClick={()=>setMutationMenu(undefined)}>Cancel</button></div>}
-    {mutationEditor&&<div className="mutation-backdrop" onMouseDown={()=>setMutationEditor(undefined)}><div className="mutation-editor" onMouseDown={event=>event.stopPropagation()}><div className="mutation-editor-head"><div><p className="eyebrow">ABYSSAL MUTATION</p><h3>{mutationEditor.item.name}</h3></div><button type="button" onClick={()=>setMutationEditor(undefined)}>×</button></div><label>Mutaplasmid<select value={mutationEditor.selected} onChange={event=>selectMutation(Number(event.target.value))}>{mutationEditor.options.map((option,index)=><option key={option.mutaplasmidTypeId} value={index}>{option.mutaplasmidName}</option>)}</select></label><div className="mutation-attributes">{mutationEditor.options[mutationEditor.selected].attributes.map(attribute=>{const key=String(attribute.attributeId);const value=mutationEditor.values[key]??attribute.baseValue;const delta=attribute.baseValue?((value/attribute.baseValue)-1)*100:0;return <div className="mutation-attribute" key={attribute.attributeId}><div><strong>{attribute.name}</strong><small>Base {attribute.baseValue.toFixed(3)} - legal {attribute.minValue.toFixed(3)} – {attribute.maxValue.toFixed(3)}</small></div><input type="range" min={attribute.minValue} max={attribute.maxValue} step={Math.max(Math.abs(attribute.maxValue-attribute.minValue)/1000,0.000001)} value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Number(event.target.value)}})}/><input type="number" min={attribute.minValue} max={attribute.maxValue} step="any" value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Math.min(attribute.maxValue,Math.max(attribute.minValue,Number(event.target.value)))}})}/><em className={(attribute.highIsGood?delta>=0:delta<=0)?"good":"bad"}>{delta>=0?"+":""}{delta.toFixed(1)}%</em></div>})}</div><div className="mutation-editor-foot"><span>{mutationEditor.options[mutationEditor.selected].resultingTypeName}</span><button type="button" onClick={()=>void addMutated()}>Add mutated module</button></div></div></div>}
+    {mutationEditor&&<div className="mutation-backdrop" onMouseDown={()=>setMutationEditor(undefined)}><div className="mutation-editor" onMouseDown={event=>event.stopPropagation()}><div className="mutation-editor-head"><div><p className="eyebrow">ABYSSAL MUTATION</p><h3>{mutationEditor.item.name}</h3></div><button type="button" onClick={()=>setMutationEditor(undefined)}>X</button></div><label>Mutaplasmid<select value={mutationEditor.selected} onChange={event=>selectMutation(Number(event.target.value))}>{mutationEditor.options.map((option,index)=><option key={option.mutaplasmidTypeId} value={index}>{option.mutaplasmidName}</option>)}</select></label><div className="mutation-attributes">{mutationEditor.options[mutationEditor.selected].attributes.map(attribute=>{const key=String(attribute.attributeId);const value=mutationEditor.values[key]??attribute.baseValue;const delta=attribute.baseValue?((value/attribute.baseValue)-1)*100:0;return <div className="mutation-attribute" key={attribute.attributeId}><div><strong>{attribute.name}</strong><small>Base {attribute.baseValue.toFixed(3)} - legal {attribute.minValue.toFixed(3)} to {attribute.maxValue.toFixed(3)}</small></div><input type="range" min={attribute.minValue} max={attribute.maxValue} step={Math.max(Math.abs(attribute.maxValue-attribute.minValue)/1000,0.000001)} value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Number(event.target.value)}})}/><input type="number" min={attribute.minValue} max={attribute.maxValue} step="any" value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Math.min(attribute.maxValue,Math.max(attribute.minValue,Number(event.target.value)))}})}/><em className={(attribute.highIsGood?delta>=0:delta<=0)?"good":"bad"}>{delta>=0?"+":""}{delta.toFixed(1)}%</em></div>})}</div><div className="mutation-editor-foot"><span>{mutationEditor.options[mutationEditor.selected].resultingTypeName}</span><button type="button" onClick={()=>void addMutated()}>Add mutated module</button></div></div></div>}
     {mutationStatus&&<small className="mutation-status">{mutationStatus}</small>}
   </div>;
 }
@@ -1260,6 +1335,8 @@ function FitDisplay({
   onAnalysis,
   onExportToPlanner,
   onShowInfo,
+  onChangeShip,
+  issuesDock,
 }: {
   fit: Fit;
   characters: FittingCharacter[];
@@ -1272,20 +1349,32 @@ function FitDisplay({
   onExport(): void;
   onExportToDoctrine(): void;
   onModuleStateChange(rack: FitModuleRack, index: number, state: ModuleState): void;
-  onBayActiveQuantityChange(target: "drones" | "fighters", index: number, quantity: number): void;
+  onBayActiveQuantityChange(target: "drones" | "fighters", index: number, delta: number, baseline: number, maxAllowed: number): void;
   onRemoveItem(target: BuilderTarget, index: number): void;
   onAddItem(target: BuilderTarget, item: FittingSearchResult): Promise<boolean>;
   onLoadCharge(target: FitModuleRack, index: number, item: FittingSearchResult): Promise<boolean>;
   onAnalysis(readiness: "ready" | "missing", missingRequirements: number): void;
   onExportToPlanner(intent: FitResolutionIntent): void;
   onShowInfo(typeId:number,name?:string):void;
+  onChangeShip():void;
+  issuesDock: HTMLDivElement | null;
 }) {
-  const [tab, setTab] = useState<"fitting" | "performance">("fitting");
+  const [tab, setTab] = useState<"fitting" | "performance" | "market" | "notes">("fitting");
   const [analysis, setAnalysis] = useState<any>(null);
   const [remedies, setRemedies] = useState<FitRemedyCandidate[]>([]);
   const [eveExporting, setEveExporting] = useState(false);
   const [eveExportStatus, setEveExportStatus] = useState("");
+  useEffect(() => { if (!eveExportStatus) return; const timer = window.setTimeout(() => { setEveExportStatus(""); }, 2800); return () => window.clearTimeout(timer); }, [eveExportStatus]);
   const [hullProfile, setHullProfile] = useState<HullFittingProfile | null>(null);
+  const [hullTypeInfo, setHullTypeInfo] = useState<Awaited<ReturnType<typeof window.sage.getFittingTypeInfoLocal>> | null>(null);
+  const [externalHeroRules, setExternalHeroRules] = useState<FitterHeroRule[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = window.sage.getFitterContentConfig;
+    if (typeof load !== "function") return () => { cancelled = true; };
+    void load().then((value) => { if (!cancelled) setExternalHeroRules(coerceFitterHeroRules(value?.rules)); }).catch(() => { if (!cancelled) setExternalHeroRules([]); });
+    return () => { cancelled = true; };
+  }, []);
   const shoppingEntries = useMemo(() => fitShoppingEntries(fit), [fit]);
   const fitPriceKey = shoppingEntries.map((entry) => `${entry.typeId}:${entry.quantity}`).join("|");
   const [fitCost, setFitCost] = useState<FitCostEstimate | null>(null);
@@ -1310,6 +1399,12 @@ function FitDisplay({
     }).catch(() => { if (!cancelled) { setFitCost(null); setFitCostLoading(false); } });
     return () => { cancelled = true; };
   }, [fitPriceKey]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!fit.hull.typeId) { setHullTypeInfo(null); return; }
+    void window.sage.getFittingTypeInfoLocal(fit.hull.typeId).then((info) => { if (!cancelled) setHullTypeInfo(info); }).catch(() => { if (!cancelled) setHullTypeInfo(null); });
+    return () => { cancelled = true; };
+  }, [fit.hull.typeId]);
   useEffect(() => {
     let cancelled = false;
     if (!fit.hull.typeId) { setHullProfile(null); return; }
@@ -1385,9 +1480,9 @@ function FitDisplay({
     const resolved = await window.sage.resolveFittingTypeNamesLocal(requested);
     const byName = new Map(resolved.map((item) => [item.name.toLowerCase(), item]));
     const effect = byName.get(name.toLowerCase());
-    if (!effect) return "No current CCP SDE type matched “" + name + "”.";
+    if (!effect) return "No current CCP SDE type matched: " + name + ".";
     const charge = chargeName ? byName.get(chargeName.toLowerCase()) : undefined;
-    if (chargeName && !charge) return "No current CCP SDE charge/script matched “" + chargeName + "”.";
+    if (chargeName && !charge) return "No current CCP SDE charge/script matched: " + chargeName + ".";
     if (charge && (input.kind === "projected" || input.kind === "command")) {
       const compatibility = await window.sage.checkFittingChargeCompatibilityLocal(effect.id, charge.id);
       if (!compatibility.compatible) return compatibility.reason;
@@ -1521,100 +1616,132 @@ function FitDisplay({
 
   const fitSummary = summarizeFit(fit);
   const effectiveSlots = analysis?.fitting?.slots ?? hullProfile?.slots;
+  const hullGroupName = String(hullTypeInfo?.group?.name ?? "Ship");
+  const hullClass = hullGroupName.toUpperCase();
+  const hullMarketSegments = hullTypeInfo?.marketGroup?.path ?? [];
+  const hullMarketPath = hullMarketSegments.slice(-2).join(" / ") || "Capsuleer Hull";
+  const faction = resolveFitterFaction({ factionId:hullTypeInfo?.identity?.factionId, factionName:hullTypeInfo?.identity?.factionName, raceId:hullTypeInfo?.identity?.raceId, raceName:hullTypeInfo?.identity?.raceName, marketSegments:hullMarketSegments, hullName:fit.hull.name });
+  const factionArtwork = resolveFactionArtwork(faction);
+  const hero = resolveFitterHero({ hullName:fit.hull.name, hullTypeId:fit.hull.typeId, factionId:faction.id, groupName:hullGroupName }, [...externalHeroRules, ...FITTER_HERO_CONTENT]);
+  const heroStyle = { "--fit-hero-art": `url("${hero.resolvedArtwork}")` } as CSSProperties & Record<"--fit-hero-art", string>;
+  const factionStyle = { "--fit-faction-art": `url("${factionArtwork}")` } as CSSProperties & Record<"--fit-faction-art", string>;
+  const shipFrame = resolveShipFrame(fit.hull.name, hullGroupName);
+  const shipFrameStyle = { "--fit-ship-scale": String(shipFrame.scale), "--fit-ship-x": `${shipFrame.x}%`, "--fit-ship-y": `${shipFrame.y}%`, "--fit-ship-rotate": `${shipFrame.rotate}deg` } as CSSProperties & Record<string,string>;
+  const runHeroCta = () => {
+    if (hero.ctaAction) window.dispatchEvent(new CustomEvent("sage:fitter-hero-cta", { detail:{ action:hero.ctaAction, fitId:fit.id, hullTypeId:fit.hull.typeId } }));
+    if (hero.ctaUrl && typeof window.sage.openExternalUrl === "function") void window.sage.openExternalUrl(hero.ctaUrl).catch(() => undefined);
+  };
   return (
-    <div className="fit-display fit-display-v3">
-      <div className="fit-v2-center-header">
-        <div className="fit-title">
-          <div>
-            <p className="eyebrow">SHIP FITTING</p>
-            <h2>{fit.name}</h2>
-            <span>{fit.hull.name}</span>
-          </div>
-          <div className="fit-title-actions">
-            <select
-              value={characterId}
-              onChange={(event) => onCharacterChange(event.target.value)}
-            >
-              {characters.map((character) => (
-                <option key={character.characterId} value={character.characterId}>
-                  {character.character.name}
-                </option>
-              ))}
-            </select>
-            <button onClick={onRename}>Rename</button>
-            <button onClick={onDuplicate}>Duplicate</button>
-            <button onClick={onExport}>Copy JSON</button>
-            <button className="fit-export-corporation" onClick={onExportToDoctrine}>Export to Doctrine</button>
-            <button onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>
-              {eveExporting ? "Exporting..." : "Export to EVE"}
-            </button>
-            <button className="route-fit" onClick={exportCurrentFitToShoppingList}>
-              Add to Shopping List
-            </button>
-            <button onClick={onRemove}>Delete fit</button>
-          </div>
+    <div className="fit-display fit-display-v3 fit-concept-display">
+      {issuesDock ? createPortal(<FitIssuesPanel analysis={analysis} remedies={remedies} onFix={() => exportResolution("fit-issues")} />, issuesDock) : null}
+      <section className={`fit-concept-hero ${hero.kind === "promotion" ? "has-promotion" : ""}`} style={heroStyle} onContextMenu={(event)=>{if(!fit.hull.typeId)return;event.preventDefault();onShowInfo(fit.hull.typeId,fit.hull.name);}}>
+        <div className="fit-concept-hero-copy">
+          <div className="fit-concept-hull-class">{fit.hull.typeId && <img src={imageUrl(fit.hull.typeId,"icon",64)} />}<span>{hullClass}</span></div>
+          {hero.kind === "promotion" && hero.headline && <div className="fit-concept-promo-kicker">LIVE CAMPAIGN <b>{hero.headline}</b></div>}
+          <h2>{fit.hull.name}</h2>
+          <div className="fit-concept-breadcrumb"><span>{faction.name}</span><b>/</b><span>{hullMarketPath}</span></div>
+          <p>{hero.supportingText ?? <>&quot;{fit.hull.name} in theory. Devastating in practice.&quot;</>}</p>
+          <div className="fit-concept-hero-actions"><button type="button" className="fit-concept-change-ship" onClick={onChangeShip}>Change Ship</button>{hero.kind === "promotion" && hero.ctaLabel && <button type="button" className="fit-concept-promo-cta" onClick={runHeroCta}>{hero.ctaLabel}</button>}</div>
         </div>
-        <div className="fit-library-summary">
-          <span>{fitSummary.moduleCount} modules</span><span>{fitSummary.droneCount} drones</span><span>{fitSummary.resolvedItems} resolved</span><span>{fitSummary.unresolvedItems} unresolved</span>
+        <div className={`fit-concept-faction-card ${faction.className}`} style={factionStyle} aria-label={`${faction.name} faction presentation`}>
+          <span className="fit-faction-eyebrow">{faction.eyebrow}</span><b className="fit-faction-sigil">{faction.sigil}</b><strong>{faction.name}</strong><small>{faction.flavour.map((line,index)=><span key={line}>{line}{index < faction.flavour.length-1 && <br/>}</span>)}</small>
         </div>
-        <div className="fit-total-cost" aria-live="polite">
-          <span>EST. TOTAL FIT COST</span>
-          <strong>{fitCostLoading ? "Pricing..." : fitCost ? formatFitIsk(fitCost.total) : "Market price unavailable"}</strong>
-          <small>{fitCost ? `${fitCost.pricedTypes}/${fitCost.totalTypes} item types priced at current retained best-sell quotes` : "Retained public market quotes unavailable"}</small>
+      </section>
+
+      <section className="fit-concept-commandbar">
+        <div className="fit-concept-namebox">
+          <span><small>Fitting Name</small><strong>{fit.name}</strong></span>
+          <button type="button" className="fit-name-edit" onClick={onRename} title="Rename fitting">Edit</button>
         </div>
-        {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
-        <div className="fit-tabs">
-          <button
-            className={tab === "fitting" ? "active" : ""}
-            onClick={() => setTab("fitting")}
-          >
-            Fitting
-          </button>
-          <button
-            className={tab === "performance" ? "active" : ""}
-            onClick={() => setTab("performance")}
-          >
-            Performance & skills
-          </button>
+        <div className="fit-concept-actions">
+          <button type="button" className="fit-action-save" onClick={()=>setEveExportStatus("Fit saved to Sage persistent storage.")}>Save Fit</button>
+          <button type="button" className="fit-action-duplicate" onClick={onDuplicate}>Duplicate</button>
+          <button type="button" className="fit-action-export" onClick={onExport}>Export</button>
+          <button type="button" className="shopping fit-action-shopping" onClick={exportCurrentFitToShoppingList}>Add to Shopping List</button>
+          <details className="fit-concept-more">
+            <summary aria-label="More fitting actions">...</summary>
+            <div>
+              <button type="button" onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>{eveExporting ? "Exporting..." : "Export to EVE"}</button>
+              <button type="button" onClick={onExportToDoctrine}>Export to Doctrine</button>
+              <button type="button" onClick={onRoute}>Procurement</button>
+              <button type="button" onClick={()=>exportResolution("dream-fit")}>Add Skills to Planner</button>
+              <button type="button" className="danger" onClick={onRemove}>Delete Fit</button>
+            </div>
+          </details>
+          <select className="fit-concept-character" value={characterId} onChange={(event)=>onCharacterChange(event.target.value)} aria-label="Fitting pilot">{characters.map((character)=><option key={character.characterId} value={character.characterId}>{character.character.name}</option>)}</select>
         </div>
-      </div>
+      </section>
+
+      <section className="fit-concept-tabs">
+        <div role="tablist" aria-label="Fitting detail views">
+          <button type="button" role="tab" aria-selected={tab==="fitting"} className={tab==="fitting"?"active":""} onClick={()=>setTab("fitting")}>Fitting</button>
+          <button type="button" role="tab" aria-selected={tab==="performance"} className={tab==="performance"?"active":""} onClick={()=>setTab("performance")}>Performance</button>
+          <button type="button" role="tab" aria-selected={tab==="market"} className={tab==="market"?"active":""} onClick={()=>setTab("market")}>Cost &amp; Market</button>
+          <button type="button" role="tab" aria-selected={tab==="notes"} className={tab==="notes"?"active":""} onClick={()=>setTab("notes")}>Notes</button>
+        </div>
+        <span className="fit-concept-fix-tip">Fix My Fit can resolve fitting issues and suggest viable replacements.</span>
+      </section>
 
       {tab === "fitting" ? (
         <>
-          <div className="fit-v2-center-stage">
-            <div className="fit-v2-ship">
-              <div className="fit-v2-ship-frame" onContextMenu={(event)=>{if(!fit.hull.typeId)return;event.preventDefault();onShowInfo(fit.hull.typeId,fit.hull.name);}}>{fit.hull.typeId ? <img src={imageUrl(fit.hull.typeId, "render", 512)} /> : <div>?</div>}</div>
-              <div className="fit-v2-quick-actions"><button onClick={() => exportResolution("dream-fit")}>Dream fit</button><button onClick={onRoute}>Procurement</button><button onClick={onDuplicate}>Duplicate</button></div>
+          <div className="fit-v2-center-stage fit-concept-fitting-stage">
+            <div className="fit-v2-selected fit-concept-racks fit-concept-racks-left">
+              <SlotRack title="HIGH SLOTS" side="high" items={fit.high} limit={effectiveSlots?.high ?? fit.high.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
+              <SlotRack title="MID SLOTS" side="mid" items={fit.mid} limit={effectiveSlots?.mid ?? fit.mid.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
+              <SlotRack title="LOW SLOTS" side="low" items={fit.low} limit={effectiveSlots?.low ?? fit.low.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
             </div>
-            <div className="fit-v2-selected">
-              <SlotRack title="High slots" side="high" items={fit.high} limit={effectiveSlots?.high ?? fit.high.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              <SlotRack title="Mid slots" side="mid" items={fit.mid} limit={effectiveSlots?.mid ?? fit.mid.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              <SlotRack title="Low slots" side="low" items={fit.low} limit={effectiveSlots?.low ?? fit.low.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              <SlotRack title="Rigs" side="rig" items={fit.rig} limit={effectiveSlots?.rig ?? fit.rig.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              {((effectiveSlots?.subsystem ?? 0) > 0 || fit.subsystem.length > 0) && <SlotRack title="Subsystems" side="subsystem" items={fit.subsystem} limit={effectiveSlots?.subsystem ?? fit.subsystem.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />}
+            <div className="fit-v2-ship fit-concept-ship-core">
+              <div className="fit-concept-core-orbit orbit-a" aria-hidden="true" />
+              <div className="fit-concept-core-orbit orbit-b" aria-hidden="true" />
+              <div className="fit-v2-ship-frame" style={shipFrameStyle}>{fit.hull.typeId ? <img src={imageUrl(fit.hull.typeId, "render", 512)} alt={fit.hull.name} /> : <div>?</div>}</div>
+              <div className="fit-concept-core-status"><i/><span>SYSTEMS ONLINE</span><small>READY FOR DEPLOYMENT</small></div>
             </div>
-            <FitIssuesPanel analysis={analysis} remedies={remedies} onFix={() => exportResolution("fit-issues")} />
+            <div className="fit-v2-selected fit-concept-racks fit-concept-racks-right">
+              <SlotRack title="RIG SLOTS" side="rig" items={fit.rig} limit={effectiveSlots?.rig ?? fit.rig.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
+              {((effectiveSlots?.subsystem ?? 0) > 0 || fit.subsystem.length > 0) && <SlotRack title="SUBSYSTEMS" side="subsystem" items={fit.subsystem} limit={effectiveSlots?.subsystem ?? fit.subsystem.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />}            </div>
           </div>
-          <div className="fit-v2-additions">
-            <FitAdditionsPanel fit={fit} analysis={analysis} externalEffects={externalEffects} onBayActiveQuantityChange={onBayActiveQuantityChange} onRemoveItem={onRemoveItem} onShowInfo={onShowInfo} />
-          </div>
+          <div className="fit-v2-additions"><FitAdditionsPanel fit={fit} analysis={analysis} externalEffects={externalEffects} onBayActiveQuantityChange={onBayActiveQuantityChange} onRemoveItem={onRemoveItem} onShowInfo={onShowInfo} /></div>
         </>
+      ) : tab === "performance" ? (
+        <div className="fit-v2-performance-stage fit-concept-secondary-stage"><FitPerformance analysis={analysis} status={analysisStatus} fit={fit} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} abyssSelection={abyssSelection} onAbyssSelectionChange={setAbyssSelection} externalEffects={externalEffects} boosterSideEffects={boosterSideEffects} selectedBoosterSideEffectKeys={selectedBoosterSideEffectKeys} onSelectedBoosterSideEffectKeysChange={setSelectedBoosterSideEffectKeys} onAddExternalEffect={addExternalEffect} onUpdateExternalEffect={updateExternalEffect} onRemoveExternalEffect={removeExternalEffect} onExportToPlanner={()=>exportResolution("dream-fit")} /></div>
+      ) : tab === "market" ? (
+        <div className="fit-v2-performance-stage fit-concept-secondary-stage fit-concept-market-stage">
+          <div><p className="eyebrow">COST &amp; MARKET</p><h3>{fitCostLoading ? "Pricing fit..." : fitCost ? formatFitIsk(fitCost.total) : "Market price unavailable"}</h3><p>{fitCost ? `${fitCost.pricedTypes}/${fitCost.totalTypes} item types have retained best-sell quotes.` : "Retained public market quotes are unavailable."}</p></div>
+          <div className="fit-concept-market-metrics"><article><span>Modules</span><strong>{fitSummary.moduleCount}</strong></article><article><span>Drones</span><strong>{fitSummary.droneCount}</strong></article><article><span>Resolved</span><strong>{fitSummary.resolvedItems}</strong></article><article><span>Unresolved</span><strong>{fitSummary.unresolvedItems}</strong></article></div>
+          <div className="fit-concept-market-actions"><button type="button" onClick={exportCurrentFitToShoppingList}>Add to Shopping List</button><button type="button" onClick={onRoute}>Open Procurement</button></div>
+        </div>
       ) : (
-        <div className="fit-v2-performance-stage">
-          <FitPerformance analysis={analysis} status={analysisStatus} fit={fit} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} abyssSelection={abyssSelection} onAbyssSelectionChange={setAbyssSelection} externalEffects={externalEffects} boosterSideEffects={boosterSideEffects} selectedBoosterSideEffectKeys={selectedBoosterSideEffectKeys} onSelectedBoosterSideEffectKeysChange={setSelectedBoosterSideEffectKeys} onAddExternalEffect={addExternalEffect} onUpdateExternalEffect={updateExternalEffect} onRemoveExternalEffect={removeExternalEffect} onExportToPlanner={() => exportResolution("dream-fit")} />
+        <div className="fit-v2-performance-stage fit-concept-secondary-stage fit-concept-notes-stage">
+          <div><p className="eyebrow">FIT NOTES</p><h3>{fit.name}</h3></div>
+          {fit.instructions.length ? fit.instructions.map((note,index)=><p key={index}>{note}</p>) : <p>No fit notes or operating instructions.</p>}
         </div>
       )}
 
-      <FitStatsSidebar analysis={analysis} refreshing={analysisRefreshing} fit={fit} hullProfile={hullProfile} targetDamageProfilePreset={targetDamageProfilePreset} onTargetDamageProfilePresetChange={setTargetDamageProfilePreset} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} targetNpc={targetNpc} npcTargetOptions={npcTargetOptions} npcTargetSearch={npcTargetSearch} onNpcTargetSearchChange={setNpcTargetSearch} onNpcTargetChange={selectNpcTarget} />
+      <aside className="fit-concept-right-rail">
+        <div className="fit-total-cost" aria-live="polite">
+          <span>EST. TOTAL FIT COST</span>
+          <strong>{fitCostLoading ? "Pricing..." : fitCost ? formatFitIsk(fitCost.total) : "Pricing unavailable"}</strong>
+          <small>{fitCost ? `${fitCost.pricedTypes}/${fitCost.totalTypes} item types priced from retained market quotes` : "Retained public market quotes unavailable"}</small>
+        </div>
+        {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
+        <FitStatsSidebar analysis={analysis} refreshing={analysisRefreshing} fit={fit} hullProfile={hullProfile} targetDamageProfilePreset={targetDamageProfilePreset} onTargetDamageProfilePresetChange={setTargetDamageProfilePreset} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} targetNpc={targetNpc} npcTargetOptions={npcTargetOptions} npcTargetSearch={npcTargetSearch} onNpcTargetSearchChange={setNpcTargetSearch} onNpcTargetChange={selectNpcTarget} />
+      </aside>
     </div>
   );
-
 }
-
 type AdditionTab = "drones" | "fighters" | "cargo" | "implants" | "boosters" | "projected" | "command" | "notes";
 type AdditionEntry = { item: FitItem; index: number; target: "drones" | "fighters" | "cargo" | "implants" | "boosters" };
 
-function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantityChange, onRemoveItem, onShowInfo }: { fit: Fit; analysis: any; externalEffects: ExternalEffectSelection[]; onBayActiveQuantityChange(target:"drones"|"fighters",index:number, quantity:number):void; onRemoveItem(target:BuilderTarget,index:number):void; onShowInfo(typeId:number,name?:string):void }) {
+function DroneLoadoutCard({ entry, activeQuantity, maxActive, onStep, onRemove, onShowInfo }: { entry: AdditionEntry; activeQuantity: number; maxActive: number; onStep(delta:number):void; onRemove():void; onShowInfo(typeId:number,name?:string):void }) {
+  return <article className="fit-drone-card" onContextMenu={event=>{if(!entry.item.typeId)return;event.preventDefault();onShowInfo(entry.item.typeId,entry.item.name);}}>
+    <div className="fit-drone-icon">{entry.item.typeId?<img src={imageUrl(entry.item.typeId,"icon",64)}/>:<b>?</b>}</div>
+    <span className="fit-drone-copy"><strong title={entry.item.name}>{entry.item.name}</strong><small><b>{entry.item.quantity}</b> in bay <i/> <b>{activeQuantity}</b> active <em>/ {maxActive} max</em></small></span>
+    <div className="drone-active-stepper" title="Active count used by fit analysis"><button type="button" disabled={activeQuantity<=0} onClick={()=>onStep(-1)} aria-label={"Reduce active "+entry.item.name}>-</button><b>{activeQuantity}</b><button type="button" disabled={activeQuantity>=maxActive} onClick={()=>onStep(1)} aria-label={"Increase active "+entry.item.name}>+</button></div>
+    <button type="button" className="fit-addition-remove" onClick={onRemove} aria-label={"Remove "+entry.item.name}>x</button>
+  </article>;
+}
+
+function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantityChange, onRemoveItem, onShowInfo }: { fit: Fit; analysis: any; externalEffects: ExternalEffectSelection[]; onBayActiveQuantityChange(target:"drones"|"fighters",index:number, delta:number, baseline:number, maxAllowed:number):void; onRemoveItem(target:BuilderTarget,index:number):void; onShowInfo(typeId:number,name?:string):void }) {
   const [activeTab, setActiveTab] = useState<AdditionTab>("drones");
   const [legacyBayKinds, setLegacyBayKinds] = useState<Record<number, "drone" | "fighter" | "unknown">>({});
   useEffect(() => {
@@ -1636,11 +1763,30 @@ function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantity
   const counts:Record<AdditionTab,number>={drones:sum(droneEntries),fighters:sum(fighterEntries),cargo:sum(cargoEntries),implants:plannedImplants.length+installedImplants.length,boosters:plannedBoosters.length+appliedBoosters.length,projected:projected.length,command:command.length,notes:fit.instructions.length};
   const tabs:Array<{id:AdditionTab;label:string}>=[{id:"drones",label:"Drones"},{id:"fighters",label:"Fighters"},{id:"cargo",label:"Cargo"},{id:"implants",label:"Implants"},{id:"boosters",label:"Boosters"},{id:"projected",label:"Projected"},{id:"command",label:"Command"},{id:"notes",label:"Notes"}];
   const info:Record<AdditionTab,string>={drones:"Drone bay loadout and launched count used by live DPS analysis.",fighters:"Fighter hangar and active squadrons validated against tubes and fighter class limits.",cargo:"Charges, scripts, paste, probes and other carried items.",implants:"Planned fit implants plus implants already installed on the selected pilot.",boosters:"Boosters assigned to the fit plus temporary external booster effects.",projected:"Remote effects projected onto this fit for performance analysis.",command:"Command burst effects currently applied to this fit.",notes:"Imported operating notes and fit instructions."};
-  const activeCount=(entry:AdditionEntry)=>{if(entry.item.activeQuantity!=null)return Math.max(0,Math.min(entry.item.quantity,entry.item.activeQuantity));if(entry.target==="fighters")return Math.min(entry.item.quantity,1);const matches=(analysis?.damage?.activeDrones??[]).filter((candidate:any)=>(entry.item.typeId&&Number(candidate.typeId)===entry.item.typeId)||String(candidate.name??"")===entry.item.name);const explicit=matches.map((candidate:any)=>Number(candidate.activeQuantity??candidate.quantity)).find((value:number)=>Number.isFinite(value));if(explicit!=null)return Math.max(0,Math.min(entry.item.quantity,Math.round(explicit)));return Math.min(entry.item.quantity,5);};
-  const step=(entry:AdditionEntry,delta:number)=>{if(entry.target!=="drones"&&entry.target!=="fighters")return;onBayActiveQuantityChange(entry.target,entry.index,Math.max(0,Math.min(entry.item.quantity,activeCount(entry)+delta)));};
-  const renderBay=(entries:AdditionEntry[],active=false)=>entries.length?<div className="fit-addition-list">{entries.map(entry=><div className="fit-addition-item" key={entry.target+"-"+entry.item.name+"-"+entry.index} onContextMenu={event=>{if(!entry.item.typeId)return;event.preventDefault();onShowInfo(entry.item.typeId,entry.item.name);}}>{entry.item.typeId?<img src={imageUrl(entry.item.typeId,"icon",64)}/>:<b>?</b>}<span><strong>{entry.item.name}</strong><small>{entry.item.quantity} assigned - {entry.target}</small></span>{active&&<div className="drone-active-stepper" title="Active count used by fit analysis"><small>Active</small><button type="button" onClick={()=>step(entry,-1)}>−</button><b>{activeCount(entry)}</b><button type="button" onClick={()=>step(entry,1)}>+</button></div>}<button type="button" className="fit-addition-remove" onClick={()=>onRemoveItem(entry.target,entry.index)} aria-label={"Remove "+entry.item.name}>×</button></div>)}</div>:<div className="fit-addition-empty">Nothing assigned here.</div>;
-  const renderEffects=(items:any[],empty:string,label:string)=>items.length?<div className="fit-addition-effect-list">{items.map((item:any,index:number)=><div className="fit-addition-effect" key={String(item.id??item.typeId??index)} onContextMenu={event=>{if(!item.typeId)return;event.preventDefault();onShowInfo(Number(item.typeId),item.name);}}>{item.typeId?<img src={imageUrl(Number(item.typeId),"icon",64)}/>:<b>◇</b>}<span><strong>{item.name??("Type "+item.typeId)}</strong><small>{item.chargeName?item.chargeName+" - ":""}{item.state?item.state+" - ":""}{label}</small></span></div>)}</div>:<div className="fit-addition-empty">{empty}</div>;
-  return <div className="fit-additions-panel"><div className="fit-additions-head"><strong>Additions</strong><small>{info[activeTab]}</small></div><div className="fit-addition-tabs-v3" role="tablist">{tabs.map(tab=><button type="button" role="tab" aria-selected={activeTab===tab.id} className={activeTab===tab.id?"active":""} key={tab.id} onClick={()=>setActiveTab(tab.id)}><span>{tab.label}</span>{counts[tab.id]>0&&<b>{counts[tab.id]}</b>}</button>)}</div><div className="fit-addition-content" role="tabpanel">
+  const activeCount=(entry:AdditionEntry)=>{
+    if(entry.item.activeQuantity!=null)return Math.max(0,Math.min(entry.item.quantity,Math.floor(entry.item.activeQuantity)));
+    if(entry.target==="fighters")return Math.min(entry.item.quantity,1);
+    const matches=(analysis?.damage?.activeDrones??[]).filter((candidate:any)=>(entry.item.typeId&&Number(candidate.typeId)===entry.item.typeId)||String(candidate.name??"")===entry.item.name);
+    if(matches.length)return Math.max(0,Math.min(entry.item.quantity,matches.length));
+    return 0;
+  };
+  const maxActiveFor=(entry:AdditionEntry)=>{
+    if(entry.target==="fighters") { const system=analysis?.fighterSystem; const tubes=Math.max(0,Number(system?.tubes??1)); const otherEntries=fighterEntries.filter(candidate=>candidate!==entry); const other=otherEntries.reduce((sum,candidate)=>sum+activeCount(candidate),0); const inventory=Array.isArray(system?.inventory)?system.inventory:[]; const row=inventory.find((item:any)=>(entry.item.typeId&&Number(item.typeId)===entry.item.typeId)||String(item.name??"")===entry.item.name); const fighterClass=String(row?.class??"unknown"); const classLimit=fighterClass==="light"?Number(system?.lightSlots??tubes):fighterClass==="support"?Number(system?.supportSlots??tubes):fighterClass==="heavy"?Number(system?.heavySlots??tubes):tubes; const otherSameClass=otherEntries.reduce((sum,candidate)=>{const match=inventory.find((item:any)=>(candidate.item.typeId&&Number(item.typeId)===candidate.item.typeId)||String(item.name??"")===candidate.item.name);return String(match?.class??"unknown")===fighterClass?sum+activeCount(candidate):sum;},0); return Math.max(0,Math.min(entry.item.quantity,tubes-other,Math.max(0,classLimit-otherSameClass))); }
+    if(entry.target!=="drones")return entry.item.quantity;
+    const limits=analysis?.damage?.droneLimits; const maxDrones=Math.max(0,Number(limits?.maxActiveDrones??5));
+    const otherActive=droneEntries.filter(candidate=>candidate!==entry).reduce((sum,candidate)=>sum+activeCount(candidate),0);
+    const countCap=Math.max(0,maxDrones-otherActive);
+    const bandwidthCapacity=Math.max(0,Number(limits?.bandwidthCapacity??analysis?.resources?.capacity?.bandwidth??0));
+    const bandwidthByType=Array.isArray(limits?.bandwidthByType)?limits.bandwidthByType:[];
+    const bandwidthFor=(candidate:AdditionEntry)=>Number(bandwidthByType.find((row:any)=>(candidate.item.typeId&&Number(row.typeId)===candidate.item.typeId)||String(row.name??"")===candidate.item.name)?.bandwidth??0);
+    const usedByOthers=droneEntries.filter(candidate=>candidate!==entry).reduce((sum,candidate)=>sum+activeCount(candidate)*bandwidthFor(candidate),0);
+    const perDrone=bandwidthFor(entry); const bandwidthCap=bandwidthCapacity>0&&perDrone>0?Math.max(0,Math.floor((bandwidthCapacity-usedByOthers)/perDrone)):entry.item.quantity;
+    return Math.max(0,Math.min(entry.item.quantity,countCap,bandwidthCap));
+  };
+  const step=(entry:AdditionEntry,delta:number)=>{if(entry.target!=="drones"&&entry.target!=="fighters")return;const baseline=activeCount(entry);const maxAllowed=maxActiveFor(entry);onBayActiveQuantityChange(entry.target,entry.index,delta,baseline,maxAllowed);};
+  const renderBay=(entries:AdditionEntry[],active=false)=>entries.length?<div className={active?"fit-addition-list fit-drone-list":"fit-addition-list"}>{entries.map(entry=>active?<DroneLoadoutCard key={entry.target+"-"+entry.item.name+"-"+entry.index} entry={entry} activeQuantity={activeCount(entry)} maxActive={maxActiveFor(entry)} onStep={delta=>step(entry,delta)} onRemove={()=>onRemoveItem(entry.target,entry.index)} onShowInfo={onShowInfo}/>:<div className="fit-addition-item" key={entry.target+"-"+entry.item.name+"-"+entry.index} onContextMenu={event=>{if(!entry.item.typeId)return;event.preventDefault();onShowInfo(entry.item.typeId,entry.item.name);}}>{entry.item.typeId?<img src={imageUrl(entry.item.typeId,"icon",64)}/>:<b>?</b>}<span><strong>{entry.item.name}</strong><small>{entry.item.quantity} assigned / {entry.target}</small></span><button type="button" className="fit-addition-remove" onClick={()=>onRemoveItem(entry.target,entry.index)} aria-label={"Remove "+entry.item.name}>x</button></div>)}</div>:<div className="fit-addition-empty">Nothing assigned here.</div>;
+  const renderEffects=(items:any[],empty:string,label:string)=>items.length?<div className="fit-addition-effect-list">{items.map((item:any,index:number)=><div className="fit-addition-effect" key={String(item.id??item.typeId??index)} onContextMenu={event=>{if(!item.typeId)return;event.preventDefault();onShowInfo(Number(item.typeId),item.name);}}>{item.typeId?<img src={imageUrl(Number(item.typeId),"icon",64)}/>:<b>?</b>}<span><strong>{item.name??("Type "+item.typeId)}</strong><small>{item.chargeName?item.chargeName+" - ":""}{item.state?item.state+" - ":""}{label}</small></span></div>)}</div>:<div className="fit-addition-empty">{empty}</div>;
+  return <div className="fit-additions-panel"><div className="fit-additions-head"><strong>Additional Loadouts</strong><small>{info[activeTab]}</small>{activeTab==="drones"&&<button type="button" className="fit-add-drones" onClick={()=>window.dispatchEvent(new Event("sage:fitter-open-drones"))}>+ Add Drones</button>}</div><div className="fit-addition-tabs-v3" role="tablist">{tabs.map(tab=><button type="button" role="tab" aria-selected={activeTab===tab.id} className={activeTab===tab.id?"active":""} key={tab.id} onClick={()=>setActiveTab(tab.id)}><span>{tab.label}</span>{counts[tab.id]>0&&<b>{counts[tab.id]}</b>}</button>)}</div><div className="fit-addition-content" role="tabpanel">
     {activeTab==="drones"&&renderBay(droneEntries,true)}{activeTab==="fighters"&&renderBay(fighterEntries,true)}{activeTab==="cargo"&&renderBay(cargoEntries)}
     {activeTab==="implants"&&<>{renderBay(plannedImplants)}{installedImplants.length>0&&<div className="fit-addition-secondary"><small>Installed on pilot</small>{renderEffects(installedImplants,"","Installed on selected pilot")}</div>}</>}
     {activeTab==="boosters"&&<>{renderBay(plannedBoosters)}{appliedBoosters.length>0&&<div className="fit-addition-secondary"><small>External / temporary</small>{renderEffects(appliedBoosters,"","Applied to analysis")}</div>}</>}
@@ -1659,19 +1805,23 @@ function FitIssuesPanel({ analysis, remedies, onFix }: { analysis:any; remedies:
   const augments = remedies.filter((item) => item.kind === "implant" || item.kind === "implant-set");
   const moduleChanges = remedies.filter((item) => item.kind === "module");
   const rigs = remedies.filter((item) => item.kind === "rig");
-  return <aside className="fit-v2-issues">
-    <div className="fit-v2-issues-head"><strong>Fitting issues</strong><span>{analysis ? issues.length + missing.length : "…"}</span></div>
-    {!analysis ? <small className="fit-issues-state">Analyzing fit…</small> : issues.length === 0 && missing.length === 0 ? <div className="fit-issue-ok">✓ Fit viable for this pilot</div> : <div className="fit-issue-list">
-      {missing.slice(0,4).map((item:any) => <article className="skill" key={`skill-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><small>L{item.trainedLevel} → L{item.requiredLevel}</small><em>{item.item}</em></article>)}
-      {issues.slice(0,6).map((issue:any,index:number) => <article className={issue.level === "error" ? "error" : "warning"} key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small>{(issue.code === "cpu-exceeded" || issue.code === "powergrid-exceeded") && <em>{remedies.filter((item) => item.solves.includes(issue.code)).length} exact full-fit fixes</em>}</article>)}
+  const stateClass = !analysis ? "analyzing" : hasIssues ? "has-issues" : "viable";
+  const visibleIssues = issues.slice(0,3);
+  const visibleMissing = missing.slice(0,Math.max(0,3-visibleIssues.length));
+  return <aside className={`fit-v2-issues ${stateClass}`}>
+    <div className="fit-v2-issues-head"><strong>Fitting Issues</strong><span>{analysis ? issues.length + missing.length : "..."}</span></div>
+    {analysis && hasIssues && <small className="fit-issues-intro">Your current fit has issues that need attention before it can be used effectively.</small>}
+    {!analysis ? <small className="fit-issues-state">Analyzing fit...</small> : !hasIssues ? <div className="fit-issue-ok">Fit viable for this pilot</div> : <div className="fit-issue-list">
+      {visibleIssues.map((issue:any,index:number) => <article className={issue.level === "error" ? "error" : "warning"} key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small>{(issue.code === "cpu-exceeded" || issue.code === "powergrid-exceeded") && <em>{remedies.filter((item) => item.solves.includes(issue.code)).length} exact full-fit fixes</em>}</article>)}
+      {visibleMissing.map((item:any) => <article className="skill" key={`skill-${item.skillId}-${item.requiredLevel}`}><strong>{item.skill}</strong><small>L{item.trainedLevel} -&gt; L{item.requiredLevel}</small><em>{item.item}</em></article>)}
     </div>}
     {hasRemedySummary && <div className="fit-issue-remedy-summary"><span>{supportSkills.length} skills</span><span>{augments.length} augments</span><span>{moduleChanges.length} module swaps</span><span>{rigs.length} rigs</span></div>}
-    {hasIssues && <button type="button" className="fit-issues-fix" onClick={onFix}>Fix Fit</button>}
+    {hasIssues && <div className="fit-issues-actions"><button type="button" className="fit-issues-fix" onClick={onFix}>Fix My Fit</button><button type="button" className="fit-issues-remedies" onClick={onFix}>Show Remedies</button></div>}
   </aside>;
 }
 function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageProfilePreset, onTargetDamageProfilePresetChange, damageProfilePreset, onDamageProfilePresetChange, targetProfile, onTargetProfileChange, targetNpc, npcTargetOptions, npcTargetSearch, onNpcTargetSearchChange, onNpcTargetChange }: { analysis:any; refreshing:boolean; fit:Fit; hullProfile:HullFittingProfile|null; targetDamageProfilePreset:NpcDamagePreset; onTargetDamageProfilePresetChange(value:NpcDamagePreset):void; damageProfilePreset:NpcDamagePreset; onDamageProfilePresetChange(value:NpcDamagePreset):void; targetProfile:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}; onTargetProfileChange(value:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}):void; targetNpc:FittingSearchResult|null; npcTargetOptions:FittingSearchResult[]; npcTargetSearch:string; onNpcTargetSearchChange(value:string):void; onNpcTargetChange(typeId:number):void }) {
-  const fmt=(value:number|undefined,digits=0)=>value==null||!Number.isFinite(value)?"—":value.toLocaleString(undefined,{maximumFractionDigits:digits,minimumFractionDigits:digits});
-  const pct=(value:number|undefined)=>value==null?"—":(value*100).toFixed(1)+"%";
+  const fmt=(value:number|undefined,digits=0)=>value==null||!Number.isFinite(value)?"--":value.toLocaleString(undefined,{maximumFractionDigits:digits,minimumFractionDigits:digits});
+  const pct=(value:number|undefined)=>value==null?"--":(value*100).toFixed(1)+"%";
   const slots=analysis?.fitting?.slots ?? hullProfile?.slots;
   const hardpoints=analysis?.fitting?.hardpoints ?? hullProfile?.hardpoints;
   const storage=analysis?.storage;
@@ -1682,65 +1832,33 @@ function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageP
   const nav=analysis?.navigation;
   const targeting=analysis?.targeting;
   const appliedWeaponDps=damage?.weaponProfiles?.reduce((sum:number,weapon:any)=>sum+Number(weapon.targetApplication?.appliedDps??0),0)??0;
-  const Stat=({icon,label,value,sub}:{icon:string;label:string;value:string;sub?:string})=><div className="pyfa-stat"><i>{icon}</i><span><small>{label}</small><strong>{value}</strong>{sub&&<em>{sub}</em>}</span></div>;
-  const Resource=({icon,label,used,total,unit}:{icon:string;label:string;used:number|undefined;total:number|undefined;unit:string})=>{const ratio=total&&used!=null?Math.max(0,Math.min(1,used/total)):0;return <div className="pyfa-resource"><div><i>{icon}</i><span>{label}</span><strong>{used==null||total==null?"—":fmt(used,1)+" / "+fmt(total,1)+" "+unit}</strong></div><b><u style={{width:(ratio*100)+"%"}}/></b></div>};
-  const ResistRow=({icon,label,resists,ehp}:{icon:string;label:string;resists:number[]|undefined;ehp:number|undefined})=><div className="pyfa-resist-row"><i>{icon}</i><span>{label}</span>{[0,1,2,3].map(index=><b key={index}>{resists?pct(resists[index]):"—"}</b>)}<strong>{ehp==null?"—":fmt(ehp)}</strong></div>;
+  const capacitorPeakMargin=cap ? Number(cap.peakRechargeGjPerSecond??0)-Number(cap.demandGjPerSecond??0) : undefined;
+  const damageKinds=["em","thermal","kinetic","explosive"] as const;
+  const Stat=({icon,label,value,sub,tone="normal",priority=false}:{icon:string;label:string;value:string;sub?:string;tone?:"normal"|"primary"|"good"|"warn"|"danger"|"muted";priority?:boolean})=><div className={`pyfa-stat tone-${tone}${priority?" priority":""}`}><i>{icon}</i><span><small>{label}</small><strong>{value}</strong>{sub&&<em>{sub}</em>}</span></div>;
+  const Resource=({icon,label,used,total,unit}:{icon:string;label:string;used:number|undefined;total:number|undefined;unit:string})=>{const rawRatio=total&&used!=null?used/total:0;const ratio=Math.max(0,Math.min(1,rawRatio));const state=rawRatio>1?"danger":rawRatio>=.98?"full":rawRatio>=.85?"warn":"ok";return <div className={`pyfa-resource resource-${state}`}><div><i>{icon}</i><span>{label}</span><strong>{used==null||total==null?"--":fmt(used,1)+" / "+fmt(total,1)+(unit?" "+unit:"")}</strong></div><b><u style={{width:(ratio*100)+"%"}}/></b></div>};
+  const ResistRow=({icon,label,resists,ehp}:{icon:string;label:string;resists:number[]|undefined;ehp:number|undefined})=><div className="pyfa-resist-row"><i>{icon}</i><span>{label}</span>{[0,1,2,3].map(index=><b className={`damage-${damageKinds[index]}`} key={index}>{resists?pct(resists[index]):"--"}</b>)}<strong>{ehp==null?"--":fmt(ehp)}</strong></div>;
   return <aside className="fit-v2-context pyfa-stats-panel">
-    {refreshing&&<div className="fit-analysis-refreshing"><span>Calculating current fit…</span><i/></div>}
-    <section><h3><i>⚙</i> Resources</h3><Resource icon="◫" label="CPU" used={res?.used.cpu} total={res?.capacity.cpu} unit="tf"/><Resource icon="⚡" label="Powergrid" used={res?.used.powergrid} total={res?.capacity.powergrid} unit="MW"/><Resource icon="⬡" label="Calibration" used={res?.used.calibration} total={res?.capacity.calibration} unit=""/><Resource icon="◇" label="Drone bay" used={storage?.droneBayUsedM3} total={storage?.droneBayCapacityM3??hullProfile?.storage.droneBayM3} unit="m³"/><Resource icon="⌁" label="Bandwidth" used={storage?.droneBandwidthUsed} total={storage?.droneBandwidthCapacity??hullProfile?.storage.droneBandwidth} unit="Mbit/s"/><Resource icon="▣" label="Cargo" used={storage?.cargoUsedM3} total={storage?.cargoCapacityM3??hullProfile?.storage.cargoM3} unit="m³"/><div className="pyfa-slot-line"><span>Slots</span><strong>{fit.high.length}/{slots?.high??"—"} H - {fit.mid.length}/{slots?.mid??"—"} M - {fit.low.length}/{slots?.low??"—"} L - {fit.rig.length}/{slots?.rig??"—"} R</strong></div><div className="pyfa-slot-line"><span>Hardpoints</span><strong>{hardpoints?.turret??"\u2014"} turret / {hardpoints?.launcher??"\u2014"} launcher</strong></div></section>
-    <section><h3><i>◈</i> Resistances <small>Effective HP {defence?fmt(defence.totalEhp):"—"}</small></h3><div className="pyfa-resist-head"><span></span><span></span><b title="EM"><i className="resist-damage-icon em">ϟ</i><small>EM</small></b><b title="Thermal"><i className="resist-damage-icon thermal">♨</i><small>TH</small></b><b title="Kinetic"><i className="resist-damage-icon kinetic">◆</i><small>KI</small></b><b title="Explosive"><i className="resist-damage-icon explosive">✹</i><small>EX</small></b><strong>EHP</strong></div><ResistRow icon="◉" label="Shield" resists={defence?.shieldResists} ehp={defence?.shieldEhp}/><ResistRow icon="◆" label="Armor" resists={defence?.armorResists} ehp={defence?.armorEhp}/><ResistRow icon="⬢" label="Hull" resists={defence?.hullResists} ehp={defence?.structureEhp}/></section>
-    <section><h3><i>↻</i> Recharge & tank</h3><div className="pyfa-stat-grid"><Stat icon="◉" label="Passive shield" value={defence?fmt(defence.effectivePassiveShieldPeak,1)+" EHP/s":"—"}/><Stat icon="◆" label="Armor rep" value={defence?fmt(defence.effectiveArmorRepairPerSecond,1)+" EHP/s":"—"}/><Stat icon="◉" label="Shield rep" value={defence?fmt(defence.effectiveShieldRepairPerSecond,1)+" EHP/s":"—"}/><Stat icon="⬢" label="Hull rep" value={defence?fmt(defence.effectiveStructureRepairPerSecond,1)+" EHP/s":"—"}/></div></section>
-    <section><h3><i>✦</i> Firepower</h3><div className="pyfa-stat-grid"><Stat icon="✹" label="Weapon DPS" value={damage?fmt(damage.weaponDps,1):"—"}/><Stat icon="◇" label="Drone DPS" value={damage?fmt(damage.droneDps,1):"—"}/><Stat icon="✦" label="Total volley" value={damage?fmt(damage.totalVolley,0):"—"}/><Stat icon="⌖" label="Applied weapon" value={damage?fmt(appliedWeaponDps,1)+" DPS":"—"}/><Stat icon="◎" label="True target DPS" value={damage?.target?fmt(damage.target.trueDps,1)+" DPS":"—"} sub={damage?.target?.name}/><Stat icon="⏱" label="Target TTK" value={damage?.target?.timeToKillSeconds!=null&&Number.isFinite(damage.target.timeToKillSeconds)?fmt(damage.target.timeToKillSeconds,1)+" s":"—"}/></div></section>
-    <details className="pyfa-damage-profiles">
-      <summary>
-        <span className="pyfa-damage-profile-title"><i aria-hidden="true"/><strong>Damage profiles</strong></span>
-        <span className="pyfa-damage-profile-summary">
-          <small><b>DEAL</b> {targetNpc?.name ?? NPC_DAMAGE_PRESETS[targetDamageProfilePreset].label}</small>
-          <small><b>TANK</b> {targetNpc?.combatProfile?.outgoingDamageTotal ? targetNpc.name : NPC_DAMAGE_PRESETS[damageProfilePreset].label}</small>
-        </span>
-        <i className="pyfa-damage-profile-chevron" aria-hidden="true"/>
-      </summary>
+    {refreshing&&<div className="fit-analysis-refreshing"><span>Calculating current fit...</span><i/></div>}
+    <section className="pyfa-section pyfa-section-analytics"><h3>Ship Analytics</h3><Resource icon="C" label="CPU" used={res?.used.cpu} total={res?.capacity.cpu} unit="tf"/><Resource icon="P" label="Powergrid" used={res?.used.powergrid} total={res?.capacity.powergrid} unit="MW"/><Resource icon="R" label="Calibration" used={res?.used.calibration} total={res?.capacity.calibration} unit=""/><Resource icon="D" label="Drone bay" used={storage?.droneBayUsedM3} total={storage?.droneBayCapacityM3??hullProfile?.storage.droneBayM3} unit="m3"/><Resource icon="B" label="Bandwidth" used={storage?.droneBandwidthUsed} total={storage?.droneBandwidthCapacity??hullProfile?.storage.droneBandwidth} unit="Mbit/s"/><Resource icon="H" label="Cargo" used={storage?.cargoUsedM3} total={storage?.cargoCapacityM3??hullProfile?.storage.cargoM3} unit="m3"/><div className="pyfa-slot-line"><span>Slots</span><strong>{fit.high.length}/{slots?.high??"--"} H - {fit.mid.length}/{slots?.mid??"--"} M - {fit.low.length}/{slots?.low??"--"} L - {fit.rig.length}/{slots?.rig??"--"} R</strong></div><div className="pyfa-slot-line"><span>Hardpoints</span><strong>{hardpoints?.turret??"--"} turret / {hardpoints?.launcher??"--"} launcher</strong></div></section>
+    <section className="pyfa-section pyfa-section-defense"><h3>Defense <small>Effective HP <strong>{defence?fmt(defence.totalEhp):"--"}</strong></small></h3><div className="pyfa-resist-head"><span></span><span></span><b className="damage-em" title="EM"><small>EM</small></b><b className="damage-thermal" title="Thermal"><small>TH</small></b><b className="damage-kinetic" title="Kinetic"><small>KI</small></b><b className="damage-explosive" title="Explosive"><small>EX</small></b><strong>EHP</strong></div><ResistRow icon="S" label="Shield" resists={defence?.shieldResists} ehp={defence?.shieldEhp}/><ResistRow icon="A" label="Armor" resists={defence?.armorResists} ehp={defence?.armorEhp}/><ResistRow icon="H" label="Hull" resists={defence?.hullResists} ehp={defence?.structureEhp}/><div className="pyfa-defense-raw"><span><small>Shield HP</small><strong>{defence?fmt(defence.shieldHp):"--"}</strong></span><span><small>Armor HP</small><strong>{defence?fmt(defence.armorHp):"--"}</strong></span><span><small>Hull HP</small><strong>{defence?fmt(defence.structureHp):"--"}</strong></span></div></section>
+    <section className="pyfa-section pyfa-section-tank"><h3>Recharge &amp; Tank</h3><div className="pyfa-stat-grid"><Stat icon="S" label="Passive shield" value={defence?fmt(defence.effectivePassiveShieldPeak,1)+" EHP/s":"--"} priority/><Stat icon="A" label="Armor rep" value={defence?fmt(defence.effectiveArmorRepairPerSecond,1)+" EHP/s":"--"}/><Stat icon="S" label="Shield rep" value={defence?fmt(defence.effectiveShieldRepairPerSecond,1)+" EHP/s":"--"}/><Stat icon="H" label="Hull rep" value={defence?fmt(defence.effectiveStructureRepairPerSecond,1)+" EHP/s":"--"}/></div></section>
+    <section className="pyfa-section pyfa-section-firepower"><h3>Firepower</h3><div className="pyfa-stat-grid"><Stat icon="D" label="Total DPS" value={damage?fmt(damage.totalDps,1):"--"} tone="primary" priority/><Stat icon="W" label="Weapon DPS" value={damage?fmt(damage.weaponDps,1):"--"}/><Stat icon="D" label="Drone DPS" value={damage?fmt(damage.droneDps,1):"--"}/><Stat icon="V" label="Total volley" value={damage?fmt(damage.totalVolley,0):"--"}/><Stat icon="A" label="Applied weapon" value={damage?fmt(appliedWeaponDps,1)+" DPS":"--"} tone={damage?.target?"good":"muted"}/><Stat icon="T" label="True target DPS" value={damage?.target?fmt(damage.target.trueDps,1)+" DPS":"--"} sub={damage?.target?.name} tone={damage?.target?"primary":"muted"}/><Stat icon="T" label="Target TTK" value={damage?.target?.timeToKillSeconds!=null&&Number.isFinite(damage.target.timeToKillSeconds)?fmt(damage.target.timeToKillSeconds,1)+" s":"--"} tone={damage?.target?"primary":"muted"}/></div></section>
+    <details className="pyfa-damage-profiles" open>
+      <summary><span className="pyfa-damage-profile-title"><i aria-hidden="true"/><strong>Damage profiles</strong></span><span className="pyfa-damage-profile-summary"><small><b>DEAL</b> {targetNpc?.name ?? NPC_DAMAGE_PRESETS[targetDamageProfilePreset].label}</small><small><b>TANK</b> {targetNpc?.combatProfile?.outgoingDamageTotal ? targetNpc.name : NPC_DAMAGE_PRESETS[damageProfilePreset].label}</small></span><i className="pyfa-damage-profile-chevron" aria-hidden="true"/></summary>
       <div className="pyfa-damage-profile-body">
-        <label className="pyfa-damage-profile-field npc-target-picker">
-          <span><strong>Exact NPC target</strong><small>CCP SDE resistances, HP, signature and outgoing damage</small></span>
-          <input value={npcTargetSearch} onChange={event=>onNpcTargetSearchChange(event.target.value)} placeholder="Search every combat NPC, e.g. Leshak, Tyrannos, Guristas..." />
-          <select value={targetNpc?.id??0} onChange={event=>onNpcTargetChange(Number(event.target.value))}>
-            <option value={0}>No exact target - use manual profiles</option>
-            <optgroup label="Abyssal room enemies">{npcTargetOptions.filter(item=>item.combatProfile?.abyssal).map(item=><option key={"abyss-"+item.id} value={item.id}>{item.name}</option>)}</optgroup>
-            {npcTargetSearch.trim().length>=2&&<optgroup label="All NPC search results">{npcTargetOptions.filter(item=>!item.combatProfile?.abyssal).map(item=><option key={"npc-"+item.id} value={item.id}>{item.name}</option>)}</optgroup>}
-          </select>
-          <em>{targetNpc?.combatProfile ? `Exact target: ${targetNpc.name} - ${Math.round(targetNpc.combatProfile.shieldHp+targetNpc.combatProfile.armorHp+targetNpc.combatProfile.structureHp).toLocaleString()} raw HP. True DPS uses shield, armor and hull resists.` : "All Abyssal room entities are loaded; search reaches every SDE combat entity."}</em>
-        </label>
-        <label className="pyfa-damage-profile-field">
-          <span><strong>Fallback target profile</strong><small>Recommendation only when no exact NPC target is selected</small></span>
-          <select value={targetDamageProfilePreset} onChange={event=>onTargetDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>
-            {NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - deal {NPC_DAMAGE_PRESETS[key].dealLabel}</option>)}
-          </select>
-          <em>Recommended: {NPC_DAMAGE_PRESETS[targetDamageProfilePreset].dealLabel}</em>
-        </label>
-        <label className="pyfa-damage-profile-field">
-          <span><strong>Defensive damage profile</strong><small>Incoming damage mix used for tank and EHP</small></span>
-          <select value={damageProfilePreset} onChange={event=>onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>
-            {NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}
-          </select>
-          <em>Incoming: {NPC_DAMAGE_PRESETS[damageProfilePreset].incomingLabel}</em>
-        </label>
-        <div className="pyfa-damage-application">
-          <div className="pyfa-damage-application-head"><strong>Target application</strong><small>Range, signature and movement used for applied DPS</small></div>
-          <div className="fit-v2-target-grid">
-            <label>Range km<input type="number" min="0" value={targetProfile.rangeM/1000} onChange={event=>onTargetProfileChange({...targetProfile,rangeM:Math.max(0,Number(event.target.value)*1000)})}/></label>
-            <label>Signature m<input type="number" min="1" value={targetProfile.signatureRadiusM} onChange={event=>onTargetProfileChange({...targetProfile,signatureRadiusM:Math.max(1,Number(event.target.value))})}/></label>
-            <label>Transversal<input type="number" min="0" value={targetProfile.transverseVelocityMps} onChange={event=>onTargetProfileChange({...targetProfile,transverseVelocityMps:Math.max(0,Number(event.target.value))})}/></label>
-            <label>Velocity<input type="number" min="0" value={targetProfile.velocityMps} onChange={event=>onTargetProfileChange({...targetProfile,velocityMps:Math.max(0,Number(event.target.value))})}/></label>
-          </div>
-        </div>
+        <label className="pyfa-damage-profile-field profile-deal"><span><strong>DEAL profile</strong><small>Outgoing damage mix when no exact NPC target is selected</small></span><select value={targetDamageProfilePreset} onChange={event=>onTargetDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - deal {NPC_DAMAGE_PRESETS[key].dealLabel}</option>)}</select><em>Recommended: {NPC_DAMAGE_PRESETS[targetDamageProfilePreset].dealLabel}</em></label>
+        <label className="pyfa-damage-profile-field profile-tank"><span><strong>TANK profile</strong><small>Incoming damage mix used for resistance-weighted EHP and tank</small></span><select value={damageProfilePreset} onChange={event=>onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}</select><em>Incoming: {NPC_DAMAGE_PRESETS[damageProfilePreset].incomingLabel}</em></label>
+        <details className="pyfa-damage-profile-advanced">
+          <summary><span>Exact target &amp; application</span><small>NPC resistances, range, signature &amp; movement</small><i aria-hidden="true"/></summary>
+        <label className="pyfa-damage-profile-field npc-target-picker profile-exact"><span><strong>Exact NPC target</strong><small>CCP SDE resistances, HP, signature and outgoing damage</small></span><input value={npcTargetSearch} onChange={event=>onNpcTargetSearchChange(event.target.value)} placeholder="Search every combat NPC, e.g. Leshak, Tyrannos, Guristas..."/><select value={targetNpc?.id??0} onChange={event=>onNpcTargetChange(Number(event.target.value))}><option value={0}>No exact target - use manual profiles</option><optgroup label="Abyssal room enemies">{npcTargetOptions.filter(item=>item.combatProfile?.abyssal).map(item=><option key={"abyss-"+item.id} value={item.id}>{item.name}</option>)}</optgroup>{npcTargetSearch.trim().length>=2&&<optgroup label="All NPC search results">{npcTargetOptions.filter(item=>!item.combatProfile?.abyssal).map(item=><option key={"npc-"+item.id} value={item.id}>{item.name}</option>)}</optgroup>}</select><em>{targetNpc?.combatProfile ? `Exact target: ${targetNpc.name} - ${Math.round(targetNpc.combatProfile.shieldHp+targetNpc.combatProfile.armorHp+targetNpc.combatProfile.structureHp).toLocaleString()} raw HP. True DPS uses shield, armor and hull resists.` : "All Abyssal room entities are loaded; search reaches every SDE combat entity."}</em></label>
+        <div className="pyfa-damage-application profile-application"><div className="pyfa-damage-application-head"><strong>Target application</strong><small>Range, signature and movement used for applied DPS</small></div><div className="fit-v2-target-grid"><label>Range km<input type="number" min="0" value={targetProfile.rangeM/1000} onChange={event=>onTargetProfileChange({...targetProfile,rangeM:Math.max(0,Number(event.target.value)*1000)})}/></label><label>Signature m<input type="number" min="1" value={targetProfile.signatureRadiusM} onChange={event=>onTargetProfileChange({...targetProfile,signatureRadiusM:Math.max(1,Number(event.target.value))})}/></label><label>Transversal<input type="number" min="0" value={targetProfile.transverseVelocityMps} onChange={event=>onTargetProfileChange({...targetProfile,transverseVelocityMps:Math.max(0,Number(event.target.value))})}/></label><label>Velocity<input type="number" min="0" value={targetProfile.velocityMps} onChange={event=>onTargetProfileChange({...targetProfile,velocityMps:Math.max(0,Number(event.target.value))})}/></label></div></div>
+        </details>
       </div>
     </details>
-    <section><h3><i>⚡</i> Capacitor</h3><div className="pyfa-stat-grid"><Stat icon="◍" label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"—"}/><Stat icon="⏱" label="State" value={cap?(cap.stable?"Stable +"+fmt(cap.stablePercent,1)+"%":fmt(cap.depletionSeconds,0)+" s"):"—"}/><Stat icon="↓" label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"—"}/><Stat icon="↑" label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"—"}/></div></section>
-    <section><h3><i>⌖</i> Targeting & misc</h3><div className="pyfa-stat-grid"><Stat icon="⌖" label="Targets" value={targeting?fmt(targeting.maximumLockedTargets):"—"}/><Stat icon="◎" label="Lock range" value={targeting?fmt(targeting.maximumRangeM/1000,1)+" km":"—"}/><Stat icon="◌" label="Scan res" value={targeting?fmt(targeting.scanResolution,0)+" mm":"—"}/><Stat icon="∿" label="Sensor str" value={targeting?fmt(targeting.sensorStrength,1):"—"}/><Stat icon="➤" label="Speed" value={nav?fmt(nav.maximumVelocity,0)+" m/s":"—"}/><Stat icon="⏱" label="Align" value={nav?fmt(nav.alignSeconds,2)+" s":"—"}/><Stat icon="◯" label="Signature" value={targeting?fmt(targeting.signatureRadiusM,0)+" m":"—"}/><Stat icon="✧" label="Warp" value={nav?fmt(nav.warpSpeedAuPerSecond,1)+" AU/s":"—"}/></div></section>
+    <section className="pyfa-section pyfa-section-capacitor"><h3>Capacitor</h3><div className="pyfa-stat-grid"><Stat icon="S" label="State" value={cap?(cap.stable?"Stable +"+fmt(cap.stablePercent,1)+"%":fmt(cap.depletionSeconds,0)+" s to empty"):"--"} tone={cap?.stable?"good":cap?"danger":"muted"} priority/><Stat icon="C" label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"--"}/><Stat icon="T" label="Recharge time" value={cap?fmt(cap.rechargeSeconds,1)+" s":"--"}/><Stat icon="D" label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"--"}/><Stat icon="R" label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"--"}/><Stat icon="M" label="Peak margin" value={capacitorPeakMargin==null?"--":(capacitorPeakMargin>=0?"+":"")+fmt(capacitorPeakMargin,2)+" GJ/s"} tone={capacitorPeakMargin==null?"muted":capacitorPeakMargin>=0?"good":"danger"}/></div></section>
+    <section className="pyfa-section pyfa-section-targeting"><h3>Targeting &amp; Navigation</h3><div className="pyfa-stat-grid"><Stat icon="T" label="Targets" value={targeting?fmt(targeting.maximumLockedTargets):"--"}/><Stat icon="R" label="Lock range" value={targeting?fmt(targeting.maximumRangeM/1000,1)+" km":"--"}/><Stat icon="S" label="Scan res" value={targeting?fmt(targeting.scanResolution,0)+" mm":"--"}/><Stat icon="S" label="Sensor str" value={targeting?fmt(targeting.sensorStrength,1):"--"}/><Stat icon="V" label="Speed" value={nav?fmt(nav.maximumVelocity,0)+" m/s":"--"}/><Stat icon="A" label="Align" value={nav?fmt(nav.alignSeconds,2)+" s":"--"}/><Stat icon="S" label="Signature" value={targeting?fmt(targeting.signatureRadiusM,0)+" m":"--"}/><Stat icon="W" label="Warp" value={nav?fmt(nav.warpSpeedAuPerSecond,1)+" AU/s":"--"}/></div></section>
   </aside>;
 }
-
 function FitPerformance({
   analysis,
   status,
@@ -1835,7 +1953,7 @@ function FitPerformance({
     const valid=(tier<=3?[0.3,0.5]:[0.5,0.7]) as Array<0.3|0.5|0.7>;
     onAbyssSelectionChange({...abyssSelection,tier,penalty:valid.includes(abyssSelection.penalty)?abyssSelection.penalty:valid[valid.length-1],roomKey:"all"});
   };
-  const abyssSeconds = (value:number) => !Number.isFinite(value) ? "∞" : value >= 60 ? Math.floor(value/60)+"m "+Math.round(value%60)+"s" : value.toFixed(1)+"s";
+  const abyssSeconds = (value:number) => !Number.isFinite(value) ? "--" : value >= 60 ? Math.floor(value/60)+"m "+Math.round(value%60)+"s" : value.toFixed(1)+"s";
   const abyssResists = (values:number[]) => values.map(value=>Math.round(value*100)+"%").join(" / ");
   return (
     <div className="fit-performance">
@@ -1856,12 +1974,12 @@ function FitPerformance({
           <label>Tier<select value={abyssSelection.tier} onChange={(event)=>setAbyssTier(Number(event.target.value) as AbyssFitterSelection["tier"])}>{[0,1,2,3,4,5,6].map(tier=><option key={tier} value={tier}>T{tier}</option>)}</select></label>
           <label>Weather<select value={abyssSelection.weather} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,weather:event.target.value as AbyssFitterSelection["weather"],roomKey:"all"})}><option value="electrical">Electrical</option><option value="exotic">Exotic</option><option value="firestorm">Firestorm</option><option value="gamma">Gamma</option><option value="dark">Dark</option></select></label>
           <label>Weather strength<select value={abyssSelection.penalty} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,penalty:Number(event.target.value) as AbyssFitterSelection["penalty"]})}>{validAbyssPenalties.map(value=><option key={value} value={value}>{Math.round(value*100)}%</option>)}</select></label>
-          <label>Room<select disabled={!abyssSelection.enabled || !abyssResult?.rooms?.length} value={abyssSelection.roomKey} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,roomKey:event.target.value})}><option value="all">All possible rooms</option>{abyssResult?.rooms?.map((room:any)=><option key={room.key} value={room.key}>{room.name} · {room.family}</option>)}</select></label>
+          <label>Room<select disabled={!abyssSelection.enabled || !abyssResult?.rooms?.length} value={abyssSelection.roomKey} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,roomKey:event.target.value})}><option value="all">All possible rooms</option>{abyssResult?.rooms?.map((room:any)=><option key={room.key} value={room.key}>{room.name} - {room.family}</option>)}</select></label>
         </div>
         {!abyssSelection.enabled && <div className="abyss-room-muted">Enable the profile to apply weather to the fit and evaluate every verified room composition in Sage's current dataset.</div>}
         {abyssSelection.enabled && abyssResult && <>
           <div className="abyss-room-summary">
-            <article><span>Known rooms</span><strong>{abyssResult.summary.roomCount}</strong><small>T{abyssResult.tier} · {abyssResult.weather} · {Math.round(abyssResult.penalty*100)}%</small></article>
+            <article><span>Known rooms</span><strong>{abyssResult.summary.roomCount}</strong><small>T{abyssResult.tier} - {abyssResult.weather} - {Math.round(abyssResult.penalty*100)}%</small></article>
             {abyssResult.summary.unclearableRoomCount > 0 && <article><span>Cannot clear</span><strong>{abyssResult.summary.unclearableRoomCount}</strong><small>known room{abyssResult.summary.unclearableRoomCount===1?"":"s"} at current application/range</small></article>}
             <article><span>Worst incoming</span><strong>{abyssResult.summary.worstIncoming?.incoming.totalDps.toFixed(1) ?? "-"} DPS</strong><small>{abyssResult.summary.worstIncoming?.name ?? "No room"}</small></article>
             <article><span>Max-ramp worst</span><strong>{abyssResult.summary.worstMaxRamp?.incoming.maxRamp.totalDps.toFixed(1) ?? "-"} DPS</strong><small>{abyssResult.summary.worstMaxRamp?.name ?? "No room"}</small></article>
@@ -1876,12 +1994,12 @@ function FitPerformance({
           <div className="abyss-worst-damage-grid">
             {[["EM",abyssResult.summary.worstEm,"em"],["Thermal",abyssResult.summary.worstThermal,"thermal"],["Kinetic",abyssResult.summary.worstKinetic,"kinetic"],["Explosive",abyssResult.summary.worstExplosive,"explosive"]].map(([label,room,key]:any)=><button type="button" key={key} onClick={()=>room&&onAbyssSelectionChange({...abyssSelection,roomKey:room.key})}><span>Worst {label}</span><strong>{room?.incoming?.[key]?.toFixed(1) ?? "-"} DPS</strong><small>{room?.name ?? "No room"}</small></button>)}
           </div>
-          {abyssSelection.roomKey === "all" && <div className="abyss-all-rooms-table"><div className="abyss-table-row head"><span>Room</span><span>Hostiles</span><span>Incoming</span><span>Max ramp</span><span>Clear est.</span><span>Fit EHP</span></div>{abyssResult.rooms.map((room:any)=><button type="button" className="abyss-table-row" key={room.key} onClick={()=>onAbyssSelectionChange({...abyssSelection,roomKey:room.key})}><span><strong>{room.name}</strong><small>{room.family}{room.variable?" · variable envelope":""}</small></span><span>{room.totalHostiles}</span><span>{room.incoming.totalDps.toFixed(1)}</span><span>{room.incoming.maxRamp.totalDps.toFixed(1)}</span><span>{abyssSeconds(room.clearSeconds)}</span><span>{Math.round(room.playerTank.totalEhp).toLocaleString()}</span></button>)}</div>}
+          {abyssSelection.roomKey === "all" && <div className="abyss-all-rooms-table"><div className="abyss-table-row head"><span>Room</span><span>Hostiles</span><span>Incoming</span><span>Max ramp</span><span>Clear est.</span><span>Fit EHP</span></div>{abyssResult.rooms.map((room:any)=><button type="button" className="abyss-table-row" key={room.key} onClick={()=>onAbyssSelectionChange({...abyssSelection,roomKey:room.key})}><span><strong>{room.name}</strong><small>{room.family}{room.variable?" - variable envelope":""}</small></span><span>{room.totalHostiles}</span><span>{room.incoming.totalDps.toFixed(1)}</span><span>{room.incoming.maxRamp.totalDps.toFixed(1)}</span><span>{abyssSeconds(room.clearSeconds)}</span><span>{Math.round(room.playerTank.totalEhp).toLocaleString()}</span></button>)}</div>}
           {abyssDisplayRoom && <div className="abyss-room-detail">
             <div className="abyss-room-detail-head"><div><strong>{abyssDisplayRoom.name}</strong><small>{abyssSelection.roomKey === "all" ? "Worst incoming room shown while All possible is selected" : abyssDisplayRoom.family}</small>{abyssDisplayRoom.notes&&<small>{abyssDisplayRoom.notes}</small>}</div><div><span>{abyssDisplayRoom.incoming.totalDps.toFixed(1)} incoming DPS</span><span>{Math.round(abyssDisplayRoom.playerTank.totalEhp).toLocaleString()} fit EHP</span><span>{abyssSeconds(abyssDisplayRoom.combatSeconds)} combat</span><span>{abyssSeconds(abyssDisplayRoom.droneNavigationSeconds)} drone travel</span><span>{abyssSeconds(abyssDisplayRoom.clearSeconds)} estimated clear</span></div></div>
-            <div className="abyss-damage-vector"><span>EM {abyssDisplayRoom.incoming.em.toFixed(1)} · {(abyssDisplayRoom.incoming.shares.em*100).toFixed(0)}%</span><span>TH {abyssDisplayRoom.incoming.thermal.toFixed(1)} · {(abyssDisplayRoom.incoming.shares.thermal*100).toFixed(0)}%</span><span>KI {abyssDisplayRoom.incoming.kinetic.toFixed(1)} · {(abyssDisplayRoom.incoming.shares.kinetic*100).toFixed(0)}%</span><span>EX {abyssDisplayRoom.incoming.explosive.toFixed(1)} · {(abyssDisplayRoom.incoming.shares.explosive*100).toFixed(0)}%</span></div>
+            <div className="abyss-damage-vector"><span>EM {abyssDisplayRoom.incoming.em.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.em*100).toFixed(0)}%</span><span>TH {abyssDisplayRoom.incoming.thermal.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.thermal*100).toFixed(0)}%</span><span>KI {abyssDisplayRoom.incoming.kinetic.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.kinetic*100).toFixed(0)}%</span><span>EX {abyssDisplayRoom.incoming.explosive.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.explosive*100).toFixed(0)}%</span></div>
             <div className="abyss-player-tank"><span>Active tank {(abyssDisplayRoom.playerTank.effectiveShieldRepairPerSecond+abyssDisplayRoom.playerTank.effectiveArmorRepairPerSecond+abyssDisplayRoom.playerTank.effectiveStructureRepairPerSecond).toFixed(1)} EHP/s</span><span>Passive shield {abyssDisplayRoom.playerTank.effectivePassiveShieldPeak.toFixed(1)} EHP/s</span></div>
-            <div className="abyss-target-table"><div className="abyss-target-row head"><span>Enemy</span><span>Count</span><span>HP base → weather</span><span>Weather resists S/A/H (EM/TH/KI/EX)</span><span>NPC DPS base / max</span><span>True DPS</span><span>TTK each</span></div>{abyssDisplayRoom.targets.map((target:any)=><div className="abyss-target-row" key={target.typeId}><span><strong>{target.name}</strong><small>{target.alternatives.length>1?"Worst envelope of: "+target.alternatives.map((item:any)=>item.name).join(", "):"Type "+target.typeId}</small></span><span>{target.minCount===target.maxCount?target.count:target.minCount+"–"+target.maxCount+" → "+target.count}</span><span>{Math.round(target.baseHp.total).toLocaleString()} → {Math.round(target.weatherHp.total).toLocaleString()}</span><span><small>S {abyssResists(target.weatherResists.shield)}</small><small>A {abyssResists(target.weatherResists.armor)}</small><small>H {abyssResists(target.weatherResists.hull)}</small></span><span>{target.outgoingDpsTotal.toFixed(1)} / {target.outgoingDpsMaxTotal.toFixed(1)}</span><span>{target.trueDps.toFixed(1)}</span><span>{abyssSeconds(target.ttkSeconds)}</span></div>)}</div>
+            <div className="abyss-target-table"><div className="abyss-target-row head"><span>Enemy</span><span>Count</span><span>HP base to weather</span><span>Weather resists S/A/H (EM/TH/KI/EX)</span><span>NPC DPS base / max</span><span>True DPS</span><span>TTK each</span></div>{abyssDisplayRoom.targets.map((target:any)=><div className="abyss-target-row" key={target.typeId}><span><strong>{target.name}</strong><small>{target.alternatives.length>1?"Worst envelope of: "+target.alternatives.map((item:any)=>item.name).join(", "):"Type "+target.typeId}</small></span><span>{target.minCount===target.maxCount?target.count:target.minCount+"-"+target.maxCount+" to "+target.count}</span><span>{Math.round(target.baseHp.total).toLocaleString()} to {Math.round(target.weatherHp.total).toLocaleString()}</span><span><small>S {abyssResists(target.weatherResists.shield)}</small><small>A {abyssResists(target.weatherResists.armor)}</small><small>H {abyssResists(target.weatherResists.hull)}</small></span><span>{target.outgoingDpsTotal.toFixed(1)} / {target.outgoingDpsMaxTotal.toFixed(1)}</span><span>{target.trueDps.toFixed(1)}</span><span>{abyssSeconds(target.ttkSeconds)}</span></div>)}</div>
           </div>}
           <details className="abyss-room-limitations"><summary>Data provenance & simulation limits</summary><p>{abyssResult.provenance.roomSource}; combat stats: {abyssResult.provenance.staticStats}; telemetry cross-check: {abyssResult.provenance.telemetryCrossCheck}.</p>{abyssResult.limitations.map((text:string,index:number)=><p key={index}>{text}</p>)}</details>
         </>}
@@ -2036,7 +2154,7 @@ function FitPerformance({
                 {analysis.commandBurstSources?.map((source:any,index:number)=><article key={`burst-${source.typeId}-${index}`}><span>Fleet boost - {source.name}</span><strong>{source.charge??"Command burst"}</strong><small>{source.buffs.map((buff:any)=>`${buff.description}: ${Number(buff.value).toFixed(2)}`).join(" - ")}</small></article>)}
                 {analysis.projectedSources?.map((source:any,index:number)=><article key={`projected-${source.typeId}-${index}`}><span>Projected - {source.name}</span><strong>{Math.round(Number(source.effectiveness??1)*100)}% effectiveness</strong><small>{source.effects?.join(" - ")||"Projected DOGMA effects applied"}</small></article>)}
                 {analysis.environmentSources?.map((source:any,index:number)=><article key={`environment-${source.typeId}-${index}`}><span>Environment</span><strong>{source.name}</strong><small>Environment DOGMA modifiers applied</small></article>)}
-                {analysis.fighterSystem?.capacityM3>0&&<article><span>Fighter system</span><strong>{analysis.fighterSystem.activeSquadrons} / {analysis.fighterSystem.tubes} active tubes</strong><small>{analysis.fighterSystem.usedM3.toFixed(0)} / {analysis.fighterSystem.capacityM3.toFixed(0)} m³ fighter hangar used</small></article>}
+                {analysis.fighterSystem?.capacityM3>0&&<article><span>Fighter system</span><strong>{analysis.fighterSystem.activeSquadrons} / {analysis.fighterSystem.tubes} active tubes</strong><small>{analysis.fighterSystem.usedM3.toFixed(0)} / {analysis.fighterSystem.capacityM3.toFixed(0)} m3 fighter hangar used</small></article>}
               </div>
             </>
           )}
@@ -2247,9 +2365,9 @@ function SlotRack({ title, side, items, limit, onStateChange, onRemove, onDropIt
   const states:ModuleState[]=side==="rig"||side==="subsystem"?["online"]:["offline","online","active","overheated"];
   const count=Math.max(items.length,Math.max(0,Math.floor(limit||0)));
   const allowDrag=(event:DragEvent<HTMLElement>)=>{if(event.dataTransfer.types.includes(FITTING_DRAG_MIME)){event.preventDefault();event.dataTransfer.dropEffect="copy";}};
-  return <div className={"slot-rack "+side} onDragOver={allowDrag}><span>{title}<small>{items.length} / {limit || count}</small></span><div>{Array.from({length:count},(_,index)=>{const item=items[index];return item?<ItemIcon item={item} states={states} onStateChange={state=>onStateChange(side,index,state)} onRemove={()=>onRemove(side,index)} onChargeDrop={charge=>onLoadCharge(side,index,charge)} onShowInfo={onShowInfo} key={(item.name)+"-"+index}/>:<div className="fit-item fit-empty-slot" key={"empty-"+side+"-"+index} title={"Drop a "+side+" module here"} onDragOver={allowDrag} onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onDropItem(side,dragged);}}><b>+</b><span>Drop / Empty</span></div>;})}</div></div>;
+  return <div className={"slot-rack "+side} onDragOver={allowDrag}><span>{title}<small>{items.length} / {limit || count}</small></span><div>{Array.from({length:count},(_,index)=>{const item=items[index];return item?<FittedSlotTile item={item} states={states} onStateChange={state=>onStateChange(side,index,state)} onRemove={()=>onRemove(side,index)} onChargeDrop={charge=>onLoadCharge(side,index,charge)} onShowInfo={onShowInfo} key={(item.name)+"-"+index}/>:<div className="fit-item fitted-slot-empty fit-empty-slot" key={"empty-"+side+"-"+index} title={"Drop a "+side+" module here"} onDragOver={allowDrag} onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onDropItem(side,dragged);}}><b>+</b><span>Drop / Empty</span></div>;})}</div></div>;
 }
-function ItemIcon({
+function FittedSlotTile({
   item,
   states,
   onStateChange,
@@ -2280,16 +2398,17 @@ function ItemIcon({
   const allowCharge=(event:DragEvent<HTMLElement>)=>{if(event.dataTransfer.types.includes(FITTING_DRAG_MIME)){event.preventDefault();event.dataTransfer.dropEffect="copy";}};
   return (
     <div
-      className={`fit-item state-${currentState}`}
+      className={`fit-item fitted-slot-tile state-${currentState}`}
       title={`${item.name}${item.charge ? `, ${item.charge}` : ""} - drop compatible ammo / script here`}
       onDragOver={allowCharge}
       onContextMenu={(event)=>{if(!item.typeId)return;event.preventDefault();onShowInfo(item.typeId,item.name);}}
       onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onChargeDrop(dragged);}}
     >
       {item.typeId ? <img src={imageUrl(item.typeId, "icon", 64)} /> : <b>?</b>}
+      {item.charge && <span className="fitted-slot-charge-indicator" title={`Loaded: ${item.charge}`} aria-label={`Loaded charge ${item.charge}`} />}
       {item.quantity > 1 && <em>{item.quantity}</em>}{item.mutation && <i className="abyssal-badge" title={item.mutation.mutaplasmidName}>A</i>}
       <span className="fit-item-copy"><strong className="fit-module-name" title={item.name}>{item.name}</strong><small className="fit-loaded-charge" title={item.charge ?? ""} onContextMenu={(event)=>{if(!item.chargeTypeId)return;event.preventDefault();event.stopPropagation();onShowInfo(item.chargeTypeId,item.charge);}}>{item.charge ?? "\u00a0"}</small></span>
-      <button type="button" className="fit-item-remove" aria-label={`Remove ${item.name}`} onClick={onRemove}>×</button>
+      <button type="button" className="fit-item-remove" aria-label={`Remove ${item.name}`} onClick={onRemove}>X</button>
       <select
         className="fit-module-state"
         value={currentState}

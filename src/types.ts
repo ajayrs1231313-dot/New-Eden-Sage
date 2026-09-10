@@ -1157,6 +1157,7 @@ declare global {
       installUpdate(): Promise<boolean>;
       openSupportPage(): Promise<void>;
       openZkillboard(killmailId?: number): Promise<void>;
+      openExternalUrl(url:string): Promise<void>;
       openDiscordUrl(url:string): Promise<void>;
       getMcpSetup(): Promise<{ command: string; args: string[]; json: string; codex: string; access: string; claudeDesktop: string; claudeCode: string }>;
       getClaudeMcpStatus(): Promise<ClaudeCompatibilityStatus>;
@@ -1232,6 +1233,7 @@ declare global {
       publishPlanetaryCorpSurvey(input:Record<string,unknown>): Promise<any>;
       publishPlanetaryCorpTemplate(input:{characterId:string;planId:string}): Promise<PlanetarySavedPlan>;
       unpublishPlanetaryCorpObject(input:{characterId:string;planId:string;objectId:string}): Promise<PlanetarySavedPlan|boolean>;
+      getFitterContentConfig(): Promise<{ path:string; rules:unknown[] }>;
       getAugmentGuideLocal(installedTypeIds:number[]): Promise<AugmentGuideResult>;
       getBoosterSideEffectsLocal(boosterTypeIds:number[]): Promise<Array<{ boosterTypeId:number; boosterName:string; effectId:number; effectName:string; chanceAttributeId:number; chance:number }>>;
       copyText(value: string): Promise<boolean>;
@@ -1250,7 +1252,7 @@ declare global {
       filterFittingItemsForHullLocal(input:{hullTypeId:number;candidates:Array<{typeId:number;placement?:string}>;fitted?:Array<{typeId:number;rack?:string}>}): Promise<{compatibleTypeIds:number[];checked:number}>;
       getFittingChargesForModulesLocal(moduleTypeIds:number[]): Promise<{compatibleTypeIds:number[];checked:number}>;
       getFittingCatalogueLocal(): Promise<{ groups: Array<{ id:number; name:string; parentId?:number; iconId?:number }>; items: Array<{ id:number; name:string; groupId:number; categoryId:number; categoryName:string; rack?: "low" | "mid" | "high" | "rig" | "subsystem"; marketGroupId:number; rootName:string; metaLevel:number; placement:"ship"|"high"|"mid"|"low"|"rig"|"subsystem"|"drone"|"fighter"|"implant"|"booster"|"charge"|"cargo" }> }>;
-      getFittingTypeInfoLocal(typeId:number): Promise<{ typeId:number; name:string; description:string; group:{id:number;name:string}; category:{id:number;name:string}; marketGroup:null|{id:number;name:string;path:string[]}; placement:"ship"|"high"|"mid"|"low"|"rig"|"subsystem"|"drone"|"fighter"|"implant"|"booster"|"charge"|"cargo"; rack?:string; metaLevel?:number; techLevel?:number; published:boolean; iconId?:number; physical:{volumeM3?:number;massKg?:number;capacityM3?:number;radiusM?:number;portionSize?:number;basePrice?:number}; fitting:Array<{attributeId:number;label:string;unit:string;value:number}>; requirements:Array<{skillId:number;name:string;level:number}>; attributes:Array<{attributeId:number;name:string;internalName?:string;description?:string;value:number;unitId?:number;unit?:string;categoryId?:number;category:string;highIsGood?:boolean;published:boolean}>; effects:Array<{effectId:number;name:string;category:number;description?:string}> }>;
+      getFittingTypeInfoLocal(typeId:number): Promise<{ typeId:number; name:string; description:string; group:{id:number;name:string}; category:{id:number;name:string}; marketGroup:null|{id:number;name:string;path:string[]}; identity:{factionId?:number;factionName?:string;raceId?:number;raceName?:string}; placement:"ship"|"high"|"mid"|"low"|"rig"|"subsystem"|"drone"|"fighter"|"implant"|"booster"|"charge"|"cargo"; rack?:string; metaLevel?:number; techLevel?:number; published:boolean; iconId?:number; physical:{volumeM3?:number;massKg?:number;capacityM3?:number;radiusM?:number;portionSize?:number;basePrice?:number}; fitting:Array<{attributeId:number;label:string;unit:string;value:number}>; requirements:Array<{skillId:number;name:string;level:number}>; attributes:Array<{attributeId:number;name:string;internalName?:string;description?:string;value:number;unitId?:number;unit?:string;categoryId?:number;category:string;highIsGood?:boolean;published:boolean}>; effects:Array<{effectId:number;name:string;category:number;description?:string}> }>;
       getHullFittingProfileLocal(typeId:number): Promise<{ slots:{ high:number; mid:number; low:number; rig:number; subsystem:number }; hardpoints:{ turret:number; launcher:number }; storage:{ cargoM3:number; droneBayM3:number; droneBandwidth:number; fighterHangarM3:number; fighterTubes:number } }>;
       getMutationOptionsLocal(typeId: number): Promise<Array<{ mutaplasmidTypeId: number; mutaplasmidName: string; resultingTypeId: number; resultingTypeName: string; attributes: Array<{ attributeId: number; name: string; baseValue: number; minValue: number; maxValue: number; minMultiplier: number; maxMultiplier: number; highIsGood: boolean; unitId?: number }> }>>;
       checkFittingChargeCompatibilityLocal(moduleTypeId:number, chargeTypeId:number): Promise<{ compatible:boolean; reason:string }>;

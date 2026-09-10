@@ -1,0 +1,207 @@
+/* Auto-hide Command navigation: overlay the existing rail without changing page internals. */
+.app-shell {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.app-shell > main {
+  grid-column: 1 !important;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+}
+
+.app-shell > aside.command-sidebar,
+.app-shell.fittings-shell-active > aside.command-sidebar {
+  position: fixed !important;
+  inset: 0 auto 0 0 !important;
+  z-index: 1100;
+  display: flex !important;
+  width: var(--sage-sidebar-width, 264px) !important;
+  min-width: 0 !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  max-height: 100dvh;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  transform: translateX(calc(-100% - 14px));
+  transition: transform 170ms ease-out, box-shadow 170ms ease-out;
+  border-right: 1px solid #244a53;
+  background: #071018f5;
+  box-shadow: 18px 0 42px transparent;
+  will-change: transform;
+  contain: layout paint;
+}
+
+.app-shell > aside.command-sidebar.is-open {
+  transform: translateX(0);
+  box-shadow: 18px 0 42px #000b;
+}
+
+.app-shell > aside.command-sidebar.is-pinned {
+  box-shadow: 12px 0 30px #0009;
+}
+
+.sidebar-edge-trigger {
+  position: fixed;
+  z-index: 1090;
+  inset: 0 auto 0 0;
+  width: 7px;
+  min-width: 7px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #65e1d2;
+  opacity: .34;
+}
+
+.sidebar-edge-trigger::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 1px;
+  width: 2px;
+  height: 42px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 10px #65e1d266;
+}
+
+.sidebar-edge-trigger:hover,
+.sidebar-edge-trigger:focus-visible {
+  opacity: .9;
+  outline: none;
+}
+
+.sidebar-pin-toggle {
+  position: absolute;
+  z-index: 2;
+  top: 12px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #244650;
+  border-radius: 5px;
+  background: #081a21e8;
+  color: #6f939a;
+}
+
+.sidebar-pin-toggle:hover,
+.sidebar-pin-toggle:focus-visible,
+.sidebar-pin-toggle.active {
+  border-color: #4ca59c;
+  color: #65e1d2;
+  background: #0b2529;
+  outline: none;
+}
+
+.sidebar-pin-toggle svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sidebar-autohide-onboarding {
+  position: fixed;
+  z-index: 1120;
+  top: 66px;
+  left: calc(var(--sage-sidebar-width, 264px) + 24px);
+  width: min(360px, calc(100vw - var(--sage-sidebar-width, 264px) - 46px));
+  padding: 16px 17px 15px;
+  border: 1px solid #397078;
+  border-radius: 8px;
+  background: #07171df7;
+  box-shadow: 0 18px 46px #000c, inset 0 1px #65e1d21f;
+}
+
+.sidebar-autohide-onboarding::before {
+  content: "";
+  position: absolute;
+  top: 27px;
+  right: 100%;
+  width: 25px;
+  height: 1px;
+  background: #65e1d2;
+  box-shadow: 0 0 8px #65e1d266;
+}
+
+.sidebar-autohide-onboarding::after {
+  content: "";
+  position: absolute;
+  top: 24px;
+  right: calc(100% + 21px);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #65e1d2;
+  box-shadow: 0 0 10px #65e1d288;
+}
+
+.sidebar-autohide-onboarding .eyebrow {
+  margin: 0 0 5px;
+  color: #65e1d2;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.sidebar-autohide-onboarding strong {
+  display: block;
+  margin-bottom: 7px;
+  color: #e6f3f5;
+  font: 600 17px/1.2 "Space Grotesk", Inter, sans-serif;
+}
+
+.sidebar-autohide-onboarding p {
+  margin: 0;
+  color: #9bb5ba;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.sidebar-autohide-onboarding button {
+  margin-top: 13px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid #58bdb3;
+  border-radius: 5px;
+  background: #65e1d2;
+  color: #041113;
+  font-weight: 800;
+}
+
+.sidebar-autohide-onboarding button:hover,
+.sidebar-autohide-onboarding button:focus-visible {
+  background: #87ece1;
+  outline: 2px solid #65e1d244;
+  outline-offset: 2px;
+}
+
+@media (max-width: 620px) {
+  .sidebar-autohide-onboarding {
+    top: 54px;
+    left: 18px;
+    width: min(360px, calc(100vw - 36px));
+  }
+  .sidebar-autohide-onboarding::before,
+  .sidebar-autohide-onboarding::after {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell > aside.command-sidebar {
+    transition: none;
+  }
+}

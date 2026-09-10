@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760" fill="none">
+<defs>
+  <radialGradient id="wash"><stop stop-color="#0d3b45" stop-opacity=".20"/><stop offset=".58" stop-color="#05171e" stop-opacity=".04"/><stop offset="1" stop-color="#020b10" stop-opacity="0"/></radialGradient>
+  <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#36d5cf" stop-opacity=".20"/><stop offset=".44" stop-color="#2b6771" stop-opacity=".05"/><stop offset=".78" stop-color="#bc8434" stop-opacity=".08"/><stop offset="1" stop-color="#36d5cf" stop-opacity=".14"/></linearGradient>
+  <pattern id="grid" width="42" height="42" patternUnits="userSpaceOnUse"><path d="M42 0H0V42" stroke="#55bdbb" stroke-opacity=".025"/></pattern>
+</defs>
+<rect width="1600" height="760" fill="url(#grid)"/>
+<ellipse cx="815" cy="390" rx="380" ry="330" fill="url(#wash)"/>
+<path d="M26 70h210l24-24h210M26 690h210l24 24h210M1574 70h-210l-24-24h-210M1574 690h-210l-24 24h-210" stroke="url(#edge)"/>
+<path d="M454 54v650M1174 54v650" stroke="#3aa5a5" stroke-opacity=".055" stroke-dasharray="2 13"/>
+<path d="M496 390h112M1020 390h112M814 96v86M814 600v74" stroke="#4ea2a5" stroke-opacity=".09"/>
+<circle cx="814" cy="390" r="246" stroke="#2d7e84" stroke-opacity=".055"/>
+<circle cx="814" cy="390" r="278" stroke="#b98538" stroke-opacity=".045" stroke-dasharray="4 24"/>
+</svg>

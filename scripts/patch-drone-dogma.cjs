@@ -1,0 +1,7 @@
+const fs=require('fs');
+const p='electron/fitting-dogma.ts';let s=fs.readFileSync(p,'utf8');
+function rep(from,to,label){if(!s.includes(from))throw new Error('Missing '+label);s=s.replace(from,to);}
+rep('  const explicitDroneSelection = droneItems.some((item) => item.activeQuantity != null);\r\n  const droneCandidates = droneItems','  const explicitDroneSelection = droneItems.some((item) => item.activeQuantity != null);\r\n  const droneBandwidthByType = droneItems.map((item) => {\r\n    const itemDogma = moduleDogmaFor(item);\r\n    return { typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, bandwidth:effectiveItemAttr(itemDogma, 1272, item.typeId) };\r\n  });\r\n  const droneCandidates = droneItems','bandwidth map');
+rep('    activeDrones.push(...droneCandidates.slice(0, maxActiveDrones));','    for (const drone of droneCandidates) {\r\n      if (activeDrones.length >= maxActiveDrones) break;\r\n      if (drone.bandwidth <= bandwidthRemaining) {\r\n        activeDrones.push(drone);\r\n        bandwidthRemaining -= drone.bandwidth;\r\n      }\r\n    }','explicit selection enforcement');
+rep('      explicitDroneSelection,\r\n    },','      explicitDroneSelection,\r\n      droneLimits: { maxActiveDrones, bandwidthCapacity:shipAttr(1271), bandwidthByType:droneBandwidthByType },\r\n    },','drone limits return');
+fs.writeFileSync(p,s);console.log('patched drone DOGMA selection/limits');

@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { STATIC_DATA_ROOT } from "./data-paths";
+import { DATA_ROOT, STATIC_DATA_ROOT } from "./data-paths";
 import { logEvent } from "./logger";
 
 export type TypeImageVariation = "icon" | "render";
 
 const TYPE_IMAGE_ROOT = path.join(STATIC_DATA_ROOT, "Type Images");
+const FITTER_CONTENT_ASSET_ROOT = path.join(DATA_ROOT, "Fitter Content");
 const IMAGE_SERVER = "https://images.evetech.net/types";
 const allowedSizes = new Set([32, 64, 128, 256, 512, 1024]);
 const inflight = new Map<string, Promise<string>>();
@@ -131,9 +132,25 @@ function imageContentType(data: Buffer) {
   return "application/octet-stream";
 }
 
+async function fitterContentProtocolResponse(url: URL) {
+  const parts = decodeURIComponent(url.pathname).split("/").filter(Boolean);
+  if (!parts.length) throw new Error("Missing fitter content asset path.");
+  const root = path.resolve(FITTER_CONTENT_ASSET_ROOT);
+  const target = path.resolve(root, ...parts);
+  const rootPrefix = root.toLowerCase() + path.sep;
+  if (!target.toLowerCase().startsWith(rootPrefix)) throw new Error("Invalid fitter content asset path.");
+  const ext = path.extname(target).toLowerCase();
+  const allowed = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"]);
+  if (!allowed.has(ext)) throw new Error("Unsupported fitter content asset type.");
+  const data = await fs.readFile(target);
+  const contentType = ext === ".svg" ? "image/svg+xml" : ext === ".gif" ? "image/gif" : imageContentType(data);
+  return new Response(data, { status:200, headers:{ "Content-Type":contentType, "Cache-Control":"no-cache" } });
+}
+
 export async function typeImageProtocolResponse(requestUrl: string) {
   try {
     const url = new URL(requestUrl);
+    if (url.hostname === "fitter-content") return await fitterContentProtocolResponse(url);
     const parts = url.pathname.split("/").filter(Boolean);
     const typeId = safeTypeId(parts[0]);
     const variation = safeVariation(parts[1]);

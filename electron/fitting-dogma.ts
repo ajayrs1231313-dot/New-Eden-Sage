@@ -116,7 +116,7 @@ type DBuffDefinition = {
   locationRequiredSkillModifiers: Array<{ dogmaAttributeID: number; skillID: number }>;
   locationGroupModifiers: Array<{ dogmaAttributeID: number; groupID: number }>;
 };
-type GroupAttributeModifier = { groupId: number; attributeId: number; value: number; operation: number };
+type GroupAttributeModifier = { groupId: number; attributeId: number; value: number; operation: number; stacking?: boolean };
 
 type FittingDogmaIndex = {
   dogma: Map<number, Dogma>;
@@ -673,11 +673,13 @@ export async function prepareFittingDataLocal(onProgress?: (progress:FittingPrep
 
 type FittingTypeInfoStatic = {
   typeId:number; name:string; description:string; groupId:number; marketGroupId?:number; published:boolean;
+  factionId?:number; raceId?:number;
   basePrice?:number; volumeM3?:number; massKg?:number; capacityM3?:number; radiusM?:number; portionSize?:number; metaLevel?:number; techLevel?:number; iconId?:number;
 };
 type FittingAttributeMeta = { name:string; displayName:string; description?:string; unitId?:number; categoryId?:number; highIsGood?:boolean; published?:boolean };
 type FittingTypeInfoIndex = {
   types:Map<number,FittingTypeInfoStatic>; groupNames:Map<number,string>; groupCategories:Map<number,number>; categoryNames:Map<number,string>;
+  factionNames:Map<number,string>; raceNames:Map<number,string>;
   marketGroups:Map<number,{name:string;parentId?:number}>; attributeMeta:Map<number,FittingAttributeMeta>; attributeCategoryNames:Map<number,string>; units:Map<number,string>; effects:Map<number,{name:string;category:number;description?:string}>;
 };
 let fittingTypeInfoCache:Promise<FittingTypeInfoIndex>|undefined;
@@ -690,16 +692,19 @@ async function fittingTypeInfoIndex(){
     const zip=new AdmZip(ARCHIVE);
     const lines=(name:string)=>zip.getEntry(name)?.getData().toString("utf8").split(/\r?\n/).filter(Boolean) ?? [];
     const types=new Map<number,FittingTypeInfoStatic>(); const groupNames=new Map<number,string>(); const groupCategories=new Map<number,number>(); const categoryNames=new Map<number,string>();
+    const factionNames=new Map<number,string>(); const raceNames=new Map<number,string>();
     const marketGroups=new Map<number,{name:string;parentId?:number}>(); const attributeMeta=new Map<number,FittingAttributeMeta>(); const attributeCategoryNames=new Map<number,string>(); const units=new Map<number,string>(); const effects=new Map<number,{name:string;category:number;description?:string}>();
     for(const line of lines("categories.jsonl")){const row=JSON.parse(line);categoryNames.set(Number(row._key),row.name?.en ?? row.name ?? `Category ${row._key}`);}
     for(const line of lines("groups.jsonl")){const row=JSON.parse(line);groupNames.set(Number(row._key),row.name?.en ?? row.name ?? `Group ${row._key}`);groupCategories.set(Number(row._key),Number(row.categoryID ?? 0));}
+    for(const line of lines("factions.jsonl")){const row=JSON.parse(line);factionNames.set(Number(row._key),row.name?.en ?? row.name ?? `Faction ${row._key}`);}
+    for(const line of lines("races.jsonl")){const row=JSON.parse(line);raceNames.set(Number(row._key),row.name?.en ?? row.name ?? `Race ${row._key}`);}
     for(const line of lines("marketGroups.jsonl")){const row=JSON.parse(line);marketGroups.set(Number(row._key),{name:row.name?.en ?? row.name ?? `Market group ${row._key}`,parentId:row.parentGroupID==null?undefined:Number(row.parentGroupID)});}
     for(const line of lines("dogmaAttributeCategories.jsonl")){const row=JSON.parse(line);attributeCategoryNames.set(Number(row._key),row.name?.en ?? row.name ?? `Category ${row._key}`);}
     for(const line of lines("dogmaUnits.jsonl")){const row=JSON.parse(line);units.set(Number(row._key),row.displayName?.en ?? row.displayName ?? row.name?.en ?? row.name ?? "");}
     for(const line of lines("dogmaAttributes.jsonl")){const row=JSON.parse(line);attributeMeta.set(Number(row._key),{name:row.name ?? `Attribute ${row._key}`,displayName:row.displayName?.en ?? row.displayName ?? row.name ?? `Attribute ${row._key}`,description:plainSdeText(row.description?.en ?? row.description),unitId:row.unitID==null?undefined:Number(row.unitID),categoryId:row.attributeCategoryID==null?undefined:Number(row.attributeCategoryID),highIsGood:row.highIsGood,published:row.published});}
     for(const line of lines("dogmaEffects.jsonl")){const row=JSON.parse(line);effects.set(Number(row._key),{name:row.displayName?.en ?? row.name ?? row.guid ?? `Effect ${row._key}`,category:Number(row.effectCategoryID ?? 0),description:plainSdeText(row.description?.en ?? row.description)});}
-    for(const line of lines("types.jsonl")){const row=JSON.parse(line);if(!row.name?.en)continue;types.set(Number(row._key),{typeId:Number(row._key),name:row.name.en,description:plainSdeText(row.description?.en ?? row.description),groupId:Number(row.groupID ?? 0),marketGroupId:row.marketGroupID==null?undefined:Number(row.marketGroupID),published:Boolean(row.published),basePrice:row.basePrice==null?undefined:Number(row.basePrice),volumeM3:row.volume==null?undefined:Number(row.volume),massKg:row.mass==null?undefined:Number(row.mass),capacityM3:row.capacity==null?undefined:Number(row.capacity),radiusM:row.radius==null?undefined:Number(row.radius),portionSize:row.portionSize==null?undefined:Number(row.portionSize),metaLevel:row.metaLevel==null?undefined:Number(row.metaLevel),techLevel:row.techLevel==null?undefined:Number(row.techLevel),iconId:row.iconID==null?undefined:Number(row.iconID)});}
-    return {types,groupNames,groupCategories,categoryNames,marketGroups,attributeMeta,attributeCategoryNames,units,effects};
+    for(const line of lines("types.jsonl")){const row=JSON.parse(line);if(!row.name?.en)continue;types.set(Number(row._key),{typeId:Number(row._key),name:row.name.en,description:plainSdeText(row.description?.en ?? row.description),groupId:Number(row.groupID ?? 0),marketGroupId:row.marketGroupID==null?undefined:Number(row.marketGroupID),published:Boolean(row.published),factionId:row.factionID==null?undefined:Number(row.factionID),raceId:row.raceID==null?undefined:Number(row.raceID),basePrice:row.basePrice==null?undefined:Number(row.basePrice),volumeM3:row.volume==null?undefined:Number(row.volume),massKg:row.mass==null?undefined:Number(row.mass),capacityM3:row.capacity==null?undefined:Number(row.capacity),radiusM:row.radius==null?undefined:Number(row.radius),portionSize:row.portionSize==null?undefined:Number(row.portionSize),metaLevel:row.metaLevel==null?undefined:Number(row.metaLevel),techLevel:row.techLevel==null?undefined:Number(row.techLevel),iconId:row.iconID==null?undefined:Number(row.iconID)});}
+    return {types,groupNames,groupCategories,categoryNames,factionNames,raceNames,marketGroups,attributeMeta,attributeCategoryNames,units,effects};
   }));
 }
 export async function getFittingTypeInfoLocal(typeId:number){
@@ -713,7 +718,7 @@ export async function getFittingTypeInfoLocal(typeId:number){
   const attributes=[...(source?.attributes ?? new Map<number,number>())].map(([attributeId,value])=>{const a=meta.attributeMeta.get(attributeId);return{attributeId,name:a?.displayName ?? a?.name ?? `Attribute ${attributeId}`,internalName:a?.name,description:a?.description,value,unitId:a?.unitId,unit:a?.unitId==null?undefined:meta.units.get(a.unitId),categoryId:a?.categoryId,category:a?.categoryId==null?"Other":meta.attributeCategoryNames.get(a.categoryId) ?? "Other",highIsGood:a?.highIsGood,published:a?.published !== false};}).filter(item=>item.published).sort((a,b)=>String(a.category).localeCompare(String(b.category))||a.name.localeCompare(b.name));
   const dogmaEffects=[...(source?.effects ?? new Set<number>())].map(effectId=>{const e=meta.effects.get(effectId);return{effectId,name:e?.name ?? `Effect ${effectId}`,category:e?.category ?? 0,description:e?.description};}).sort((a,b)=>a.name.localeCompare(b.name));
   const fittingValues=[{attributeId:50,label:"CPU usage",unit:"tf"},{attributeId:30,label:"Powergrid usage",unit:"MW"},{attributeId:1153,label:"Calibration cost",unit:""},{attributeId:1132,label:"Calibration capacity",unit:""},{attributeId:1547,label:"Rig size",unit:""},{attributeId:128,label:"Charge size",unit:""}].flatMap(def=>{const value=source?.attributes.get(def.attributeId);return value==null?[]:[{...def,value}];});
-  return {typeId:id,name:type.name,description:type.description,group:{id:type.groupId,name:groupName},category:{id:categoryId,name:categoryName},marketGroup:type.marketGroupId==null?null:{id:type.marketGroupId,name:meta.marketGroups.get(type.marketGroupId)?.name ?? "Unknown",path:marketPath},placement,rack,metaLevel:type.metaLevel,techLevel:type.techLevel,published:type.published,iconId:type.iconId,physical:{volumeM3:type.volumeM3,massKg:type.massKg,capacityM3:type.capacityM3,radiusM:type.radiusM,portionSize:type.portionSize,basePrice:type.basePrice},fitting:fittingValues,requirements,attributes,effects:dogmaEffects};
+  return {typeId:id,name:type.name,description:type.description,group:{id:type.groupId,name:groupName},category:{id:categoryId,name:categoryName},marketGroup:type.marketGroupId==null?null:{id:type.marketGroupId,name:meta.marketGroups.get(type.marketGroupId)?.name ?? "Unknown",path:marketPath},identity:{factionId:type.factionId,factionName:type.factionId==null?undefined:meta.factionNames.get(type.factionId),raceId:type.raceId,raceName:type.raceId==null?undefined:meta.raceNames.get(type.raceId)},placement,rack,metaLevel:type.metaLevel,techLevel:type.techLevel,published:type.published,iconId:type.iconId,physical:{volumeM3:type.volumeM3,massKg:type.massKg,capacityM3:type.capacityM3,radiusM:type.radiusM,portionSize:type.portionSize,basePrice:type.basePrice},fitting:fittingValues,requirements,attributes,effects:dogmaEffects};
 }
 
 export async function getBoosterSideEffectsLocal(boosterTypeIds:number[]) {
@@ -1418,7 +1423,13 @@ export async function resolveFittingTypeNamesLocal(requestedNames: string[]) {
   for (const [id, name] of names) {
     const groupId = groups.get(id) ?? 0;
     const categoryId = groupCategories.get(groupId) ?? 0;
-    byName.set(name.toLowerCase(), { id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Unknown", rack: fittingRack(dogma, id) });
+    const key = name.toLowerCase();
+    const candidate = { id, name, groupId, categoryId, categoryName: categoryNames.get(categoryId) ?? "Unknown", rack: fittingRack(dogma, id) };
+    const existing = byName.get(key);
+    // CCP SDE can contain unpublished Entity rows with the same display name as
+    // a real fitting type (for example Infiltrator II). Never let an Entity
+    // shadow a ship/module/charge/drone/skill entry during exact-name imports.
+    if (!existing || (existing.categoryId === 11 && categoryId !== 11)) byName.set(key, candidate);
   }
   const unique = [...new Set(requestedNames.map((name) => name.trim()).filter(Boolean))];
   return unique.flatMap((requested) => {
@@ -1936,6 +1947,7 @@ export async function analyzeFittingDogma(input: {
   const locationSkillModifiers: RequiredAttributeModifier[] = [...commandRequiredModifiers];
   const ownerModifiers: RequiredAttributeModifier[] = [...environmentOwnerModifiers];
   const locationItemModifiers: Array<{ attributeId: number; value: number; operation: number }> = [];
+  const fittedGroupModifiers: GroupAttributeModifier[] = [];
 
   const collectLocationItemModifiers = (
     source: Dogma,
@@ -2052,6 +2064,41 @@ export async function analyzeFittingDogma(input: {
     }
   }
 
+  // Fitted weapon upgrades and rigs commonly use shipID LocationGroupModifier
+  // effects (for example MFS II and hybrid damage/ROF rigs). These modify every
+  // fitted item in the matching group and are stacking-penalized only against
+  // other fitted contributors to the same attribute.
+  for (const item of online) {
+    const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
+    if (!source) continue;
+    const state = item.state ?? "active";
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect) continue;
+      if (effect.category === 5 && state !== "overheated") continue;
+      if (effect.category === 1 && state !== "active" && state !== "overheated") continue;
+      if (effect.category === 2 || effect.category === 3) continue;
+      for (const modifier of effect.modifiers) {
+        if (
+          modifier.domain !== "shipID" ||
+          modifier.func !== "LocationGroupModifier" ||
+          modifier.groupID == null ||
+          modifier.modifiedAttributeID == null ||
+          modifier.modifyingAttributeID == null
+        ) continue;
+        for (let count = 0; count < (item.quantity ?? 1); count += 1) {
+          fittedGroupModifiers.push({
+            groupId: modifier.groupID,
+            attributeId: modifier.modifiedAttributeID,
+            value: attr(source, modifier.modifyingAttributeID),
+            operation: modifier.operation ?? 0,
+            stacking: true,
+          });
+        }
+      }
+    }
+  }
+
   // Character-domain ItemModifiers are a separate DOGMA state from the ship. CCP
   // uses this path for missile damage, drone control range/count, target count and
   // other pilot-level attributes. Collect all applicable sources first so operation
@@ -2157,12 +2204,20 @@ export async function analyzeFittingDogma(input: {
     if (projected.length) current = applyOrderedChanges(current, projected, penalized.has(attributeId), penalties);
     if (targetTypeId) {
       const groupId = groups.get(targetTypeId) ?? 0;
-      const grouped = commandGroupModifiers.filter((change) => change.attributeId === attributeId && change.groupId === groupId);
-      if (grouped.length) current = applyOrderedChanges(current, grouped, false, penalties);
-      if (!skillScaledSources.has(target)) {
-        const skillGrouped = skillGroupModifiers.filter((change) => change.attributeId === attributeId && change.groupId === groupId);
-        if (skillGrouped.length) current = applyOrderedChanges(current, skillGrouped, false, penalties);
-      }
+      const grouped: MixedOrderedChange[] = [
+        ...commandGroupModifiers
+          .filter((change) => change.attributeId === attributeId && change.groupId === groupId)
+          .map((change) => ({ value: change.value, operation: change.operation, stacking: false })),
+        ...(!skillScaledSources.has(target)
+          ? skillGroupModifiers
+              .filter((change) => change.attributeId === attributeId && change.groupId === groupId)
+              .map((change) => ({ value: change.value, operation: change.operation, stacking: false }))
+          : []),
+        ...fittedGroupModifiers
+          .filter((change) => change.attributeId === attributeId && change.groupId === groupId)
+          .map((change) => ({ value: change.value, operation: change.operation, stacking: true })),
+      ];
+      if (grouped.length) current = applyMixedOrderedChanges(current, grouped, penalized.has(attributeId), penalties);
     }
     return current;
   };
@@ -2616,6 +2671,10 @@ export async function analyzeFittingDogma(input: {
 
   const droneItems = input.items.filter((item) => item.rack === "drone");
   const explicitDroneSelection = droneItems.some((item) => item.activeQuantity != null);
+  const droneBandwidthByType = droneItems.map((item) => {
+    const itemDogma = moduleDogmaFor(item);
+    return { typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, bandwidth:effectiveItemAttr(itemDogma, 1272, item.typeId) };
+  });
   const droneCandidates = droneItems
     .flatMap((item) => {
       const itemDogma = moduleDogmaFor(item);
@@ -2662,7 +2721,13 @@ export async function analyzeFittingDogma(input: {
     const requestedBandwidth = droneCandidates.reduce((sum, drone) => sum + drone.bandwidth, 0);
     if (droneCandidates.length > maxActiveDrones) issues.push({ level: "error", code: "active-drone-count", message: `${droneCandidates.length} drones are marked active; this pilot/hull combination can control at most ${maxActiveDrones} at once.` });
     if (requestedBandwidth > shipAttr(1271)) issues.push({ level: "error", code: "active-drone-bandwidth", message: `Selected active drones require ${requestedBandwidth} Mbit/s; the hull provides ${shipAttr(1271)} Mbit/s.` });
-    activeDrones.push(...droneCandidates.slice(0, maxActiveDrones));
+    for (const drone of droneCandidates) {
+      if (activeDrones.length >= maxActiveDrones) break;
+      if (drone.bandwidth <= bandwidthRemaining) {
+        activeDrones.push(drone);
+        bandwidthRemaining -= drone.bandwidth;
+      }
+    }
   } else {
     for (const drone of droneCandidates) {
       if (activeDrones.length >= maxActiveDrones) break;
@@ -3234,6 +3299,7 @@ export async function analyzeFittingDogma(input: {
         targetApplication: droneApplicationAtSignature(drone, weatherTargetCombatProfile?.signatureRadiusM ?? targetProfile.signatureRadiusM),
       })),
       explicitDroneSelection,
+      droneLimits: { maxActiveDrones, bandwidthCapacity:shipAttr(1271), bandwidthByType:droneBandwidthByType },
     },
     defence: {
       shieldHp,
