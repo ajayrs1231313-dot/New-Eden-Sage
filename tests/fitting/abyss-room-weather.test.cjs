@@ -138,6 +138,28 @@ const snapshot = {
   approx(exotic.abyss.siteEstimate.representative.estimatedClearSeconds, meanT5Clear * 3, 1e-8, 'representative site clear');
   approx(exotic.abyss.siteEstimate.representative.timerMarginSeconds, 1200 - meanT5Clear * 3, 1e-8, 'Abyss timer margin');
 
+  // Activity profile: T4 Electrical averages the documented room population instead of
+  // forcing the user to pick one arbitrary NPC from the entire SDE catalogue.
+  const t4Electrical = await analyze({ tier: 4, weather: 'electrical', penalty: 0.7, roomKey: 'all' });
+  const t4Average = t4Electrical.abyss.summary.averageTarget;
+  assert.ok(t4Average && Number.isFinite(t4Average.trueDps) && t4Average.trueDps > 0, 'T4 Electrical average target DPS missing');
+  assert.equal(t4Average.roomCount, t4Electrical.abyss.rooms.length);
+  assert.ok(t4Average.averageHostilesPerRoom > 0);
+  assert.ok(t4Average.distinctTargetCount > 0);
+  assert.match(t4Average.basis, /Equal mean across documented room compositions/i);
+  const expectedAverageShieldEm = t4Electrical.abyss.rooms.reduce((roomSum, room) => {
+    const hostiles = room.targets.reduce((sum, target) => sum + target.count, 0);
+    const weighted = room.targets.reduce((sum, target) => sum + target.weatherResists.shield[0] * target.count, 0) / hostiles;
+    return roomSum + weighted;
+  }, 0) / t4Electrical.abyss.rooms.length;
+  approx(t4Average.weatherResists.shield[0], expectedAverageShieldEm, 1e-8, 'T4 Electrical averaged shield EM');
+  assert.ok(t4Electrical.abyss.summary.averageIncoming.totalDps > 0, 'T4 Electrical averaged incoming DPS missing');
+
+  const t4Leshak = await analyze({ tier: 4, weather: 'electrical', penalty: 0.7, roomKey: 't4-leshak' });
+  assert.equal(t4Leshak.abyss.summary.averageTarget.roomCount, 1);
+  assert.equal(t4Leshak.abyss.summary.averageTarget.averageHostilesPerRoom, t4Leshak.abyss.selectedRoom.totalHostiles);
+  assert.match(t4Leshak.abyss.summary.averageTarget.basis, /selected room composition/i);
+
   // Documented hostile caps must constrain deterministic threat-envelope selection.
   const tier1 = await analyze({ tier: 1, weather: 'exotic', penalty: 0.5, roomKey: 'all' });
   for (const [key, cap] of [

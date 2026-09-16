@@ -138,6 +138,7 @@ function OnboardingJourney({ snapshot, allCommandTabsVisited }: { snapshot: Char
   ];
   const labels = ["Welcome", "Add Character", "Sync Data", "Visit All Command Tabs"];
   const completeCount = states.filter((state) => state === "complete").length;
+  if (completeCount === labels.length) return null;
   const progressSegments = labels.length - 1;
   const completedSegments = Math.max(0, Math.min(progressSegments, completeCount - 1));
   return (

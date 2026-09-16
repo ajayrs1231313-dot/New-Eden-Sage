@@ -36,7 +36,11 @@
   position:relative!important; isolation:isolate; grid-column:1!important; grid-row:4!important;
   display:grid!important; grid-template-columns:minmax(190px,32%) minmax(220px,35%) minmax(170px,29%)!important; justify-content:center!important; gap:8px!important;
   min-width:0; min-height:0; padding:6px 8px!important; border:1px solid #1b4650; border-radius:4px;
-  background:#031018 url("./fitter-assets/fitter-stage-overlay.svg") center/100% 100% no-repeat!important; overflow:hidden!important;
+  background-color:#031018!important;
+  background-image:linear-gradient(rgba(2,9,13,.72),rgba(2,10,14,.84)),url("./fitter-assets/fitter-stage-overlay.svg"),url("./fitter-assets/misty-teal-orbital-shipyard-hangar.webp")!important;
+  background-size:cover,100% 100%,cover!important;
+  background-position:center,center,center!important;
+  background-repeat:no-repeat,no-repeat,no-repeat!important; overflow:hidden!important;
   box-shadow:inset 0 0 90px rgba(0,0,0,.34),inset 0 1px rgba(87,220,215,.05),0 7px 18px rgba(0,0,0,.18);
 }
 .fit-concept-fitting-stage:before { content:none!important; }
@@ -92,9 +96,19 @@
 .fit-concept-fitting-stage .fit-item-copy,.fit-concept-fitting-stage .fit-empty-slot > span { display:none!important; }
 .fit-concept-fitting-stage .fit-empty-slot { display:grid!important; place-items:center!important; border:0!important; background:#051117 url("./fitter-assets/fitter-slot-bezel.svg") center/100% 100% no-repeat!important; opacity:.72; }
 .fit-concept-fitting-stage .fit-empty-slot > b { display:grid!important; place-items:center!important; width:23px!important; min-width:23px!important; height:23px!important; min-height:23px!important; border:1px solid #2d5962!important; border-radius:50%!important; background:#081a20!important; color:#58a8a2!important; font-size:15px!important; }
-.fit-concept-fitting-stage .fit-item-remove { position:absolute!important; top:-4px!important; right:-4px!important; z-index:7; width:14px!important; height:14px!important; min-width:14px!important; min-height:14px!important; padding:0!important; display:grid!important; place-items:center!important; border:1px solid #77454a!important; border-radius:2px!important; background:#1b0f12!important; color:#d88682!important; font-size:10px!important; line-height:1!important; opacity:.95; }
-.fit-concept-fitting-stage .fit-module-state { position:absolute!important; left:2px!important; bottom:2px!important; z-index:7; display:block!important; width:11px!important; min-width:11px!important; max-width:11px!important; height:11px!important; min-height:11px!important; max-height:11px!important; padding:0!important; border:1px solid #61b8ae!important; border-radius:50%!important; background:#12373a!important; color:transparent!important; font-size:1px!important; appearance:none; cursor:pointer; box-shadow:0 0 5px rgba(68,209,195,.22); }
-.fit-concept-fitting-stage .fit-module-state:focus { outline:1px solid #6aebe0; outline-offset:1px; }
+.fit-concept-fitting-stage .fit-item-remove { position:absolute!important; top:-4px!important; right:-4px!important; z-index:70; width:14px!important; height:14px!important; min-width:14px!important; min-height:14px!important; padding:0!important; display:grid!important; place-items:center!important; border:1px solid #77454a!important; border-radius:2px!important; background:#1b0f12!important; color:#d88682!important; font-size:10px!important; line-height:1!important; opacity:0; pointer-events:none; transform:scale(.88); transition:opacity .10s ease,transform .10s ease; }
+.fit-concept-fitting-stage .fit-item:hover > .fit-item-remove,.fit-concept-fitting-stage .fit-item:focus-within > .fit-item-remove { opacity:.96; pointer-events:auto; transform:scale(1); }
+.fit-concept-fitting-stage .fit-module-state-lights { position:absolute!important; left:50%!important; bottom:-7px!important; z-index:30; height:8px!important; display:flex!important; align-items:center; justify-content:center; gap:2px; transform:translateX(-50%); pointer-events:auto; }
+.fit-concept-fitting-stage .fit-module-state-light { position:static!important; box-sizing:border-box!important; display:block!important; width:7px!important; min-width:7px!important; max-width:7px!important; height:7px!important; min-height:7px!important; max-height:7px!important; margin:0!important; padding:0!important; border:1px solid currentColor!important; border-radius:50%!important; appearance:none!important; cursor:pointer; font-size:0!important; line-height:0!important; opacity:.32; box-shadow:none!important; transition:opacity .1s ease,background .1s ease,box-shadow .1s ease,transform .1s ease; }
+.fit-concept-fitting-stage .fit-module-state-light:hover:not(:disabled) { opacity:.72; transform:scale(1.12); }
+.fit-concept-fitting-stage .fit-module-state-light-on { color:#4ce3b8!important; background:#0b241e!important; }
+.fit-concept-fitting-stage .fit-module-state-light-on.active { opacity:1; background:#40dfaf!important; border-color:#7affda!important; box-shadow:0 0 5px rgba(64,223,175,.82)!important; }
+.fit-concept-fitting-stage .fit-module-state-light-overheat { color:#ff9b55!important; background:#2a160c!important; }
+.fit-concept-fitting-stage .fit-module-state-light-overheat.active { opacity:1; background:#ff8a3d!important; border-color:#ffc08e!important; box-shadow:0 0 5px rgba(255,126,55,.88)!important; }
+.fit-concept-fitting-stage .fit-module-state-light-off { color:#aab5b8!important; background:#20282b!important; }
+.fit-concept-fitting-stage .fit-module-state-light-off.active { opacity:1; background:#aeb9bb!important; border-color:#e0e7e8!important; box-shadow:0 0 4px rgba(201,214,217,.58)!important; }
+.fit-concept-fitting-stage .fit-module-state-light:disabled { opacity:.12!important; cursor:default; transform:none!important; }
+.fit-concept-fitting-stage .fit-module-state-light:focus-visible { outline:1px solid #d9f8f2!important; outline-offset:1px; }
 .fit-concept-fitting-stage .fitted-slot-charge-indicator { position:absolute; right:2px; bottom:2px; z-index:7; width:8px; height:8px; border:1px solid #d5a04a; border-radius:1px; background:#523818; box-shadow:0 0 5px rgba(223,164,65,.28); }
 .fit-concept-fitting-stage .fit-item em { position:absolute; top:27px!important; right:2px!important; z-index:5; font-size:10px!important; line-height:1; }
 .fit-concept-fitting-stage .abyssal-badge { left:-3px!important; top:-3px!important; width:13px!important; height:13px!important; font-size:9px!important; line-height:13px!important; }

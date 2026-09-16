@@ -58,7 +58,9 @@ import { analyzeActivityReadiness } from "./activity-readiness";
 import { analyzeCurrentShipUse, type CurrentShipUseProfileId } from "./capability-engine";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
+import { searchMarketTypes } from "./market-static-index";
 import { searchMcpMarketOrders } from "./mcp-market-search";
+import { quoteMarketDepth } from "./market-depth";
 import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
 import { disposePublicDataRefreshProcess, runPublicDataRefresh } from "./public-data-refresh-manager";
 import { disposeContractIntelligenceProcess, getContractMarketWorkspace, searchContractMarketWorkspace } from "./contract-intelligence-manager";
@@ -204,6 +206,11 @@ async function installSharedPublicData() {
       window?.webContents.send("public-data:progress", { running: true, percent: publicInstallPercent(message, completed, total), message, completed, total });
     });
     adoptInstalledSharedMarketManifest(result.manifest);
+    // Contract intelligence runs in a long-lived child process with its own module caches.
+    // Restart it after every successful public-data reconciliation, even when the server
+    // generation is already installed, so a previously stale worker cannot keep serving
+    // an older manifest after the main process has advanced.
+    disposeContractIntelligenceProcess();
     if (result.changed.length) announceInstalledPublicData(result);
     publicAvailability = { updateAvailable: false, availableGeneration: result.manifest.generation, lastCheckedAt: new Date().toISOString() };
     const status = await loadPublicDataStatus();
@@ -2401,6 +2408,14 @@ if (!hasSingleInstanceLock) {
     });
     return result.filePath;
   });
+  ipcMain.handle("market:search-ore-types", async (_event, input: { query?: string; limit?: number }) => {
+    const query = String(input?.query ?? "").trim();
+    if (query.length < 2) return [];
+    const limit = Math.max(1, Math.min(25, Math.floor(Number(input?.limit ?? 12))));
+    const matches = await searchMarketTypes(query, 200);
+    return matches.filter((type) => type.categoryName === "Asteroid" && !type.name.startsWith("Batch Compressed ")).slice(0, limit);
+  });
+  ipcMain.handle("market:quote-depth", async (_event, input) => quoteMarketDepth(input ?? {}));
   ipcMain.handle("market:raw-search", async (_event, input) => {
     const searchInput = input ?? { query: "" };
     const exact = await runRawMarketSearch(

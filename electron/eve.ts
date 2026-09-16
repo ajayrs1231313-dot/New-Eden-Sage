@@ -367,9 +367,27 @@ export async function fetchCharacterCurrentShipSnapshot(
   const typeResponse = await fetch(`https://esi.evetech.net/universe/types/${ship.ship_type_id}/`, { headers: publicHeaders });
   if (!typeResponse.ok) throw new Error(`ESI ship-type lookup failed (${typeResponse.status}).`);
   const shipType = await typeResponse.json() as { name: string };
+
+  // Explicit current-ship refresh also refreshes the ship's asset layout so the
+  // fitter can import what is actually fitted in EVE instead of a stale snapshot.
+  let currentShipFit: any[] = [];
+  try {
+    const assets = await privateEsiPagedJson<any>(characterId, `/characters/${characterId}/assets/`, accessToken, 4);
+    if (Array.isArray(assets)) currentShipFit = assets.filter((asset:any) =>
+      Number(asset?.location_id) === Number(ship.ship_item_id) || Number(asset?.item_id) === Number(ship.ship_item_id),
+    );
+  } catch {
+    // Never reuse another hull's stale fitting. If the same ship item is still
+    // active, its last-known fitting remains a better fallback than nothing.
+    if (Number(existingSnapshot?.ship?.ship_item_id) === Number(ship.ship_item_id) && Array.isArray(existingSnapshot?.extended?.currentShipFit)) {
+      currentShipFit = existingSnapshot.extended.currentShipFit;
+    }
+  }
+
   return {
     ...existingSnapshot,
     ship: { ...ship, ship_type_name: shipType.name },
+    extended: { ...(existingSnapshot.extended ?? {}), currentShipFit },
   };
 }
 

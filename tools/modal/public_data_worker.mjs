@@ -861,7 +861,20 @@ async function writeMarketArtifacts(generationRoot, snapshot, previousManifest) 
   await gzipJsonAtomic(tradesPath, trades);
   await gzipJsonAtomic(shortagesPath, shortages);
 
-  for (const [key, file] of [['market-global', globalPath], ['market-regional', regionalPath], ['market-trades', tradesPath], ['market-shortages', shortagesPath]]) {
+  const forgeEntry = (snapshot.regions || []).find(region => Number(region.regionId) === 10000002);
+  if (!forgeEntry?.file) throw new Error('The Forge raw market source is missing from the complete market snapshot.');
+  const forgeRaw = await readGzipJson(path.join(RAW_ROOT, forgeEntry.file), null);
+  if (!Array.isArray(forgeRaw?.orders)) throw new Error('The Forge raw market source could not be read for hub-depth retention.');
+  const hubOrders = forgeRaw.orders.filter(order => Number(order.location_id) === 60003760);
+  const hubDepth = {
+    schemaVersion: 1, dataset: 'market-hub-depth', snapshotId: snapshot.id, createdAt: snapshot.createdAt,
+    regionId: 10000002, locationId: 60003760, locationName: 'Jita IV - Moon 4 - Caldari Navy Assembly Plant',
+    orderCount: hubOrders.length, orders: hubOrders,
+  };
+  const hubDepthPath = path.join(generationRoot, 'market-hub-depth-v1.json.gz');
+  await gzipJsonAtomic(hubDepthPath, hubDepth);
+
+  for (const [key, file] of [['market-global', globalPath], ['market-regional', regionalPath], ['market-trades', tradesPath], ['market-shortages', shortagesPath], ['market-hub-depth', hubDepthPath]]) {
     const stat = await fs.stat(file);
     files[key] = { version: snapshot.id, path: `generations/${path.basename(generationRoot)}/${path.basename(file)}`, bytes: stat.size, sha256: await sha256File(file), schemaVersion: key === 'market-global' ? 2 : 1 };
   }
@@ -1011,7 +1024,8 @@ async function main() {
   const contracts = await refreshPublicContracts(regions);
   const publicChanged = publicResults.some(item => item.changed);
   const marketSchemaUpgradeRequired = Number(previousManifest?.files?.['market-global']?.schemaVersion || 0) < 2;
-  const materialChanged = market.changed || contracts.changed || publicChanged || marketSchemaUpgradeRequired || !previousManifest || !previousManifest.files?.['public-contracts'];
+  const marketDepthUpgradeRequired = !previousManifest?.files?.['market-hub-depth'];
+  const materialChanged = market.changed || contracts.changed || publicChanged || marketSchemaUpgradeRequired || marketDepthUpgradeRequired || !previousManifest || !previousManifest.files?.['public-contracts'];
   const pruning = await pruneHistory();
 
   if (!materialChanged) {
@@ -1026,9 +1040,9 @@ async function main() {
   const generationRoot = path.join(PUBLISH_ROOT, 'generations', generation);
   await fs.mkdir(generationRoot, { recursive: true });
   let marketPrepared;
-  if (market.changed || !previousManifest || marketSchemaUpgradeRequired) marketPrepared = await writeMarketArtifacts(generationRoot, market.snapshot, previousManifest);
+  if (market.changed || !previousManifest || marketSchemaUpgradeRequired || marketDepthUpgradeRequired) marketPrepared = await writeMarketArtifacts(generationRoot, market.snapshot, previousManifest);
   else {
-    const files = await copyPreviousArtifacts(previousManifest, generationRoot, ['market-global', 'market-regional', 'market-trades', 'market-shortages']);
+    const files = await copyPreviousArtifacts(previousManifest, generationRoot, ['market-global', 'market-regional', 'market-trades', 'market-shortages', 'market-hub-depth']);
     marketPrepared = { files, index: null, regional: null, trades: null, shortages: null, computeMs: 0 };
   }
   const shared = await publicBundle(publicResults, previousManifest, generationRoot, !previousManifest);

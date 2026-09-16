@@ -28,6 +28,7 @@ for (const tool of [
   'get_market_dataset_status',
   'get_market_trade_opportunities',
   'get_market_shortages',
+  'search_public_contracts',
   'get_public_contracts',
   'list_public_data_sources',
   'get_public_data_source',

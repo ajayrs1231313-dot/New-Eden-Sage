@@ -4,7 +4,8 @@ import "./fittings-task11.css";
 import { parseFits, prepareImportedFits, validateFit, type FitValidationResult } from "./fitting-engine";
 import { duplicateFit, ensureFitMeta, exportFitJson, filterAndSortFits, renameFit, summarizeFit, type FitLibraryMetaMap, type FitLibrarySort } from "./fitting-library";
 import "./fittings-task12.css";
-import type { FitResolutionIntent, FitRemedyCandidate } from "./types";
+import type { CharacterSnapshot, FitResolutionIntent, FitRemedyCandidate } from "./types";
+import { currentEveFitFromSnapshot } from "./current-eve-fit";
 import { FITTER_HERO_CONTENT, coerceFitterHeroRules, resolveFactionArtwork, resolveFitterFaction, resolveFitterHero, resolveShipFrame, type FitterHeroRule } from "./fitter-presentation";
 import { advanceFitterActiveQuantity } from "./fitter-quantity";
 import { FittingShowInfo, type ShowInfoTarget } from "./FittingShowInfo";
@@ -38,7 +39,7 @@ type ExternalEffectSelection = {
   effectiveness?: number;
 };
 type BoosterSideEffectOption = { boosterTypeId:number; boosterName:string; effectId:number; effectName:string; chanceAttributeId:number; chance:number };
-type FittingCharacter = { characterId: string; character: { name: string; corporation_id?: number; corporation_name?: string } };
+type FittingCharacter = CharacterSnapshot;
 type DoctrineExportSlotOption = { slot: number; name: string; fitCount: number };
 type DoctrineExportDraft = { corporationId: number; corporationName: string; slot: number; doctrineName: string; slots: DoctrineExportSlotOption[] };
 const PENDING_DOCTRINE_FIT_KEY = "new-eden-sage-pending-doctrine-fit";
@@ -100,6 +101,10 @@ let sharedStaticItemsPromise:Promise<CatalogueItem[]>|null=null;
 function beginSharedFittingPreparation(){if(sharedPreparationResult)return Promise.resolve(sharedPreparationResult);if(typeof window.sage.prepareFittingDataLocal!=="function")return Promise.reject(new Error("Live fitting preparation bridge is not available in this window."));return sharedPreparationPromise ??= window.sage.prepareFittingDataLocal().then(result=>{sharedPreparationResult=result as FittingPreparationResult;return sharedPreparationResult;}).catch(error=>{sharedPreparationPromise=null;throw error;});}
 function loadStaticFittingItems(){return sharedStaticItemsPromise ??= import("./fitting-catalogue-items-static.json").then(module=>{const payload=(module as any).default ?? module;return (payload.items ?? []) as CatalogueItem[];});}
 type AbyssFitterSelection = { enabled:boolean; tier:0|1|2|3|4|5|6; weather:"electrical"|"exotic"|"firestorm"|"gamma"|"dark"; penalty:0.3|0.5|0.7; roomKey:string };
+const ABYSS_WEATHER_OPTIONS: Array<{ value:AbyssFitterSelection["weather"]; label:string }> = [
+  { value:"electrical", label:"Electrical" }, { value:"exotic", label:"Exotic" }, { value:"firestorm", label:"Firestorm" }, { value:"gamma", label:"Gamma" }, { value:"dark", label:"Dark" },
+];
+const abyssScenarioLabel=(tier:AbyssFitterSelection["tier"],weather:AbyssFitterSelection["weather"])=>`T${tier} ${ABYSS_WEATHER_OPTIONS.find(option=>option.value===weather)?.label??weather}`;
 type NpcDamagePreset = "omni" | "em-only" | "thermal-only" | "kinetic-only" | "explosive-only" | "angel" | "blood-raiders" | "guristas" | "sansha" | "serpentis" | "mordus" | "rogue-drones";
 const NPC_DAMAGE_PRESETS: Record<NpcDamagePreset,{label:string;incoming:{em:number;thermal:number;kinetic:number;explosive:number};incomingLabel:string;dealLabel:string}> = {
   omni:{label:"Omni / unknown",incoming:{em:.25,thermal:.25,kinetic:.25,explosive:.25},incomingLabel:"25 / 25 / 25 / 25",dealLabel:"match actual target"},
@@ -116,6 +121,101 @@ const NPC_DAMAGE_PRESETS: Record<NpcDamagePreset,{label:string;incoming:{em:numb
   "rogue-drones":{label:"Rogue Drones",incoming:{em:.25,thermal:.25,kinetic:.25,explosive:.25},incomingLabel:"varies by drone",dealLabel:"EM / Thermal"},
 };
 const NPC_DAMAGE_PRESET_KEYS = Object.keys(NPC_DAMAGE_PRESETS) as NpcDamagePreset[];
+
+type CombatActivityId = "manual" | "abyss" | "anomaly" | "ded" | "mission" | "burner" | "incursion" | "homefront" | "wormhole" | "pochven" | "exploration" | "foB" | "event";
+type CombatTargetProfile = { rangeM:number; signatureRadiusM:number; transverseVelocityMps:number; velocityMps:number };
+type CombatSiteOption = { id:string; label:string; detail:string; profile:CombatTargetProfile; strategy?:string[] };
+type CombatSpaceOption = { value:string; label:string; faction?:NpcDamagePreset };
+type CombatActivityDefinition = { id:CombatActivityId; label:string; short:string; description:string; defaultFaction:NpcDamagePreset; factionSelectable:boolean; spaces:CombatSpaceOption[]; sites:CombatSiteOption[]; strategy:string[] };
+type FitCombatScenarioState = { activity:CombatActivityId; space:string; faction:NpcDamagePreset; site:string; abyssHull:"cruiser"|"destroyer"|"frigate" };
+const COMBAT_TARGET_PROFILES = {
+  light:{rangeM:8_000,signatureRadiusM:45,transverseVelocityMps:450,velocityMps:900},
+  medium:{rangeM:20_000,signatureRadiusM:125,transverseVelocityMps:220,velocityMps:450},
+  mixed:{rangeM:30_000,signatureRadiusM:150,transverseVelocityMps:200,velocityMps:500},
+  heavy:{rangeM:40_000,signatureRadiusM:380,transverseVelocityMps:80,velocityMps:180},
+  fleet:{rangeM:45_000,signatureRadiusM:250,transverseVelocityMps:160,velocityMps:350},
+} satisfies Record<string,CombatTargetProfile>;
+const COMBAT_SPACE_OPTIONS:CombatSpaceOption[] = [
+  {value:"any",label:"Any space / use enemy profile"},
+  {value:"highsec",label:"High security"},
+  {value:"lowsec",label:"Low security"},
+  {value:"nullsec",label:"Null security"},
+];
+const DED_SPACE_OPTIONS:CombatSpaceOption[] = [
+  {value:"amarr-blood",label:"Amarr regions - Blood Raiders",faction:"blood-raiders"},
+  {value:"amarr-sansha",label:"Amarr south / Khanid - Sansha",faction:"sansha"},
+  {value:"caldari",label:"Caldari regions - Guristas",faction:"guristas"},
+  {value:"gallente",label:"Gallente regions - Serpentis",faction:"serpentis"},
+  {value:"minmatar",label:"Minmatar regions - Angel Cartel",faction:"angel"},
+  {value:"drone",label:"Drone regions - Rogue Drones",faction:"rogue-drones"},
+  {value:"custom",label:"Other / choose enemy manually"},
+];
+const COMBAT_FACTION_OPTIONS = (["angel","blood-raiders","guristas","sansha","serpentis","mordus","rogue-drones"] as NpcDamagePreset[]);
+const site=(id:string,label:string,detail:string,profile:CombatTargetProfile,strategy?:string[]):CombatSiteOption=>({id,label,detail,profile,strategy});
+const FIT_COMBAT_ACTIVITIES:CombatActivityDefinition[] = [
+  {id:"manual",label:"Manual / exact NPC",short:"Manual",description:"Use the exact NPC or manual application controls in the right rail.",defaultFaction:"omni",factionSelectable:true,spaces:COMBAT_SPACE_OPTIONS,sites:[site("manual","Manual target profile","No site assumptions; use exact NPC search or tune range, signature and movement yourself.",COMBAT_TARGET_PROFILES.medium)],strategy:["Use this when you know the exact NPC or want to test a specific range, signature and movement profile.","The right-rail Target & Application panel remains authoritative in manual mode."]},
+  {id:"abyss",label:"Abyssal Deadspace",short:"Abyss",description:"Tier, weather and documented Abyss room populations calculated by Sage.",defaultFaction:"omni",factionSelectable:false,spaces:[{value:"abyss",label:"Abyssal Deadspace"}],sites:[site("abyss","Abyss room catalogue","Sage uses the selected tier/weather and its documented room catalogue.",COMBAT_TARGET_PROFILES.mixed)],strategy:["Match damage type and movement to the selected weather rather than one NPC.","Watch the 20-minute margin, neut pressure and small-target application; a paper-DPS increase is not always a faster clear.","Use the room breakdown below when one spawn family is the limiting case."]},
+  {id:"anomaly",label:"Combat anomalies",short:"Anomalies",description:"K-space pirate anomalies from starter sites through null-sec Havens and Sanctums.",defaultFaction:"guristas",factionSelectable:true,spaces:COMBAT_SPACE_OPTIONS,sites:[
+    site("hideaway","Hideaway / Burrow","Entry-level anomaly; mostly light targets.",COMBAT_TARGET_PROFILES.light),site("refuge","Refuge","Light-to-medium wave profile.",COMBAT_TARGET_PROFILES.light),site("den","Den","Frigate/cruiser-heavy mixed waves.",COMBAT_TARGET_PROFILES.medium),site("rally","Rally Point","Mid-tier mixed pirate waves.",COMBAT_TARGET_PROFILES.medium),site("port","Port","Cruiser/battlecruiser weighted waves.",COMBAT_TARGET_PROFILES.mixed),site("hub","Hub","Heavy anomaly with larger hulls.",COMBAT_TARGET_PROFILES.heavy),site("haven","Haven","Null-sec battleship-heavy anomaly.",COMBAT_TARGET_PROFILES.heavy),site("sanctum","Sanctum","Top-end null-sec anomaly; sustained heavy waves.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Set the local pirate faction so the tank profile and recommended damage are relevant to the region.","Prioritise tackle, e-war and trigger management before chasing maximum paper DPS.","For fast anomalies, drone travel and lock/application time can matter as much as raw DPS."]},
+  {id:"ded",label:"DED complexes & escalations",short:"DED / escalations",description:"Rated DED complexes, unrated combat signatures and expedition/escalation combat.",defaultFaction:"guristas",factionSelectable:true,spaces:DED_SPACE_OPTIONS,sites:[
+    ...([1,2,3,4,5,6,7,8,10] as const).map(level=>site(`ded-${level}`,`${level}/10 DED complex`,level<=3?"Small-hull rated complex.":level<=6?"Cruiser/battlecruiser weighted rated complex.":"High-end rated complex with heavy NPCs and escalation-grade pressure.",level<=3?COMBAT_TARGET_PROFILES.light:level<=6?COMBAT_TARGET_PROFILES.mixed:COMBAT_TARGET_PROFILES.heavy)),
+    site("unrated","Unrated combat signature","Unrated signature; exact wave composition varies by faction/site.",COMBAT_TARGET_PROFILES.mixed),site("expedition","Escalation / expedition","Escalated combat chain; use the local pirate faction and the exact stage if known.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Choose the local pirate faction first; DED resist holes and incoming damage follow the NPC family, not the security band alone.","Rated complexes can restrict hull size, so validate the ship before treating the result as operational.","Use an exact NPC in the right rail for a boss/application check when the final room is the real limiter."]},
+  {id:"mission",label:"Security missions / Epic arcs",short:"Missions",description:"Security missions, COSMOS combat and epic-arc combat stages.",defaultFaction:"guristas",factionSelectable:true,spaces:[{value:"highsec",label:"High security"},{value:"lowsec",label:"Low security"},{value:"nullsec",label:"Null security / pirate missions"}],sites:[
+    site("l1","Level 1 security","Frigate-scale mission profile.",COMBAT_TARGET_PROFILES.light),site("l2","Level 2 security","Frigate/destroyer profile.",COMBAT_TARGET_PROFILES.light),site("l3","Level 3 security","Cruiser/battlecruiser profile.",COMBAT_TARGET_PROFILES.medium),site("l4","Level 4 security","Battleship-heavy mission profile.",COMBAT_TARGET_PROFILES.heavy),site("epic","Epic Arc / COSMOS combat","Long-form mission combat; select the actual enemy faction for the stage.",COMBAT_TARGET_PROFILES.mixed)
+  ],strategy:["Set the mission enemy faction rather than assuming the agent faction.","Carry the correct damage flight/ammo and keep a secondary damage option for mixed-faction chains.","For Level 4s and arcs, trigger order and range control usually matter more than squeezing out a few extra paper DPS."]},
+  {id:"burner",label:"Anomic / Burner missions",short:"Burners",description:"Anomic Agent, Team and Base encounters where application and control are critical.",defaultFaction:"omni",factionSelectable:true,spaces:[{value:"mission",label:"Mission pocket"}],sites:[
+    site("agent","Anomic Agent","Small, fast target; application profile is deliberately harsh.",{rangeM:12_000,signatureRadiusM:35,transverseVelocityMps:650,velocityMps:1_400}),site("team","Anomic Team","Fast frigate team encounter with support pressure.",{rangeM:18_000,signatureRadiusM:40,transverseVelocityMps:600,velocityMps:1_200}),site("base","Anomic Base","Multi-ship burner encounter with heavier combined pressure.",COMBAT_TARGET_PROFILES.medium)
+  ],strategy:["Application, control and the exact burner damage profile are mandatory; generic mission fits are not a safe assumption.","Use the exact NPC selector for a named burner when available.","Treat web/scram range, speed tank and cap pressure as fit requirements, not optional polish."]},
+  {id:"incursion",label:"Sansha Incursions",short:"Incursions",description:"Scout through Headquarters and mothership sites using the Sansha damage profile.",defaultFaction:"sansha",factionSelectable:false,spaces:[{value:"incursion",label:"Incursion constellation"}],sites:[
+    site("scout","Scout","Low-end incursion fleet site.",COMBAT_TARGET_PROFILES.medium),site("vanguard","Vanguard","Fast fleet site with strong application requirements.",COMBAT_TARGET_PROFILES.fleet),site("assault","Assault","Larger fleet site with heavier target mix.",COMBAT_TARGET_PROFILES.fleet),site("hq","Headquarters","High incoming pressure and battleship-weighted fleet combat.",COMBAT_TARGET_PROFILES.heavy),site("mothership","Mothership / Kundalini","End-site fleet encounter.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Sansha EM/Thermal pressure is applied automatically to the tank profile.","Fleet composition, broadcasts and logistics coverage are part of survivability; local tank alone is not a complete incursion safety check.","Use the fitted drone selector for the flight you will actually field so Sage recalculates DPS."]},
+  {id:"homefront",label:"Homefront Operations",short:"Homefront",description:"Fleet PvE Homefront content; use the selected enemy profile for the specific operation.",defaultFaction:"omni",factionSelectable:true,spaces:[{value:"highsec",label:"High security"}],sites:[
+    site("combat","Combat-focused Homefront","General combat-heavy Homefront profile.",COMBAT_TARGET_PROFILES.medium),site("mixed","Mixed-objective Homefront","Combat plus objective/support pressure.",COMBAT_TARGET_PROFILES.mixed),site("boss","Heavy / boss objective","Heavier target and fleet-pressure profile.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Homefront objectives differ sharply; use the operation's actual enemy profile where known.","Do not judge fleet viability from personal DPS alone: objective mechanics and logistics can be the limiting factor.","Select the drone flight you intend to use rather than leaving Auto when coordinating fleet damage types."]},
+  {id:"wormhole",label:"Wormhole Sleeper PvE",short:"Wormholes",description:"Sleeper combat sites from C1 through C6; omni tank assumption until an exact wave is selected.",defaultFaction:"omni",factionSelectable:false,spaces:[{value:"wormhole",label:"Wormhole space"}],sites:[
+    site("c1","Class 1 Sleeper site","Entry Sleeper site.",COMBAT_TARGET_PROFILES.medium),site("c2","Class 2 Sleeper site","Light-to-medium Sleeper waves.",COMBAT_TARGET_PROFILES.medium),site("c3","Class 3 Sleeper site","Stronger Sleeper waves with meaningful neut/web pressure.",COMBAT_TARGET_PROFILES.mixed),site("c4","Class 4 Sleeper site","Heavy Sleeper combat.",COMBAT_TARGET_PROFILES.heavy),site("c5","Class 5 Sleeper site","Capital-capable high-class Sleeper combat.",COMBAT_TARGET_PROFILES.heavy),site("c6","Class 6 Sleeper site","Top-end Sleeper combat pressure.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Sleeper damage and e-war vary by wave, so Sage keeps the generic tank profile omni unless you select an exact NPC.","Neuts, webs and remote reps can define the encounter; cap stability and target priority deserve equal weight with DPS.","In high-class holes, use this as a fit/application view rather than a substitute for site-specific escalation mechanics."]},
+  {id:"pochven",label:"Pochven combat",short:"Pochven",description:"Triglavian/EDENCOM/Drifter combat and Observatory Flashpoint-style fleet PvE.",defaultFaction:"omni",factionSelectable:false,spaces:[{value:"pochven",label:"Pochven"}],sites:[
+    site("flashpoint","Observatory Flashpoint","Fleet-scale Pochven site.",COMBAT_TARGET_PROFILES.fleet),site("anomaly","Pochven combat anomaly","Mixed Triglavian/EDENCOM combat profile.",COMBAT_TARGET_PROFILES.mixed),site("drifter","Drifter / roaming combat","High application and potentially heavy incoming damage.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Pochven NPC composition varies, so use exact NPC search for a precise resist/application check.","Expect webs, neuts, remote reps and target switching; raw paper DPS is only one part of the site.","Use omni tank as the safe generic profile until the exact hostile group is known."]},
+  {id:"exploration",label:"Combat exploration & hazardous sites",short:"Combat exploration",description:"Unrated combat signatures, Ghost/Sleeper Cache hazards and related exploration combat.",defaultFaction:"guristas",factionSelectable:true,spaces:COMBAT_SPACE_OPTIONS,sites:[
+    site("unrated","Unrated combat signature","Faction combat signature with variable room composition.",COMBAT_TARGET_PROFILES.mixed),site("ghost","Ghost / Covert Research site","Short timer/hazard site; survival and exit discipline matter.",COMBAT_TARGET_PROFILES.light),site("sleeper-cache","Sleeper Cache","Exploration hazards with Sleeper-related pressure.",COMBAT_TARGET_PROFILES.medium),site("besieged","Besieged Covert Research Facility","Combat exploration site with heavier NPC pressure.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Site hazards can kill a fit that looks fine against NPC DPS alone; timer/cloud/explosion mechanics remain separate from tank math.","Use the faction selector when the site has a normal pirate NPC family; otherwise leave the profile conservative.","Keep an exit plan and do not trade mobility for paper DPS unless the site mechanic allows it."]},
+  {id:"foB",label:"Pirate FOB / Stronghold",short:"FOB",description:"Forward Operating Base and diamond-rat style combat.",defaultFaction:"guristas",factionSelectable:true,spaces:[{value:"highsec",label:"High security"},{value:"lowsec",label:"Low security"}],sites:[
+    site("fob","Pirate Forward Operating Base","Diamond-rat fleet pressure and structure objective.",COMBAT_TARGET_PROFILES.fleet),site("diamond","Diamond NPC engagement","Response-fleet style NPC combat.",COMBAT_TARGET_PROFILES.fleet)
+  ],strategy:["Diamond NPCs behave more like a coordinated fleet than ordinary belt/anomaly rats.","Account for tackle, logistics and response escalation; solo tank/DPS numbers do not describe the whole engagement.","Set the pirate faction so the right-rail tank profile follows the local FOB."]},
+  {id:"event",label:"Limited-time combat event",short:"Events",description:"Rotating seasonal/live-event combat sites using a manually selected enemy profile.",defaultFaction:"omni",factionSelectable:true,spaces:COMBAT_SPACE_OPTIONS,sites:[
+    site("event-light","Event site - light targets","Frigate/cruiser-weighted event profile.",COMBAT_TARGET_PROFILES.light),site("event-mixed","Event site - mixed targets","General mixed event profile.",COMBAT_TARGET_PROFILES.mixed),site("event-heavy","Event site - heavy / boss","Heavy or boss-weighted event profile.",COMBAT_TARGET_PROFILES.heavy)
+  ],strategy:["Events rotate, so select the enemy profile and target scale that match the current site rather than relying on stale hard-coded spawns.","Use exact NPC search when the current event NPC is present in the SDE.","The selected fitted drone flight feeds live DPS immediately, making it easy to compare the damage type you plan to bring."]},
+];
+const dedTargetProfile=(rating:number)=>rating<=3?COMBAT_TARGET_PROFILES.light:rating<=5?COMBAT_TARGET_PROFILES.mixed:COMBAT_TARGET_PROFILES.heavy;
+const DED_COMPLEX_NAMES:Partial<Record<NpcDamagePreset,Array<{rating:number;name:string}>>> = {
+  angel:[{rating:1,name:"Minmatar Contracted Bio-Farm"},{rating:2,name:"Angel Creo-Corp Mining"},{rating:3,name:"Angel Repurposed Outpost"},{rating:4,name:"Angel Cartel Occupied Mining Colony"},{rating:5,name:"Angel's Red Light District"},{rating:6,name:"Angel Mineral Acquisition Outpost"},{rating:7,name:"Angel Military Operations Complex"},{rating:8,name:"Cartel Prisoner Retention"},{rating:10,name:"Angel Cartel Naval Shipyard"}],
+  "blood-raiders":[{rating:1,name:"Old Meanie - Cultivation Center"},{rating:2,name:"Blood Raider Human Farm"},{rating:3,name:"Blood Raider Intelligence Collection Point"},{rating:4,name:"Mul-Zatah Monastery"},{rating:5,name:"Blood Raider Psychotropics Depot"},{rating:6,name:"Crimson Hand Supply Depot"},{rating:7,name:"Blood Raider Coordination Center"},{rating:8,name:"Blood Raider Prison Camp"},{rating:10,name:"Blood Raider Naval Shipyard"}],
+  guristas:[{rating:1,name:"Pith Robux Asteroid Mining & Co."},{rating:2,name:"Pith Merchant Depot"},{rating:3,name:"Guristas Guerilla Grounds"},{rating:4,name:"Guristas Scout Outpost"},{rating:5,name:"Guristas Hallucinogen Supply Waypoint"},{rating:6,name:"Guristas Troop Reinvigoration Camp"},{rating:7,name:"Gurista Military Operations Complex"},{rating:8,name:"Pith's Penal Complex"},{rating:10,name:"The Maze"}],
+  sansha:[{rating:1,name:"Sansha Military Outpost"},{rating:2,name:"Sansha Acclimatization Facility"},{rating:3,name:"Sansha's Command Relay Outpost"},{rating:4,name:"Sansha's Nation Occupied Mining Colony"},{rating:5,name:"Sansha's Nation Neural Paralytic Facility"},{rating:6,name:"Sansha War Supply Complex"},{rating:7,name:"Sansha Military Operations Complex"},{rating:8,name:"Sansha Prison Camp"},{rating:10,name:"Centus Assembly T.P. Co."}],
+  serpentis:[{rating:1,name:"Serpentis Drug Outlet"},{rating:2,name:"Serpentis Live Cargo Distribution Facilities"},{rating:3,name:"Serpentis Narcotic Warehouses"},{rating:4,name:"Serpentis Phi-Outpost"},{rating:5,name:"Serpentis Corporation Hydroponics Site"},{rating:6,name:"Serpentis Logistical Outpost"},{rating:7,name:"Serpentis Paramilitary Complex"},{rating:8,name:"Serpentis Prison Camp"},{rating:10,name:"Serpentis Fleet Shipyard"}],
+  "rogue-drones":[{rating:2,name:"Rogue Drone Infestation Sprout"},{rating:3,name:"Rogue Drone Asteroid Infestation"},{rating:4,name:"Drone Infested Mine"},{rating:5,name:"Outgrowth Rogue Drone Hive"},{rating:10,name:"Outgrowth Rogue Drone Hive"}],
+};
+const DED_UNRATED_BY_FACTION:Partial<Record<NpcDamagePreset,CombatSiteOption[]>> = {
+  angel:[site("unrated-outpost","Angel Outpost","Unrated Angel combat signature.",COMBAT_TARGET_PROFILES.medium),site("unrated-minor-annex","Minor Angel Annex","Unrated Angel complex.",COMBAT_TARGET_PROFILES.medium),site("unrated-annex","Angel Annex","Unrated Angel complex with escalation potential.",COMBAT_TARGET_PROFILES.mixed),site("unrated-base","Angel Base","Null-sec unrated Angel complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-fortress","Angel Fortress","Heavy unrated Angel complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-military","Angel Military Complex","Heavy unrated military complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-provincial","Angel Provincial HQ","High-end unrated Angel complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-staging","Angel Domination Fleet Staging Point","Fleet-staging-point combat chain.",COMBAT_TARGET_PROFILES.heavy)],
+  "blood-raiders":[site("unrated-outpost","Blood Raider Outpost","Unrated Blood Raider combat signature.",COMBAT_TARGET_PROFILES.medium),site("unrated-minor-annex","Minor Blood Annex","Unrated Blood Raider complex.",COMBAT_TARGET_PROFILES.medium),site("unrated-annex","Blood Annex","Unrated Blood Raider complex.",COMBAT_TARGET_PROFILES.mixed),site("unrated-base","Blood Raider Base","Null-sec unrated Blood Raider complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-fortress","Blood Raider Fortress","Heavy unrated Blood Raider complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-military","Blood Military Complex","Heavy unrated military complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-provincial","Blood Provincial HQ","High-end unrated Blood Raider complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-staging","Dark Blood Fleet Staging Point","Fleet-staging-point combat chain.",COMBAT_TARGET_PROFILES.heavy)],
+  guristas:[site("unrated-outpost","Gurista Outpost","Unrated Guristas combat signature.",COMBAT_TARGET_PROFILES.medium),site("unrated-minor-annex","Minor Guristas Annex","Unrated Guristas complex.",COMBAT_TARGET_PROFILES.medium),site("unrated-annex","Guristas Annex","Unrated Guristas complex.",COMBAT_TARGET_PROFILES.mixed),site("unrated-base","Gurista Base","Null-sec unrated Guristas complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-fortress","Gurista Fortress","Heavy unrated Guristas complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-military","Gurista Military Complex","Heavy unrated military complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-provincial","Gurista Provincial HQ","High-end unrated Guristas complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-staging","Dread Guristas Fleet Staging Point","Fleet-staging-point combat chain.",COMBAT_TARGET_PROFILES.heavy)],
+  sansha:[site("unrated-outpost","Sansha Outpost","Unrated Sansha combat signature.",COMBAT_TARGET_PROFILES.medium),site("unrated-minor-annex","Minor Sansha Annex","Unrated Sansha complex.",COMBAT_TARGET_PROFILES.medium),site("unrated-annex","Sansha Annex","Unrated Sansha complex.",COMBAT_TARGET_PROFILES.mixed),site("unrated-base","Sansha Base","Null-sec unrated Sansha complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-fortress","Sansha Fortress","Heavy unrated Sansha complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-military","Sansha Military Complex","Heavy unrated military complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-provincial","Sansha Provincial HQ","High-end unrated Sansha complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-staging","True Sansha Fleet Staging Point","Fleet-staging-point combat chain.",COMBAT_TARGET_PROFILES.heavy)],
+  serpentis:[site("unrated-outpost","Serpentis Outpost","Unrated Serpentis combat signature.",COMBAT_TARGET_PROFILES.medium),site("unrated-minor-annex","Minor Serpentis Annex","Unrated Serpentis complex.",COMBAT_TARGET_PROFILES.medium),site("unrated-annex","Serpentis Annex","Unrated Serpentis complex.",COMBAT_TARGET_PROFILES.mixed),site("unrated-base","Serpentis Base","Null-sec unrated Serpentis complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-fortress","Serpentis Fortress","Heavy unrated Serpentis complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-military","Serpentis Military Complex","Heavy unrated military complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-provincial","Serpentis Provincial HQ","High-end unrated Serpentis complex.",COMBAT_TARGET_PROFILES.heavy),site("unrated-staging","Shadow Serpentis Fleet Staging Point","Fleet-staging-point combat chain.",COMBAT_TARGET_PROFILES.heavy)],
+};
+const INITIAL_COMBAT_SCENARIO:FitCombatScenarioState = { activity:"manual", space:"any", faction:"omni", site:"manual", abyssHull:"cruiser" };
+const combatActivity=(id:CombatActivityId)=>FIT_COMBAT_ACTIVITIES.find(item=>item.id===id)??FIT_COMBAT_ACTIVITIES[0];
+const combatSitesFor=(state:FitCombatScenarioState)=>{
+  const activity=combatActivity(state.activity);
+  if(state.activity!=="ded")return activity.sites;
+  const named=DED_COMPLEX_NAMES[state.faction]??[];
+  if(!named.length)return activity.sites;
+  return [...named.map(item=>site(`ded-${item.rating}`,`${item.rating}/10 · ${item.name}`,`Faction-specific DED complex for ${NPC_DAMAGE_PRESETS[state.faction].label}.`,dedTargetProfile(item.rating))),...DED_UNRATED_BY_FACTION[state.faction]??[],site("expedition","Escalation / expedition","Escalated combat chain from the selected pirate faction; use the exact chain/stage where known.",COMBAT_TARGET_PROFILES.heavy)];
+};
+const combatSite=(state:FitCombatScenarioState)=>{const sites=combatSitesFor(state);return sites.find(item=>item.id===state.site)??sites[0]};
 
 const FITTING_DRAG_MIME = "application/x-new-eden-sage-fitting-item";
 function writeFittingDrag(event: DragEvent<HTMLElement>, item: FittingDragPayload) {
@@ -738,6 +838,54 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
       );
     }
   }
+  async function importCurrentEveFit() {
+    if (!selectedCharacterId) {
+      setStatus("Select a connected character before importing the current EVE fit.");
+      return;
+    }
+    try {
+      setLastValidation(null);
+      setStatus("Refreshing current EVE ship and fitted assets...");
+      const snapshot = await window.sage.refreshCurrentShip(selectedCharacterId);
+      const currentRows = Array.isArray(snapshot.extended?.currentShipFit) ? snapshot.extended.currentShipFit : [];
+      const currentTypeIds = [...new Set(currentRows.flatMap((item:any) => Number(item?.type_id) > 0 ? [Number(item.type_id)] : []))];
+      const currentTypeMeta = currentTypeIds.length ? await window.sage.resolveFittingTypeIdsLocal(currentTypeIds) : [];
+      const currentMetaById = new Map(currentTypeMeta.map((item:any) => [Number(item.id), item]));
+      const enrichedSnapshot = {
+        ...snapshot,
+        extended: {
+          ...(snapshot.extended ?? {}),
+          currentShipFit: currentRows.map((item:any) => {
+            const meta = currentMetaById.get(Number(item.type_id)) as any;
+            return { ...item, item: meta?.name ?? item.item, category_id: meta?.categoryId ?? item.category_id, categoryName: meta?.categoryName };
+          }),
+        },
+      } as CharacterSnapshot;
+      setCharacters((current) => current.map((character) => character.characterId === enrichedSnapshot.characterId ? enrichedSnapshot : character));
+      const draft = currentEveFitFromSnapshot(enrichedSnapshot) as Fit;
+      const resolved = await resolveFitFromEve(draft, typeNames);
+      const validation = validateFit(resolved);
+      setLastValidation(validation);
+      if (!validation.valid) {
+        setStatus(`Current EVE fit import blocked: ${validation.errors.map((issue) => issue.message).join("  ")}`);
+        return;
+      }
+      const { imported, duplicateCount, renamedCount } = prepareImportedFits(fits, [resolved]);
+      const importedFit = imported[0];
+      setFits((current) => [importedFit, ...current]);
+      setActiveId(importedFit.id);
+      setSelectedCharacterId(snapshot.characterId);
+      setSideMode("build");
+      const fittedCount = importedFit.high.length + importedFit.mid.length + importedFit.low.length + importedFit.rig.length + importedFit.subsystem.length;
+      const bayCount = importedFit.drones.reduce((sum, item) => sum + item.quantity, 0) + importedFit.fighters.reduce((sum, item) => sum + item.quantity, 0);
+      const notes = [duplicateCount ? "duplicate kept" : "", renamedCount ? "renamed to keep both fits" : ""].filter(Boolean).join(", ");
+      setStatus(`Imported current EVE fit from ${snapshot.character.name}: ${snapshot.ship.ship_type_name} with ${fittedCount} fitted modules/rigs and ${bayCount} drones/fighters.${notes ? " " + notes + "." : ""} Loaded charges and live activation state may need review.`);
+    } catch (error) {
+      setLastValidation(null);
+      setStatus(error instanceof Error ? error.message : "The current EVE fit could not be imported.");
+    }
+  }
+
   function touchFit(id: string) {
     setLibraryMeta((current) => ({ ...current, [id]: { ...(current[id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), readiness: "unknown" } }));
   }
@@ -886,6 +1034,25 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
     setLibraryMeta((current) => ({ ...current, [activeId]: { ...(current[activeId] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString() } }));
     setStatus(`Active ${target} selection updated. DPS and bandwidth will recalculate automatically.`);
   }
+  function setActiveInstructions(instructions: string[]) {
+    if (!active) return;
+    const fitId = active.id;
+    setFits((current) => current.map((fit) => fit.id === fitId ? { ...fit, instructions } : fit));
+    touchFit(fitId);
+  }
+
+  function setActiveDroneFlight(typeId: number | null, activeCount = 0) {
+    if (!active) return;
+    const fitId = active.id;
+    setFits((current) => current.map((fit) => {
+      if (fit.id !== fitId) return fit;
+      return { ...fit, drones: fit.drones.map((item) => typeId == null ? { ...item, activeQuantity: undefined } : { ...item, activeQuantity: item.typeId === typeId ? Math.max(0, Math.min(item.quantity, Math.floor(activeCount))) : 0 }) };
+    }));
+    touchFit(fitId);
+    const chosen = typeId == null ? "automatic drone flight" : active.drones.find((item) => item.typeId === typeId)?.name ?? "drone flight";
+    setStatus(`Using ${chosen}. DPS and bandwidth will recalculate automatically.`);
+  }
+
   function renameActiveFit() {
     if (!active) return;
     const nextName = window.prompt("Rename fitting", active.name);
@@ -979,7 +1146,19 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
         {sideMode === "build" ? (
           <FitBuilder fit={active} characterId={selectedCharacterId} onCreate={createBuilderFit} onAdd={addBuilderItem} onRemove={removeBuilderItem} onQuantity={setBuilderItemQuantity} onState={setBuilderItemState} onCharge={loadBuilderCharge} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} onBrowseModeChange={setBuilderBrowseMode} />
         ) : sideMode === "import" ? (
-          <div className="fit-v2-import"><p className="eyebrow">UNIVERSAL FIT IMPORT</p><h3>Paste a fit from anywhere</h3><button type="button" className="copy-fit-prompt" onClick={() => void copyChatGPTInstructions()}>Copy prompt for any LLM</button><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'Paste PYFA/EFT, XML, ESI JSON, DNA, Sage JSON, or a labelled plain-text fit...'} /><label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.fit,.txt,.json,.xml,.dna" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label><button type="button" onClick={() => void importFit()} disabled={!input.trim()}>Import and display</button><small>{status}</small>{lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}</div>
+          <div className="fit-v2-import">
+            <p className="eyebrow">FIT IMPORT</p>
+            <h3>Bring a fit into Sage</h3>
+            <button type="button" className="fit-import-current-eve" onClick={() => void importCurrentEveFit()} disabled={!selectedCharacterId}>Import current EVE fit</button>
+            <small className="fit-import-current-eve-note">Refreshes the selected character's active ship and imports its fitted assets directly from EVE.</small>
+            <div className="fit-import-divider"><span>or paste a fit</span></div>
+            <button type="button" className="copy-fit-prompt" onClick={() => void copyChatGPTInstructions()}>Copy prompt for any LLM</button>
+            <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={'Paste PYFA/EFT, XML, ESI JSON, DNA, Sage JSON, or a labelled plain-text fit...'} />
+            <label className="copy-fit-prompt">Choose fitting file<input type="file" accept=".eft,.fit,.txt,.json,.xml,.dna" hidden onChange={async (event) => { const file=event.target.files?.[0]; if(!file)return; try{setInput(await file.text());setStatus(file.name+' loaded locally. Review it, then import.');}catch{setStatus('Could not read '+file.name+'.');} event.target.value=''; }} /></label>
+            <button type="button" onClick={() => void importFit()} disabled={!input.trim()}>Import and display</button>
+            <small>{status}</small>
+            {lastValidation && lastValidation.issues.length > 0 && <div className="fit-validation"><strong>{lastValidation.valid ? "Validation report" : "Import blocked"}</strong>{lastValidation.issues.slice(0,6).map((issue,index)=><p className={issue.level} key={issue.code+index}>{issue.message}</p>)}</div>}
+          </div>
         ) : (
           <div className="fit-saved-browser">
             <div className="fit-saved-browser-head"><span>SAVED FITS</span><button type="button" className="fit-new-build" onClick={startNewFit}>+ New Fit</button></div>
@@ -991,7 +1170,7 @@ export function FittingsWorkspace({ onExportToPlanner, activeCharacterId }: { on
       </aside>
       <div className="fit-v2-issues-dock" ref={setIssuesDock} />
       <div className="fit-main">
-        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} onChangeShip={() => { setSideMode("build"); window.setTimeout(() => window.dispatchEvent(new CustomEvent("sage:fitter-open-ships")), 0); }} issuesDock={issuesDock} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
+        {active ? <FitDisplay fit={active} characters={characters} characterId={selectedCharacterId} onCharacterChange={setSelectedCharacterId} onRemove={() => removeFit(active.id)} onRoute={() => setRouteOpen(true)} onRename={renameActiveFit} onDuplicate={duplicateActiveFit} onExport={exportActiveFit} onExportToDoctrine={openDoctrineExport} onModuleStateChange={setActiveModuleState} onBayActiveQuantityChange={setActiveBayQuantity} onDroneFlightChange={setActiveDroneFlight} onInstructionsChange={setActiveInstructions} onRemoveItem={removeBuilderItem} onAddItem={addBuilderItem} onLoadCharge={loadBuilderCharge} onAnalysis={(readiness, missingRequirements) => setLibraryMeta((current) => ({ ...current, [active.id]: { ...(current[active.id] ?? { createdAt: new Date().toISOString() }), updatedAt: new Date().toISOString(), lastAnalyzedAt: new Date().toISOString(), readiness, missingRequirements } }))} onExportToPlanner={(intent) => onExportToPlanner?.(intent)} onShowInfo={(typeId,name) => setShowInfoTarget({typeId,name})} onChangeShip={() => { setSideMode("build"); window.setTimeout(() => window.dispatchEvent(new CustomEvent("sage:fitter-open-ships")), 0); }} onBrowseDamageItems={(kind) => { setSideMode("build"); window.setTimeout(() => window.dispatchEvent(new CustomEvent(kind === "drones" ? "sage:fitter-open-drones" : "sage:fitter-open-weapons")), 0); }} issuesDock={issuesDock} /> : <div className="fit-empty"><h2>No fitting selected</h2><p>Create a fit from the module browser or import one.</p></div>}
       </div>
       {doctrineExport && active && <div className="fit-doctrine-export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDoctrineExport(null); }}>
         <section className="fit-doctrine-export-dialog" role="dialog" aria-modal="true" aria-label="Export fitting to doctrine">
@@ -1081,7 +1260,8 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
   useEffect(() => {
     const openShips = () => setBrowserTab("ships");
     const openModules = () => setBrowserTab("catalogue");
-    const openDrones = () => { setBrowserTab("catalogue"); setPlacementFilter("drone"); };
+    const openDrones = () => { setBrowserTab("catalogue"); setPlacementFilter("drone"); setCatalogueFilter(""); };
+    const openWeapons = () => { setBrowserTab("catalogue"); setPlacementFilter("high"); setCatalogueFilter(""); };
     const openCargo = () => { setBrowserTab("catalogue"); setPlacementFilter("cargo"); };
     const searchBuilder = (event: Event) => {
       const query = String((event as CustomEvent<string>).detail ?? "");
@@ -1092,12 +1272,14 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
     window.addEventListener("sage:fitter-open-ships", openShips);
     window.addEventListener("sage:fitter-open-modules", openModules);
     window.addEventListener("sage:fitter-open-drones", openDrones);
+    window.addEventListener("sage:fitter-open-weapons", openWeapons);
     window.addEventListener("sage:fitter-open-cargo", openCargo);
     window.addEventListener("sage:fitter-search-builder", searchBuilder);
     return () => {
       window.removeEventListener("sage:fitter-open-ships", openShips);
       window.removeEventListener("sage:fitter-open-modules", openModules);
       window.removeEventListener("sage:fitter-open-drones", openDrones);
+      window.removeEventListener("sage:fitter-open-weapons", openWeapons);
       window.removeEventListener("sage:fitter-open-cargo", openCargo);
       window.removeEventListener("sage:fitter-search-builder", searchBuilder);
     };
@@ -1329,6 +1511,8 @@ function FitDisplay({
   onExportToDoctrine,
   onModuleStateChange,
   onBayActiveQuantityChange,
+  onDroneFlightChange,
+  onInstructionsChange,
   onRemoveItem,
   onAddItem,
   onLoadCharge,
@@ -1336,6 +1520,7 @@ function FitDisplay({
   onExportToPlanner,
   onShowInfo,
   onChangeShip,
+  onBrowseDamageItems,
   issuesDock,
 }: {
   fit: Fit;
@@ -1350,6 +1535,8 @@ function FitDisplay({
   onExportToDoctrine(): void;
   onModuleStateChange(rack: FitModuleRack, index: number, state: ModuleState): void;
   onBayActiveQuantityChange(target: "drones" | "fighters", index: number, delta: number, baseline: number, maxAllowed: number): void;
+  onDroneFlightChange(typeId: number | null, activeCount?: number): void;
+  onInstructionsChange(instructions: string[]): void;
   onRemoveItem(target: BuilderTarget, index: number): void;
   onAddItem(target: BuilderTarget, item: FittingSearchResult): Promise<boolean>;
   onLoadCharge(target: FitModuleRack, index: number, item: FittingSearchResult): Promise<boolean>;
@@ -1357,9 +1544,10 @@ function FitDisplay({
   onExportToPlanner(intent: FitResolutionIntent): void;
   onShowInfo(typeId:number,name?:string):void;
   onChangeShip():void;
+  onBrowseDamageItems(kind:"drones"|"weapons"):void;
   issuesDock: HTMLDivElement | null;
 }) {
-  const [tab, setTab] = useState<"fitting" | "performance" | "market" | "notes">("fitting");
+  const [tab, setTab] = useState<"fitting" | "scenario" | "performance" | "market" | "notes">("fitting");
   const [analysis, setAnalysis] = useState<any>(null);
   const [remedies, setRemedies] = useState<FitRemedyCandidate[]>([]);
   const [eveExporting, setEveExporting] = useState(false);
@@ -1425,17 +1613,12 @@ function FitDisplay({
   }, [fit.hull.typeId]);
   const [targetProfile, setTargetProfile] = useState({ rangeM: 10000, signatureRadiusM: 125, transverseVelocityMps: 0, velocityMps: 0 });
   const [abyssSelection, setAbyssSelection] = useState<AbyssFitterSelection>({ enabled:false, tier:5, weather:"exotic", penalty:0.7, roomKey:"all" });
+  const [combatScenario, setCombatScenario] = useState<FitCombatScenarioState>(INITIAL_COMBAT_SCENARIO);
+  useEffect(() => { setCombatScenario(INITIAL_COMBAT_SCENARIO); }, [fit.id]);
   const [damageProfilePreset, setDamageProfilePreset] = useState<NpcDamagePreset>("omni");
-  const [targetDamageProfilePreset, setTargetDamageProfilePreset] = useState<NpcDamagePreset>("omni");
   const [targetNpc, setTargetNpc] = useState<FittingSearchResult | null>(null);
-  const [abyssNpcTargets, setAbyssNpcTargets] = useState<FittingSearchResult[]>([]);
   const [npcTargetSearch, setNpcTargetSearch] = useState("");
   const [npcTargetSearchResults, setNpcTargetSearchResults] = useState<FittingSearchResult[]>([]);
-  useEffect(() => {
-    let cancelled=false;
-    void window.sage.searchFittingTypesLocal("@npc:abyssal", 500).then((items) => { if (!cancelled) setAbyssNpcTargets(items.filter((item) => item.combatProfile?.abyssal && !/placeholder/i.test(item.name))); }).catch(() => { if (!cancelled) setAbyssNpcTargets([]); });
-    return () => { cancelled=true; };
-  }, []);
   useEffect(() => {
     const query=npcTargetSearch.trim();
     if (query.length < 2) { setNpcTargetSearchResults([]); return; }
@@ -1445,13 +1628,14 @@ function FitDisplay({
   }, [npcTargetSearch]);
   const npcTargetOptions = useMemo(() => {
     const byId=new Map<number,FittingSearchResult>();
-    for (const item of [...abyssNpcTargets, ...npcTargetSearchResults, ...(targetNpc ? [targetNpc] : [])]) byId.set(item.id,item);
+    for (const item of [...npcTargetSearchResults, ...(targetNpc ? [targetNpc] : [])]) byId.set(item.id,item);
     return [...byId.values()];
-  }, [abyssNpcTargets,npcTargetSearchResults,targetNpc]);
+  }, [npcTargetSearchResults,targetNpc]);
   const selectNpcTarget = (typeId:number) => {
     if (!typeId) { setTargetNpc(null); return; }
     const target=npcTargetOptions.find((item) => item.id===typeId) ?? null;
     setTargetNpc(target);
+    if (target) setAbyssSelection((current) => ({ ...current, enabled:false }));
     if (target?.combatProfile?.signatureRadiusM) setTargetProfile((current) => ({...current,signatureRadiusM:target.combatProfile!.signatureRadiusM}));
   };
   const [externalEffects, setExternalEffects] = useState<ExternalEffectSelection[]>([]);
@@ -1588,6 +1772,55 @@ function FitDisplay({
       remedies,
       resources: analysis?.resources ? { used: { ...analysis.resources.used }, capacity: { ...analysis.resources.capacity } } : undefined,
       rigSlots: { used: fit.rig.reduce((sum, item) => sum + Math.max(1, Number(item.quantity ?? 1)), 0), capacity: Number(analysis?.fitting?.slots?.rig ?? 0) },
+      abyss: abyssSelection.enabled && analysis?.abyss ? {
+        enabled: true,
+        tier: Number(abyssSelection.tier),
+        weather: String(abyssSelection.weather),
+        penalty: Number(abyssSelection.penalty),
+        roomKey: String(abyssSelection.roomKey),
+        roomName: analysis.abyss?.selectedRoom?.name ? String(analysis.abyss.selectedRoom.name) : undefined,
+        roomCount: Number(analysis.abyss?.summary?.roomCount ?? 0),
+        unclearableRoomCount: Number(analysis.abyss?.summary?.unclearableRoomCount ?? 0),
+        averageTargetDps: Number(analysis.abyss?.summary?.averageTarget?.trueDps ?? 0),
+        averageIncomingDps: Number(analysis.abyss?.summary?.averageIncoming?.totalDps ?? 0),
+        averageHostilesPerRoom: Number(analysis.abyss?.summary?.averageTarget?.averageHostilesPerRoom ?? 0),
+        targetSample: Number(analysis.abyss?.summary?.averageTarget?.distinctTargetCount ?? 0),
+        timerSeconds: Number(analysis.abyss?.siteEstimate?.timerSeconds ?? 1200),
+        representativeClearSeconds: Number(analysis.abyss?.siteEstimate?.representative?.estimatedClearSeconds ?? Infinity),
+        representativeTimerMarginSeconds: Number(analysis.abyss?.siteEstimate?.representative?.timerMarginSeconds ?? -Infinity),
+        heavyKnownClearSeconds: Number(analysis.abyss?.siteEstimate?.heavyKnown?.estimatedClearSeconds ?? Infinity),
+        heavyKnownTimerMarginSeconds: Number(analysis.abyss?.siteEstimate?.heavyKnown?.timerMarginSeconds ?? -Infinity),
+        basis: analysis.abyss?.summary?.averageTarget?.basis ? String(analysis.abyss.summary.averageTarget.basis) : undefined,
+      } : undefined,
+      performance: analysis ? (() => {
+        const scenarioTank = analysis?.abyss?.summary?.averageIncoming?.playerTank;
+        const scenarioTankEhpPerSecond =
+          Number(scenarioTank?.effectiveShieldRepairPerSecond ?? analysis?.defence?.effectiveShieldRepairPerSecond ?? 0) +
+          Number(scenarioTank?.effectiveArmorRepairPerSecond ?? analysis?.defence?.effectiveArmorRepairPerSecond ?? 0) +
+          Number(scenarioTank?.effectiveStructureRepairPerSecond ?? analysis?.defence?.effectiveStructureRepairPerSecond ?? 0) +
+          Number(scenarioTank?.effectivePassiveShieldPeak ?? analysis?.defence?.effectivePassiveShieldPeak ?? 0);
+        const capPeakMarginGjPerSecond = Number(analysis?.capacitor?.peakRechargeGjPerSecond ?? 0) - Number(analysis?.capacitor?.demandGjPerSecond ?? 0);
+        return {
+          paperDps: Number(analysis?.damage?.totalDps ?? 0),
+          weaponDps: Number(analysis?.damage?.weaponDps ?? 0),
+          droneDps: Number(analysis?.damage?.droneDps ?? 0),
+          appliedWeaponDps: Number(analysis?.damage?.appliedWeaponDps ?? 0),
+          totalEhp: Number(analysis?.defence?.totalEhp ?? 0),
+          scenarioTankEhpPerSecond,
+          shieldRepairEhpPerSecond: Number(analysis?.defence?.effectiveShieldRepairPerSecond ?? 0),
+          armorRepairEhpPerSecond: Number(analysis?.defence?.effectiveArmorRepairPerSecond ?? 0),
+          passiveShieldEhpPerSecond: Number(analysis?.defence?.effectivePassiveShieldPeak ?? 0),
+          capStable: Boolean(analysis?.capacitor?.stable),
+          capStablePercent: Number(analysis?.capacitor?.stablePercent ?? 0),
+          capDepletionSeconds: Number(analysis?.capacitor?.depletionSeconds ?? 0),
+          capDemandGjPerSecond: Number(analysis?.capacitor?.demandGjPerSecond ?? 0),
+          capPeakMarginGjPerSecond,
+          maximumVelocityMps: Number(analysis?.navigation?.maximumVelocity ?? 0),
+          alignSeconds: Number(analysis?.navigation?.alignSeconds ?? 0),
+          signatureRadiusM: Number(analysis?.targeting?.signatureRadiusM ?? 0),
+          activeDrones: (analysis?.damage?.activeDrones ?? []).map((drone:any) => String(drone.name ?? `Type ${drone.typeId}`)),
+        };
+      })() : undefined,
     });
   };
   async function exportCurrentFitToEve() {
@@ -1615,6 +1848,12 @@ function FitDisplay({
   }
 
   const fitSummary = summarizeFit(fit);
+  const selectedCombatActivity = combatActivity(combatScenario.activity);
+  const selectedCombatSite = combatSite(combatScenario);
+  const combatScenarioLabel = combatScenario.activity === "abyss"
+    ? `${selectedCombatActivity.short} · ${abyssScenarioLabel(abyssSelection.tier,abyssSelection.weather)}`
+    : `${selectedCombatActivity.short} · ${selectedCombatSite.label}`;
+  const combatScenarioActive = combatScenario.activity !== "manual";
   const effectiveSlots = analysis?.fitting?.slots ?? hullProfile?.slots;
   const hullGroupName = String(hullTypeInfo?.group?.name ?? "Ship");
   const hullClass = hullGroupName.toUpperCase();
@@ -1675,6 +1914,7 @@ function FitDisplay({
       <section className="fit-concept-tabs">
         <div role="tablist" aria-label="Fitting detail views">
           <button type="button" role="tab" aria-selected={tab==="fitting"} className={tab==="fitting"?"active":""} onClick={()=>setTab("fitting")}>Fitting</button>
+          <button type="button" role="tab" aria-selected={tab==="scenario"} className={tab==="scenario"?"active":""} onClick={()=>setTab("scenario")}>Combat Scenario</button>
           <button type="button" role="tab" aria-selected={tab==="performance"} className={tab==="performance"?"active":""} onClick={()=>setTab("performance")}>Performance</button>
           <button type="button" role="tab" aria-selected={tab==="market"} className={tab==="market"?"active":""} onClick={()=>setTab("market")}>Cost &amp; Market</button>
           <button type="button" role="tab" aria-selected={tab==="notes"} className={tab==="notes"?"active":""} onClick={()=>setTab("notes")}>Notes</button>
@@ -1700,10 +1940,14 @@ function FitDisplay({
               <SlotRack title="RIG SLOTS" side="rig" items={fit.rig} limit={effectiveSlots?.rig ?? fit.rig.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
               {((effectiveSlots?.subsystem ?? 0) > 0 || fit.subsystem.length > 0) && <SlotRack title="SUBSYSTEMS" side="subsystem" items={fit.subsystem} limit={effectiveSlots?.subsystem ?? fit.subsystem.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />}            </div>
           </div>
-          <div className="fit-v2-additions"><FitAdditionsPanel fit={fit} analysis={analysis} externalEffects={externalEffects} onBayActiveQuantityChange={onBayActiveQuantityChange} onRemoveItem={onRemoveItem} onShowInfo={onShowInfo} /></div>
+          <div className="fit-v2-additions"><FitAdditionsPanel fit={fit} analysis={analysis} externalEffects={externalEffects} onBayActiveQuantityChange={onBayActiveQuantityChange} onRemoveItem={onRemoveItem} onShowInfo={onShowInfo} onAddDrones={()=>onBrowseDamageItems("drones")} onInstructionsChange={onInstructionsChange} /></div>
         </>
+      ) : tab === "scenario" ? (
+        <div className="fit-v2-performance-stage fit-concept-secondary-stage fit-combat-scenario-host">
+          <FitCombatScenario analysis={analysis} fit={fit} scenario={combatScenario} onScenarioChange={setCombatScenario} abyssSelection={abyssSelection} onAbyssSelectionChange={setAbyssSelection} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} onNpcTargetChange={selectNpcTarget} onDroneFlightChange={onDroneFlightChange} onBrowseDrones={()=>onBrowseDamageItems("drones")} />
+        </div>
       ) : tab === "performance" ? (
-        <div className="fit-v2-performance-stage fit-concept-secondary-stage"><FitPerformance analysis={analysis} status={analysisStatus} fit={fit} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} abyssSelection={abyssSelection} onAbyssSelectionChange={setAbyssSelection} externalEffects={externalEffects} boosterSideEffects={boosterSideEffects} selectedBoosterSideEffectKeys={selectedBoosterSideEffectKeys} onSelectedBoosterSideEffectKeysChange={setSelectedBoosterSideEffectKeys} onAddExternalEffect={addExternalEffect} onUpdateExternalEffect={updateExternalEffect} onRemoveExternalEffect={removeExternalEffect} onExportToPlanner={()=>exportResolution("dream-fit")} /></div>
+        <div className="fit-v2-performance-stage fit-concept-secondary-stage"><FitPerformance analysis={analysis} status={analysisStatus} fit={fit} characters={characters} characterId={characterId} onCharacterChange={onCharacterChange} externalEffects={externalEffects} boosterSideEffects={boosterSideEffects} selectedBoosterSideEffectKeys={selectedBoosterSideEffectKeys} onSelectedBoosterSideEffectKeysChange={setSelectedBoosterSideEffectKeys} onAddExternalEffect={addExternalEffect} onUpdateExternalEffect={updateExternalEffect} onRemoveExternalEffect={removeExternalEffect} onModuleStateChange={onModuleStateChange} onExportToEve={exportCurrentFitToEve} eveExporting={eveExporting} eveExportStatus={eveExportStatus} onExportToPlanner={()=>exportResolution("dream-fit")} /></div>
       ) : tab === "market" ? (
         <div className="fit-v2-performance-stage fit-concept-secondary-stage fit-concept-market-stage">
           <div><p className="eyebrow">COST &amp; MARKET</p><h3>{fitCostLoading ? "Pricing fit..." : fitCost ? formatFitIsk(fitCost.total) : "Market price unavailable"}</h3><p>{fitCost ? `${fitCost.pricedTypes}/${fitCost.totalTypes} item types have retained best-sell quotes.` : "Retained public market quotes are unavailable."}</p></div>
@@ -1713,7 +1957,7 @@ function FitDisplay({
       ) : (
         <div className="fit-v2-performance-stage fit-concept-secondary-stage fit-concept-notes-stage">
           <div><p className="eyebrow">FIT NOTES</p><h3>{fit.name}</h3></div>
-          {fit.instructions.length ? fit.instructions.map((note,index)=><p key={index}>{note}</p>) : <p>No fit notes or operating instructions.</p>}
+          <textarea className="fit-notes-editor fit-notes-editor-page" value={fit.instructions.join("\n")} onChange={(event)=>onInstructionsChange(event.target.value.split(/\r?\n/))} placeholder="Add fit notes or operating instructions..." aria-label="Fit notes" />
         </div>
       )}
 
@@ -1724,7 +1968,7 @@ function FitDisplay({
           <small>{fitCost ? `${fitCost.pricedTypes}/${fitCost.totalTypes} item types priced from retained market quotes` : "Retained public market quotes unavailable"}</small>
         </div>
         {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
-        <FitStatsSidebar analysis={analysis} refreshing={analysisRefreshing} fit={fit} hullProfile={hullProfile} targetDamageProfilePreset={targetDamageProfilePreset} onTargetDamageProfilePresetChange={setTargetDamageProfilePreset} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} targetNpc={targetNpc} npcTargetOptions={npcTargetOptions} npcTargetSearch={npcTargetSearch} onNpcTargetSearchChange={setNpcTargetSearch} onNpcTargetChange={selectNpcTarget} />
+        <FitStatsSidebar analysis={analysis} refreshing={analysisRefreshing} fit={fit} hullProfile={hullProfile} damageProfilePreset={damageProfilePreset} onDamageProfilePresetChange={setDamageProfilePreset} targetProfile={targetProfile} onTargetProfileChange={setTargetProfile} targetNpc={targetNpc} npcTargetOptions={npcTargetOptions} npcTargetSearch={npcTargetSearch} onNpcTargetSearchChange={setNpcTargetSearch} onNpcTargetChange={selectNpcTarget} abyssSelection={abyssSelection} scenarioLabel={combatScenarioLabel} scenarioActive={combatScenarioActive} onDroneFlightChange={onDroneFlightChange} onModuleStateChange={onModuleStateChange} onLoadCharge={onLoadCharge} onBrowseDamageItems={onBrowseDamageItems} />
       </aside>
     </div>
   );
@@ -1741,7 +1985,7 @@ function DroneLoadoutCard({ entry, activeQuantity, maxActive, onStep, onRemove, 
   </article>;
 }
 
-function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantityChange, onRemoveItem, onShowInfo }: { fit: Fit; analysis: any; externalEffects: ExternalEffectSelection[]; onBayActiveQuantityChange(target:"drones"|"fighters",index:number, delta:number, baseline:number, maxAllowed:number):void; onRemoveItem(target:BuilderTarget,index:number):void; onShowInfo(typeId:number,name?:string):void }) {
+function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantityChange, onRemoveItem, onShowInfo, onAddDrones, onInstructionsChange }: { fit: Fit; analysis: any; externalEffects: ExternalEffectSelection[]; onBayActiveQuantityChange(target:"drones"|"fighters",index:number, delta:number, baseline:number, maxAllowed:number):void; onRemoveItem(target:BuilderTarget,index:number):void; onShowInfo(typeId:number,name?:string):void; onAddDrones():void; onInstructionsChange(instructions:string[]):void }) {
   const [activeTab, setActiveTab] = useState<AdditionTab>("drones");
   const [legacyBayKinds, setLegacyBayKinds] = useState<Record<number, "drone" | "fighter" | "unknown">>({});
   useEffect(() => {
@@ -1760,7 +2004,7 @@ function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantity
   const installedImplants=(analysis?.enhancements??[]).filter((item:any)=>item.kind==="implant" && !plannedImplantIds.has(Number(item.typeId)));
   const appliedBoosters=externalEffects.filter(item=>item.kind==="booster"); const projected=externalEffects.filter(item=>item.kind==="projected"); const command=externalEffects.filter(item=>item.kind==="command");
   const sum=(entries:AdditionEntry[])=>entries.reduce((total,entry)=>total+Number(entry.item.quantity||0),0);
-  const counts:Record<AdditionTab,number>={drones:sum(droneEntries),fighters:sum(fighterEntries),cargo:sum(cargoEntries),implants:plannedImplants.length+installedImplants.length,boosters:plannedBoosters.length+appliedBoosters.length,projected:projected.length,command:command.length,notes:fit.instructions.length};
+  const counts:Record<AdditionTab,number>={drones:sum(droneEntries),fighters:sum(fighterEntries),cargo:sum(cargoEntries),implants:plannedImplants.length+installedImplants.length,boosters:plannedBoosters.length+appliedBoosters.length,projected:projected.length,command:command.length,notes:fit.instructions.filter(note=>note.trim()).length};
   const tabs:Array<{id:AdditionTab;label:string}>=[{id:"drones",label:"Drones"},{id:"fighters",label:"Fighters"},{id:"cargo",label:"Cargo"},{id:"implants",label:"Implants"},{id:"boosters",label:"Boosters"},{id:"projected",label:"Projected"},{id:"command",label:"Command"},{id:"notes",label:"Notes"}];
   const info:Record<AdditionTab,string>={drones:"Drone bay loadout and launched count used by live DPS analysis.",fighters:"Fighter hangar and active squadrons validated against tubes and fighter class limits.",cargo:"Charges, scripts, paste, probes and other carried items.",implants:"Planned fit implants plus implants already installed on the selected pilot.",boosters:"Boosters assigned to the fit plus temporary external booster effects.",projected:"Remote effects projected onto this fit for performance analysis.",command:"Command burst effects currently applied to this fit.",notes:"Imported operating notes and fit instructions."};
   const activeCount=(entry:AdditionEntry)=>{
@@ -1786,12 +2030,12 @@ function FitAdditionsPanel({ fit, analysis, externalEffects, onBayActiveQuantity
   const step=(entry:AdditionEntry,delta:number)=>{if(entry.target!=="drones"&&entry.target!=="fighters")return;const baseline=activeCount(entry);const maxAllowed=maxActiveFor(entry);onBayActiveQuantityChange(entry.target,entry.index,delta,baseline,maxAllowed);};
   const renderBay=(entries:AdditionEntry[],active=false)=>entries.length?<div className={active?"fit-addition-list fit-drone-list":"fit-addition-list"}>{entries.map(entry=>active?<DroneLoadoutCard key={entry.target+"-"+entry.item.name+"-"+entry.index} entry={entry} activeQuantity={activeCount(entry)} maxActive={maxActiveFor(entry)} onStep={delta=>step(entry,delta)} onRemove={()=>onRemoveItem(entry.target,entry.index)} onShowInfo={onShowInfo}/>:<div className="fit-addition-item" key={entry.target+"-"+entry.item.name+"-"+entry.index} onContextMenu={event=>{if(!entry.item.typeId)return;event.preventDefault();onShowInfo(entry.item.typeId,entry.item.name);}}>{entry.item.typeId?<img src={imageUrl(entry.item.typeId,"icon",64)}/>:<b>?</b>}<span><strong>{entry.item.name}</strong><small>{entry.item.quantity} assigned / {entry.target}</small></span><button type="button" className="fit-addition-remove" onClick={()=>onRemoveItem(entry.target,entry.index)} aria-label={"Remove "+entry.item.name}>x</button></div>)}</div>:<div className="fit-addition-empty">Nothing assigned here.</div>;
   const renderEffects=(items:any[],empty:string,label:string)=>items.length?<div className="fit-addition-effect-list">{items.map((item:any,index:number)=><div className="fit-addition-effect" key={String(item.id??item.typeId??index)} onContextMenu={event=>{if(!item.typeId)return;event.preventDefault();onShowInfo(Number(item.typeId),item.name);}}>{item.typeId?<img src={imageUrl(Number(item.typeId),"icon",64)}/>:<b>?</b>}<span><strong>{item.name??("Type "+item.typeId)}</strong><small>{item.chargeName?item.chargeName+" - ":""}{item.state?item.state+" - ":""}{label}</small></span></div>)}</div>:<div className="fit-addition-empty">{empty}</div>;
-  return <div className="fit-additions-panel"><div className="fit-additions-head"><strong>Additional Loadouts</strong><small>{info[activeTab]}</small>{activeTab==="drones"&&<button type="button" className="fit-add-drones" onClick={()=>window.dispatchEvent(new Event("sage:fitter-open-drones"))}>+ Add Drones</button>}</div><div className="fit-addition-tabs-v3" role="tablist">{tabs.map(tab=><button type="button" role="tab" aria-selected={activeTab===tab.id} className={activeTab===tab.id?"active":""} key={tab.id} onClick={()=>setActiveTab(tab.id)}><span>{tab.label}</span>{counts[tab.id]>0&&<b>{counts[tab.id]}</b>}</button>)}</div><div className="fit-addition-content" role="tabpanel">
+  return <div className="fit-additions-panel"><div className="fit-additions-head"><strong>Additional Loadouts</strong><small>{info[activeTab]}</small>{activeTab==="drones"&&<button type="button" className="fit-add-drones" onClick={onAddDrones}>+ Add Drones</button>}</div><div className="fit-addition-tabs-v3" role="tablist">{tabs.map(tab=><button type="button" role="tab" aria-selected={activeTab===tab.id} className={activeTab===tab.id?"active":""} key={tab.id} onClick={()=>setActiveTab(tab.id)}><span>{tab.label}</span>{counts[tab.id]>0&&<b>{counts[tab.id]}</b>}</button>)}</div><div className="fit-addition-content" role="tabpanel">
     {activeTab==="drones"&&renderBay(droneEntries,true)}{activeTab==="fighters"&&renderBay(fighterEntries,true)}{activeTab==="cargo"&&renderBay(cargoEntries)}
     {activeTab==="implants"&&<>{renderBay(plannedImplants)}{installedImplants.length>0&&<div className="fit-addition-secondary"><small>Installed on pilot</small>{renderEffects(installedImplants,"","Installed on selected pilot")}</div>}</>}
     {activeTab==="boosters"&&<>{renderBay(plannedBoosters)}{appliedBoosters.length>0&&<div className="fit-addition-secondary"><small>External / temporary</small>{renderEffects(appliedBoosters,"","Applied to analysis")}</div>}</>}
     {activeTab==="projected"&&renderEffects(projected,"No projected effects are currently applied.","Applied to analysis")}{activeTab==="command"&&renderEffects(command,"No command burst effects are currently applied.","Applied to analysis")}
-    {activeTab==="notes"&&(fit.instructions.length?<div className="fit-addition-notes">{fit.instructions.map((note,index)=><p key={index}>{note}</p>)}</div>:<div className="fit-addition-empty">No fit notes or operating instructions.</div>)}
+    {activeTab==="notes"&&<textarea className="fit-notes-editor fit-notes-editor-inline" value={fit.instructions.join("\n")} onChange={(event)=>onInstructionsChange(event.target.value.split(/\r?\n/))} placeholder="Add fit notes or operating instructions..." aria-label="Fit notes" />}
   </div></div>;
 }
 
@@ -1819,9 +2063,25 @@ function FitIssuesPanel({ analysis, remedies, onFix }: { analysis:any; remedies:
     {hasIssues && <div className="fit-issues-actions"><button type="button" className="fit-issues-fix" onClick={onFix}>Fix My Fit</button><button type="button" className="fit-issues-remedies" onClick={onFix}>Show Remedies</button></div>}
   </aside>;
 }
-function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageProfilePreset, onTargetDamageProfilePresetChange, damageProfilePreset, onDamageProfilePresetChange, targetProfile, onTargetProfileChange, targetNpc, npcTargetOptions, npcTargetSearch, onNpcTargetSearchChange, onNpcTargetChange }: { analysis:any; refreshing:boolean; fit:Fit; hullProfile:HullFittingProfile|null; targetDamageProfilePreset:NpcDamagePreset; onTargetDamageProfilePresetChange(value:NpcDamagePreset):void; damageProfilePreset:NpcDamagePreset; onDamageProfilePresetChange(value:NpcDamagePreset):void; targetProfile:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}; onTargetProfileChange(value:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}):void; targetNpc:FittingSearchResult|null; npcTargetOptions:FittingSearchResult[]; npcTargetSearch:string; onNpcTargetSearchChange(value:string):void; onNpcTargetChange(typeId:number):void }) {
+function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, damageProfilePreset, onDamageProfilePresetChange, targetProfile, onTargetProfileChange, targetNpc, npcTargetOptions, npcTargetSearch, onNpcTargetSearchChange, onNpcTargetChange, abyssSelection, scenarioLabel, scenarioActive, onDroneFlightChange, onModuleStateChange, onLoadCharge, onBrowseDamageItems }: {
+  analysis:any; refreshing:boolean; fit:Fit; hullProfile:HullFittingProfile|null;
+  damageProfilePreset:NpcDamagePreset; onDamageProfilePresetChange(value:NpcDamagePreset):void;
+  targetProfile:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number};
+  onTargetProfileChange(value:{rangeM:number;signatureRadiusM:number;transverseVelocityMps:number;velocityMps:number}):void;
+  targetNpc:FittingSearchResult|null; npcTargetOptions:FittingSearchResult[]; npcTargetSearch:string; onNpcTargetSearchChange(value:string):void; onNpcTargetChange(typeId:number):void;
+  abyssSelection:AbyssFitterSelection; scenarioLabel:string; scenarioActive:boolean;
+  onDroneFlightChange(typeId:number|null, activeCount?:number):void;
+  onModuleStateChange(rack:FitModuleRack,index:number,state:ModuleState):void;
+  onLoadCharge(rack:FitModuleRack,index:number,item:FittingSearchResult):Promise<boolean>;
+  onBrowseDamageItems(kind:"drones"|"weapons"):void;
+}) {
   const fmt=(value:number|undefined,digits=0)=>value==null||!Number.isFinite(value)?"--":value.toLocaleString(undefined,{maximumFractionDigits:digits,minimumFractionDigits:digits});
   const pct=(value:number|undefined)=>value==null?"--":(value*100).toFixed(1)+"%";
+  const duration=(seconds:number|undefined)=>{
+    if(seconds==null||!Number.isFinite(seconds))return "--";
+    const safe=Math.max(0,Math.round(seconds));
+    return `${Math.floor(safe/60)}m ${String(safe%60).padStart(2,"0")}s`;
+  };
   const slots=analysis?.fitting?.slots ?? hullProfile?.slots;
   const hardpoints=analysis?.fitting?.hardpoints ?? hullProfile?.hardpoints;
   const storage=analysis?.storage;
@@ -1831,44 +2091,364 @@ function FitStatsSidebar({ analysis, refreshing, fit, hullProfile, targetDamageP
   const cap=analysis?.capacitor;
   const nav=analysis?.navigation;
   const targeting=analysis?.targeting;
+  const abyss=analysis?.abyss;
+  const averageTarget=abyssSelection.enabled ? abyss?.summary?.averageTarget : undefined;
+  const averageIncoming=abyssSelection.enabled ? abyss?.summary?.averageIncoming : undefined;
+  const weaponProfileTypeIds=useMemo(()=>new Set((damage?.weaponProfiles??[]).map((item:any)=>Number(item.typeId)).filter(Boolean)),[damage?.weaponProfiles]);
+  const weaponEntries=useMemo(()=>fit.high.map((item,index)=>({item,index})).filter(({item})=>Boolean(item.typeId)&&(weaponProfileTypeIds.has(Number(item.typeId))||Boolean(item.chargeTypeId))),[fit.high,weaponProfileTypeIds]);
+  const [weaponChargeOptions,setWeaponChargeOptions]=useState<Record<number,Array<{id:number;name:string}>>>({});
+  useEffect(()=>{
+    let cancelled=false;
+    const modules=[...new Set(weaponEntries.flatMap(({item})=>item.typeId?[item.typeId]:[]))];
+    if(!modules.length){setWeaponChargeOptions({});return;}
+    void Promise.all(modules.map(async(typeId)=>{
+      try{
+        const result=await window.sage.getFittingChargesForModulesLocal([typeId]);
+        const resolved=result.compatibleTypeIds.length?await window.sage.resolveFittingTypeIdsLocal(result.compatibleTypeIds):[];
+        return [typeId,resolved.map((item:any)=>({id:Number(item.id),name:String(item.name)})).filter(item=>item.id>0).sort((a,b)=>a.name.localeCompare(b.name))] as const;
+      }catch{return [typeId,[]] as const;}
+    })).then(rows=>{if(!cancelled)setWeaponChargeOptions(Object.fromEntries(rows));});
+    return()=>{cancelled=true;};
+  },[weaponEntries.map(({item})=>item.typeId).join(",")]);
+  const explicitDroneFlight=fit.drones.some(item=>item.activeQuantity!=null);
+  const quickDroneTypeId=explicitDroneFlight?(fit.drones.find(item=>Number(item.activeQuantity??0)>0)?.typeId??0):0;
+  const selectDroneFlight=(typeId:number)=>{
+    if(!typeId){onDroneFlightChange(null);return;}
+    const bay=fit.drones.find(item=>item.typeId===typeId);
+    if(!bay)return;
+    const limits=damage?.droneLimits;
+    const maxActive=Math.max(0,Math.floor(Number(limits?.maxActiveDrones??5)));
+    const bandwidthEntry=(limits?.bandwidthByType??[]).find((item:any)=>Number(item.typeId)===typeId);
+    const bandwidth=Math.max(0,Number(bandwidthEntry?.bandwidth??0));
+    const byBandwidth=bandwidth>0?Math.floor(Number(limits?.bandwidthCapacity??0)/bandwidth):maxActive;
+    const activeCount=Math.max(0,Math.min(Number(bay.quantity||0),maxActive,byBandwidth||maxActive));
+    onDroneFlightChange(typeId,activeCount);
+  };
   const appliedWeaponDps=damage?.weaponProfiles?.reduce((sum:number,weapon:any)=>sum+Number(weapon.targetApplication?.appliedDps??0),0)??0;
+  const profileAppliedDps=appliedWeaponDps+Number(damage?.droneDps??0);
   const capacitorPeakMargin=cap ? Number(cap.peakRechargeGjPerSecond??0)-Number(cap.demandGjPerSecond??0) : undefined;
   const damageKinds=["em","thermal","kinetic","explosive"] as const;
-  const Stat=({icon,label,value,sub,tone="normal",priority=false}:{icon:string;label:string;value:string;sub?:string;tone?:"normal"|"primary"|"good"|"warn"|"danger"|"muted";priority?:boolean})=><div className={`pyfa-stat tone-${tone}${priority?" priority":""}`}><i>{icon}</i><span><small>{label}</small><strong>{value}</strong>{sub&&<em>{sub}</em>}</span></div>;
-  const Resource=({icon,label,used,total,unit}:{icon:string;label:string;used:number|undefined;total:number|undefined;unit:string})=>{const rawRatio=total&&used!=null?used/total:0;const ratio=Math.max(0,Math.min(1,rawRatio));const state=rawRatio>1?"danger":rawRatio>=.98?"full":rawRatio>=.85?"warn":"ok";return <div className={`pyfa-resource resource-${state}`}><div><i>{icon}</i><span>{label}</span><strong>{used==null||total==null?"--":fmt(used,1)+" / "+fmt(total,1)+(unit?" "+unit:"")}</strong></div><b><u style={{width:(ratio*100)+"%"}}/></b></div>};
-  const ResistRow=({icon,label,resists,ehp}:{icon:string;label:string;resists:number[]|undefined;ehp:number|undefined})=><div className="pyfa-resist-row"><i>{icon}</i><span>{label}</span>{[0,1,2,3].map(index=><b className={`damage-${damageKinds[index]}`} key={index}>{resists?pct(resists[index]):"--"}</b>)}<strong>{ehp==null?"--":fmt(ehp)}</strong></div>;
-  return <aside className="fit-v2-context pyfa-stats-panel">
-    {refreshing&&<div className="fit-analysis-refreshing"><span>Calculating current fit...</span><i/></div>}
-    <section className="pyfa-section pyfa-section-analytics"><h3>Ship Analytics</h3><Resource icon="C" label="CPU" used={res?.used.cpu} total={res?.capacity.cpu} unit="tf"/><Resource icon="P" label="Powergrid" used={res?.used.powergrid} total={res?.capacity.powergrid} unit="MW"/><Resource icon="R" label="Calibration" used={res?.used.calibration} total={res?.capacity.calibration} unit=""/><Resource icon="D" label="Drone bay" used={storage?.droneBayUsedM3} total={storage?.droneBayCapacityM3??hullProfile?.storage.droneBayM3} unit="m3"/><Resource icon="B" label="Bandwidth" used={storage?.droneBandwidthUsed} total={storage?.droneBandwidthCapacity??hullProfile?.storage.droneBandwidth} unit="Mbit/s"/><Resource icon="H" label="Cargo" used={storage?.cargoUsedM3} total={storage?.cargoCapacityM3??hullProfile?.storage.cargoM3} unit="m3"/><div className="pyfa-slot-line"><span>Slots</span><strong>{fit.high.length}/{slots?.high??"--"} H - {fit.mid.length}/{slots?.mid??"--"} M - {fit.low.length}/{slots?.low??"--"} L - {fit.rig.length}/{slots?.rig??"--"} R</strong></div><div className="pyfa-slot-line"><span>Hardpoints</span><strong>{hardpoints?.turret??"--"} turret / {hardpoints?.launcher??"--"} launcher</strong></div></section>
-    <section className="pyfa-section pyfa-section-defense"><h3>Defense <small>Effective HP <strong>{defence?fmt(defence.totalEhp):"--"}</strong></small></h3><div className="pyfa-resist-head"><span></span><span></span><b className="damage-em" title="EM"><small>EM</small></b><b className="damage-thermal" title="Thermal"><small>TH</small></b><b className="damage-kinetic" title="Kinetic"><small>KI</small></b><b className="damage-explosive" title="Explosive"><small>EX</small></b><strong>EHP</strong></div><ResistRow icon="S" label="Shield" resists={defence?.shieldResists} ehp={defence?.shieldEhp}/><ResistRow icon="A" label="Armor" resists={defence?.armorResists} ehp={defence?.armorEhp}/><ResistRow icon="H" label="Hull" resists={defence?.hullResists} ehp={defence?.structureEhp}/><div className="pyfa-defense-raw"><span><small>Shield HP</small><strong>{defence?fmt(defence.shieldHp):"--"}</strong></span><span><small>Armor HP</small><strong>{defence?fmt(defence.armorHp):"--"}</strong></span><span><small>Hull HP</small><strong>{defence?fmt(defence.structureHp):"--"}</strong></span></div></section>
-    <section className="pyfa-section pyfa-section-tank"><h3>Recharge &amp; Tank</h3><div className="pyfa-stat-grid"><Stat icon="S" label="Passive shield" value={defence?fmt(defence.effectivePassiveShieldPeak,1)+" EHP/s":"--"} priority/><Stat icon="A" label="Armor rep" value={defence?fmt(defence.effectiveArmorRepairPerSecond,1)+" EHP/s":"--"}/><Stat icon="S" label="Shield rep" value={defence?fmt(defence.effectiveShieldRepairPerSecond,1)+" EHP/s":"--"}/><Stat icon="H" label="Hull rep" value={defence?fmt(defence.effectiveStructureRepairPerSecond,1)+" EHP/s":"--"}/></div></section>
-    <section className="pyfa-section pyfa-section-firepower"><h3>Firepower</h3><div className="pyfa-stat-grid"><Stat icon="D" label="Total DPS" value={damage?fmt(damage.totalDps,1):"--"} tone="primary" priority/><Stat icon="W" label="Weapon DPS" value={damage?fmt(damage.weaponDps,1):"--"}/><Stat icon="D" label="Drone DPS" value={damage?fmt(damage.droneDps,1):"--"}/><Stat icon="V" label="Total volley" value={damage?fmt(damage.totalVolley,0):"--"}/><Stat icon="A" label="Applied weapon" value={damage?fmt(appliedWeaponDps,1)+" DPS":"--"} tone={damage?.target?"good":"muted"}/><Stat icon="T" label="True target DPS" value={damage?.target?fmt(damage.target.trueDps,1)+" DPS":"--"} sub={damage?.target?.name} tone={damage?.target?"primary":"muted"}/><Stat icon="T" label="Target TTK" value={damage?.target?.timeToKillSeconds!=null&&Number.isFinite(damage.target.timeToKillSeconds)?fmt(damage.target.timeToKillSeconds,1)+" s":"--"} tone={damage?.target?"primary":"muted"}/></div></section>
-    <details className="pyfa-damage-profiles" open>
-      <summary><span className="pyfa-damage-profile-title"><i aria-hidden="true"/><strong>Damage profiles</strong></span><span className="pyfa-damage-profile-summary"><small><b>DEAL</b> {targetNpc?.name ?? NPC_DAMAGE_PRESETS[targetDamageProfilePreset].label}</small><small><b>TANK</b> {targetNpc?.combatProfile?.outgoingDamageTotal ? targetNpc.name : NPC_DAMAGE_PRESETS[damageProfilePreset].label}</small></span><i className="pyfa-damage-profile-chevron" aria-hidden="true"/></summary>
-      <div className="pyfa-damage-profile-body">
-        <label className="pyfa-damage-profile-field profile-deal"><span><strong>DEAL profile</strong><small>Outgoing damage mix when no exact NPC target is selected</small></span><select value={targetDamageProfilePreset} onChange={event=>onTargetDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - deal {NPC_DAMAGE_PRESETS[key].dealLabel}</option>)}</select><em>Recommended: {NPC_DAMAGE_PRESETS[targetDamageProfilePreset].dealLabel}</em></label>
-        <label className="pyfa-damage-profile-field profile-tank"><span><strong>TANK profile</strong><small>Incoming damage mix used for resistance-weighted EHP and tank</small></span><select value={damageProfilePreset} onChange={event=>onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}</select><em>Incoming: {NPC_DAMAGE_PRESETS[damageProfilePreset].incomingLabel}</em></label>
-        <details className="pyfa-damage-profile-advanced">
-          <summary><span>Exact target &amp; application</span><small>NPC resistances, range, signature &amp; movement</small><i aria-hidden="true"/></summary>
-        <label className="pyfa-damage-profile-field npc-target-picker profile-exact"><span><strong>Exact NPC target</strong><small>CCP SDE resistances, HP, signature and outgoing damage</small></span><input value={npcTargetSearch} onChange={event=>onNpcTargetSearchChange(event.target.value)} placeholder="Search every combat NPC, e.g. Leshak, Tyrannos, Guristas..."/><select value={targetNpc?.id??0} onChange={event=>onNpcTargetChange(Number(event.target.value))}><option value={0}>No exact target - use manual profiles</option><optgroup label="Abyssal room enemies">{npcTargetOptions.filter(item=>item.combatProfile?.abyssal).map(item=><option key={"abyss-"+item.id} value={item.id}>{item.name}</option>)}</optgroup>{npcTargetSearch.trim().length>=2&&<optgroup label="All NPC search results">{npcTargetOptions.filter(item=>!item.combatProfile?.abyssal).map(item=><option key={"npc-"+item.id} value={item.id}>{item.name}</option>)}</optgroup>}</select><em>{targetNpc?.combatProfile ? `Exact target: ${targetNpc.name} - ${Math.round(targetNpc.combatProfile.shieldHp+targetNpc.combatProfile.armorHp+targetNpc.combatProfile.structureHp).toLocaleString()} raw HP. True DPS uses shield, armor and hull resists.` : "All Abyssal room entities are loaded; search reaches every SDE combat entity."}</em></label>
-        <div className="pyfa-damage-application profile-application"><div className="pyfa-damage-application-head"><strong>Target application</strong><small>Range, signature and movement used for applied DPS</small></div><div className="fit-v2-target-grid"><label>Range km<input type="number" min="0" value={targetProfile.rangeM/1000} onChange={event=>onTargetProfileChange({...targetProfile,rangeM:Math.max(0,Number(event.target.value)*1000)})}/></label><label>Signature m<input type="number" min="1" value={targetProfile.signatureRadiusM} onChange={event=>onTargetProfileChange({...targetProfile,signatureRadiusM:Math.max(1,Number(event.target.value))})}/></label><label>Transversal<input type="number" min="0" value={targetProfile.transverseVelocityMps} onChange={event=>onTargetProfileChange({...targetProfile,transverseVelocityMps:Math.max(0,Number(event.target.value))})}/></label><label>Velocity<input type="number" min="0" value={targetProfile.velocityMps} onChange={event=>onTargetProfileChange({...targetProfile,velocityMps:Math.max(0,Number(event.target.value))})}/></label></div></div>
-        </details>
+  const Metric=({label,value,sub,tone="normal",featured=false}:{label:string;value:string;sub?:string;tone?:"normal"|"primary"|"good"|"warn"|"danger"|"muted";featured?:boolean})=><article className={`fit-rail-metric tone-${tone}${featured?" featured":""}`}><span>{label}</span><strong>{value}</strong>{sub&&<small>{sub}</small>}</article>;
+  const Resource=({label,used,total,unit}:{label:string;used:number|undefined;total:number|undefined;unit:string})=>{
+    const rawRatio=total&&used!=null?used/total:0;
+    const ratio=Math.max(0,Math.min(1,rawRatio));
+    const state=rawRatio>1?"danger":rawRatio>=.98?"full":rawRatio>=.85?"warn":"ok";
+    return <article className={`fit-rail-resource resource-${state}`}><span>{label}</span><strong>{used==null||total==null?"--":fmt(used,1)+" / "+fmt(total,1)+(unit?" "+unit:"")}</strong><b><i style={{width:(ratio*100)+"%"}}/></b></article>;
+  };
+  const ResistRow=({label,resists,ehp}:{label:string;resists:number[]|undefined;ehp:number|undefined})=><div className="fit-rail-resist-row"><strong>{label}</strong>{[0,1,2,3].map(index=><span className={`fit-rail-resist-pill damage-${damageKinds[index]}`} key={index}>{resists?pct(resists[index]):"--"}</span>)}<b className="fit-rail-ehp-pill">{ehp==null?"--":fmt(ehp)}</b></div>;
+  const tankAgainstScenario=averageIncoming?.playerTank;
+  const scenarioTank=Number(tankAgainstScenario?.effectiveShieldRepairPerSecond??defence?.effectiveShieldRepairPerSecond??0)
+    +Number(tankAgainstScenario?.effectiveArmorRepairPerSecond??defence?.effectiveArmorRepairPerSecond??0)
+    +Number(tankAgainstScenario?.effectiveStructureRepairPerSecond??defence?.effectiveStructureRepairPerSecond??0)
+    +Number(tankAgainstScenario?.effectivePassiveShieldPeak??defence?.effectivePassiveShieldPeak??0);
+  const incoming=Number(averageIncoming?.totalDps??0);
+  const tankRatio=incoming>0?scenarioTank/incoming:0;
+
+  return <aside className="fit-v2-context pyfa-stats-panel fit-stats-polished">
+    {refreshing&&<div className="fit-analysis-refreshing"><span>Calculating current fit...</span></div>}
+
+    <section className="fit-rail-section fit-rail-target-application">
+      <header className="fit-rail-section-head"><div><span>Target &amp; application</span><strong>{targetNpc?.name??"Application profile"}</strong></div><em>{scenarioActive?scenarioLabel:"Manual / exact NPC"}</em></header>
+      <div className="fit-rail-advanced-grid">
+        <label><span>Incoming tank profile</span><select value={damageProfilePreset} onChange={event=>onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}</select></label>
+        <label><span>Specific NPC</span><input value={npcTargetSearch} onChange={event=>onNpcTargetSearchChange(event.target.value)} placeholder="Search NPC..."/><select value={targetNpc?.id??0} onChange={event=>onNpcTargetChange(Number(event.target.value))}><option value={0}>No exact target</option>{npcTargetOptions.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       </div>
-    </details>
-    <section className="pyfa-section pyfa-section-capacitor"><h3>Capacitor</h3><div className="pyfa-stat-grid"><Stat icon="S" label="State" value={cap?(cap.stable?"Stable +"+fmt(cap.stablePercent,1)+"%":fmt(cap.depletionSeconds,0)+" s to empty"):"--"} tone={cap?.stable?"good":cap?"danger":"muted"} priority/><Stat icon="C" label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"--"}/><Stat icon="T" label="Recharge time" value={cap?fmt(cap.rechargeSeconds,1)+" s":"--"}/><Stat icon="D" label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"--"}/><Stat icon="R" label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"--"}/><Stat icon="M" label="Peak margin" value={capacitorPeakMargin==null?"--":(capacitorPeakMargin>=0?"+":"")+fmt(capacitorPeakMargin,2)+" GJ/s"} tone={capacitorPeakMargin==null?"muted":capacitorPeakMargin>=0?"good":"danger"}/></div></section>
-    <section className="pyfa-section pyfa-section-targeting"><h3>Targeting &amp; Navigation</h3><div className="pyfa-stat-grid"><Stat icon="T" label="Targets" value={targeting?fmt(targeting.maximumLockedTargets):"--"}/><Stat icon="R" label="Lock range" value={targeting?fmt(targeting.maximumRangeM/1000,1)+" km":"--"}/><Stat icon="S" label="Scan res" value={targeting?fmt(targeting.scanResolution,0)+" mm":"--"}/><Stat icon="S" label="Sensor str" value={targeting?fmt(targeting.sensorStrength,1):"--"}/><Stat icon="V" label="Speed" value={nav?fmt(nav.maximumVelocity,0)+" m/s":"--"}/><Stat icon="A" label="Align" value={nav?fmt(nav.alignSeconds,2)+" s":"--"}/><Stat icon="S" label="Signature" value={targeting?fmt(targeting.signatureRadiusM,0)+" m":"--"}/><Stat icon="W" label="Warp" value={nav?fmt(nav.warpSpeedAuPerSecond,1)+" AU/s":"--"}/></div></section>
+      <div className="fit-v2-target-grid"><label>Range km<input type="number" min="0" value={targetProfile.rangeM/1000} onChange={event=>onTargetProfileChange({...targetProfile,rangeM:Math.max(0,Number(event.target.value)*1000)})}/></label><label>Signature m<input type="number" min="1" value={targetProfile.signatureRadiusM} onChange={event=>onTargetProfileChange({...targetProfile,signatureRadiusM:Math.max(1,Number(event.target.value))})}/></label><label>Transversal<input type="number" min="0" value={targetProfile.transverseVelocityMps} onChange={event=>onTargetProfileChange({...targetProfile,transverseVelocityMps:Math.max(0,Number(event.target.value))})}/></label><label>Velocity<input type="number" min="0" value={targetProfile.velocityMps} onChange={event=>onTargetProfileChange({...targetProfile,velocityMps:Math.max(0,Number(event.target.value))})}/></label></div>
+    </section>
+
+    <section className="fit-rail-section pyfa-section-defense">
+      <header className="fit-rail-section-head"><div><span>Defense</span><strong>{defence?fmt(defence.totalEhp)+" EHP":"--"}</strong></div><em>Profile effective H</em></header>
+      <div className="fit-rail-resist-head"><strong>Layer</strong><span>EM</span><span>TH</span><span>KI</span><span>EX</span><b>EHP</b></div>
+      <ResistRow label="Shield" resists={defence?.shieldResists} ehp={defence?.shieldEhp}/>
+      <ResistRow label="Armor" resists={defence?.armorResists} ehp={defence?.armorEhp}/>
+      <ResistRow label="Hull" resists={defence?.hullResists} ehp={defence?.structureEhp}/>
+    </section>
+
+        <div className="fit-rail-columns">
+      <div className="fit-rail-column fit-rail-column-left">
+        <section className="fit-rail-section pyfa-section-firepower">
+              <header className="fit-rail-section-head"><div><span>Firepower</span><strong>{damage?fmt(damage.totalDps,1)+" paper DPS":"--"}</strong></div>{averageTarget&&<em>{fmt(averageTarget.trueDps,1)} scenario DPS</em>}</header>
+              <div className="fit-rail-metric-grid">
+                <Metric label="Paper DPS" value={damage?fmt(damage.totalDps,1):"--"}/>
+                <Metric label={averageTarget||damage?.target?"Scenario DPS":"Applied profile DPS"} value={averageTarget?fmt(averageTarget.trueDps,1):damage?.target?fmt(damage.target.trueDps,1):scenarioActive&&damage?fmt(profileAppliedDps,1):"--"} sub={averageTarget?scenarioLabel:damage?.target?.name??(scenarioActive?scenarioLabel:undefined)} tone="primary" featured/>
+                <Metric label="Weapon DPS" value={damage?fmt(damage.weaponDps,1):"--"}/>
+                <Metric label="Drone DPS" value={damage?fmt(damage.droneDps,1):"--"}/>
+                <Metric label="Applied weapon" value={damage?fmt(appliedWeaponDps,1)+" DPS":"--"} tone={damage?.target||averageTarget?"good":"muted"}/>
+              </div>
+              <div className="firepower-loadout">
+                <div className="firepower-loadout-head"><span>Damage loadout</span><div><button type="button" onClick={()=>onBrowseDamageItems("drones")}>Change drones</button><button type="button" onClick={()=>onBrowseDamageItems("weapons")}>Change weapons</button></div></div>
+                {weaponEntries.length>0&&<div className="firepower-weapon-list">{weaponEntries.map(({item,index})=>{const options=item.typeId?weaponChargeOptions[item.typeId]??[]:[];return <div className="firepower-weapon-row" key={index+":"+(item.typeId??item.name)}><span><strong>{item.name}</strong><small>{item.charge??"No ammo loaded"}</small></span><select aria-label={item.name+" state"} value={item.state??"active"} onChange={event=>onModuleStateChange("high",index,event.target.value as ModuleState)}><option value="active">Active</option><option value="overheated">Overheated</option><option value="online">Online / not firing</option><option value="offline">Offline</option></select><select aria-label={item.name+" ammo"} value={item.chargeTypeId??0} disabled={!options.length} onChange={event=>{const charge=options.find(option=>option.id===Number(event.target.value));if(charge)void onLoadCharge("high",index,{id:charge.id,name:charge.name,groupId:0,categoryId:8,categoryName:"Charge"} as FittingSearchResult);}}><option value={0}>{options.length?"Choose ammo...":"No compatible ammo"}</option>{options.map(option=><option key={option.id} value={option.id}>{option.name}</option>)}</select></div>})}</div>}
+                {!fit.drones.length&&!weaponEntries.length&&<small className="firepower-loadout-empty">No drones or weapon modules are fitted. Use the controls above to add a damage source.</small>}
+              </div>
+            </section>
+
+        <section className="fit-rail-section pyfa-section-capacitor">
+              <header className="fit-rail-section-head"><div><span>Capacitor</span><strong>{cap?(cap.stable?"Stable":duration(cap.depletionSeconds)+" to empty"):"--"}</strong></div><em>{capacitorPeakMargin==null?"":(capacitorPeakMargin>=0?"+":"")+fmt(capacitorPeakMargin,2)+" GJ/s peak margin"}</em></header>
+              <div className="fit-rail-metric-grid">
+                <Metric label="Capacity" value={cap?fmt(cap.capacityGj,0)+" GJ":"--"}/>
+                <Metric label="Demand" value={cap?fmt(cap.demandGjPerSecond,2)+" GJ/s":"--"}/>
+                <Metric label="Peak recharge" value={cap?fmt(cap.peakRechargeGjPerSecond,2)+" GJ/s":"--"}/>
+                <Metric label="Cap state" value={cap?(cap.stable?`Stable ${fmt(cap.stablePercent,1)}%`:duration(cap.depletionSeconds)):"--"} tone={cap?.stable?"good":cap?"danger":"muted"}/>
+              </div>
+            </section>
+      </div>
+      <div className="fit-rail-column fit-rail-column-right">
+        <section className="fit-rail-section pyfa-section-tank">
+              <header className="fit-rail-section-head"><div><span>Recharge &amp; tank</span><strong>{scenarioTank>0?fmt(scenarioTank,1)+" EHP/s":"Tank output"}</strong></div>{incoming>0&&<em>{fmt(tankRatio,1)}x average incoming</em>}</header>
+              <div className="fit-rail-metric-grid">
+                <Metric label="Shield repair" value={defence?fmt(defence.effectiveShieldRepairPerSecond,1)+" EHP/s":"--"} tone={Number(defence?.effectiveShieldRepairPerSecond??0)>0?"good":"muted"}/>
+                <Metric label="Passive shield" value={defence?fmt(defence.effectivePassiveShieldPeak,1)+" EHP/s":"--"}/>
+                <Metric label="Armor repair" value={defence?fmt(defence.effectiveArmorRepairPerSecond,1)+" EHP/s":"--"}/>
+                {incoming>0&&<Metric label="Average incoming" value={fmt(incoming,1)+" DPS"} sub={tankRatio>=1.5?"Healthy average tank margin":tankRatio>=1?"Thin average tank margin":"Average room pressure exceeds tank"} tone={tankRatio>=1.5?"good":tankRatio>=1?"warn":"danger"}/>}
+              </div>
+            </section>
+
+        <section className="fit-rail-section pyfa-section-targeting">
+              <header className="fit-rail-section-head"><div><span>Targeting &amp; navigation</span><strong>{nav?fmt(nav.maximumVelocity,0)+" m/s":"--"}</strong></div><em>{nav?fmt(nav.alignSeconds,2)+" s align":""}</em></header>
+              <div className="fit-rail-metric-grid">
+                <Metric label="Targets" value={targeting?fmt(targeting.maximumLockedTargets):"--"}/>
+                <Metric label="Lock range" value={targeting?fmt(targeting.maximumRangeM/1000,1)+" km":"--"}/>
+                <Metric label="Speed" value={nav?fmt(nav.maximumVelocity,0)+" m/s":"--"}/>
+                <Metric label="Align" value={nav?fmt(nav.alignSeconds,2)+" s":"--"}/>
+              </div>
+            </section>
+      </div>
+    </div>
+
+    <div className="fit-drone-flight-bar">
+      <span>Active drone flight</span>
+      <select value={quickDroneTypeId} disabled={!fit.drones.length} onChange={event=>selectDroneFlight(Number(event.target.value))}>
+        {fit.drones.length===0?<option value={0}>No drones fitted</option>:<>
+          <option value={0} title="Auto / best legal flight">Auto</option>
+          {fit.drones.filter(item=>item.typeId).map(item=><option key={item.typeId} value={item.typeId}>{item.name} x{item.quantity}</option>)}
+        </>}
+      </select>
+    </div>
+
+    <section className="fit-rail-section fit-rail-fitting">
+      <header className="fit-rail-section-head"><div><span>Fitting resources</span><strong>{fit.high.length}H / {fit.mid.length}M / {fit.low.length}L / {fit.rig.length}R</strong></div><em>{hardpoints?.turret??"--"} turret / {hardpoints?.launcher??"--"} launcher</em></header>
+      <div className="fit-rail-resource-grid">
+        <Resource label="CPU" used={res?.used.cpu} total={res?.capacity.cpu} unit="tf"/>
+        <Resource label="Powergrid" used={res?.used.powergrid} total={res?.capacity.powergrid} unit="MW"/>
+        <Resource label="Calibration" used={res?.used.calibration} total={res?.capacity.calibration} unit=""/>
+        <Resource label="Drone bay" used={storage?.droneBayUsedM3} total={storage?.droneBayCapacityM3??hullProfile?.storage.droneBayM3} unit="m3"/>
+        <Resource label="Bandwidth" used={storage?.droneBandwidthUsed} total={storage?.droneBandwidthCapacity??hullProfile?.storage.droneBandwidth} unit="Mbit/s"/>
+        <Resource label="Cargo" used={storage?.cargoUsedM3} total={storage?.cargoCapacityM3??hullProfile?.storage.cargoM3} unit="m3"/>
+      </div>
+    </section>
   </aside>;
 }
+
+function FitCombatScenario({
+  analysis,
+  fit,
+  scenario,
+  onScenarioChange,
+  abyssSelection,
+  onAbyssSelectionChange,
+  damageProfilePreset,
+  onDamageProfilePresetChange,
+  targetProfile,
+  onTargetProfileChange,
+  onNpcTargetChange,
+  onDroneFlightChange,
+  onBrowseDrones,
+}: {
+  analysis:any;
+  fit:Fit;
+  scenario:FitCombatScenarioState;
+  onScenarioChange(value:FitCombatScenarioState):void;
+  abyssSelection:AbyssFitterSelection;
+  onAbyssSelectionChange(value:AbyssFitterSelection):void;
+  damageProfilePreset:NpcDamagePreset;
+  onDamageProfilePresetChange(value:NpcDamagePreset):void;
+  targetProfile:CombatTargetProfile;
+  onTargetProfileChange(value:CombatTargetProfile):void;
+  onNpcTargetChange(typeId:number):void;
+  onDroneFlightChange(typeId:number|null,activeCount?:number):void;
+  onBrowseDrones():void;
+}) {
+  const activity=combatActivity(scenario.activity);
+  const selectedSite=combatSite(scenario);
+  const abyss=analysis?.abyss;
+  const averageTarget=abyssSelection.enabled?abyss?.summary?.averageTarget:undefined;
+  const averageIncoming=abyssSelection.enabled?abyss?.summary?.averageIncoming:undefined;
+  const scenarioTank=Number(averageIncoming?.playerTank?.effectiveShieldRepairPerSecond??analysis?.defence?.effectiveShieldRepairPerSecond??0)
+    +Number(averageIncoming?.playerTank?.effectiveArmorRepairPerSecond??analysis?.defence?.effectiveArmorRepairPerSecond??0)
+    +Number(averageIncoming?.playerTank?.effectiveStructureRepairPerSecond??analysis?.defence?.effectiveStructureRepairPerSecond??0)
+    +Number(averageIncoming?.playerTank?.effectivePassiveShieldPeak??analysis?.defence?.effectivePassiveShieldPeak??0);
+  const appliedWeaponDps=analysis?.damage?.weaponProfiles?.reduce((sum:number,weapon:any)=>sum+Number(weapon.targetApplication?.appliedDps??0),0)??0;
+  const profileAppliedDps=appliedWeaponDps+Number(analysis?.damage?.droneDps??0);
+  const explicitDroneFlight=fit.drones.some(item=>item.activeQuantity!=null);
+  const activeDroneTypeId=explicitDroneFlight?(fit.drones.find(item=>Number(item.activeQuantity??0)>0)?.typeId??0):0;
+  const seconds=(value:number|undefined)=>{
+    if(value==null||!Number.isFinite(value))return "--";
+    const safe=Math.abs(Math.round(value));
+    return `${Math.floor(safe/60)}m ${String(safe%60).padStart(2,"0")}s`;
+  };
+  const selectDroneFlight=(typeId:number)=>{
+    if(!typeId){onDroneFlightChange(null);return;}
+    const bay=fit.drones.find(item=>item.typeId===typeId);
+    if(!bay)return;
+    const limits=analysis?.damage?.droneLimits;
+    const maxActive=Math.max(0,Math.floor(Number(limits?.maxActiveDrones??5)));
+    const bandwidthEntry=(limits?.bandwidthByType??[]).find((item:any)=>Number(item.typeId)===typeId);
+    const bandwidth=Math.max(0,Number(bandwidthEntry?.bandwidth??0));
+    const byBandwidth=bandwidth>0?Math.floor(Number(limits?.bandwidthCapacity??0)/bandwidth):maxActive;
+    const activeCount=Math.max(0,Math.min(Number(bay.quantity||0),maxActive,byBandwidth||maxActive));
+    onDroneFlightChange(typeId,activeCount);
+  };
+  const applyScenario=(next:FitCombatScenarioState)=>{
+    const nextActivity=combatActivity(next.activity);
+    const nextSite=combatSite(next);
+    onScenarioChange(next);
+    onNpcTargetChange(0);
+    onDamageProfilePresetChange(nextActivity.factionSelectable?next.faction:nextActivity.defaultFaction);
+    onTargetProfileChange(nextSite.profile);
+    if(next.activity==="abyss"){
+      const tier=abyssSelection.enabled?abyssSelection.tier:5;
+      const validPenalties=(tier<=3?[0.3,0.5]:[0.5,0.7]) as Array<0.3|0.5|0.7>;
+      onAbyssSelectionChange({...abyssSelection,enabled:true,tier,penalty:validPenalties.includes(abyssSelection.penalty)?abyssSelection.penalty:validPenalties.at(-1)!,roomKey:"all"});
+    }else{
+      onAbyssSelectionChange({...abyssSelection,enabled:false,roomKey:"all"});
+    }
+  };
+  const chooseActivity=(id:CombatActivityId)=>{
+    const nextActivity=combatActivity(id);
+    applyScenario({
+      activity:id,
+      space:nextActivity.spaces[0]?.value??"any",
+      faction:nextActivity.defaultFaction,
+      site:(id==="ded"?(DED_COMPLEX_NAMES[nextActivity.defaultFaction]?.[0]?.rating?`ded-${DED_COMPLEX_NAMES[nextActivity.defaultFaction]![0].rating}`:nextActivity.sites[0]?.id):nextActivity.sites[0]?.id)??"manual",
+      abyssHull:scenario.abyssHull,
+    });
+  };
+  const chooseSpace=(space:string)=>{
+    const option=activity.spaces.find(item=>item.value===space);
+    if(option?.faction){
+      const candidate={...scenario,space,faction:option.faction};
+      const sites=combatSitesFor(candidate);
+      const resolved={...candidate,site:sites.some(item=>item.id===candidate.site)?candidate.site:(sites[0]?.id??candidate.site)};
+      onScenarioChange(resolved);
+      onNpcTargetChange(0);
+      onDamageProfilePresetChange(option.faction);
+      onTargetProfileChange(combatSite(resolved).profile);
+      return;
+    }
+    onScenarioChange({...scenario,space});
+  };
+  const chooseSite=(siteId:string)=>{
+    const next={...scenario,site:siteId};
+    onScenarioChange(next);
+    onNpcTargetChange(0);
+    onTargetProfileChange(combatSite(next).profile);
+  };
+  const chooseFaction=(faction:NpcDamagePreset)=>{
+    const candidate={...scenario,faction};
+    const sites=combatSitesFor(candidate);
+    const resolved={...candidate,site:sites.some(item=>item.id===candidate.site)?candidate.site:(sites[0]?.id??candidate.site)};
+    onScenarioChange(resolved);
+    onNpcTargetChange(0);
+    onDamageProfilePresetChange(faction);
+    onTargetProfileChange(combatSite(resolved).profile);
+  };
+  const chooseAbyssTier=(tier:AbyssFitterSelection["tier"])=>{
+    const validPenalties=(tier<=3?[0.3,0.5]:[0.5,0.7]) as Array<0.3|0.5|0.7>;
+    onNpcTargetChange(0);
+    onAbyssSelectionChange({...abyssSelection,enabled:true,tier,penalty:validPenalties.includes(abyssSelection.penalty)?abyssSelection.penalty:validPenalties.at(-1)!,roomKey:"all"});
+  };
+  const strategy=[...activity.strategy,...(selectedSite.strategy??[])];
+  const recommendation=NPC_DAMAGE_PRESETS[damageProfilePreset];
+  const recommendedDamage = scenario.activity==="abyss"
+    ? ({electrical:"EM",exotic:"Kinetic",firestorm:"Thermal",gamma:"Explosive",dark:"Application / strongest flight"} as const)[abyssSelection.weather]
+    : recommendation.dealLabel;
+  const recommendedDroneTokens = recommendedDamage.startsWith("EM") ? ["Praetor","Infiltrator","Acolyte"]
+    : recommendedDamage.startsWith("Kinetic") ? ["Wasp","Vespa","Hornet"]
+    : recommendedDamage.startsWith("Thermal") ? ["Ogre","Hammerhead","Hobgoblin"]
+    : recommendedDamage.startsWith("Explosive") ? ["Berserker","Valkyrie","Warrior"] : [];
+  const recommendedFittedDrone = fit.drones.find(item=>recommendedDroneTokens.some(token=>item.name.includes(token)));
+  const room=abyss?.selectedRoom??abyss?.summary?.worstIncoming;
+  return <div className="fit-combat-scenario-stage">
+    <section className="combat-scenario-builder">
+      <header className="combat-scenario-builder-head">
+        <div><span>Combat Scenario</span><strong>{activity.label}</strong><small>{activity.description}</small></div>
+        <b>{selectedSite.label}</b>
+      </header>
+      <div className="combat-scenario-picker-grid">
+        <label><span>Scenario</span><select value={scenario.activity} onChange={event=>chooseActivity(event.target.value as CombatActivityId)}>{FIT_COMBAT_ACTIVITIES.map(item=><option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+        {scenario.activity==="abyss" ? <>
+          <label><span>Tier</span><select value={abyssSelection.tier} onChange={event=>chooseAbyssTier(Number(event.target.value) as AbyssFitterSelection["tier"])}>{([0,1,2,3,4,5,6] as AbyssFitterSelection["tier"][]).map(tier=><option key={tier} value={tier}>T{tier}</option>)}</select></label>
+          <label><span>Weather</span><select value={abyssSelection.weather} onChange={event=>onAbyssSelectionChange({...abyssSelection,enabled:true,weather:event.target.value as AbyssFitterSelection["weather"],roomKey:"all"})}>{ABYSS_WEATHER_OPTIONS.map(weather=><option key={weather.value} value={weather.value}>{weather.label}</option>)}</select></label>
+          <label><span>Ship class</span><select value={scenario.abyssHull} onChange={event=>onScenarioChange({...scenario,abyssHull:event.target.value as FitCombatScenarioState["abyssHull"]})}><option value="cruiser">Cruiser filament</option><option value="destroyer">Destroyer filament</option><option value="frigate">Frigate filament</option></select></label>
+          <label><span>Weather strength</span><select value={abyssSelection.penalty} onChange={event=>onAbyssSelectionChange({...abyssSelection,penalty:Number(event.target.value) as AbyssFitterSelection["penalty"]})}>{((abyssSelection.tier<=3?[0.3,0.5]:[0.5,0.7]) as Array<0.3|0.5|0.7>).map(value=><option key={value} value={value}>{Math.round(value*100)}%</option>)}</select></label>
+          <label className="combat-scenario-wide-control"><span>Room set</span><select value={abyssSelection.roomKey} onChange={event=>onAbyssSelectionChange({...abyssSelection,roomKey:event.target.value})}><option value="all">Average all documented rooms</option>{abyss?.rooms?.map((item:any)=><option key={item.key} value={item.key}>{item.name}</option>)}</select></label>
+        </> : <>
+          {activity.spaces.length>0&&<label><span>Area of space</span><select value={scenario.space} onChange={event=>chooseSpace(event.target.value)}>{activity.spaces.map(option=><option key={option.value} value={option.value}>{option.label}</option>)}</select></label>}
+          {activity.factionSelectable&&<label><span>Enemy / local faction</span><select value={scenario.faction} onChange={event=>chooseFaction(event.target.value as NpcDamagePreset)}><option value="omni">Unknown / mixed - omni</option>{COMBAT_FACTION_OPTIONS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label}</option>)}</select></label>}
+          <label className="combat-scenario-wide-control"><span>Site / escalation</span><select value={scenario.site} onChange={event=>chooseSite(event.target.value)}>{combatSitesFor(scenario).map(option=><option key={option.id} value={option.id}>{option.label}</option>)}</select></label>
+        </>}
+      </div>
+      <div className="combat-scenario-selection-note"><strong>{selectedSite.label}</strong><span>{selectedSite.detail}</span></div>
+    </section>
+
+    <div className="combat-scenario-dashboard">
+      <section className="combat-scenario-strategy">
+        <header><span>Run strategy</span><strong>Fit this encounter, not the paper number</strong></header>
+        <div className="combat-scenario-tags">
+          <span><small>Deal</small><b>{recommendedDamage}</b></span>
+          <span><small>Tank</small><b>{scenario.activity==="abyss"?"Abyss room average":recommendation.incomingLabel}</b></span>
+          <span><small>Target model</small><b>{Math.round(targetProfile.signatureRadiusM)} m µ {Math.round(targetProfile.rangeM/1000)} km</b></span>
+        </div>
+        <ol>{strategy.map((line,index)=><li key={index}>{line}</li>)}</ol>
+      </section>
+
+      <section className="combat-scenario-loadout">
+        <header><span>Damage loadout</span><strong>Use what you will actually launch</strong></header>
+        <div className="combat-scenario-drone-guidance"><span><small>Recommended damage</small><b>{recommendedDamage}</b></span><span><small>Best matching fitted flight</small><b>{recommendedFittedDrone?.name??"No matching fitted flight"}</b></span></div>
+        <label className="combat-scenario-drone-select"><span>Active fitted drone flight</span><select value={activeDroneTypeId} disabled={!fit.drones.length} onChange={event=>selectDroneFlight(Number(event.target.value))}>{fit.drones.length===0?<option value={0}>No drones fitted</option>:<><option value={0}>Auto / best legal flight</option>{fit.drones.filter(item=>item.typeId).map(item=><option key={item.typeId} value={item.typeId}>{item.name} x{item.quantity}</option>)}</>}</select></label>
+        <div className="combat-scenario-loadout-actions"><button type="button" onClick={onBrowseDrones}>Browse drones</button><small>Changing the flight updates drone DPS and the right-rail combat readout immediately.</small></div>
+        <div className="combat-scenario-live-grid">
+          <article><span>Paper DPS</span><strong>{analysis?.damage?analysis.damage.totalDps.toFixed(1):"--"}</strong></article>
+          <article><span>{abyssSelection.enabled?"Scenario DPS":"Applied profile DPS"}</span><strong>{averageTarget?averageTarget.trueDps.toFixed(1):analysis?.damage?profileAppliedDps.toFixed(1):"--"}</strong></article>
+          <article><span>Drone DPS</span><strong>{analysis?.damage?analysis.damage.droneDps.toFixed(1):"--"}</strong></article>
+          <article><span>Profile EHP</span><strong>{analysis?.defence?Math.round(analysis.defence.totalEhp).toLocaleString():"--"}</strong></article>
+          <article><span>Tank output</span><strong>{analysis?.defence?scenarioTank.toFixed(1)+" EHP/s":"--"}</strong></article>
+          <article><span>Cap state</span><strong>{analysis?.capacitor?(analysis.capacitor.stable?"Stable":seconds(analysis.capacitor.depletionSeconds)):"--"}</strong></article>
+        </div>
+      </section>
+    </div>
+
+    {scenario.activity==="abyss"&&<section className="combat-scenario-abyss-intel">
+      <header><div><span>Abyss live analysis</span><strong>{abyssScenarioLabel(abyssSelection.tier,abyssSelection.weather)}</strong></div><small>{abyss?.summary?.roomCount??0} documented room profiles</small></header>
+      {averageTarget&&averageIncoming?<>
+        <div className="combat-scenario-abyss-metrics">
+          <article><span>Average target DPS</span><strong>{averageTarget.trueDps.toFixed(1)}</strong><small>weather-adjusted target mix</small></article>
+          <article><span>Average incoming</span><strong>{averageIncoming.totalDps.toFixed(1)} DPS</strong><small>mean room pressure</small></article>
+          <article><span>Average hostiles</span><strong>{averageTarget.averageHostilesPerRoom.toFixed(1)}</strong><small>per documented room</small></article>
+          <article><span>Representative clear</span><strong>{seconds(abyss?.siteEstimate?.representative?.estimatedClearSeconds)}</strong><small>3-room estimate</small></article>
+          <article><span>Timer margin</span><strong>{seconds(abyss?.siteEstimate?.representative?.timerMarginSeconds)}</strong><small>{Number(abyss?.siteEstimate?.representative?.timerMarginSeconds??0)>=0?"spare":"over 20-minute limit"}</small></article>
+        </div>
+        <details className="combat-scenario-room-breakdown">
+          <summary><span>Room breakdown & exact NPC data</span><small>{abyss?.summary?.roomCount??0} room profiles</small></summary>
+          <div className="abyss-all-rooms-table">
+            <div className="abyss-table-row head"><span>Room</span><span>Hostiles</span><span>Incoming</span><span>Max ramp</span><span>Clear est.</span><span>Fit EHP</span></div>
+            {abyss?.rooms?.map((item:any)=><button type="button" className="abyss-table-row" key={item.key} onClick={()=>onAbyssSelectionChange({...abyssSelection,roomKey:item.key})}><span><strong>{item.name}</strong><small>{item.family}{item.variable?" · variable envelope":""}</small></span><span>{item.totalHostiles}</span><span>{item.incoming.totalDps.toFixed(1)}</span><span>{item.incoming.maxRamp.totalDps.toFixed(1)}</span><span>{seconds(item.clearSeconds)}</span><span>{Math.round(item.playerTank.totalEhp).toLocaleString()}</span></button>)}
+          </div>
+          {room&&<details className="abyss-exact-n`c-breakdown"><summary>Exact enemies for {room.name}</summary><div className="abyss-target-table"><div className="abyss-target-row head"><span>Enemy</span><span>Count</span><span>Weather HP</span><span>Resists S/A/H</span><span>NPC DPS</span><span>True DPS</span><span>TTK</span></div>{room.targets.map((target:any)=><div className="abyss-target-row" key={target.typeId}><span><strong>{target.name}</strong><small>Type {target.typeId}</small></span><span>{target.count}</span><span>{Math.round(target.weatherHp.total).toLocaleString()}</span><span><small>S {target.weatherResists.shield.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small><small>A {target.weatherResists.armor.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small><small>H {target.weatherResists.hull.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small></span><span>{target.outgoingDpsTotal.toFixed(1)} / {target.outgoingDpsMaxTotal.toFixed(1)}</span><span>{target.trueDps.toFixed(1)}</span><span>{seconds(target.ttkSeconds)}</span></div>)}</div></details>}
+        </details>
+      </>:<div className="combat-scenario-empty">Calculating the selected Abyss tier and weather against the current fit...</div>}
+    </section>}
+  </div>;
+}
+
+
 function FitPerformance({
   analysis,
   status,
   fit,
-  targetProfile,
-  onTargetProfileChange,
-  damageProfilePreset,
-  onDamageProfilePresetChange,
-  abyssSelection,
-  onAbyssSelectionChange,
+  characters,
+  characterId,
+  onCharacterChange,
   externalEffects,
   boosterSideEffects,
   selectedBoosterSideEffectKeys,
@@ -1876,17 +2456,18 @@ function FitPerformance({
   onAddExternalEffect,
   onUpdateExternalEffect,
   onRemoveExternalEffect,
+  onModuleStateChange,
+  onExportToEve,
+  eveExporting,
+  eveExportStatus,
   onExportToPlanner,
 }: {
   analysis: any;
   status: string;
   fit: Fit;
-  targetProfile: { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number };
-  onTargetProfileChange(value: { rangeM: number; signatureRadiusM: number; transverseVelocityMps: number; velocityMps: number }): void;
-  damageProfilePreset: NpcDamagePreset;
-  onDamageProfilePresetChange(value: NpcDamagePreset): void;
-  abyssSelection: AbyssFitterSelection;
-  onAbyssSelectionChange(value: AbyssFitterSelection): void;
+  characters: FittingCharacter[];
+  characterId: string;
+  onCharacterChange(id:string):void;
   externalEffects: ExternalEffectSelection[];
   boosterSideEffects: BoosterSideEffectOption[];
   selectedBoosterSideEffectKeys: string[];
@@ -1894,6 +2475,10 @@ function FitPerformance({
   onAddExternalEffect(input: { kind: ExternalEffectKind; name: string; chargeName?: string }): Promise<string | null>;
   onUpdateExternalEffect(id: string, patch: Partial<ExternalEffectSelection>): void;
   onRemoveExternalEffect(id: string): void;
+  onModuleStateChange(rack: FitModuleRack, index: number, state: ModuleState): void;
+  onExportToEve(): Promise<void>;
+  eveExporting: boolean;
+  eveExportStatus: string;
   onExportToPlanner(): void;
 }) {
   const [externalKind, setExternalKind] = useState<ExternalEffectKind>("environment");
@@ -1930,7 +2515,7 @@ function FitPerformance({
     const burst=fleetBurstOptions.find(item=>item.id===fleetBurstTypeId);
     const charge=fleetBurstCharges.find(item=>item.id===fleetBurstChargeTypeId);
     if(!burst||!charge){setExternalStatus("Select a command burst and charge.");return;}
-    setExternalStatus("Applying fleet boost from current CCP SDE...");
+    setExternalStatus("Applying fleet boost...");
     const error=await onAddExternalEffect({kind:"command",name:burst.name,chargeName:charge.name});
     setExternalStatus(error??(burst.name+" + "+charge.name+" applied to this fit."));
   };
@@ -1939,88 +2524,25 @@ function FitPerformance({
     onSelectedBoosterSideEffectKeysChange(selectedBoosterSideEffectKeys.includes(key)?selectedBoosterSideEffectKeys.filter(item=>item!==key):[...selectedBoosterSideEffectKeys,key]);
   };
   const submitExternalEffect = async () => {
-    setExternalStatus("Resolving from local CCP SDE...");
+    setExternalStatus("Resolving effect...");
     try {
       const error = await onAddExternalEffect({ kind: externalKind, name: externalName, chargeName: externalCharge || undefined });
       if (error) setExternalStatus(error);
       else { setExternalStatus("External effect added."); setExternalName(""); setExternalCharge(""); }
     } catch (error) { setExternalStatus(error instanceof Error ? error.message : "Could not add external effect."); }
   };
-  const abyssResult = analysis?.abyss;
-  const validAbyssPenalties = (abyssSelection.tier <= 3 ? [0.3,0.5] : [0.5,0.7]) as Array<0.3|0.5|0.7>;
-  const abyssDisplayRoom = abyssResult?.selectedRoom ?? abyssResult?.summary?.worstIncoming;
-  const setAbyssTier = (tier:AbyssFitterSelection["tier"]) => {
-    const valid=(tier<=3?[0.3,0.5]:[0.5,0.7]) as Array<0.3|0.5|0.7>;
-    onAbyssSelectionChange({...abyssSelection,tier,penalty:valid.includes(abyssSelection.penalty)?abyssSelection.penalty:valid[valid.length-1],roomKey:"all"});
-  };
-  const abyssSeconds = (value:number) => !Number.isFinite(value) ? "--" : value >= 60 ? Math.floor(value/60)+"m "+Math.round(value%60)+"s" : value.toFixed(1)+"s";
-  const abyssResists = (values:number[]) => values.map(value=>Math.round(value*100)+"%").join(" / ");
   return (
     <div className="fit-performance">
-      <div className="performance-note">
-        <strong>{status}</strong>
-        <small>
-          Offline CCP dogma validates fitting resources, slots, hardpoints and
-          character requirements. Effect simulation is being expanded toward
-          full Pyfa parity.
-        </small>
-      </div>
-      <section className="abyss-room-profile">
-        <div className="abyss-room-profile-head">
-          <div><p className="eyebrow">ABYSS SIMULATION</p><h3>Abyss Room Profile</h3><small>Tier-aware room compositions, CCP NPC DOGMA and weather-adjusted fit/target math.</small></div>
-          <label className="abyss-room-toggle"><input type="checkbox" checked={abyssSelection.enabled} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,enabled:event.target.checked})}/><span>Apply Abyss profile</span></label>
-        </div>
-        <div className="abyss-room-controls">
-          <label>Tier<select value={abyssSelection.tier} onChange={(event)=>setAbyssTier(Number(event.target.value) as AbyssFitterSelection["tier"])}>{[0,1,2,3,4,5,6].map(tier=><option key={tier} value={tier}>T{tier}</option>)}</select></label>
-          <label>Weather<select value={abyssSelection.weather} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,weather:event.target.value as AbyssFitterSelection["weather"],roomKey:"all"})}><option value="electrical">Electrical</option><option value="exotic">Exotic</option><option value="firestorm">Firestorm</option><option value="gamma">Gamma</option><option value="dark">Dark</option></select></label>
-          <label>Weather strength<select value={abyssSelection.penalty} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,penalty:Number(event.target.value) as AbyssFitterSelection["penalty"]})}>{validAbyssPenalties.map(value=><option key={value} value={value}>{Math.round(value*100)}%</option>)}</select></label>
-          <label>Room<select disabled={!abyssSelection.enabled || !abyssResult?.rooms?.length} value={abyssSelection.roomKey} onChange={(event)=>onAbyssSelectionChange({...abyssSelection,roomKey:event.target.value})}><option value="all">All possible rooms</option>{abyssResult?.rooms?.map((room:any)=><option key={room.key} value={room.key}>{room.name} - {room.family}</option>)}</select></label>
-        </div>
-        {!abyssSelection.enabled && <div className="abyss-room-muted">Enable the profile to apply weather to the fit and evaluate every verified room composition in Sage's current dataset.</div>}
-        {abyssSelection.enabled && abyssResult && <>
-          <div className="abyss-room-summary">
-            <article><span>Known rooms</span><strong>{abyssResult.summary.roomCount}</strong><small>T{abyssResult.tier} - {abyssResult.weather} - {Math.round(abyssResult.penalty*100)}%</small></article>
-            {abyssResult.summary.unclearableRoomCount > 0 && <article><span>Cannot clear</span><strong>{abyssResult.summary.unclearableRoomCount}</strong><small>known room{abyssResult.summary.unclearableRoomCount===1?"":"s"} at current application/range</small></article>}
-            <article><span>Worst incoming</span><strong>{abyssResult.summary.worstIncoming?.incoming.totalDps.toFixed(1) ?? "-"} DPS</strong><small>{abyssResult.summary.worstIncoming?.name ?? "No room"}</small></article>
-            <article><span>Max-ramp worst</span><strong>{abyssResult.summary.worstMaxRamp?.incoming.maxRamp.totalDps.toFixed(1) ?? "-"} DPS</strong><small>{abyssResult.summary.worstMaxRamp?.name ?? "No room"}</small></article>
-            <article><span>Longest clear</span><strong>{abyssResult.summary.longestClear ? abyssSeconds(abyssResult.summary.longestClear.clearSeconds) : "-"}</strong><small>{abyssResult.summary.longestClear?.name ?? "No room"}</small></article>
-            <article><span>Representative site</span><strong>{abyssSeconds(abyssResult.siteEstimate.representative.estimatedClearSeconds)}</strong><small>3-room known-catalogue mean</small></article>
-            <article><span>Timer margin</span><strong>{abyssSeconds(Math.abs(abyssResult.siteEstimate.representative.timerMarginSeconds))}</strong><small>{abyssResult.siteEstimate.representative.timerMarginSeconds >= 0 ? "spare vs 20-minute timer" : "OVER 20-MINUTE TIMER"}</small></article>
-            <article><span>Heavy known site</span><strong>{abyssSeconds(abyssResult.siteEstimate.heavyKnown.estimatedClearSeconds)}</strong><small>3x longest known room envelope</small></article>
-            <article><span>Hardest target</span><strong>{abyssResult.summary.hardestTarget?.trueDps.toFixed(1) ?? "-"} true DPS</strong><small>{abyssResult.summary.hardestTarget?.name ?? "No target"}</small></article>
-            <article><span>Highest effective EHP</span><strong>{abyssResult.summary.highestEhpTarget && Number.isFinite(abyssResult.summary.highestEhpTarget.effectiveHpAgainstFit) ? Math.round(abyssResult.summary.highestEhpTarget.effectiveHpAgainstFit).toLocaleString() : "-"}</strong><small>{abyssResult.summary.highestEhpTarget?.name ?? "No target"}</small></article>
-          </div>
-          <div className="abyss-room-muted"><strong>Estimated clear time</strong> includes combat and drone navigation. Ship travel time is not included. Target positions and routing are estimated because the current Abyss room catalogue has compositions but no exact coordinates.</div>
-          <div className="abyss-worst-damage-grid">
-            {[["EM",abyssResult.summary.worstEm,"em"],["Thermal",abyssResult.summary.worstThermal,"thermal"],["Kinetic",abyssResult.summary.worstKinetic,"kinetic"],["Explosive",abyssResult.summary.worstExplosive,"explosive"]].map(([label,room,key]:any)=><button type="button" key={key} onClick={()=>room&&onAbyssSelectionChange({...abyssSelection,roomKey:room.key})}><span>Worst {label}</span><strong>{room?.incoming?.[key]?.toFixed(1) ?? "-"} DPS</strong><small>{room?.name ?? "No room"}</small></button>)}
-          </div>
-          {abyssSelection.roomKey === "all" && <div className="abyss-all-rooms-table"><div className="abyss-table-row head"><span>Room</span><span>Hostiles</span><span>Incoming</span><span>Max ramp</span><span>Clear est.</span><span>Fit EHP</span></div>{abyssResult.rooms.map((room:any)=><button type="button" className="abyss-table-row" key={room.key} onClick={()=>onAbyssSelectionChange({...abyssSelection,roomKey:room.key})}><span><strong>{room.name}</strong><small>{room.family}{room.variable?" - variable envelope":""}</small></span><span>{room.totalHostiles}</span><span>{room.incoming.totalDps.toFixed(1)}</span><span>{room.incoming.maxRamp.totalDps.toFixed(1)}</span><span>{abyssSeconds(room.clearSeconds)}</span><span>{Math.round(room.playerTank.totalEhp).toLocaleString()}</span></button>)}</div>}
-          {abyssDisplayRoom && <div className="abyss-room-detail">
-            <div className="abyss-room-detail-head"><div><strong>{abyssDisplayRoom.name}</strong><small>{abyssSelection.roomKey === "all" ? "Worst incoming room shown while All possible is selected" : abyssDisplayRoom.family}</small>{abyssDisplayRoom.notes&&<small>{abyssDisplayRoom.notes}</small>}</div><div><span>{abyssDisplayRoom.incoming.totalDps.toFixed(1)} incoming DPS</span><span>{Math.round(abyssDisplayRoom.playerTank.totalEhp).toLocaleString()} fit EHP</span><span>{abyssSeconds(abyssDisplayRoom.combatSeconds)} combat</span><span>{abyssSeconds(abyssDisplayRoom.droneNavigationSeconds)} drone travel</span><span>{abyssSeconds(abyssDisplayRoom.clearSeconds)} estimated clear</span></div></div>
-            <div className="abyss-damage-vector"><span>EM {abyssDisplayRoom.incoming.em.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.em*100).toFixed(0)}%</span><span>TH {abyssDisplayRoom.incoming.thermal.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.thermal*100).toFixed(0)}%</span><span>KI {abyssDisplayRoom.incoming.kinetic.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.kinetic*100).toFixed(0)}%</span><span>EX {abyssDisplayRoom.incoming.explosive.toFixed(1)} - {(abyssDisplayRoom.incoming.shares.explosive*100).toFixed(0)}%</span></div>
-            <div className="abyss-player-tank"><span>Active tank {(abyssDisplayRoom.playerTank.effectiveShieldRepairPerSecond+abyssDisplayRoom.playerTank.effectiveArmorRepairPerSecond+abyssDisplayRoom.playerTank.effectiveStructureRepairPerSecond).toFixed(1)} EHP/s</span><span>Passive shield {abyssDisplayRoom.playerTank.effectivePassiveShieldPeak.toFixed(1)} EHP/s</span></div>
-            <div className="abyss-target-table"><div className="abyss-target-row head"><span>Enemy</span><span>Count</span><span>HP base to weather</span><span>Weather resists S/A/H (EM/TH/KI/EX)</span><span>NPC DPS base / max</span><span>True DPS</span><span>TTK each</span></div>{abyssDisplayRoom.targets.map((target:any)=><div className="abyss-target-row" key={target.typeId}><span><strong>{target.name}</strong><small>{target.alternatives.length>1?"Worst envelope of: "+target.alternatives.map((item:any)=>item.name).join(", "):"Type "+target.typeId}</small></span><span>{target.minCount===target.maxCount?target.count:target.minCount+"-"+target.maxCount+" to "+target.count}</span><span>{Math.round(target.baseHp.total).toLocaleString()} to {Math.round(target.weatherHp.total).toLocaleString()}</span><span><small>S {abyssResists(target.weatherResists.shield)}</small><small>A {abyssResists(target.weatherResists.armor)}</small><small>H {abyssResists(target.weatherResists.hull)}</small></span><span>{target.outgoingDpsTotal.toFixed(1)} / {target.outgoingDpsMaxTotal.toFixed(1)}</span><span>{target.trueDps.toFixed(1)}</span><span>{abyssSeconds(target.ttkSeconds)}</span></div>)}</div>
-          </div>}
-          <details className="abyss-room-limitations"><summary>Data provenance & simulation limits</summary><p>{abyssResult.provenance.roomSource}; combat stats: {abyssResult.provenance.staticStats}; telemetry cross-check: {abyssResult.provenance.telemetryCrossCheck}.</p>{abyssResult.limitations.map((text:string,index:number)=><p key={index}>{text}</p>)}</details>
-        </>}
-      </section>
-      <h3>Damage profile</h3>
-      <div className="damage-profile-controls"><label>Incoming NPC damage{analysis?.damage?.target&&<small> Exact target {analysis.damage.target.name} overrides this preset.</small>}<select disabled={Boolean(analysis?.damage?.target)} value={damageProfilePreset} onChange={(event) => onDamageProfilePresetChange(event.target.value as NpcDamagePreset)}>{NPC_DAMAGE_PRESET_KEYS.map(key=><option key={key} value={key}>{NPC_DAMAGE_PRESETS[key].label} - {NPC_DAMAGE_PRESETS[key].incomingLabel}</option>)}</select></label></div>
-      <h3>Target application</h3>
-      <div className="target-profile-controls">
-        <label>Range km<input type="number" min="0" step="1" value={targetProfile.rangeM / 1000} onChange={(event) => onTargetProfileChange({ ...targetProfile, rangeM: Math.max(0, Number(event.target.value) * 1000) })} /></label>
-        <label>Signature m<input type="number" min="1" step="1" value={targetProfile.signatureRadiusM} onChange={(event) => onTargetProfileChange({ ...targetProfile, signatureRadiusM: Math.max(1, Number(event.target.value)) })} /></label>
-        <label>Transversal m/s<input type="number" min="0" step="10" value={targetProfile.transverseVelocityMps} onChange={(event) => onTargetProfileChange({ ...targetProfile, transverseVelocityMps: Math.max(0, Number(event.target.value)) })} /></label>
-        <label>Velocity m/s<input type="number" min="0" step="10" value={targetProfile.velocityMps} onChange={(event) => onTargetProfileChange({ ...targetProfile, velocityMps: Math.max(0, Number(event.target.value)) })} /></label>
-      </div>
-      <h3>External effects</h3>
-      <div className="external-effects-panel">
+      <div className="performance-status"><strong>{status}</strong></div>
+      <details className="performance-toolbox">
+        <summary><span>Run modifiers</span><small>{externalEffects.length} active effect{externalEffects.length === 1 ? "" : "s"} · boosts, boosters & environments</small></summary>
+        <div className="external-effects-panel">
         {boosterSideEffects.length>0&&<div className="booster-side-effect-picker">
           <div><strong>Booster side effects</strong><small>Tick the penalties that actually rolled. Base booster bonuses are always applied; these are source-specific random side effects.</small></div>
           <div className="booster-side-effect-options">{boosterSideEffects.map(option=>{const key=option.boosterTypeId+":"+option.effectId;return <label key={key}><input type="checkbox" checked={selectedBoosterSideEffectKeys.includes(key)} onChange={()=>toggleBoosterSideEffect(option)}/><span><strong>{option.effectName}</strong><small>{option.boosterName} - {(option.chance*100).toFixed(0)}% roll chance</small></span></label>})}</div>
         </div>}
         <div className="fleet-boost-quick-pick">
-          <div><strong>Fleet boosts</strong><small>Pick a command burst and charge; Sage applies the actual CCP command-burst modifiers to this fit.</small></div>
+          <div><strong>Fleet boosts</strong><small>Pick a command burst and charge to model the active boost.</small></div>
           <select aria-label="Fleet command burst" value={fleetBurstTypeId} onChange={(event)=>setFleetBurstTypeId(Number(event.target.value))} disabled={!fleetBurstOptions.length}>
             {!fleetBurstOptions.length&&<option value={0}>No command bursts found</option>}
             {fleetBurstOptions.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}
@@ -2033,16 +2555,17 @@ function FitPerformance({
         </div>
         <div className="external-effect-add">
           <label>Type<select value={externalKind} onChange={(event) => setExternalKind(event.target.value as ExternalEffectKind)}><option value="environment">Environment</option><option value="booster">Booster</option><option value="projected">Projected module</option><option value="command">Command burst</option></select></label>
-          <label>Exact CCP name<input value={externalName} onChange={(event) => setExternalName(event.target.value)} placeholder={externalKind === "environment" ? "Class 1 Pulsar Effects" : externalKind === "booster" ? "Strong Blue Pill Booster" : externalKind === "command" ? "Shield Command Burst II" : "Stasis Webifier II"} /></label>
+          <label>Effect name<input value={externalName} onChange={(event) => setExternalName(event.target.value)} placeholder={externalKind === "environment" ? "Class 1 Pulsar Effects" : externalKind === "booster" ? "Strong Blue Pill Booster" : externalKind === "command" ? "Shield Command Burst II" : "Stasis Webifier II"} /></label>
           {(externalKind === "projected" || externalKind === "command") && <label>Charge / script<input value={externalCharge} onChange={(event) => setExternalCharge(event.target.value)} placeholder={externalKind === "command" ? "Shield Extension Charge" : "Optional script"} /></label>}
           <button type="button" onClick={submitExternalEffect}>Add effect</button>
         </div>
         {externalStatus && <small className="external-effect-status">{externalStatus}</small>}
         {externalEffects.length > 0 && <div className="external-effect-list">{externalEffects.map((item) => <div className="external-effect-row" key={item.id}><div><strong>{item.name}</strong><small>{item.kind}{item.chargeName ? <> - {item.chargeName}</> : null}</small></div>{(item.kind === "projected" || item.kind === "command") && <><label>State<select value={item.state ?? "active"} onChange={(event) => onUpdateExternalEffect(item.id, { state: event.target.value as ModuleState })}><option value="active">Active</option><option value="overheated">Overheated</option></select></label><label>Effect %<input type="number" min="0" max="100" step="1" value={Math.round((item.effectiveness ?? 1) * 100)} onChange={(event) => onUpdateExternalEffect(item.id, { effectiveness: Math.max(0, Math.min(1, Number(event.target.value) / 100)) })} /></label></>}<button type="button" onClick={() => onRemoveExternalEffect(item.id)}>Remove</button></div>)}</div>}
-      </div>
+        </div>
+      </details>
       {analysis && (
         <>
-          <div className="performance-summary">
+          <div className="performance-summary fit-performance-overview">
             <article>
               <span>Pilot</span>
               <strong>{analysis.character}</strong>
@@ -2070,9 +2593,10 @@ function FitPerformance({
               <small>Modules grouped by imported fitting slots</small>
             </article>
           </div>
-          <h3>Base hull performance</h3>
+          <div className="fit-performance-section-title"><span>Ship performance</span><small>Current fit with selected pilot skills</small></div>
+          <div className="fit-performance-matrix">
           {analysis.resources && (
-            <div className="base-stat-grid">
+            <div className="base-stat-grid fit-performance-group performance-resources" data-title="Fitting resources">
               {(["cpu", "powergrid", "calibration"] as const).map((key) => (
                 <article key={key}>
                   <span>{key}</span>
@@ -2082,7 +2606,7 @@ function FitPerformance({
             </div>
           )}
           {analysis.capacitor && (
-            <div className="base-stat-grid">
+            <div className="base-stat-grid fit-performance-group performance-capacitor" data-title="Capacitor">
               <article><span>Capacitor capacity</span><strong>{analysis.capacitor.capacityGj.toFixed(1)} GJ</strong></article>
               <article><span>Recharge time</span><strong>{analysis.capacitor.rechargeSeconds.toFixed(1)} s</strong></article>
               <article><span>Capacitor demand</span><strong>{analysis.capacitor.demandGjPerSecond.toFixed(2)} GJ/s</strong></article>
@@ -2092,7 +2616,7 @@ function FitPerformance({
             </div>
           )}
           {analysis.damage && (
-            <div className="base-stat-grid">
+            <div className="base-stat-grid fit-performance-group performance-firepower" data-title="Firepower">
               <article><span>Raw paper DPS</span><strong>{analysis.damage.totalDps.toFixed(1)}</strong></article>
               <article><span>Weapon / drone DPS</span><strong>{analysis.damage.weaponDps.toFixed(1)} / {analysis.damage.droneDps.toFixed(1)}</strong></article>
               <article><span>Total volley</span><strong>{analysis.damage.totalVolley.toFixed(1)}</strong></article>
@@ -2101,7 +2625,7 @@ function FitPerformance({
             </div>
           )}
           {analysis.defence && (
-            <div className="base-stat-grid">
+            <div className="base-stat-grid fit-performance-group performance-defense" data-title="Defense">
               <article><span>Profile EHP</span><strong>{Math.round(analysis.defence.totalEhp).toLocaleString()}</strong></article>
               <article><span>Shield / armor / hull</span><strong>{analysis.defence.shieldHp} / {analysis.defence.armorHp} / {analysis.defence.structureHp}</strong></article>
               <article><span>Raw active repair</span><strong>{(analysis.defence.shieldRepairPerSecond + analysis.defence.armorRepairPerSecond + analysis.defence.structureRepairPerSecond).toFixed(1)} HP/s</strong></article>
@@ -2110,19 +2634,31 @@ function FitPerformance({
             </div>
           )}
           {analysis.navigation && analysis.targeting && (
-            <div className="base-stat-grid">
+            <div className="base-stat-grid fit-performance-group performance-navigation" data-title="Navigation & targeting">
               <article><span>Align time</span><strong>{analysis.navigation.alignSeconds.toFixed(2)} s</strong></article>
               <article><span>Base speed / warp</span><strong>{analysis.navigation.maximumVelocity.toFixed(0)} m/s - {analysis.navigation.warpSpeedAuPerSecond.toFixed(1)} AU/s</strong></article>
               <article><span>Targeting</span><strong>{(analysis.targeting.maximumRangeM / 1000).toFixed(1)} km - {analysis.targeting.scanResolution.toFixed(0)} mm</strong></article>
               <article><span>Signature / sensors</span><strong>{analysis.targeting.signatureRadiusM.toFixed(0)} m - {analysis.targeting.sensorStrength.toFixed(1)}</strong></article>
             </div>
           )}
+          </div>
           {analysis.heat && (
-            <>
-              <h3>Heat & overload</h3>
-              <div className="performance-note">
-                <strong>Expected heat behaviour</strong>
-                <small>Heat damage is probabilistic in EVE. Burnout values are expected outcomes from CCP rack heat, occupied-slot and attenuation mechanics, not guaranteed timers.</small>
+            <details className="performance-detail">
+              <summary><span>Heat & overload</span><small>Rack heat and expected burnout</small></summary>
+              <div className="performance-detail-body">
+              <div className="performance-overheat-controls">
+                {(["high","mid","low"] as const).map((rack) => {
+                  const heatRack = analysis.heat.racks.find((row:any) => row.rack === rack);
+                  const rows = fit[rack].map((item,index) => ({ item, index, heat: heatRack?.modules?.find((module:any) => Number(module.typeId) === Number(item.typeId)) })).filter((row) => Number(row.heat?.heatDamage ?? 0) > 0 && Number(row.heat?.cycleSeconds ?? 0) > 0);
+                  if (!rows.length) return null;
+                  const heated = rows.filter((row) => row.item.state === "overheated").length;
+                  return <section className={"performance-overheat-rack "+rack} key={rack}>
+                    <header><span>{rack.toUpperCase()} RACK</span><small>{heated}/{rows.length} overheated</small></header>
+                    <div>{rows.map(({item,index,heat}) => <button type="button" className={item.state === "overheated" ? "active" : ""} key={rack+"-"+index+"-"+(item.typeId ?? item.name)} onClick={() => onModuleStateChange(rack,index,item.state === "overheated" ? "active" : "overheated")}>
+                      <span>{item.name}</span><b>{item.state === "overheated" ? "OVERHEATED" : "OVERHEAT"}</b><small>{Number(heat?.cycleSeconds ?? 0).toFixed(1)}s cycle</small>
+                    </button>)}</div>
+                  </section>;
+                })}
               </div>
               {analysis.heat.racks.some((rack: any) => rack.overheatedModules > 0) ? analysis.heat.racks.filter((rack: any) => rack.overheatedModules > 0).map((rack: any) => (
                 <div key={rack.rack}>
@@ -2143,35 +2679,31 @@ function FitPerformance({
                   </div>
                 </div>
               )) : <div className="performance-note"><small>No fitted modules are currently set to Overheated.</small></div>}
-            </>
+              </div>
+            </details>
           )}
           {(analysis.magazines?.length > 0 || analysis.capacitor?.capacitorInjectors?.length > 0 || analysis.commandBurstSources?.length > 0 || analysis.projectedSources?.length > 0 || analysis.environmentSources?.length > 0 || analysis.fighterSystem?.capacityM3 > 0) && (
-            <>
-              <h3>Advanced simulation</h3>
-              <div className="base-stat-grid">
+            <details className="performance-detail">
+              <summary><span>Advanced simulation</span><small>Ammo, injectors and external effects</small></summary>
+              <div className="performance-detail-body">
+                <div className="base-stat-grid">
                 {analysis.magazines?.map((magazine:any,index:number)=><article key={`mag-${magazine.typeId}-${index}`}><span>{magazine.name} magazine</span><strong>{magazine.rawCharges} x {magazine.charge}</strong><small>{magazine.cycleSeconds>0?`${magazine.cyclesPerMagazine} cycles - ${magazine.reloadSeconds.toFixed(1)}s reload - ${(magazine.sustainedDutyCycle*100).toFixed(1)}% duty`:"Loaded script / non-cycling charge"}</small></article>)}
                 {analysis.capacitor?.capacitorInjectors?.map((injector:any,index:number)=><article key={`cap-${injector.typeId}-${index}`}><span>{injector.name}</span><strong>{injector.sustainedGjPerSecond.toFixed(1)} GJ/s sustained</strong><small>{injector.injectionPerCycleGj.toFixed(0)} GJ per cycle - {injector.charge}</small></article>)}
                 {analysis.commandBurstSources?.map((source:any,index:number)=><article key={`burst-${source.typeId}-${index}`}><span>Fleet boost - {source.name}</span><strong>{source.charge??"Command burst"}</strong><small>{source.buffs.map((buff:any)=>`${buff.description}: ${Number(buff.value).toFixed(2)}`).join(" - ")}</small></article>)}
-                {analysis.projectedSources?.map((source:any,index:number)=><article key={`projected-${source.typeId}-${index}`}><span>Projected - {source.name}</span><strong>{Math.round(Number(source.effectiveness??1)*100)}% effectiveness</strong><small>{source.effects?.join(" - ")||"Projected DOGMA effects applied"}</small></article>)}
-                {analysis.environmentSources?.map((source:any,index:number)=><article key={`environment-${source.typeId}-${index}`}><span>Environment</span><strong>{source.name}</strong><small>Environment DOGMA modifiers applied</small></article>)}
+                {analysis.projectedSources?.map((source:any,index:number)=><article key={`projected-${source.typeId}-${index}`}><span>Projected - {source.name}</span><strong>{Math.round(Number(source.effectiveness??1)*100)}% effectiveness</strong><small>{source.effects?.join(" - ")||"Projected effects applied"}</small></article>)}
+                {analysis.environmentSources?.map((source:any,index:number)=><article key={`environment-${source.typeId}-${index}`}><span>Environment</span><strong>{source.name}</strong><small>Environment modifiers active</small></article>)}
                 {analysis.fighterSystem?.capacityM3>0&&<article><span>Fighter system</span><strong>{analysis.fighterSystem.activeSquadrons} / {analysis.fighterSystem.tubes} active tubes</strong><small>{analysis.fighterSystem.usedM3.toFixed(0)} / {analysis.fighterSystem.capacityM3.toFixed(0)} m3 fighter hangar used</small></article>}
               </div>
-            </>
+              </div>
+            </details>
           )}
           {analysis.issues?.length > 0 && <div className="requirement-list">{analysis.issues.map((issue: any, index: number) => <article className={issue.level === "error" ? "missing" : "ready"} key={`${issue.code}-${index}`}><strong>{issue.item ?? issue.code}</strong><small>{issue.message}</small></article>)}</div>}
-          <div className="base-stat-grid">
-            {analysis.baseStats.map((stat: any) => (
-              <article key={stat.id}>
-                <span>{stat.label}</span>
-                <strong>
-                  {Math.round(stat.value).toLocaleString()} {stat.unit}
-                </strong>
-              </article>
-            ))}
-          </div>
-          <div className="planner-panel-title">
-            <div><p className="eyebrow">FIT PROGRESSION</p><h3>Continue in Activity Command</h3></div>
-            <button onClick={onExportToPlanner}>Export to Activity Command Ship Planner</button>
+          <div className="fit-eve-export-panel">
+            <div><p className="eyebrow">EVE FIT EXPORT</p><h3>Send this fit straight to EVE</h3></div>
+            <label><span>Character</span><select value={characterId} onChange={(event)=>onCharacterChange(event.target.value)} aria-label="EVE export character">{characters.map((character)=><option key={character.characterId} value={character.characterId}>{character.character.name}</option>)}</select></label>
+            <button className="primary" type="button" disabled={!characterId || eveExporting} onClick={()=>void onExportToEve()}>{eveExporting ? "Exporting..." : "Export fit to EVE"}</button>
+            <button className="secondary" type="button" onClick={onExportToPlanner}>Send to Activity Command</button>
+            {eveExportStatus && <small className="fit-eve-export-status">{eveExportStatus}</small>}
           </div>
         </>
       )}
@@ -2394,6 +2926,13 @@ function FittedSlotTile({
     : states;
   const defaultState: ModuleState = capabilities ? (capabilities.canActivate ? "active" : "online") : (states.includes("active") ? "active" : "online");
   const currentState=allowedStates.includes(item.state??defaultState)?(item.state??defaultState):defaultState;
+  const controlOnState:ModuleState=capabilities?.canActivate?"active":"online";
+  const controlState:ModuleState=currentState==="offline"?"offline":currentState==="overheated"?"overheated":controlOnState;
+  const stateLights:Array<{state:ModuleState;className:string;title:string}>=capabilities&&states.includes("offline")?[
+    {state:controlOnState,className:"fit-module-state-light-on",title:"ON"},
+    ...(capabilities.canOverheat?[{state:"overheated" as ModuleState,className:"fit-module-state-light-overheat",title:"OVERHEAT"}]:[]),
+    {state:"offline",className:"fit-module-state-light-off",title:"OFF"},
+  ]:[];
   useEffect(()=>{if(item.state&&!allowedStates.includes(item.state))onStateChange(defaultState);},[item.state,defaultState,allowedStates.join("|")]);
   const allowCharge=(event:DragEvent<HTMLElement>)=>{if(event.dataTransfer.types.includes(FITTING_DRAG_MIME)){event.preventDefault();event.dataTransfer.dropEffect="copy";}};
   return (
@@ -2409,14 +2948,17 @@ function FittedSlotTile({
       {item.quantity > 1 && <em>{item.quantity}</em>}{item.mutation && <i className="abyssal-badge" title={item.mutation.mutaplasmidName}>A</i>}
       <span className="fit-item-copy"><strong className="fit-module-name" title={item.name}>{item.name}</strong><small className="fit-loaded-charge" title={item.charge ?? ""} onContextMenu={(event)=>{if(!item.chargeTypeId)return;event.preventDefault();event.stopPropagation();onShowInfo(item.chargeTypeId,item.charge);}}>{item.charge ?? "\u00a0"}</small></span>
       <button type="button" className="fit-item-remove" aria-label={`Remove ${item.name}`} onClick={onRemove}>X</button>
-      <select
-        className="fit-module-state"
-        value={currentState}
-        aria-label={`${item.name} module state`}
-        onChange={(event) => onStateChange(event.target.value as ModuleState)}
-      >
-        {states.map((state) => <option value={state} key={state}>{state}</option>)}
-      </select>
+      {stateLights.length > 0 && <div className="fit-module-state-lights" role="group" aria-label={`${item.name} module state`}>
+        {stateLights.map((light)=><button
+          type="button"
+          className={`fit-module-state-light ${light.className}${light.state===controlState?" active":""}`}
+          aria-pressed={light.state===controlState}
+          aria-label={`${item.name}: ${light.title}`}
+          title={light.title}
+          key={light.state}
+          onClick={(event)=>{event.stopPropagation();onStateChange(light.state);}}
+        />)}
+      </div>}
     </div>
   );
 }

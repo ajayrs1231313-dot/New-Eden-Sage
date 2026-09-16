@@ -374,3 +374,31 @@ nav button .nav-icon {
   nav { gap: 2px; }
   nav button { padding-top: 8px; padding-bottom: 8px; }
 }
+
+
+/* Onboarding journey containment */
+.character-command .character-journey {
+  box-sizing: border-box;
+  height: auto;
+  min-height: 104px;
+}
+.character-command .character-journey-heading {
+  min-width: 0;
+  height: auto;
+  min-height: 17px;
+  flex-wrap: wrap;
+  line-height: 1.2;
+}
+.character-command .character-journey-rail {
+  height: auto;
+  min-height: 64px;
+}
+.character-command .character-journey-node {
+  min-width: 0;
+  padding-inline: 3px;
+}
+.character-command .character-journey-node strong,
+.character-command .character-journey-node small {
+  max-width: 100%;
+  line-height: 1.15;
+}

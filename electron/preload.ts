@@ -356,6 +356,8 @@ contextBridge.exposeInMainWorld("sage", {
     return () => ipcRenderer.removeListener("analysis:progress", listener);
   },
   exportTopArbitrage: () => ipcRenderer.invoke("trade:export-top1000"),
+  searchOreMarketTypes: (query: string, limit = 12) => ipcRenderer.invoke("market:search-ore-types", { query, limit }),
+  quoteMarketDepth: (input: unknown) => ipcRenderer.invoke("market:quote-depth", input),
   searchRawMarket: (input: unknown) => invokeAnalysis("market:raw-search", input),
   filterRegionalMarket: (input: unknown) => invokeAnalysis("market:regional-filter", input),
   getMarketItemHistory: (typeId: number) => ipcRenderer.invoke("market:item-history", typeId),

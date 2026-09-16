@@ -189,7 +189,8 @@ export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:Charact
   const positiveRois=projectedOpportunities.map(row=>roiFor(row)).filter((value):value is number=>Number.isFinite(value)&&value>0);
   const averageRoi=positiveRois.length?positiveRois.reduce((sum,value)=>sum+value,0)/positiveRois.length:0;
   const opportunityCount=projectedOpportunities.length;
-  const refreshedAt=data?.generatedAt||data?.contractsCreatedAt;
+  // Report source-data freshness, not the time this client happened to recompute the view.
+  const refreshedAt=data?.contractsCreatedAt||data?.marketCreatedAt||data?.generatedAt;
   const showStatus=busy||!data||/failed|unavailable|no server-prepared/i.test(status);
 
   return <section className={`contracts-page contracts-page-v2 contracts-reference workspace-${workspace}`}>

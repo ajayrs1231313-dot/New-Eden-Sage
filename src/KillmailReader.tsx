@@ -169,8 +169,8 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
     [killmail],
   );
   const items = useMemo(() => flattenItems(Array.isArray(victim.items) ? victim.items : []), [killmail]);
-  const fitted = useMemo(() => items.filter((item) => slotInfo(item.flag)), [items]);
-  const bayItems = useMemo(() => items.filter((item) => !slotInfo(item.flag)), [items]);
+  const fitted = useMemo(() => items.filter((item) => item.depth === 0 && slotInfo(item.flag)), [items]);
+  const bayItems = useMemo(() => items.filter((item) => item.depth > 0 || !slotInfo(item.flag)), [items]);
   const totalDamage = Math.max(1, Number(victim.damage_taken ?? attackers.reduce((sum, item) => sum + Number(item?.damage_done ?? 0), 0)));
 
   const label = (id: unknown, fallback: string) => {
@@ -221,8 +221,8 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
     <div className="killmail-facts">
       <article><span>Loss value</span><strong>{formatIsk(killmail.totalValue)}</strong><small>{killmail.points ? `${formatNumber(killmail.points)} zKill points` : "zKillboard estimate"}</small></article>
       <article><span>Damage taken</span><strong>{formatNumber(victim.damage_taken)}</strong><small>{attackers.length} attacker{attackers.length === 1 ? "" : "s"}</small></article>
-      <article><span>Location</span><strong>{systemName}</strong><small>{killmail.locationId ? `Location ${killmail.locationId}` : `System ${killmail.solarSystemId}`}</small></article>
-      <article><span>Time</span><strong>{killmail.killmailTime ? new Date(killmail.killmailTime).toLocaleString() : "Unavailable"}</strong><small>{killmail.source ?? "Public killmail"}</small></article>
+      <article><span>Location</span><strong>{systemName}</strong><small>{killmail.locationId ? "Recorded structure / station" : "Solar system"}</small></article>
+      <article><span>Time</span><strong>{killmail.killmailTime ? new Date(killmail.killmailTime).toLocaleString() : "Unavailable"}</strong><small>Killmail timestamp</small></article>
     </div>
 
     {resolving && <div className="killmail-name-status">Resolving local fitting data and EVE names…</div>}
@@ -262,7 +262,7 @@ export function KillmailReader({ killmail, systemName, onClose }: { killmail: Ki
         <div className="loss-bay-grid">
           {bayItems.map((item, index) => <div className={`loss-bay-item ${lossState(item)}`} key={`${item.typeId}-${item.flag}-${index}`}>
             <img src={typeImage(item.typeId, "icon", 48)} alt="" />
-            <div><strong>{label(item.typeId, "Type")}</strong><small>{bayLabel(item.flag)}{item.flag != null ? ` · flag ${item.flag}` : ""}</small></div>
+            <div><strong>{label(item.typeId, "Type")}</strong><small>{item.depth > 0 ? "Loaded charge" : bayLabel(item.flag)}</small></div>
             <div className="killmail-item-counts">
               {item.destroyed > 0 && <span className="destroyed">×{formatNumber(item.destroyed)} destroyed</span>}
               {item.dropped > 0 && <span className="dropped">×{formatNumber(item.dropped)} dropped</span>}

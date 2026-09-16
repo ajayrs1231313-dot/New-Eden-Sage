@@ -12,6 +12,8 @@ import { loadCurrentRawMarketManifest, loadRawMarketRegion } from "./raw-market-
 import { loadMcpMarketRegion, loadMcpMarketRegionSummaries } from "./mcp-market-reader";
 import { filterMcpRawMarketOrders, type McpRawMarketOrderFilterOptions } from "./mcp-raw-market-filter";
 import { searchMcpMarketOrders } from "./mcp-market-search";
+import { searchMcpContracts } from "./mcp-contract-search";
+import { calculateCorpOreBuyback, quoteMarketDepth } from "./market-depth";
 import { loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPreparedShortageDataset, loadSharedPreparedTradeDataset, loadSharedPublicContractsDataset, loadSharedPublicDataset, loadSharedPublicSource } from "./shared-market-data";
 import { ANALYSIS_CACHE_ROOT, USER_DATA_ROOT } from "./data-paths";
 import { calculateNavigationRoute, getNavigationNeighbours, getNavigationSystem, searchNavigationSystems } from "./universe-route-graph";
@@ -21,6 +23,7 @@ import { getSnapshot as getDatabaseSnapshot, listSnapshots as listDatabaseSnapsh
 import { SAGE_MCP_AI_INSTRUCTIONS, SAGE_CHARACTER_LIST_GUIDANCE, SAGE_CHARACTER_DATA_GUIDANCE, SAGE_SAVED_FITTINGS_GUIDANCE, SAGE_FIT_SKILL_GUIDANCE } from "./mcp-ai-policy";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const READ_ONLY_LIVE = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 const FIT_IMPORT_INSTRUCTIONS = `When creating or importing a fit into New Eden Sage, call save_sage_fit. The fit payload is intentionally flexible: you may send a normal LLM JSON object, Sage JSON, ESI fitting JSON, a JSON array or wrapped collection of fits, EFT/PYFA text, PYFA XML, EVE DNA, fenced code blocks, or clearly labelled plain text sections. Prefer exact current EVE item names and realistic quantities. Type IDs are optional; omit uncertain IDs rather than inventing them. For JSON, preferred fields are: name, ship or hull, modules.high/mid/low/rig/subsystem, drones, fighters, cargo, implants, boosters, and instructions. Each item may be a string or an object such as { name, typeId?, quantity?, charge?, chargeTypeId?, chargeQuantity?, state? }. Multiple fits may be supplied at once. Sage normalizes all supported formats into its canonical fitting shape before saving.`;
@@ -564,6 +567,49 @@ export async function startMcpServer() {
     },
     annotations: READ_ONLY,
   }, async (input) => result(await searchMcpMarketOrders(input)));
+  const marketDepthItemSchema = z.object({
+    typeId: z.number().int().positive().optional(),
+    type_id: z.number().int().positive().optional(),
+    name: z.string().min(1).max(200).optional(),
+    quantity: z.number().int().positive(),
+  });
+  const marketDepthInputSchema = {
+    items: z.array(marketDepthItemSchema).min(1).max(200).optional(),
+    typeId: z.number().int().positive().optional(),
+    type_id: z.number().int().positive().optional(),
+    name: z.string().min(1).max(200).optional(),
+    quantity: z.number().int().positive().optional(),
+    regionId: z.number().int().positive().default(10000002),
+    region_id: z.number().int().positive().optional(),
+    locationId: z.number().int().positive().default(60003760),
+    location_id: z.number().int().positive().optional(),
+    stationId: z.number().int().positive().optional(),
+    station_id: z.number().int().positive().optional(),
+    side: z.enum(["buy", "sell"]).default("buy"),
+    fresh: z.boolean().default(false),
+  };
+  const normalizeMarketDepthInput = (input: any) => ({
+    ...input,
+    typeId: input.type_id ?? input.typeId,
+    regionId: input.region_id ?? input.regionId ?? 10000002,
+    locationId: input.location_id ?? input.station_id ?? input.stationId ?? input.locationId ?? 60003760,
+    items: Array.isArray(input.items) ? input.items.map((item: any) => ({ ...item, typeId: item.type_id ?? item.typeId })) : input.items,
+  });
+
+  server.registerTool("quote_market_depth", {
+    title: "Quote exact market depth",
+    description: "Simulate filling an instant market transaction against exact order depth without returning the whole regional book. For a corp ore buyback, use Jita 4-4 (60003760), side=buy: Sage sorts buy orders by highest price, walks volume_remain across as many orders as required, respects min_volume, and returns every fill plus weighted realised price, crossed-order count, unfilled quantity and realised ISK. Batch items are supported. typeId/type_id are accepted; locationId/location_id/stationId/station_id select the station. Exact EVE names and common ore shorthand such as Omber II are resolved through Sage static data.",
+    inputSchema: marketDepthInputSchema,
+    annotations: READ_ONLY_LIVE,
+  }, async (input) => result(await quoteMarketDepth(normalizeMarketDepthInput(input))));
+
+  server.registerTool("calculate_corp_ore_buyback", {
+    title: "Calculate corp ore buyback",
+    description: "Convenience wrapper around quote_market_depth for corporation ore buybacks. Returns the complete 100% market-depth quote separately, plus a configurable payout percentage (default 90%) and corp payout ISK. This never replaces the gross realised Jita value with a top-bid multiplication.",
+    inputSchema: { ...marketDepthInputSchema, payoutPercent: z.number().min(0).max(100).default(90), payout_percent: z.number().min(0).max(100).optional() },
+    annotations: READ_ONLY_LIVE,
+  }, async (input) => result(await calculateCorpOreBuyback({ ...normalizeMarketDepthInput(input), payoutPercent: input.payout_percent ?? input.payoutPercent })));
+
   server.registerTool("list_market_regions", {
     title: "List market regions", description: "List the currently installed Sage market regions from the same server-managed shared generation used by the desktop UI, with legacy local fallback.", inputSchema: {}, annotations: READ_ONLY,
   }, async () => result(await listReadableMarketRegions()));
@@ -600,6 +646,33 @@ export async function startMcpServer() {
     title: "Read prepared market shortages", description: "Read server-prepared regional shortage signals from the installed shared generation.",
     inputSchema: { limit: z.number().int().min(1).max(500).default(100) }, annotations: READ_ONLY,
   }, async ({ limit }) => { const value = await loadSharedPreparedShortageDataset(); return result(value ? { ...value, signals: value.signals.slice(0, limit), returned: Math.min(limit, value.signals.length), total: value.signals.length } : null); });
+
+  server.registerTool("search_public_contracts", {
+    title: "Search Sage public contracts",
+    description: "Search the complete installed Sage public-contract snapshot by item/type, BPO/BPC classification, exact ME/TE or fully-researched ME10/TE20, standalone-vs-bundle filtering, price, region, system/location text, contract type, origin system name/id and jump distance. BPO classification correctly treats researched CCP blueprint items with no is_blueprint_copy flag as originals. Results include matching blueprint/item details, contract price/location, route distance and snapshot coverage.",
+    inputSchema: {
+      query: z.string().max(200).default(""),
+      typeId: z.number().int().positive().optional(),
+      blueprintKind: z.enum(["all", "bpo", "bpc", "any-blueprint", "non-blueprint"]).default("all"),
+      fullyResearched: z.boolean().default(false),
+      materialEfficiency: z.number().int().min(0).max(10).nullable().optional(),
+      timeEfficiency: z.number().int().min(0).max(20).nullable().optional(),
+      minPrice: z.number().min(0).nullable().optional(),
+      maxPrice: z.number().min(0).nullable().optional(),
+      regionId: z.number().int().positive().nullable().optional(),
+      systemQuery: z.string().max(200).optional(),
+      locationQuery: z.string().max(200).optional(),
+      contractType: z.string().max(50).optional(),
+      standaloneOnly: z.boolean().default(false),
+      originSystem: z.string().max(100).optional(),
+      originSystemId: z.number().int().positive().nullable().optional(),
+      maxJumps: z.number().int().min(0).nullable().optional(),
+      sort: z.enum(["distance", "price-low", "price-high", "newest", "expiry"]).optional(),
+      offset: z.number().int().min(0).default(0),
+      limit: z.number().int().min(1).max(500).default(100),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await searchMcpContracts(input)));
 
   server.registerTool("get_public_contracts", {
     title: "Read public contracts", description: "Read server-prepared public contracts from the installed shared generation, optionally restricted to one region.",

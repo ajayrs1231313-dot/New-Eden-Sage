@@ -24,6 +24,8 @@ assert.match(processSource, /getContractMarketIntelligence\(\)/, 'heavy contract
 assert.match(main, /market:contract-workspace[^\n]+getContractMarketWorkspace\(/, 'renderer IPC must use the off-main contract workspace path');
 assert.match(main, /market:contract-search[^\n]+searchContractMarketWorkspace\(/, 'contract filtering/search must remain off the renderer/main hot path');
 assert.match(contracts, /window\.sage\.checkPublicData\(\)/, 'manual contract refresh must use the shared server data pull');
+assert.match(main, /adoptInstalledSharedMarketManifest\(result\.manifest\);[\s\S]{0,500}?disposeContractIntelligenceProcess\(\);/, 'public-data reconciliation must restart the contract worker so it cannot retain a stale manifest');
+assert.match(contracts, /const refreshedAt=data\?\.contractsCreatedAt\|\|data\?\.marketCreatedAt\|\|data\?\.generatedAt;/, 'contract freshness must prefer source snapshot timestamps over local recompute time');
 assert.match(iskLab, /contractsVisited/, 'Contracts must remain mounted after first visit');
 assert.match(iskLab, /hidden=\{tab !== "contracts"\}/, 'leaving Contracts must hide rather than unmount its workspace');
 

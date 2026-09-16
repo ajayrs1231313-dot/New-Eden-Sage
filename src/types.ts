@@ -592,6 +592,46 @@ export type FitResolutionIntent = {
   remedies: FitRemedyCandidate[];
   resources?: { used: { cpu:number; powergrid:number; calibration:number }; capacity: { cpu:number; powergrid:number; calibration:number } };
   rigSlots?: { used:number; capacity:number };
+  abyss?: {
+    enabled: true;
+    tier: number;
+    weather: string;
+    penalty: number;
+    roomKey: string;
+    roomName?: string;
+    roomCount: number;
+    unclearableRoomCount: number;
+    averageTargetDps: number;
+    averageIncomingDps: number;
+    averageHostilesPerRoom: number;
+    targetSample: number;
+    timerSeconds: number;
+    representativeClearSeconds: number;
+    representativeTimerMarginSeconds: number;
+    heavyKnownClearSeconds: number;
+    heavyKnownTimerMarginSeconds: number;
+    basis?: string;
+  };
+  performance?: {
+    paperDps: number;
+    weaponDps: number;
+    droneDps: number;
+    appliedWeaponDps: number;
+    totalEhp: number;
+    scenarioTankEhpPerSecond: number;
+    shieldRepairEhpPerSecond: number;
+    armorRepairEhpPerSecond: number;
+    passiveShieldEhpPerSecond: number;
+    capStable: boolean;
+    capStablePercent: number;
+    capDepletionSeconds: number;
+    capDemandGjPerSecond: number;
+    capPeakMarginGjPerSecond: number;
+    maximumVelocityMps: number;
+    alignSeconds: number;
+    signatureRadiusM: number;
+    activeDrones: string[];
+  };
 };
 
 
@@ -1471,6 +1511,17 @@ declare global {
         minBestBuy?: number | null; maxBestBuy?: number | null; minBestSell?: number | null; maxBestSell?: number | null; minBuyOrders?: number | null; maxBuyOrders?: number | null; minSellOrders?: number | null; maxSellOrders?: number | null; minBuyVolume?: number | null; minSellVolume?: number | null; maxSellVolume?: number | null;
         minSpreadPercent?: number | null; maxSpreadPercent?: number | null; minRegionalPremiumPercent?: number | null; minDemandSupplyRatio?: number | null; maxItemVolumeM3?: number | null; sort?: RegionalMarketSort; offset?: number; limit?: number;
       }): Promise<RegionalMarketFilterResult>;
+      searchOreMarketTypes(query:string, limit?:number): Promise<Array<{ typeId:number; name:string; categoryId:number; categoryName:string }>>;
+      quoteMarketDepth(input: {
+        items?: Array<{ typeId?: number; name?: string; quantity: number }>;
+        typeId?: number;
+        name?: string;
+        quantity?: number;
+        regionId?: number;
+        locationId?: number;
+        side?: "buy" | "sell";
+        fresh?: boolean;
+      }): Promise<any>;
       searchRawMarket(input: {
         query: string;
         typeId?: number;

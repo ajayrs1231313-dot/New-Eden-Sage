@@ -252,7 +252,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
   const [orderDraftSeconds, setOrderDraftSeconds] = useState(20);
   const [mapCamera, setMapCamera] = useState({ zoom: 1, panX: 0, panY: 0 });
   const [warpRangeDraft, setWarpRangeDraft] = useState(0);
-  const [combatEvents, setCombatEvents] = useState<string[]>(["Empty tactical board ready - deploy only what the FC wants in the scenario."]);
+  const [combatEvents, setCombatEvents] = useState<string[]>(["Scenario ready."]);
   const engagementStartedRef = useRef(false);
 
   useEffect(() => {
@@ -407,7 +407,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
     const unit = unitsRef.current.find((candidate) => candidate.id === selectedUnitId);
     if (!unit || !payload.trim() || fitImportBusy) return;
     setFitImportBusy(true);
-    setFitImportStatus("Resolving CCP types and calculating the fit through Sage DOGMA...");
+    setFitImportStatus("Loading fit and calculating combat stats...");
     try {
       const result = await analyzeWargameFit(payload, corporation.characterId, systemEffects.map((effect) => effect.typeId));
       if (unit.typeId && unit.typeId !== result.hullTypeId) {
@@ -453,8 +453,8 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
       executeWargameCommand({ id: `replace-${sessionRef.current.revision + 1}`, kind: "replace-units", source: "system", units: recalculated });
       setSystemEffects(nextEffects);
       pushCombatEvents(nextEffects.length
-        ? `SYSTEM EFFECTS: ${nextEffects.map((effect) => effect.name).join(" + ")} applied through Sage DOGMA. Fit-linked formations recalculated.`
-        : "SYSTEM EFFECTS: cleared. Fit-linked formations recalculated in normal space.");
+        ? `SYSTEM EFFECTS: ${nextEffects.map((effect) => effect.name).join(" + ")} applied. Linked fit stats updated.`
+        : "SYSTEM EFFECTS: cleared. Linked fit stats restored to normal space.");
     } catch (error) {
       setFitImportStatus(error instanceof Error ? error.message : "System effect recalculation failed.");
     } finally {
@@ -711,9 +711,9 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
         hullResists: result.hullResists,
         simulationReady: false,
       });
-      pushCombatEvents(`${current.name}: bare-hull navigation loaded from Sage DOGMA; combat remains disabled until a fit is linked.`);
+      pushCombatEvents(`${current.name}: movement profile loaded. Link a fit to enable combat.`);
     } catch (error) {
-      pushCombatEvents(`${hullName}: bare-hull navigation unavailable - ${error instanceof Error ? error.message : 'DOGMA lookup failed'}.`);
+      pushCombatEvents(`${hullName}: movement profile unavailable.`);
     }
   }
 
@@ -911,7 +911,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
         <div><span>TACTICAL WARGAME</span><strong>{corporation.name}</strong></div>
       </div>
       <div className="wargame-scenario-name"><span>SCENARIO</span><strong>New Tactical Scenario</strong><small>{PHASES[phase].short} · T+ {formatTime}</small></div>
-      <div className={`wargame-red-intel-strip ${aiResponseVisible ? "active" : "disabled"}`}><span>RED TEAM TACTICS</span><strong>{redTacticalSummary}</strong><small>{aiResponseVisible && redMain ? "Projected hostile response · 43%" : "No tactical projection on map"}</small></div>
+      <div className={`wargame-red-intel-strip ${aiResponseVisible ? "active" : "disabled"}`}><span>RED TEAM TACTICS</span><strong>{redTacticalSummary}</strong><small>{aiResponseVisible && redMain ? "Red response projected" : "No tactical projection on map"}</small></div>
       <div className="wargame-strip-status"><span className={`wargame-live-dot ${running ? "running" : ""}`} />{running ? "SIM RUNNING" : "SIM PAUSED"}</div>
       <div className="wargame-strip-actions">
         <button type="button" onClick={() => onNavigate("jump-map")}>Jump Map</button>
@@ -935,7 +935,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
         </div>
 
         <section className="wargame-system-effects">
-          <div className="wargame-section-title"><span>SYSTEM EFFECTS</span><small>environment / system-wide DOGMA</small></div>
+          <div className="wargame-section-title"><span>SYSTEM EFFECTS</span><small>environment modifiers</small></div>
           <div className="wargame-system-effect-add">
             <input list="wargame-system-effect-presets" value={systemEffectDraft} onChange={(event) => setSystemEffectDraft(event.target.value)} placeholder="Class 5 Magnetar Effects..." />
             <datalist id="wargame-system-effect-presets">{COMMON_WARGAME_SYSTEM_EFFECTS.map((effect) => <option key={effect.typeId} value={effect.name} />)}</datalist>
@@ -944,12 +944,12 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
           <div className="wargame-system-effect-list">
             {systemEffects.length ? systemEffects.map((effect) => <button type="button" key={effect.typeId} onClick={() => void removeScenarioSystemEffect(effect.typeId)} title="Remove system effect"><span>{effect.name}</span><b>×</b></button>) : <small>Normal-space baseline. Add wormhole, incursion or another CCP environment effect.</small>}
           </div>
-          <small className="wargame-system-note">Fit-linked formations are recalculated through Sage DOGMA when this changes.</small>
+          <small className="wargame-system-note">Linked fit stats update automatically.</small>
         </section>
 
         {assetTab === "ships" && <>
           <label className="wargame-search"><span>⌕</span><input value={shipFilter} onChange={(event) => setShipFilter(event.target.value)} placeholder="Search every EVE hull..." /></label>
-          <div className="wargame-library-meta"><span>{ships.length ? `${ships.length.toLocaleString()} published hulls` : "Loading hull catalogue..."}</span><small>Drag a hull onto the tactical board</small></div>
+          <div className="wargame-library-meta"><span>{ships.length ? `${ships.length.toLocaleString()} hulls` : "Loading hull catalogue..."}</span><small>Drag a hull onto the tactical board</small></div>
           <div className="wargame-ship-library">
             {shipResults.map((ship) => <button
               type="button"
@@ -1206,7 +1206,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
 
           <section className="wargame-stat-editor">
             <div className="wargame-section-title"><span>SIMULATION VALUES</span><small>{selectedUnit.simulationReady === false ? "No fit - combat disabled" : "Overrides are scenario-local"}</small></div>
-            {selectedUnit.simulationReady === false ? <div className="wargame-unconfigured-state"><strong>FIT REQUIRED FOR COMBAT</strong><span>Weapons, drones, reps, tackle and EWAR are disabled until a fit is linked. Movement, align and warp use the real bare-hull navigation profile from Sage DOGMA.</span></div> : <div className="wargame-stat-grid">
+            {selectedUnit.simulationReady === false ? <div className="wargame-unconfigured-state"><strong>FIT REQUIRED FOR COMBAT</strong><span>Weapons, drones, reps, tackle and EWAR are disabled until a fit is linked. Movement, align and warp remain available from the hull profile.</span></div> : <div className="wargame-stat-grid">
               <label><span>Ships</span><input type="number" min="1" value={selectedUnit.count} onChange={(event) => { const count = Math.max(1, Number(event.target.value) || 1); const total = selectedUnit.maxEhp ?? selectedUnit.ehp; updateUnit(selectedUnit.id, { count, shipsAlive: count, primaryEhp: total / count, ehp: total }); }} /></label>
               <label><span>DPS</span><input type="number" value={selectedUnit.dps} onChange={(event) => updateUnit(selectedUnit.id, { dps: Number(event.target.value) || 0 })} /></label>
               <label><span>EHP</span><input type="number" value={selectedUnit.maxEhp ?? selectedUnit.ehp} onChange={(event) => { const value = Math.max(0, Number(event.target.value) || 0); updateUnit(selectedUnit.id, { ehp: value, maxEhp: value, shipsAlive: selectedUnit.count, primaryEhp: value / Math.max(1, selectedUnit.count) }); }} /><small>{Math.round(selectedUnit.ehp).toLocaleString()} remaining</small></label>
@@ -1255,7 +1255,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
               <div><span>TARGET</span><strong>{selectedTarget ? selectedTarget.name : "None"}</strong><small>{selectedTargetRange == null ? "No firing solution" : `${selectedTargetRange.toFixed(1)} km`}</small></div>
               <div><span>APPLICATION</span><strong>{selectedTarget ? `${Math.round(selectedApplication * 100)}%` : "-"}</strong><small>{selectedUnit.weaponModel ?? "turret"} model</small></div>
               <div><span>FORMATION VOLLEY</span><strong>{selectedUnit.volleyPerShip ? Math.round(selectedUnit.volleyPerShip * liveShipCount(selectedUnit)).toLocaleString() : Math.round((selectedUnit.dps || 0) * (selectedUnit.weaponCycle ?? defaultWeaponCycle(selectedUnit)) * (liveShipCount(selectedUnit) / Math.max(1, selectedUnit.count))).toLocaleString()}</strong><small>{selectedUnit.fitName ? "fit-derived paper volley" : "scenario estimate"}</small></div>
-              <div><span>WEAPON ENVELOPE</span><strong>{selectedUnit.optimalRange != null ? `${selectedUnit.optimalRange.toFixed(1)} + ${(selectedUnit.falloffRange ?? 0).toFixed(1)} km` : `${Math.round(selectedUnit.range)} km`}</strong><small>{selectedUnit.fitName ? "CCP DOGMA / loaded ammo" : "scenario range"}</small></div>
+              <div><span>WEAPON ENVELOPE</span><strong>{selectedUnit.optimalRange != null ? `${selectedUnit.optimalRange.toFixed(1)} + ${(selectedUnit.falloffRange ?? 0).toFixed(1)} km` : `${Math.round(selectedUnit.range)} km`}</strong><small>{selectedUnit.fitName ? "fit + loaded ammo" : "scenario range"}</small></div>
               <div><span>CURRENT PRIMARY</span><strong>{liveShipCount(selectedUnit) ? `${Math.round(primaryEhp(selectedUnit)).toLocaleString()} / ${Math.round(perShipEhp(selectedUnit)).toLocaleString()} EHP` : "DESTROYED"}</strong><small>{liveShipCount(selectedUnit)} of {selectedUnit.count} ships active</small></div>
               <div><span>NEXT VOLLEY</span><strong>{selectedUnit.dps > 0 ? `${Math.round(selectedVolley).toLocaleString()} raw` : "-"}</strong><small>{selectedSourceStats.length ? `${selectedReadySources}/${selectedSourceStats.length} damage channels ready` : selectedUnit.lockRemaining && selectedUnit.lockRemaining > 0 ? `LOCKING ${selectedUnit.lockRemaining.toFixed(1)}s` : selectedUnit.fireCooldown && selectedUnit.fireCooldown > 0 ? `CYCLE ${selectedUnit.fireCooldown.toFixed(1)}s` : "READY"}</small></div>
               <div><span>MOTION</span><strong>{Math.round(selectedUnit.effectiveSpeed ?? velocityMps(selectedUnit)).toLocaleString()} m/s</strong><small>{selectedWebbers.length ? `WEBBED by ${selectedWebbers.map((unit) => unit.name).join(", ")}` : "No hostile web"}</small></div>
@@ -1270,7 +1270,7 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
           </section>
 
             {selectedUnit.supportSystems?.length ? <div className="wargame-support-stack">
-              <div className="wargame-support-stack-head"><span>FIT SUPPORT / EWAR</span><small>skill + hull + script adjusted DOGMA</small></div>
+              <div className="wargame-support-stack-head"><span>FIT SUPPORT / EWAR</span><small>skill + hull + script adjusted</small></div>
               {selectedUnit.supportSystems.map((system, index) => <div className={`wargame-support-system ${system.kind}`} key={`${system.kind}-${system.typeId}-${index}`}>
                 <div><strong>{system.name}{system.quantity > 1 ? ` ×${system.quantity}` : ""}</strong><small>{system.kind.replace(/([A-Z])/g, " $1")}</small></div>
                 <span>{supportSystemDetail(system)}</span>
@@ -1284,19 +1284,19 @@ function WargameMap({ corporation, onNavigate, active }: { corporation: FleetCor
           </section>
 
           <section className="wargame-fit-bridge">
-            <div className="wargame-section-title"><span>FIT / DATA SOURCE</span><small>{selectedUnit.simulationReady === false ? "FIT REQUIRED FOR COMBAT" : selectedUnit.fitName ? "Sage DOGMA linked" : "Scenario / manual values"}</small></div>
+            <div className="wargame-section-title"><span>FIT</span><small>{selectedUnit.simulationReady === false ? "FIT REQUIRED FOR COMBAT" : selectedUnit.fitName ? "Fit linked" : "Manual values"}</small></div>
             <div className="wargame-fit-actions"><button type="button" onClick={() => setFitImportOpen((value) => !value)}>Import EVE fit</button><button type="button" disabled={!selectedUnit.fitName}>{selectedUnit.fitName ? "Fit linked" : "No fit linked"}</button></div>
             <div className="wargame-saved-fit-import"><select defaultValue="" disabled={fitImportBusy || !savedFits.some((fit) => fit.hullTypeId === selectedUnit.typeId || (!fit.hullTypeId && fit.hullName.toLowerCase() === selectedUnit.name.toLowerCase()))} onChange={(event) => { const value=event.target.value; if(value) void applySavedFitToSelected(value); event.currentTarget.value=""; }}><option value="">Saved fit for this hull...</option>{savedFits.filter((fit) => fit.hullTypeId === selectedUnit.typeId || (!fit.hullTypeId && fit.hullName.toLowerCase() === selectedUnit.name.toLowerCase())).map((fit) => <option key={fit.id} value={fit.id}>{fit.name} [{fit.source}]</option>)}</select><small>{savedFitsStatus}</small></div>
             {selectedUnit.fitName && <div className="wargame-fit-source"><span>FIT-LINKED</span><strong>{selectedUnit.fitName}</strong><small>{selectedUnit.fitSourceSummary ?? selectedUnit.fitCharacter}</small></div>}
             {fitImportStatus && <small className="wargame-fit-status">{fitImportStatus}</small>}
-            {fitImportOpen && <div className="wargame-fit-import"><textarea value={fitImportText} onChange={(event) => setFitImportText(event.target.value)} placeholder="Paste EFT / PYFA or Sage JSON fit here..." /><button type="button" disabled={!fitImportText.trim() || fitImportBusy} onClick={() => void applyFitToSelected()}>{fitImportBusy ? "Calculating through Sage..." : "Apply real fit stats"}</button><small>Uses {corporation.characterName}'s current synced skills and Sage's existing fitting/DOGMA engine.</small></div>}
+            {fitImportOpen && <div className="wargame-fit-import"><textarea value={fitImportText} onChange={(event) => setFitImportText(event.target.value)} placeholder="Paste EFT / PYFA or Sage JSON fit here..." /><button type="button" disabled={!fitImportText.trim() || fitImportBusy} onClick={() => void applyFitToSelected()}>{fitImportBusy ? "Calculating fit..." : "Apply fit"}</button><small>Uses {corporation.characterName}'s current synced skills.</small></div>}
           </section>
         </> : <div className="wargame-inspector-empty"><span>＋</span><strong>Select a fleet or drag a hull onto the board</strong><small>Stats, orders, fits and scenario overrides appear here.</small></div>}
 
         <section className={`wargame-ai-panel ${aiResponseVisible ? "active" : ""}`}>
-          <div className="wargame-ai-head"><div><span>RED TEAM AI</span><strong>Reactive opponent</strong></div><b>MCP</b></div>
-          <p>Red receives only hostile-observable state. Blue's uncommitted plan stays hidden from the opposing AI.</p>
-          {aiResponseVisible ? <div className="wargame-ai-assessment"><span>RED TEAM ACTIVE · REACTIVE</span><strong>Red now fights through discrete weapon volleys and individual primaries, weighs target value against application, and can win or lose depending on whether logistics catch the called target.</strong><small>The dashed vector is prediction; when the clock runs the Red formations now execute their own orders.</small></div> : <button type="button" onClick={() => setAiResponseVisible(true)}>Enable Red response</button>}
+          <div className="wargame-ai-head"><div><span>RED TEAM AI</span><strong>{aiResponseVisible ? "Active" : "Off"}</strong></div></div>
+          
+          {aiResponseVisible ? <div className="wargame-ai-assessment"><span>RED TEAM ACTIVE</span><strong>Red forces are reacting to the current battlefield.</strong></div> : <button type="button" onClick={() => setAiResponseVisible(true)}>Enable Red Team AI</button>}
           <div className="wargame-event-feed"><span>SIMULATION FEED</span>{combatEvents.map((entry, index) => <small key={`${entry}-${index}`}>{entry}</small>)}</div>
         </section>
       </aside>

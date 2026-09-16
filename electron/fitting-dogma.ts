@@ -3067,6 +3067,51 @@ export async function analyzeFittingDogma(input: {
     const hardestTarget=finiteTargets.length?[...finiteTargets].sort((a,b)=>a.trueDps-b.trueDps||b.ttkSeconds-a.ttkSeconds)[0]:undefined;
     const highestEhpTarget=finiteTargets.length?[...finiteTargets].sort((a,b)=>b.effectiveHpAgainstFit-a.effectiveHpAgainstFit)[0]:undefined;
     const selectedRoom=abyssConfig.roomKey !== "all" ? rooms.find(room=>room.key===abyssConfig.roomKey) : undefined;
+    // The primary activity profile is an averaged target, not an arbitrary single NPC.
+    // Within each documented room we weight each hostile by its count; across the room
+    // catalogue every room gets equal weight because Sage has no trustworthy spawn frequencies.
+    // Selecting one room narrows the same calculation to that composition.
+    const profileRooms = selectedRoom ? [selectedRoom] : rooms;
+    const weightedRoomTarget = (room:any) => {
+      const totalHostiles = room.targets.reduce((sum:number,target:any)=>sum+Math.max(0,Number(target.count??0)),0);
+      if (totalHostiles <= 0) return undefined;
+      const weighted = (selector:(target:any)=>number) => room.targets.reduce((sum:number,target:any)=>sum+selector(target)*Math.max(0,Number(target.count??0)),0)/totalHostiles;
+      const layer = (name:"shield"|"armor"|"hull") => [0,1,2,3].map(index=>weighted((target:any)=>Number(target.weatherResists?.[name]?.[index]??0))) as DamageVector;
+      return {
+        totalHostiles,
+        signatureRadiusM:weighted((target:any)=>Number(target.signatureRadiusM??0)),
+        weatherHp:{shield:weighted((target:any)=>Number(target.weatherHp?.shield??0)),armor:weighted((target:any)=>Number(target.weatherHp?.armor??0)),hull:weighted((target:any)=>Number(target.weatherHp?.hull??0))},
+        weatherResists:{shield:layer("shield"),armor:layer("armor"),hull:layer("hull")},
+      };
+    };
+    const roomAverages = profileRooms.flatMap((room:any)=>{const target=weightedRoomTarget(room);return target?[target]:[];});
+    const roomMean = (selector:(room:any)=>number) => roomAverages.length ? roomAverages.reduce((sum:number,room:any)=>sum+selector(room),0)/roomAverages.length : 0;
+    const averageLayer = (name:"shield"|"armor"|"hull") => [0,1,2,3].map(index=>roomMean((room:any)=>Number(room.weatherResists[name][index]??0))) as DamageVector;
+    const averageHp = {shield:roomMean((room:any)=>room.weatherHp.shield),armor:roomMean((room:any)=>room.weatherHp.armor),hull:roomMean((room:any)=>room.weatherHp.hull)};
+    const averageResists = {shield:averageLayer("shield"),armor:averageLayer("armor"),hull:averageLayer("hull")};
+    const averageSignatureRadiusM = roomMean((room:any)=>room.signatureRadiusM);
+    const averageApplication = roomAverages.length ? applicationAgainstSignature(averageSignatureRadiusM) : undefined;
+    const averageShieldDps = averageApplication?.layer(averageResists.shield) ?? 0;
+    const averageArmorDps = averageApplication?.layer(averageResists.armor) ?? 0;
+    const averageHullDps = averageApplication?.layer(averageResists.hull) ?? 0;
+    const averageTtkSeconds = averageApplication ? layerSeconds(averageHp.shield,averageShieldDps)+layerSeconds(averageHp.armor,averageArmorDps)+layerSeconds(averageHp.hull,averageHullDps) : Infinity;
+    const averageTotalHp = averageHp.shield+averageHp.armor+averageHp.hull;
+    const averageTarget = roomAverages.length ? {
+      roomCount:profileRooms.length,
+      averageHostilesPerRoom:profileRooms.reduce((sum:number,room:any)=>sum+Number(room.totalHostiles??0),0)/Math.max(1,profileRooms.length),
+      distinctTargetCount:new Set(profileRooms.flatMap((room:any)=>room.targets.map((target:any)=>target.typeId))).size,
+      signatureRadiusM:averageSignatureRadiusM,
+      weatherHp:{...averageHp,total:averageTotalHp},
+      weatherResists:averageResists,
+      appliedDpsBeforeResists:averageApplication?.beforeResists??0,
+      shieldDps:averageShieldDps,armorDps:averageArmorDps,hullDps:averageHullDps,
+      trueDps:Number.isFinite(averageTtkSeconds)&&averageTtkSeconds>0?averageTotalHp/averageTtkSeconds:0,
+      ttkSeconds:averageTtkSeconds,
+      basis:selectedRoom?"Hostile-count-weighted average of the selected room composition.":"Equal mean across documented room compositions; hostile-count weighted inside each room. Not spawn-frequency weighted.",
+    } : undefined;
+    const averageIncomingVector = profileRooms.length ? profileRooms.reduce((vector:DamageVector,room:any)=>{vector[0]+=Number(room.incoming.em??0);vector[1]+=Number(room.incoming.thermal??0);vector[2]+=Number(room.incoming.kinetic??0);vector[3]+=Number(room.incoming.explosive??0);return vector;},[0,0,0,0] as DamageVector).map((value:number)=>value/profileRooms.length) as DamageVector : [0,0,0,0] as DamageVector;
+    const averageIncomingTotal = averageIncomingVector.reduce((sum:number,value:number)=>sum+value,0);
+    const averageIncoming = {em:averageIncomingVector[0],thermal:averageIncomingVector[1],kinetic:averageIncomingVector[2],explosive:averageIncomingVector[3],totalDps:averageIncomingTotal,shares:{em:averageIncomingTotal?averageIncomingVector[0]/averageIncomingTotal:0,thermal:averageIncomingTotal?averageIncomingVector[1]/averageIncomingTotal:0,kinetic:averageIncomingTotal?averageIncomingVector[2]/averageIncomingTotal:0,explosive:averageIncomingTotal?averageIncomingVector[3]/averageIncomingTotal:0},playerTank:fitTankAgainst(averageIncomingVector)};
     const finiteRooms = rooms.filter((room) => Number.isFinite(room.clearSeconds));
     const unclearableRooms = rooms.filter((room) => !Number.isFinite(room.clearSeconds));
     const mean = (selector:(room:any)=>number) => finiteRooms.length ? finiteRooms.reduce((sum,room)=>sum+selector(room),0)/finiteRooms.length : Infinity;
@@ -3078,7 +3123,7 @@ export async function analyzeFittingDogma(input: {
     const abyssTimerSeconds = 20*60;
     return {
       tier:abyssConfig.tier,weather:abyssConfig.weather,penalty:abyssConfig.penalty,validPenalties:validAbyssPenalties(abyssConfig.tier),mode:abyssConfig.roomKey,rooms,selectedRoom,
-      summary:{roomCount:rooms.length,unclearableRoomCount:unclearableRooms.length,worstIncoming:by(room=>room.incoming.totalDps),worstMaxRamp:by(room=>room.incoming.maxRamp.totalDps),worstEm:by(room=>room.incoming.em),worstThermal:by(room=>room.incoming.thermal),worstKinetic:by(room=>room.incoming.kinetic),worstExplosive:by(room=>room.incoming.explosive),longestClear:longestKnownRoom,hardestTarget,highestEhpTarget},
+      summary:{roomCount:rooms.length,unclearableRoomCount:unclearableRooms.length,averageTarget,averageIncoming,worstIncoming:by(room=>room.incoming.totalDps),worstMaxRamp:by(room=>room.incoming.maxRamp.totalDps),worstEm:by(room=>room.incoming.em),worstThermal:by(room=>room.incoming.thermal),worstKinetic:by(room=>room.incoming.kinetic),worstExplosive:by(room=>room.incoming.explosive),longestClear:longestKnownRoom,hardestTarget,highestEhpTarget},
       siteEstimate:{
         roomCount:3,timerSeconds:abyssTimerSeconds,
         representative:{...representativeSite,timerMarginSeconds:abyssTimerSeconds-representativeSite.estimatedClearSeconds,basis:"Simple mean of Sage current known room catalogue; not spawn-weighted and not guaranteed."},

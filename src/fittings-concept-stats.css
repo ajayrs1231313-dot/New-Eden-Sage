@@ -124,3 +124,126 @@
 .fit-concept-right-rail .pyfa-damage-profile-field.profile-tank{border-color:#24545b;background:linear-gradient(135deg,#082129,#061920)}
 .fit-concept-right-rail .pyfa-damage-profile-field.profile-deal strong{color:#76e8df!important}
 .fit-concept-right-rail .pyfa-damage-profile-field.profile-tank strong{color:#e8c66e!important}
+
+/* Activity-first combat scenario controls */
+.fit-concept-right-rail .combat-scenario-card{order:19;grid-column:1/-1;display:grid;gap:7px;margin:0;padding:8px;border:1px solid #28545c;background:linear-gradient(145deg,#082129,#06171e)}
+.fit-concept-right-rail .combat-scenario-head>div{display:grid;gap:2px}.fit-concept-right-rail .combat-scenario-head small{color:#65cfc3;font-size:10px;letter-spacing:.09em}.fit-concept-right-rail .combat-scenario-head strong{color:#d8e9e9;font-size:15px}
+.fit-concept-right-rail .combat-scenario-main-controls{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.fit-concept-right-rail .combat-scenario-select,.fit-concept-right-rail .combat-scenario-subcontrols label,.fit-concept-right-rail .combat-scenario-advanced>label{display:grid;gap:4px;color:#76969c;font-size:11px}.fit-concept-right-rail .combat-scenario-select select,.fit-concept-right-rail .combat-scenario-subcontrols select,.fit-concept-right-rail .combat-scenario-advanced select,.fit-concept-right-rail .combat-scenario-advanced input{width:100%;min-width:0;height:31px;border:1px solid #27515a;background:#031117;color:#d4e5e7;padding:4px 7px;box-sizing:border-box}
+.fit-concept-right-rail .combat-scenario-subcontrols{display:grid;grid-template-columns:1fr 1.4fr;gap:6px}.fit-concept-right-rail .combat-scenario-metrics{display:grid;grid-template-columns:1fr 1fr;gap:5px}.fit-concept-right-rail .combat-scenario-metrics>div{display:grid;gap:2px;padding:6px;border:1px solid #1b4149;background:#06171d}.fit-concept-right-rail .combat-scenario-metrics span{color:#6d8d94;font-size:10px}.fit-concept-right-rail .combat-scenario-metrics strong{color:#d8e8e9;font-size:13px}.fit-concept-right-rail .combat-scenario-basis{color:#688991;font-size:10px;line-height:1.35}
+.fit-concept-right-rail .combat-scenario-advanced{border-top:1px solid #1b4149;padding-top:6px}.fit-concept-right-rail .combat-scenario-advanced>summary{cursor:pointer;color:#8db3b5;font-size:11px;font-weight:700}.fit-concept-right-rail .combat-scenario-advanced[open]{display:grid;gap:7px}.fit-concept-right-rail .combat-scenario-advanced .fit-v2-target-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}.fit-concept-right-rail .combat-scenario-advanced .fit-v2-target-grid label{display:grid;gap:3px;color:#6e8e95;font-size:10px}
+@media(max-width:1100px){.fit-concept-right-rail .combat-scenario-main-controls,.fit-concept-right-rail .combat-scenario-subcontrols,.fit-concept-right-rail .combat-scenario-metrics,.fit-concept-right-rail .combat-scenario-advanced .fit-v2-target-grid{grid-template-columns:1fr}}
+
+/* Firepower quick loadout: scenario tuning belongs beside the DPS readout. */
+.fit-concept-right-rail .pyfa-section-firepower{grid-column:1/-1!important}
+.fit-concept-right-rail .firepower-loadout{display:grid;gap:6px;margin-top:8px;padding-top:7px;border-top:1px solid #1b4149}
+.fit-concept-right-rail .firepower-loadout-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.fit-concept-right-rail .firepower-loadout-head>span{color:#70dcd3;font-size:9px;font-weight:800;letter-spacing:.08em}.fit-concept-right-rail .firepower-loadout-head>div{display:flex;gap:5px}.fit-concept-right-rail .firepower-loadout-head button{min-height:25px;padding:3px 7px;border:1px solid #2a6268;background:#08232a;color:#a9d7d5;font-size:9px;font-weight:700;cursor:pointer}.fit-concept-right-rail .firepower-loadout-head button:hover{border-color:#54b9b0;color:#d9fffb}
+.fit-concept-right-rail .firepower-drone-select{display:grid;grid-template-columns:auto minmax(150px,1fr);align-items:center;gap:8px;color:#789da2;font-size:10px}.fit-concept-right-rail .firepower-drone-select select,.fit-concept-right-rail .firepower-weapon-row select{min-width:0;height:29px;border:1px solid #28515a;background:#031117;color:#d4e5e7;padding:3px 6px}
+.fit-concept-right-rail .firepower-weapon-list{display:grid;gap:5px}.fit-concept-right-rail .firepower-weapon-row{display:grid;grid-template-columns:minmax(120px,1.4fr) minmax(95px,.7fr) minmax(135px,1fr);gap:5px;align-items:center;padding:5px;border:1px solid #163b43;background:#06171d}.fit-concept-right-rail .firepower-weapon-row>span{min-width:0;display:grid;gap:1px}.fit-concept-right-rail .firepower-weapon-row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d4e8e7;font-size:10px}.fit-concept-right-rail .firepower-weapon-row small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#708f94;font-size:9px}.fit-concept-right-rail .firepower-loadout-empty{color:#6f8d92;font-size:9px}
+@media(max-width:900px){.fit-concept-right-rail .firepower-weapon-row{grid-template-columns:1fr}.fit-concept-right-rail .firepower-drone-select{grid-template-columns:1fr}.fit-concept-right-rail .firepower-loadout-head{align-items:flex-start;flex-direction:column}}
+
+/* Restore the compact right-rail layout; keep only the new DPS loadout controls. */
+.fit-concept-right-rail > .fit-stats-polished{
+  display:grid!important;
+  grid-template-columns:repeat(2,minmax(0,1fr))!important;
+  grid-auto-rows:max-content;
+  align-content:start;
+  gap:7px!important;
+  width:100%!important;
+  height:100%!important;
+  min-width:0;
+  min-height:0;
+  padding:8px!important;
+  border:1px solid #19444f!important;
+  border-radius:3px!important;
+  background:linear-gradient(180deg,#06171e,#041219)!important;
+  box-shadow:inset 0 1px rgba(80,202,200,.05)!important;
+  overflow-y:auto!important;
+  overflow-x:hidden!important;
+}
+.fit-stats-polished .fit-analysis-refreshing{grid-column:1/-1}
+.fit-stats-polished .fit-rail-section{
+  min-width:0;
+  align-self:start;
+  padding:8px!important;
+  border:1px solid #173842!important;
+  border-radius:0!important;
+  background:linear-gradient(135deg,rgba(12,37,45,.96),rgba(5,22,29,.94))!important;
+  box-shadow:inset 2px 0 rgba(73,209,202,.08)!important;
+  overflow:hidden;
+}
+.fit-stats-polished .combat-scenario-card,.fit-stats-polished .pyfa-section-defense{grid-column:1/-1!important}
+.fit-stats-polished .pyfa-section-firepower{grid-column:auto!important}
+.fit-stats-polished .fit-rail-fitting{display:none!important}
+.fit-stats-polished .fit-rail-section-head{display:flex;align-items:center;justify-content:space-between;gap:6px;margin:0 0 6px;padding:0 0 5px;border-bottom:1px solid #12343c}
+.fit-stats-polished .fit-rail-section-head>div{min-width:0}.fit-stats-polished .fit-rail-section-head span{display:block;color:#61e5dc;font-size:10px;font-weight:800;letter-spacing:.055em;text-transform:uppercase}.fit-stats-polished .fit-rail-section-head strong{display:block;margin-top:2px;color:#d8edf0;font-size:13px;line-height:1.1}.fit-stats-polished .fit-rail-section-head em{min-width:0;color:#73979d;font-size:9px;font-style:normal;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fit-stats-polished .fit-rail-metric-grid{display:grid!important;gap:0!important;margin:0!important}
+.fit-stats-polished .fit-rail-metric{display:grid!important;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;align-items:center;min-width:0;min-height:0!important;padding:4px 0!important;border:0!important;border-top:1px solid #102e36!important;background:transparent!important}
+.fit-stats-polished .fit-rail-metric:first-child{border-top:0!important}.fit-stats-polished .fit-rail-metric>span{color:#78979d;font-size:10px;text-transform:uppercase;letter-spacing:.025em}.fit-stats-polished .fit-rail-metric>strong{color:#d7e8ea;font-size:12px;text-align:right}.fit-stats-polished .fit-rail-metric>small{grid-column:1/-1;margin-top:-2px;color:#58777e;font-size:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fit-stats-polished .fit-rail-metric.featured{grid-column:auto!important;min-height:0!important;border-color:#102e36!important;background:transparent!important}.fit-stats-polished .fit-rail-metric.featured>strong{color:#69e0d5;font-size:12px}.fit-stats-polished .fit-rail-metric.tone-good>strong{color:#65d9b3}.fit-stats-polished .fit-rail-metric.tone-warn>strong{color:#e0bd68}.fit-stats-polished .fit-rail-metric.tone-danger>strong{color:#e67a75}.fit-stats-polished .fit-rail-metric.tone-muted>strong{color:#718990}
+.fit-stats-polished .fit-rail-resist-head,.fit-stats-polished .fit-rail-resist-row{display:grid;grid-template-columns:48px repeat(4,minmax(0,1fr)) 54px;gap:3px;align-items:center}.fit-stats-polished .fit-rail-resist-head{padding:3px 0;color:#6c8c92;font-size:9px;text-align:center}.fit-stats-polished .fit-rail-resist-head strong{text-align:left}.fit-stats-polished .fit-rail-resist-row{min-height:27px;border-top:1px solid #102b33;color:#91abb0;font-size:9px;text-align:center}.fit-stats-polished .fit-rail-resist-row>strong{text-align:left;color:#c9dcde}.fit-stats-polished .fit-rail-resist-row>b{text-align:right;color:#e2f1f2}
+.fit-stats-polished .combat-scenario-main-controls{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px!important}.fit-stats-polished .combat-scenario-subcontrols{display:grid!important;grid-template-columns:1fr 1.4fr!important;gap:6px!important}.fit-stats-polished .combat-scenario-main-controls label,.fit-stats-polished .combat-scenario-subcontrols label,.fit-stats-polished .fit-rail-advanced-grid label{display:grid;gap:4px;color:#76969c;font-size:10px}.fit-stats-polished select,.fit-stats-polished input{min-width:0;height:31px;border:1px solid #27515a!important;border-radius:0!important;background:#031117!important;color:#d4e5e7!important;padding:4px 7px!important;font-size:10px!important}.fit-stats-polished .fit-rail-scenario-foot{display:flex;justify-content:space-between;gap:8px;margin-top:5px;color:#688991;font-size:9px}.fit-stats-polished .combat-scenario-basis{display:block;margin-top:5px;color:#688991;font-size:9px;line-height:1.35}.fit-stats-polished .combat-scenario-advanced{margin-top:6px;border-top:1px solid #1b4149;padding-top:6px}.fit-stats-polished .combat-scenario-advanced summary{cursor:pointer;color:#8db3b5;font-size:10px;font-weight:700}.fit-stats-polished .fit-rail-advanced-grid{display:grid;gap:5px;margin-top:6px}.fit-stats-polished .fit-v2-target-grid{display:grid!important;grid-template-columns:1fr 1fr!important;gap:5px!important;margin-top:5px!important}
+.fit-stats-polished .firepower-loadout{display:grid;gap:5px;margin-top:6px!important;padding-top:6px!important;border:0!important;border-top:1px solid #1b4149!important;background:transparent!important}.fit-stats-polished .firepower-loadout-head{display:none!important}.fit-stats-polished .firepower-drone-select{display:grid!important;grid-template-columns:82px minmax(0,1fr)!important;align-items:center!important;gap:6px!important;color:#789da2!important;font-size:9px!important}.fit-stats-polished .firepower-drone-select select{height:27px!important;padding:2px 5px!important;font-size:9px!important}.fit-stats-polished .firepower-weapon-list{display:grid;gap:4px}.fit-stats-polished .firepower-weapon-row{display:grid!important;grid-template-columns:minmax(0,1fr) 72px minmax(90px,1fr)!important;gap:4px!important;align-items:center!important;padding:4px!important;border:1px solid #163b43!important;background:#06171d!important}.fit-stats-polished .firepower-weapon-row strong,.fit-stats-polished .firepower-weapon-row small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fit-stats-polished .firepower-weapon-row strong{color:#d4e8e7;font-size:9px}.fit-stats-polished .firepower-weapon-row small{color:#708f94;font-size:8px}.fit-stats-polished .firepower-weapon-row select{height:26px!important;padding:2px 4px!important;font-size:8px!important}
+@media(max-width:900px){.fit-concept-right-rail > .fit-stats-polished{grid-template-columns:1fr!important}.fit-stats-polished .combat-scenario-card,.fit-stats-polished .pyfa-section-defense,.fit-stats-polished .pyfa-section-firepower{grid-column:1!important}}
+
+/* Surgical restore: preserve the compact sidebar and only add the DPS selectors. */
+.fit-concept-right-rail > .fit-stats-polished > .combat-scenario-card{order:0!important;grid-column:1/-1!important}
+.fit-concept-right-rail > .fit-stats-polished > .pyfa-section-defense{order:1!important;grid-column:1/-1!important}
+.fit-concept-right-rail > .fit-stats-polished > .pyfa-section-firepower{order:2!important;grid-column:1!important}
+.fit-concept-right-rail > .fit-stats-polished > .pyfa-section-tank{order:3!important;grid-column:2!important}
+.fit-concept-right-rail > .fit-stats-polished > .pyfa-section-capacitor{order:4!important;grid-column:1!important}
+.fit-concept-right-rail > .fit-stats-polished > .pyfa-section-targeting{order:5!important;grid-column:2!important}
+.fit-concept-right-rail > .fit-stats-polished > .fit-rail-fitting{order:6!important}
+.fit-stats-polished .firepower-drone-select{grid-template-columns:68px minmax(0,1fr)!important;gap:5px!important}
+.fit-stats-polished .firepower-drone-select select{width:100%!important;min-width:0!important}
+@media(max-width:900px){
+  .fit-concept-right-rail > .fit-stats-polished > .combat-scenario-card,
+  .fit-concept-right-rail > .fit-stats-polished > .pyfa-section-defense,
+  .fit-concept-right-rail > .fit-stats-polished > .pyfa-section-firepower,
+  .fit-concept-right-rail > .fit-stats-polished > .pyfa-section-tank,
+  .fit-concept-right-rail > .fit-stats-polished > .pyfa-section-capacitor,
+  .fit-concept-right-rail > .fit-stats-polished > .pyfa-section-targeting{grid-column:1!important}
+}
+
+/* Keep the requested drone selector tiny so Firepower stays the old compact size. */
+.fit-stats-polished .firepower-loadout{gap:2px!important;margin-top:3px!important;padding-top:3px!important}
+.fit-stats-polished .firepower-drone-select{grid-template-columns:60px minmax(0,1fr)!important;gap:4px!important;font-size:8px!important}
+.fit-stats-polished .firepower-drone-select select{height:24px!important;min-height:24px!important;padding:1px 4px!important;font-size:9px!important}
+
+
+/* Independent compact sidebar columns + embossed resistance values. */
+.fit-concept-right-rail > .fit-stats-polished > .fit-rail-columns{order:2!important;grid-column:1/-1!important;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;align-items:start;min-width:0}
+.fit-stats-polished .fit-rail-column{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;align-content:start;min-width:0}
+.fit-stats-polished .fit-rail-column > .fit-rail-section{grid-column:1!important;align-self:start;margin:0!important}
+.fit-stats-polished .fit-rail-resist-head,.fit-stats-polished .fit-rail-resist-row{gap:4px}
+.fit-stats-polished .fit-rail-resist-pill{display:inline-flex;align-items:center;justify-content:center;min-width:0;min-height:20px;padding:0 3px;border:1px solid #1a4650;border-radius:2px;background:linear-gradient(180deg,#0b2730,#061a21);box-shadow:inset 0 1px rgba(110,230,222,.10),inset 0 -1px rgba(0,0,0,.55),0 1px rgba(0,0,0,.25);font-weight:800;line-height:1}
+.fit-stats-polished .fit-rail-resist-pill.damage-em{border-color:#1e5261}.fit-stats-polished .fit-rail-resist-pill.damage-thermal{border-color:#613438}.fit-stats-polished .fit-rail-resist-pill.damage-kinetic{border-color:#285263}.fit-stats-polished .fit-rail-resist-pill.damage-explosive{border-color:#665425}
+@media(max-width:900px){.fit-concept-right-rail > .fit-stats-polished > .fit-rail-columns{grid-template-columns:1fr}.fit-stats-polished .fit-rail-column{gap:7px}}
+/* Balanced fitter stat cards + full-width drone flight bar. */
+.fit-concept-right-rail > .fit-stats-polished > .fit-rail-columns{align-items:stretch!important}
+.fit-stats-polished .fit-rail-column{grid-template-rows:repeat(2,minmax(0,1fr))!important;align-content:stretch!important}
+.fit-stats-polished .fit-rail-column > .fit-rail-section{height:100%!important;align-self:stretch!important;box-sizing:border-box}
+.fit-stats-polished .pyfa-section-firepower .firepower-loadout:not(:has(.firepower-weapon-list)):not(:has(.firepower-loadout-empty)){display:none!important}
+.fit-stats-polished .fit-drone-flight-bar{order:3!important;grid-column:1/-1!important;display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:center;min-height:38px;padding:7px 8px;border:1px solid #173842;border-radius:2px;background:linear-gradient(180deg,rgba(12,37,45,.96),rgba(5,22,29,.94));box-shadow:inset 0 1px rgba(110,230,222,.08),inset 0 -1px rgba(0,0,0,.5);box-sizing:border-box}
+.fit-stats-polished .fit-drone-flight-bar>span{color:#72aeb5;font-size:9px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.fit-stats-polished .fit-drone-flight-bar select{width:100%;min-width:0;height:27px;padding:2px 7px;border:1px solid #24515b;background:#071a21;color:#d6e9eb;font-size:10px}
+.fit-stats-polished .fit-drone-flight-bar select:disabled{opacity:.6}
+.fit-stats-polished .fit-rail-ehp-pill{display:inline-flex!important;align-items:center;justify-content:center;justify-self:stretch;width:100%;min-width:0;min-height:20px;padding:0 3px;box-sizing:border-box;border:1px solid #52646a;border-radius:2px;background:linear-gradient(180deg,#18272c,#0b171b);box-shadow:inset 0 1px rgba(255,255,255,.08),inset 0 -1px rgba(0,0,0,.6),0 1px rgba(0,0,0,.25);color:#eef3f4!important;font-weight:800;line-height:1;text-align:center!important}
+/* Active drone flight above the four balanced stat cards. */
+.fit-concept-right-rail > .fit-stats-polished > .fit-drone-flight-bar{order:2!important}
+.fit-concept-right-rail > .fit-stats-polished > .fit-rail-columns{order:3!important}
+
+
+/* Right rail: manual Target & Application replaces Combat Scenario. */
+.fit-concept-right-rail>.fit-stats-polished>.fit-rail-target-application{order:0!important;grid-column:1/-1!important;padding:7px!important}
+.fit-concept-right-rail>.fit-stats-polished>.pyfa-section-defense{order:1!important}
+.fit-concept-right-rail>.fit-stats-polished>.fit-rail-columns{order:2!important}
+.fit-concept-right-rail>.fit-stats-polished>.fit-drone-flight-bar{order:3!important}
+.fit-stats-polished .fit-rail-target-application .fit-rail-section-head{margin-bottom:5px!important;padding-bottom:5px!important}
+.fit-stats-polished .fit-rail-target-application .fit-rail-section-head em{max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fit-stats-polished .fit-rail-target-application .fit-rail-advanced-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:5px;margin:0}
+.fit-stats-polished .fit-rail-target-application .fit-rail-advanced-grid label{display:grid;gap:3px;min-width:0;color:#75979d;font-size:8px}
+.fit-stats-polished .fit-rail-target-application .fit-rail-advanced-grid input,.fit-stats-polished .fit-rail-target-application .fit-rail-advanced-grid select{width:100%;height:27px!important;min-width:0;padding:2px 5px!important;border:1px solid #24515b!important;border-radius:2px!important;background:#03131a!important;color:#d4e7e8!important;font-size:8px!important}
+.fit-stats-polished .fit-rail-target-application .fit-rail-advanced-grid select{margin-top:2px}
+.fit-stats-polished .fit-rail-target-application .fit-v2-target-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:4px!important;margin-top:5px!important}
+.fit-stats-polished .fit-rail-target-application .fit-v2-target-grid label{display:grid;grid-template-columns:1fr 62px;gap:4px;align-items:center;padding:3px 4px;border:1px solid #153740;background:#05171d;color:#6f9298;font-size:8px}
+.fit-stats-polished .fit-rail-target-application .fit-v2-target-grid input{height:24px!important;padding:1px 4px!important;text-align:right}
+@media(max-width:900px){.fit-stats-polished .fit-rail-target-application .fit-rail-advanced-grid{grid-template-columns:1fr}.fit-stats-polished .fit-rail-target-application .fit-v2-target-grid{grid-template-columns:1fr!important}}

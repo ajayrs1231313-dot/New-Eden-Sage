@@ -99,6 +99,7 @@ assert.ok(hud.includes("character-corporation-name-measure"), "corporation name 
 
 // Onboarding: derive eligible commands from the live nav, exclude Settings, persist visits, and complete only when all have been seen.
 assert.ok(hud.includes('["Welcome", "Add Character", "Sync Data", "Visit All Command Tabs"]'), "Character onboarding must contain exactly the new four-node sequence");
+assert.ok(hud.includes('if (completeCount === labels.length) return null;'), 'completed onboarding journey should disappear at 4/4');
 assert.ok(app.includes('const commandNav = nav.filter((item) => item.id !== "settings");'), "onboarding command targets must derive from live nav and explicitly exclude Settings");
 assert.ok(app.includes('const COMMAND_VISIT_STORAGE_KEY = "new-eden-sage:onboarding:command-tabs:v1";'), "command visit onboarding must use a versioned persistent key");
 assert.ok(app.includes("localStorage.getItem(COMMAND_VISIT_STORAGE_KEY)") && app.includes("localStorage.setItem(COMMAND_VISIT_STORAGE_KEY"), "command visits must survive app restart");

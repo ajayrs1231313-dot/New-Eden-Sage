@@ -17,7 +17,7 @@ import type {
 const gunzipAsync = promisify(gunzip);
 const SHARED_MANIFEST_SCHEMA = 1;
 const REQUIRED_ARTIFACTS = ["market-global", "market-regional"] as const;
-const KNOWN_OPTIONAL_ARTIFACTS = ["market-trades", "market-shortages", "public-shared", "public-contracts"] as const;
+const KNOWN_OPTIONAL_ARTIFACTS = ["market-trades", "market-shortages", "market-hub-depth", "public-shared", "public-contracts"] as const;
 const DEFAULT_SHARED_MARKET_BASE_URL = "https://newedensage--new-eden-sage-market-benchmark-shared-market-web.modal.run";
 const MANIFEST_FILE = "manifest.json";
 
@@ -49,6 +49,18 @@ export type SharedMarketManifest = {
   contractsChanged?: boolean;
   publicChanged?: boolean;
   files: Record<string, SharedMarketArtifact>;
+};
+
+export type SharedMarketHubDepthDataset = {
+  schemaVersion: 1;
+  dataset: "market-hub-depth";
+  snapshotId: string;
+  createdAt: string;
+  regionId: number;
+  locationId: number;
+  locationName: string;
+  orderCount: number;
+  orders: import("./market").MarketOrder[];
 };
 
 export type SharedPreparedTradeDataset = {
@@ -112,6 +124,7 @@ type ParsedGeneration = {
   regional: RegionalMarketAggregateIndex;
   trades: SharedPreparedTradeDataset | null;
   shortages: SharedPreparedShortageDataset | null;
+  hubDepth: SharedMarketHubDepthDataset | null;
   publicShared: SharedPreparedPublicDataset | null;
   contracts: SharedPublicContractsDataset | null;
 };
@@ -121,6 +134,7 @@ const globalGenerationCache = new Map<string, Promise<FullMarketAnalysisIndex | 
 const regionalGenerationCache = new Map<string, Promise<RegionalMarketAggregateIndex | null>>();
 const tradeGenerationCache = new Map<string, Promise<SharedPreparedTradeDataset | null>>();
 const shortageGenerationCache = new Map<string, Promise<SharedPreparedShortageDataset | null>>();
+const hubDepthGenerationCache = new Map<string, Promise<SharedMarketHubDepthDataset | null>>();
 const publicSharedGenerationCache = new Map<string, Promise<SharedPreparedPublicDataset | null>>();
 const contractGenerationCache = new Map<string, Promise<SharedPublicContractsDataset | null>>();
 
@@ -130,6 +144,7 @@ export function invalidateSharedMarketMemoryCache() {
   regionalGenerationCache.clear();
   tradeGenerationCache.clear();
   shortageGenerationCache.clear();
+  hubDepthGenerationCache.clear();
   publicSharedGenerationCache.clear();
   contractGenerationCache.clear();
 }
@@ -459,19 +474,21 @@ async function parseJsonDataset<T extends { schemaVersion: number; dataset: stri
 
 async function validateStagedGeneration(manifest: SharedMarketManifest, root: string): Promise<ParsedGeneration> {
   const startedAt = Date.now();
-  const [global, regional, trades, shortages, publicShared, contracts] = await Promise.all([
+  const [global, regional, trades, shortages, hubDepth, publicShared, contracts] = await Promise.all([
     parseGlobalArtifact(manifest, root),
     parseRegionalArtifact(manifest, root),
     parseJsonDataset<SharedPreparedTradeDataset>(manifest, root, "market-trades", "market-trades"),
     parseJsonDataset<SharedPreparedShortageDataset>(manifest, root, "market-shortages", "market-shortages"),
+    parseJsonDataset<SharedMarketHubDepthDataset>(manifest, root, "market-hub-depth", "market-hub-depth"),
     parseJsonDataset<SharedPreparedPublicDataset>(manifest, root, "public-shared", "public-shared"),
     parseJsonDataset<SharedPublicContractsDataset>(manifest, root, "public-contracts", "public-contracts"),
   ]);
   if (trades && !Array.isArray(trades.opportunities)) throw new Error("Shared market-trades payload has no opportunity list.");
   if (shortages && !Array.isArray(shortages.signals)) throw new Error("Shared market-shortages payload has no signal list.");
   if (contracts && !Array.isArray(contracts.regions)) throw new Error("Shared public-contracts payload has no region list.");
+  if (hubDepth && !Array.isArray(hubDepth.orders)) throw new Error("Shared market-hub-depth payload has no order list.");
   void logEvent("info", "shared_market.validation_ms", { durationMs: Date.now() - startedAt, generation: manifest.generation });
-  return { global, regional, trades, shortages, publicShared, contracts };
+  return { global, regional, trades, shortages, hubDepth, publicShared, contracts };
 }
 
 function installWarmGeneration(manifest: SharedMarketManifest, parsed: ParsedGeneration) {
@@ -479,6 +496,7 @@ function installWarmGeneration(manifest: SharedMarketManifest, parsed: ParsedGen
   regionalGenerationCache.set(manifest.generation, Promise.resolve(parsed.regional));
   tradeGenerationCache.set(manifest.generation, Promise.resolve(parsed.trades));
   shortageGenerationCache.set(manifest.generation, Promise.resolve(parsed.shortages));
+  hubDepthGenerationCache.set(manifest.generation, Promise.resolve(parsed.hubDepth));
   publicSharedGenerationCache.set(manifest.generation, Promise.resolve(parsed.publicShared));
   contractGenerationCache.set(manifest.generation, Promise.resolve(parsed.contracts));
 }
@@ -639,6 +657,12 @@ export async function loadSharedPreparedShortageDataset(): Promise<SharedPrepare
   const manifest = await loadCurrentSharedMarketManifest();
   if (!manifest?.files["market-shortages"]) return null;
   return cachedLoad(shortageGenerationCache, manifest, "market-shortages", () => parseJsonDataset<SharedPreparedShortageDataset>(manifest, generationRoot(manifest.generation), "market-shortages", "market-shortages"));
+}
+
+export async function loadSharedMarketHubDepthDataset(): Promise<SharedMarketHubDepthDataset | null> {
+  const manifest = await loadCurrentSharedMarketManifest();
+  if (!manifest?.files["market-hub-depth"]) return null;
+  return cachedLoad(hubDepthGenerationCache, manifest, "market-hub-depth", () => parseJsonDataset<SharedMarketHubDepthDataset>(manifest, generationRoot(manifest.generation), "market-hub-depth", "market-hub-depth"));
 }
 
 export async function loadSharedPublicContractsDataset(): Promise<SharedPublicContractsDataset | null> {

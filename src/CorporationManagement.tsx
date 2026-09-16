@@ -5,12 +5,13 @@ import { CorporationRoles } from "./CorporationRoles";
 import { CorporationDiscordIntegration } from "./CorporationDiscordIntegration";
 import { CorporationFindHome } from "./CorporationFindHome";
 import { CorporationHr } from "./CorporationHr";
+import { CorporationOreBuyback } from "./CorporationOreBuyback";
 import { buildSystemNewsKillmailWindows, mergeSystemNewsKillmails, type KillmailWindowKey } from "./system-news-killmail-windows";
 
 type SystemHit = { systemId: number; name: string; regionName: string; constellationName: string; securityStatus: number };
 type Intel = any;
 type Watched = { systemId: number; name: string };
-type CorpSection = "system-news" | "find-home" | "overview" | "members" | "ops" | "roles" | "hr" | "structures" | "alliance" | "discord";
+type CorpSection = "system-news" | "find-home" | "ore-buyback" | "overview" | "members" | "ops" | "roles" | "hr" | "structures" | "alliance" | "discord";
 type KillmailStatus = {
   cooldownMs?: number;
   cacheTtlMs?: number;
@@ -216,12 +217,13 @@ export function CorporationManagement() {
       <button className={section === "ops" ? "active" : ""} onClick={() => setSection("ops")}>Op Planner</button>
       <button className={section === "roles" ? "active" : ""} onClick={() => setSection("roles")}>Corp Roles</button>
       <button className={section === "hr" ? "active" : ""} onClick={() => setSection("hr")}>HR</button>
+      <button className={section === "ore-buyback" ? "active" : ""} onClick={() => setSection("ore-buyback")}>Corp Ore Buyback</button>
       <button className={section === "structures" ? "active" : ""} onClick={() => setSection("structures")}>Structures</button>
       <button className={section === "alliance" ? "active" : ""} onClick={() => setSection("alliance")}>Alliance Management</button>
       <button className={section === "discord" ? "active" : ""} onClick={() => setSection("discord")}>Discord Setup</button>
     </div>
 
-    {section === "system-news" ? <SystemNews /> : section === "find-home" ? <CorporationFindHome corporation={corporation} /> : section === "alliance" ? <AllianceManagementReserved /> : <>
+    {section === "system-news" ? <SystemNews /> : section === "find-home" ? <CorporationFindHome corporation={corporation} /> : section === "ore-buyback" ? <CorporationOreBuyback /> : section === "alliance" ? <AllianceManagementReserved /> : <>
       <div className="corp-data-head">
         <div>
           <p className="eyebrow">CORPORATION · COMMAND</p>
