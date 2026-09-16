@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../..");
+const source=fs.readFileSync(path.join(root,"src/Fittings.tsx"),"utf8");
+assert.ok(source.includes('const [eveExportDialogOpen, setEveExportDialogOpen] = useState(false);'),"export must have its own destination chooser");
+assert.ok(source.includes('const [eveExportCharacterId, setEveExportCharacterId] = useState(characterId);'),"export destination must be separate from analysis pilot");
+assert.ok(source.includes('className="fit-action-export" onClick={openEveExportDialog}'),"main Export button must open destination chooser");
+assert.ok(source.includes('aria-label="Export fit destination character"'),"chooser must expose connected-character selector");
+assert.ok(source.includes('exportFitToEve({ characterId: targetCharacterId, fit })'),"EVE export must use the chosen destination character");
+assert.ok(source.includes('It does not change the fitter analysis pilot.'),"dialog must make independent destination behavior explicit");
+console.log("Fitter EVE export character chooser regression: PASS");

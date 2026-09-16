@@ -52,7 +52,22 @@ const site = timing.aggregatePveSiteClearTime([mobile, fast, sentry]);
 approx(site.combatSeconds, 120);
 approx(site.droneNavigationSeconds, 123);
 approx(site.estimatedClearSeconds, 243);
-assert.equal(timing.PVE_CLEAR_TIME_CAVEAT, 'Estimated clear time includes combat and drone navigation. Ship travel time is not included.');
+assert.equal(mobile.shipNavigationSeconds, 0);
+assert.equal(sentry.shipNavigationSeconds, 0);
+
+const withShipReposition = timing.calculatePveRoomClearTime({
+  targets,
+  geometry:'exact',
+  droneTravel:{mode:'mobile', effectiveVelocityMps:1000},
+  shipTravel:{mode:'average-reposition', effectiveVelocityMps:500, minimumLegDistanceM:4000, maximumLegDistanceM:8000, velocityUtilization:0.8},
+});
+approx(withShipReposition.shipNavigationDistanceM, 20000);
+approx(withShipReposition.shipNavigationSeconds, 50);
+assert.equal(withShipReposition.shipNavigationLegCount, 3);
+approx(withShipReposition.averageShipNavigationSecondsPerLeg, 50 / 3);
+approx(withShipReposition.estimatedClearSeconds, 172);
+assert.match(timing.PVE_CLEAR_TIME_CAVEAT, /target-to-target ship repositioning/i);
+assert.match(timing.PVE_CLEAR_TIME_CAVEAT, /not a guarantee/i);
 
 const estimated = timing.estimateClusteredPveGeometry([
   {id:'group-a', count:3, priority:0, ttkSeconds:5},

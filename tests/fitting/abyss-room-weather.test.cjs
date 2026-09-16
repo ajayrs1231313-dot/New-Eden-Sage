@@ -128,15 +128,19 @@ const snapshot = {
   assert.equal(benthic.droneNavigation.mode, 'mobile');
   assert.ok(benthic.droneNavigation.effectiveMaxVelocityMps > 0, 'effective drone velocity missing');
   assert.ok(benthic.droneNavigationSeconds > 0, 'mobile drones should add practical navigation time');
-  approx(benthic.clearSeconds, benthic.combatSeconds + benthic.droneNavigationSeconds, 1e-8, 'whole-room elapsed clear time');
+  approx(benthic.clearSeconds, benthic.combatSeconds + benthic.droneNavigationSeconds + benthic.shipNavigationSeconds, 1e-8, 'whole-room elapsed clear time');
   assert.ok(benthic.clearSeconds > benthic.combatSeconds, 'navigation must not be folded into a fake DPS number');
 
-  assert.match(exotic.abyss.clearTimeCaveat, /Ship travel time is not included/i);
+  assert.ok(exotic.abyss.rooms.some(room => room.shipNavigationSeconds > 0), 'Abyss clear times should include meaningful ship target-to-target repositioning');
+  assert.match(exotic.abyss.clearTimeCaveat, /target-to-target ship repositioning/i);
+  assert.match(exotic.abyss.clearTimeCaveat, /not a guarantee/i);
   assert.equal(exotic.abyss.siteEstimate.roomCount, 3);
   const finiteT5Rooms = exotic.abyss.rooms.filter(room => Number.isFinite(room.clearSeconds));
   const meanT5Clear = finiteT5Rooms.reduce((sum, room) => sum + room.clearSeconds, 0) / finiteT5Rooms.length;
   approx(exotic.abyss.siteEstimate.representative.estimatedClearSeconds, meanT5Clear * 3, 1e-8, 'representative site clear');
   approx(exotic.abyss.siteEstimate.representative.timerMarginSeconds, 1200 - meanT5Clear * 3, 1e-8, 'Abyss timer margin');
+  const longestT5Clear = Math.max(...finiteT5Rooms.map(room => room.clearSeconds));
+  approx(exotic.abyss.siteEstimate.heavyKnown.estimatedClearSeconds, longestT5Clear * 3, 1e-8, 'worst-known 3-room clear');
 
   // Activity profile: T4 Electrical averages the documented room population instead of
   // forcing the user to pick one arbitrary NPC from the entire SDE catalogue.

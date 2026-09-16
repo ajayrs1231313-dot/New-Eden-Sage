@@ -304,7 +304,8 @@
 .combat-scenario-abyss-intel>header{display:flex;justify-content:space-between;gap:10px;padding-bottom:5px;border-bottom:1px solid #173b43}
 .combat-scenario-abyss-intel>header strong{display:block;color:#daecec;font-size:11px}
 .combat-scenario-abyss-intel>header small{color:#68888f;font-size:8px}
-.combat-scenario-abyss-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;margin:6px 0}
+.combat-scenario-abyss-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;margin:6px 0}
+.combat-scenario-clear-time-caveat{display:flex;align-items:center;gap:7px;margin:-1px 0 6px;padding:5px 7px;border:1px solid #274d54;border-left:3px solid #5ab8b1;background:linear-gradient(90deg,#071d23,#041419);color:#789ba0;font-size:7.5px;line-height:1.25}.combat-scenario-clear-time-caveat strong{flex:0 0 auto;color:#a9d8d3;font-size:7.5px;text-transform:uppercase;letter-spacing:.05em}.combat-scenario-abyss-metrics article.clear-time{box-shadow:inset 2px 0 rgba(87,210,199,.22),inset 0 1px rgba(255,255,255,.03)}.combat-scenario-abyss-metrics article.worst-clear-time{border-color:#634c2a;background:linear-gradient(135deg,#171208,#071318);box-shadow:inset 2px 0 rgba(220,164,71,.35)}.combat-scenario-abyss-metrics article.worst-clear-time strong{color:#f0c77d}
 .combat-scenario-room-breakdown{border:1px solid #173b43;background:#04141a}
 .combat-scenario-room-breakdown>summary{display:flex;justify-content:space-between;gap:8px;padding:6px 7px;cursor:pointer;color:#83aaae;font-size:8px}
 .combat-scenario-room-breakdown[open]>summary{border-bottom:1px solid #173b43}
@@ -360,3 +361,9 @@
 .fit-performance .fit-eve-export-panel>div{align-self:center}.fit-performance .fit-eve-export-panel .eyebrow{margin:0 0 1px;color:#61a4a8;font-size:6.5px}.fit-performance .fit-eve-export-panel h3{margin:0!important;color:#e0eff0!important;font-size:9.5px!important;text-transform:none!important;letter-spacing:0!important}.fit-performance .fit-eve-export-panel label{display:grid;gap:2px}.fit-performance .fit-eve-export-panel label>span{font-size:6.5px;color:#6d9297;text-transform:uppercase;letter-spacing:.05em}.fit-performance .fit-eve-export-panel .primary{border-color:#3f857e!important;background:#10302f!important;color:#8ff1e6!important}.fit-performance .fit-eve-export-panel .secondary{border-color:#344650!important;background:#0a1820!important;color:#8aa4aa!important}.fit-performance .fit-eve-export-panel .fit-eve-export-status{grid-column:1/-1;color:#7bb8b4;font-size:7px}
 .combat-scenario-loadout-actions button{min-width:102px;flex:0 0 auto;white-space:nowrap;line-height:1!important}.combat-scenario-loadout-actions small{min-width:0}
 @media(max-width:1100px){.performance-overheat-controls{grid-template-columns:1fr}.fit-performance .fit-eve-export-panel{grid-template-columns:1fr 1fr}.fit-performance .fit-eve-export-panel>div{grid-column:1/-1}}
+.combat-scenario-abyss-metrics article.tank-stable{border-color:#235a4c;box-shadow:inset 2px 0 rgba(74,211,157,.38),inset 0 1px rgba(255,255,255,.03)}
+.combat-scenario-abyss-metrics article.tank-stable small:first-of-type{color:#71d9ad}
+.combat-scenario-abyss-metrics article.tank-cap-limited{border-color:#65522d;box-shadow:inset 2px 0 rgba(224,176,76,.38),inset 0 1px rgba(255,255,255,.03)}
+.combat-scenario-abyss-metrics article.tank-cap-limited small:first-of-type{color:#e4bd70}
+.combat-scenario-abyss-metrics article.tank-breaks{border-color:#6a3034;box-shadow:inset 2px 0 rgba(221,91,99,.38),inset 0 1px rgba(255,255,255,.03)}
+.combat-scenario-abyss-metrics article.tank-breaks small:first-of-type{color:#e88d93}

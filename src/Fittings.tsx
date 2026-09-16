@@ -1552,6 +1552,8 @@ function FitDisplay({
   const [remedies, setRemedies] = useState<FitRemedyCandidate[]>([]);
   const [eveExporting, setEveExporting] = useState(false);
   const [eveExportStatus, setEveExportStatus] = useState("");
+  const [eveExportDialogOpen, setEveExportDialogOpen] = useState(false);
+  const [eveExportCharacterId, setEveExportCharacterId] = useState(characterId);
   useEffect(() => { if (!eveExportStatus) return; const timer = window.setTimeout(() => { setEveExportStatus(""); }, 2800); return () => window.clearTimeout(timer); }, [eveExportStatus]);
   const [hullProfile, setHullProfile] = useState<HullFittingProfile | null>(null);
   const [hullTypeInfo, setHullTypeInfo] = useState<Awaited<ReturnType<typeof window.sage.getFittingTypeInfoLocal>> | null>(null);
@@ -1823,14 +1825,23 @@ function FitDisplay({
       })() : undefined,
     });
   };
-  async function exportCurrentFitToEve() {
-    if (!characterId) return;
+  function openEveExportDialog() {
+    const defaultCharacterId = characters.some((character) => character.characterId === characterId)
+      ? characterId
+      : characters[0]?.characterId ?? "";
+    setEveExportCharacterId(defaultCharacterId);
+    setEveExportStatus("");
+    setEveExportDialogOpen(true);
+  }
+  async function exportCurrentFitToEve(targetCharacterId = characterId, closeDialogOnSuccess = false) {
+    if (!targetCharacterId) return;
     setEveExporting(true);
     setEveExportStatus("Saving fit to EVE...");
     try {
-      await window.sage.exportFitToEve({ characterId, fit });
-      const characterName = characters.find((character) => character.characterId === characterId)?.character.name ?? "the selected character";
+      await window.sage.exportFitToEve({ characterId: targetCharacterId, fit });
+      const characterName = characters.find((character) => character.characterId === targetCharacterId)?.character.name ?? "the selected character";
       setEveExportStatus(`Saved to ${characterName}'s EVE fitting library.`);
+      if (closeDialogOnSuccess) setEveExportDialogOpen(false);
     } catch (error) {
       setEveExportStatus(error instanceof Error ? error.message : "Could not export the fit to EVE.");
     } finally {
@@ -1895,12 +1906,12 @@ function FitDisplay({
         <div className="fit-concept-actions">
           <button type="button" className="fit-action-save" onClick={()=>setEveExportStatus("Fit saved to Sage persistent storage.")}>Save Fit</button>
           <button type="button" className="fit-action-duplicate" onClick={onDuplicate}>Duplicate</button>
-          <button type="button" className="fit-action-export" onClick={onExport}>Export</button>
+          <button type="button" className="fit-action-export" onClick={openEveExportDialog}>Export</button>
           <button type="button" className="shopping fit-action-shopping" onClick={exportCurrentFitToShoppingList}>Add to Shopping List</button>
           <details className="fit-concept-more">
             <summary aria-label="More fitting actions">...</summary>
             <div>
-              <button type="button" onClick={exportCurrentFitToEve} disabled={!characterId || eveExporting}>{eveExporting ? "Exporting..." : "Export to EVE"}</button>
+              <button type="button" onClick={openEveExportDialog} disabled={!characters.length}>Export to EVE</button>
               <button type="button" onClick={onExportToDoctrine}>Export to Doctrine</button>
               <button type="button" onClick={onRoute}>Procurement</button>
               <button type="button" onClick={()=>exportResolution("dream-fit")}>Add Skills to Planner</button>
@@ -1910,6 +1921,17 @@ function FitDisplay({
           <select className="fit-concept-character" value={characterId} onChange={(event)=>onCharacterChange(event.target.value)} aria-label="Fitting pilot">{characters.map((character)=><option key={character.characterId} value={character.characterId}>{character.character.name}</option>)}</select>
         </div>
       </section>
+
+      {eveExportDialogOpen && <div className="fit-doctrine-export-backdrop fit-eve-export-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !eveExporting) setEveExportDialogOpen(false); }}>
+        <section className="fit-doctrine-export-dialog fit-eve-export-dialog" role="dialog" aria-modal="true" aria-label="Export fitting to EVE">
+          <div className="fit-doctrine-export-head"><div><p className="eyebrow">EVE FIT EXPORT</p><h3>Choose destination character</h3><p>{fit.name} - {fit.hull.name}</p></div><button className="fit-doctrine-export-close" onClick={() => setEveExportDialogOpen(false)} disabled={eveExporting} aria-label="Close">X</button></div>
+          <div className="fit-doctrine-export-corp"><span>DESTINATION</span><strong>{characters.find((character) => character.characterId === eveExportCharacterId)?.character.name ?? "Choose a connected character"}</strong></div>
+          <label><span>Send fitting to</span><select value={eveExportCharacterId} onChange={(event) => setEveExportCharacterId(event.target.value)} aria-label="Export fit destination character">{characters.map((character) => <option key={character.characterId} value={character.characterId}>{character.character.name}</option>)}</select></label>
+          {eveExportStatus && <small className="fit-eve-export-dialog-status">{eveExportStatus}</small>}
+          <div className="fit-doctrine-export-actions"><button type="button" onClick={() => void onExport()} disabled={eveExporting}>Copy Sage JSON</button><button type="button" onClick={() => setEveExportDialogOpen(false)} disabled={eveExporting}>Cancel</button><button type="button" className="primary" onClick={() => void exportCurrentFitToEve(eveExportCharacterId, true)} disabled={!eveExportCharacterId || eveExporting}>{eveExporting ? "Exporting..." : "Export fit to EVE"}</button></div>
+          <small>This saves the fitting to the selected character's personal EVE fitting library. It does not change the fitter analysis pilot.</small>
+        </section>
+      </div>}
 
       <section className="fit-concept-tabs">
         <div role="tablist" aria-label="Fitting detail views">
@@ -2277,6 +2299,13 @@ function FitCombatScenario({
     +Number(averageIncoming?.playerTank?.effectiveArmorRepairPerSecond??analysis?.defence?.effectiveArmorRepairPerSecond??0)
     +Number(averageIncoming?.playerTank?.effectiveStructureRepairPerSecond??analysis?.defence?.effectiveStructureRepairPerSecond??0)
     +Number(averageIncoming?.playerTank?.effectivePassiveShieldPeak??analysis?.defence?.effectivePassiveShieldPeak??0);
+  const activeScenarioTank=Number(averageIncoming?.playerTank?.effectiveShieldRepairPerSecond??analysis?.defence?.effectiveShieldRepairPerSecond??0)
+    +Number(averageIncoming?.playerTank?.effectiveArmorRepairPerSecond??analysis?.defence?.effectiveArmorRepairPerSecond??0)
+    +Number(averageIncoming?.playerTank?.effectiveStructureRepairPerSecond??analysis?.defence?.effectiveStructureRepairPerSecond??0);
+  const passiveScenarioTank=Number(averageIncoming?.playerTank?.effectivePassiveShieldPeak??analysis?.defence?.effectivePassiveShieldPeak??0);
+  const averageIncomingDps=Number(averageIncoming?.totalDps??0);
+  const averageTankHolds=averageIncomingDps>0&&scenarioTank>=averageIncomingDps;
+  const averageTankCapStable=Boolean(analysis?.capacitor?.stable);
   const appliedWeaponDps=analysis?.damage?.weaponProfiles?.reduce((sum:number,weapon:any)=>sum+Number(weapon.targetApplication?.appliedDps??0),0)??0;
   const profileAppliedDps=appliedWeaponDps+Number(analysis?.damage?.droneDps??0);
   const explicitDroneFlight=fit.drones.some(item=>item.activeQuantity!=null);
@@ -2286,6 +2315,13 @@ function FitCombatScenario({
     const safe=Math.abs(Math.round(value));
     return `${Math.floor(safe/60)}m ${String(safe%60).padStart(2,"0")}s`;
   };
+  const averageTankStable=averageTankHolds&&averageTankCapStable;
+  const averageTankStatus=averageTankStable
+    ? `Tank stable · ${scenarioTank.toFixed(1)} EHP/s`
+    : averageTankHolds
+      ? `Tank holds · cap ${seconds(Number(analysis?.capacitor?.depletionSeconds??0))}`
+      : `Tank breaks · ${scenarioTank.toFixed(1)} EHP/s`;
+  const averageTankStatusClass=averageTankStable?"tank-stable":averageTankHolds?"tank-cap-limited":"tank-breaks";
   const selectDroneFlight=(typeId:number)=>{
     if(!typeId){onDroneFlightChange(null);return;}
     const bay=fit.drones.find(item=>item.typeId===typeId);
@@ -2367,6 +2403,9 @@ function FitCombatScenario({
     : recommendedDamage.startsWith("Thermal") ? ["Ogre","Hammerhead","Hobgoblin"]
     : recommendedDamage.startsWith("Explosive") ? ["Berserker","Valkyrie","Warrior"] : [];
   const recommendedFittedDrone = fit.drones.find(item=>recommendedDroneTokens.some(token=>item.name.includes(token)));
+  const modeledShipLegCount=(abyss?.rooms??[]).reduce((sum:number,candidate:any)=>sum+Number(candidate?.shipNavigation?.legCount??0),0);
+  const modeledShipTravelSeconds=(abyss?.rooms??[]).reduce((sum:number,candidate:any)=>sum+Number(candidate?.shipNavigationSeconds??0),0);
+  const averageTargetTravelSeconds=modeledShipLegCount?modeledShipTravelSeconds/modeledShipLegCount:0;
   const room=abyss?.selectedRoom??abyss?.summary?.worstIncoming;
   return <div className="fit-combat-scenario-stage">
     <section className="combat-scenario-builder">
@@ -2397,7 +2436,7 @@ function FitCombatScenario({
         <div className="combat-scenario-tags">
           <span><small>Deal</small><b>{recommendedDamage}</b></span>
           <span><small>Tank</small><b>{scenario.activity==="abyss"?"Abyss room average":recommendation.incomingLabel}</b></span>
-          <span><small>Target model</small><b>{Math.round(targetProfile.signatureRadiusM)} m µ {Math.round(targetProfile.rangeM/1000)} km</b></span>
+          <span><small>Target model</small><b>{Math.round(targetProfile.signatureRadiusM)} m sig · {Math.round(targetProfile.rangeM/1000)} km range</b></span>
         </div>
         <ol>{strategy.map((line,index)=><li key={index}>{line}</li>)}</ol>
       </section>
@@ -2423,10 +2462,16 @@ function FitCombatScenario({
       {averageTarget&&averageIncoming?<>
         <div className="combat-scenario-abyss-metrics">
           <article><span>Average target DPS</span><strong>{averageTarget.trueDps.toFixed(1)}</strong><small>weather-adjusted target mix</small></article>
-          <article><span>Average incoming</span><strong>{averageIncoming.totalDps.toFixed(1)} DPS</strong><small>mean room pressure</small></article>
+          <article className={averageTankStatusClass}><span>Average incoming</span><strong>{averageIncoming.totalDps.toFixed(1)} DPS</strong><small>{averageTankStatus}</small><small>{activeScenarioTank>0?`active reps ${activeScenarioTank.toFixed(1)} + passive ${passiveScenarioTank.toFixed(1)} EHP/s after hardeners/resists`:`passive ${passiveScenarioTank.toFixed(1)} EHP/s after hardeners/resists`}</small></article>
           <article><span>Average hostiles</span><strong>{averageTarget.averageHostilesPerRoom.toFixed(1)}</strong><small>per documented room</small></article>
-          <article><span>Representative clear</span><strong>{seconds(abyss?.siteEstimate?.representative?.estimatedClearSeconds)}</strong><small>3-room estimate</small></article>
+          <article><span>Avg target travel</span><strong>{seconds(averageTargetTravelSeconds)}</strong><small>ship reposition / modeled leg</small></article>
+          <article className="clear-time"><span>Representative clear</span><strong>{seconds(abyss?.siteEstimate?.representative?.estimatedClearSeconds)}</strong><small>3-room estimate</small></article>
+          <article className="worst-clear-time"><span>Worst-case 3-room total</span><strong>{seconds(abyss?.siteEstimate?.heavyKnown?.estimatedClearSeconds)}</strong><small>3x longest documented room</small></article>
           <article><span>Timer margin</span><strong>{seconds(abyss?.siteEstimate?.representative?.timerMarginSeconds)}</strong><small>{Number(abyss?.siteEstimate?.representative?.timerMarginSeconds??0)>=0?"spare":"over 20-minute limit"}</small></article>
+        </div>
+        <div className="combat-scenario-clear-time-caveat" title={abyss?.clearTimeCaveat ?? ""}>
+          <strong>Clear-time estimate</strong>
+          <span>Includes estimated target-to-target ship and drone travel. These times are estimates, not a guarantee.</span>
         </div>
         <details className="combat-scenario-room-breakdown">
           <summary><span>Room breakdown & exact NPC data</span><small>{abyss?.summary?.roomCount??0} room profiles</small></summary>
@@ -2434,7 +2479,7 @@ function FitCombatScenario({
             <div className="abyss-table-row head"><span>Room</span><span>Hostiles</span><span>Incoming</span><span>Max ramp</span><span>Clear est.</span><span>Fit EHP</span></div>
             {abyss?.rooms?.map((item:any)=><button type="button" className="abyss-table-row" key={item.key} onClick={()=>onAbyssSelectionChange({...abyssSelection,roomKey:item.key})}><span><strong>{item.name}</strong><small>{item.family}{item.variable?" · variable envelope":""}</small></span><span>{item.totalHostiles}</span><span>{item.incoming.totalDps.toFixed(1)}</span><span>{item.incoming.maxRamp.totalDps.toFixed(1)}</span><span>{seconds(item.clearSeconds)}</span><span>{Math.round(item.playerTank.totalEhp).toLocaleString()}</span></button>)}
           </div>
-          {room&&<details className="abyss-exact-n`c-breakdown"><summary>Exact enemies for {room.name}</summary><div className="abyss-target-table"><div className="abyss-target-row head"><span>Enemy</span><span>Count</span><span>Weather HP</span><span>Resists S/A/H</span><span>NPC DPS</span><span>True DPS</span><span>TTK</span></div>{room.targets.map((target:any)=><div className="abyss-target-row" key={target.typeId}><span><strong>{target.name}</strong><small>Type {target.typeId}</small></span><span>{target.count}</span><span>{Math.round(target.weatherHp.total).toLocaleString()}</span><span><small>S {target.weatherResists.shield.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small><small>A {target.weatherResists.armor.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small><small>H {target.weatherResists.hull.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small></span><span>{target.outgoingDpsTotal.toFixed(1)} / {target.outgoingDpsMaxTotal.toFixed(1)}</span><span>{target.trueDps.toFixed(1)}</span><span>{seconds(target.ttkSeconds)}</span></div>)}</div></details>}
+          {room&&<details className="abyss-exact-npc-breakdown"><summary>Exact enemies for {room.name}</summary><div className="abyss-target-table"><div className="abyss-target-row head"><span>Enemy</span><span>Count</span><span>Weather HP</span><span>Resists S/A/H</span><span>NPC DPS</span><span>True DPS</span><span>TTK</span></div>{room.targets.map((target:any)=><div className="abyss-target-row" key={target.typeId}><span><strong>{target.name}</strong><small>Type {target.typeId}</small></span><span>{target.count}</span><span>{Math.round(target.weatherHp.total).toLocaleString()}</span><span><small>S {target.weatherResists.shield.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small><small>A {target.weatherResists.armor.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small><small>H {target.weatherResists.hull.map((v:number)=>Math.round(v*100)+"%").join(" / ")}</small></span><span>{target.outgoingDpsTotal.toFixed(1)} / {target.outgoingDpsMaxTotal.toFixed(1)}</span><span>{target.trueDps.toFixed(1)}</span><span>{seconds(target.ttkSeconds)}</span></div>)}</div></details>}
         </details>
       </>:<div className="combat-scenario-empty">Calculating the selected Abyss tier and weather against the current fit...</div>}
     </section>}

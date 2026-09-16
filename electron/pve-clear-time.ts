@@ -16,6 +16,17 @@ export type PveDroneTravelModel = {
   engagementRangeM?: number;
 };
 
+export type PveShipTravelModel = {
+  mode: "none" | "average-reposition";
+  effectiveVelocityMps: number;
+  /** Ignore tiny local shuffles that do not normally force the hull to reposition. */
+  minimumLegDistanceM?: number;
+  /** Cap estimated per-target repositioning so synthetic room geometry cannot invent extreme burns. */
+  maximumLegDistanceM?: number;
+  /** Ships do not spend every reposition at their theoretical maximum velocity. */
+  velocityUtilization?: number;
+};
+
 export type PveRouteLeg = {
   targetId: string;
   targetLabel?: string;
@@ -28,13 +39,19 @@ export type PveRoomClearTiming = {
   geometry: "exact" | "estimated";
   combatSeconds: number;
   droneNavigationSeconds: number;
+  shipNavigationSeconds: number;
   estimatedClearSeconds: number;
   droneNavigationDistanceM: number;
+  shipNavigationDistanceM: number;
   effectiveDroneVelocityMps: number;
+  effectiveShipVelocityMps: number;
+  shipNavigationLegCount: number;
+  averageShipNavigationSecondsPerLeg: number;
   route: PveRouteLeg[];
+  shipRoute: PveRouteLeg[];
 };
 
-export const PVE_CLEAR_TIME_CAVEAT = "Estimated clear time includes combat and drone navigation. Ship travel time is not included.";
+export const PVE_CLEAR_TIME_CAVEAT = "Estimated clear time includes combat, drone navigation and reasonable target-to-target ship repositioning. These times are estimates, not a guarantee.";
 
 const distance = (left: PvePoint, right: PvePoint) => Math.hypot(
   right.xM - left.xM,
@@ -42,22 +59,10 @@ const distance = (left: PvePoint, right: PvePoint) => Math.hypot(
   (right.zM ?? 0) - (left.zM ?? 0),
 );
 
-export function calculatePveRoomClearTime(input: {
-  targets: PveClearTarget[];
-  droneTravel: PveDroneTravelModel;
-  launchPosition?: PvePoint;
-  geometry: "exact" | "estimated";
-}): PveRoomClearTiming {
-  const required = input.targets.filter((target) => target.requiredForClear !== false);
-  const combatSeconds = required.reduce((sum, target) => sum + Math.max(0, target.ttkSeconds), 0);
-  const mobile = input.droneTravel.mode === "mobile" && input.droneTravel.effectiveVelocityMps > 0;
-  const routeCandidates = mobile
-    ? required.filter((target) => target.requiresDroneTravel !== false)
-    : [];
+function buildPriorityRoute(targets: PveClearTarget[], start: PvePoint, velocityMps: number) {
   const route: PveRouteLeg[] = [];
-  let current = input.launchPosition ?? { xM: 0, yM: 0, zM: 0 };
-  let remaining = [...routeCandidates];
-  let navigationDistanceM = 0;
+  let current = start;
+  let remaining = [...targets];
   while (remaining.length) {
     const priority = Math.min(...remaining.map((target) => target.priority));
     const candidates = remaining.filter((target) => target.priority === priority);
@@ -67,27 +72,76 @@ export function calculatePveRoomClearTime(input: {
     });
     const next = candidates[0];
     const legDistanceM = distance(current, next.position);
-    const travelSeconds = legDistanceM / input.droneTravel.effectiveVelocityMps;
-    navigationDistanceM += legDistanceM;
     route.push({
       targetId: next.id,
       targetLabel: next.label,
       priority: next.priority,
       distanceM: legDistanceM,
-      travelSeconds,
+      travelSeconds: velocityMps > 0 ? legDistanceM / velocityMps : 0,
     });
     current = next.position;
     remaining = remaining.filter((target) => target !== next);
   }
-  const droneNavigationSeconds = mobile ? navigationDistanceM / input.droneTravel.effectiveVelocityMps : 0;
+  return route;
+}
+
+export function calculatePveRoomClearTime(input: {
+  targets: PveClearTarget[];
+  droneTravel: PveDroneTravelModel;
+  shipTravel?: PveShipTravelModel;
+  launchPosition?: PvePoint;
+  geometry: "exact" | "estimated";
+}): PveRoomClearTiming {
+  const required = input.targets.filter((target) => target.requiredForClear !== false);
+  const combatSeconds = required.reduce((sum, target) => sum + Math.max(0, target.ttkSeconds), 0);
+  const launchPosition = input.launchPosition ?? { xM: 0, yM: 0, zM: 0 };
+
+  const mobile = input.droneTravel.mode === "mobile" && input.droneTravel.effectiveVelocityMps > 0;
+  const routeCandidates = mobile
+    ? required.filter((target) => target.requiresDroneTravel !== false)
+    : [];
+  const route = mobile
+    ? buildPriorityRoute(routeCandidates, launchPosition, input.droneTravel.effectiveVelocityMps)
+    : [];
+  const droneNavigationDistanceM = route.reduce((sum, leg) => sum + leg.distanceM, 0);
+  const droneNavigationSeconds = mobile ? droneNavigationDistanceM / input.droneTravel.effectiveVelocityMps : 0;
+
+  // Abyss and other PvE catalogues rarely provide exact NPC coordinates. For ship
+  // movement we therefore model only meaningful target-to-target repositioning: the
+  // first target is excluded, tiny local shuffles are ignored, and a single synthetic
+  // geometry leg is capped. This makes movement affect clear time without pretending
+  // that generated coordinates are authoritative telemetry.
+  const shipTravelEnabled = input.shipTravel?.mode === "average-reposition" && Number(input.shipTravel.effectiveVelocityMps) > 0;
+  const theoreticalShipVelocityMps = shipTravelEnabled ? Math.max(0, Number(input.shipTravel!.effectiveVelocityMps)) : 0;
+  const velocityUtilization = shipTravelEnabled ? Math.min(1, Math.max(0.25, Number(input.shipTravel?.velocityUtilization ?? 0.8))) : 0;
+  const effectiveShipVelocityMps = theoreticalShipVelocityMps * velocityUtilization;
+  const minimumLegDistanceM = Math.max(0, Number(input.shipTravel?.minimumLegDistanceM ?? 4_000));
+  const maximumLegDistanceM = Math.max(minimumLegDistanceM, Number(input.shipTravel?.maximumLegDistanceM ?? 8_000));
+  const rawShipRoute = shipTravelEnabled ? buildPriorityRoute(required, launchPosition, effectiveShipVelocityMps) : [];
+  const shipRoute = rawShipRoute.slice(1).flatMap((leg) => {
+    if (leg.distanceM < minimumLegDistanceM) return [];
+    const modeledDistanceM = Math.min(leg.distanceM, maximumLegDistanceM);
+    return [{ ...leg, distanceM: modeledDistanceM, travelSeconds: modeledDistanceM / Math.max(1e-9, effectiveShipVelocityMps) }];
+  });
+  const shipNavigationDistanceM = shipRoute.reduce((sum, leg) => sum + leg.distanceM, 0);
+  const shipNavigationSeconds = shipRoute.reduce((sum, leg) => sum + leg.travelSeconds, 0);
+  const shipNavigationLegCount = shipRoute.length;
+  const averageShipNavigationSecondsPerLeg = shipNavigationLegCount ? shipNavigationSeconds / shipNavigationLegCount : 0;
+
   return {
     geometry: input.geometry,
     combatSeconds,
     droneNavigationSeconds,
-    estimatedClearSeconds: combatSeconds + droneNavigationSeconds,
-    droneNavigationDistanceM: navigationDistanceM,
+    shipNavigationSeconds,
+    estimatedClearSeconds: combatSeconds + droneNavigationSeconds + shipNavigationSeconds,
+    droneNavigationDistanceM,
+    shipNavigationDistanceM,
     effectiveDroneVelocityMps: mobile ? input.droneTravel.effectiveVelocityMps : 0,
+    effectiveShipVelocityMps,
+    shipNavigationLegCount,
+    averageShipNavigationSecondsPerLeg,
     route,
+    shipRoute,
   };
 }
 
@@ -148,10 +202,11 @@ export function estimateClusteredPveGeometry(
   });
 }
 
-export function aggregatePveSiteClearTime(rooms: Array<Pick<PveRoomClearTiming, "combatSeconds" | "droneNavigationSeconds" | "estimatedClearSeconds">>) {
+export function aggregatePveSiteClearTime(rooms: Array<Pick<PveRoomClearTiming, "combatSeconds" | "droneNavigationSeconds" | "shipNavigationSeconds" | "estimatedClearSeconds">>) {
   return rooms.reduce((total, room) => ({
     combatSeconds: total.combatSeconds + room.combatSeconds,
     droneNavigationSeconds: total.droneNavigationSeconds + room.droneNavigationSeconds,
+    shipNavigationSeconds: total.shipNavigationSeconds + room.shipNavigationSeconds,
     estimatedClearSeconds: total.estimatedClearSeconds + room.estimatedClearSeconds,
-  }), { combatSeconds: 0, droneNavigationSeconds: 0, estimatedClearSeconds: 0 });
+  }), { combatSeconds: 0, droneNavigationSeconds: 0, shipNavigationSeconds: 0, estimatedClearSeconds: 0 });
 }
