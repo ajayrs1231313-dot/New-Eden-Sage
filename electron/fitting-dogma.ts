@@ -31,14 +31,17 @@ function fittingRack(dogma: Map<number, Dogma>, typeId: number) {
 
 export type FittingPlacement = "ship" | "high" | "mid" | "low" | "rig" | "subsystem" | "drone" | "fighter" | "implant" | "booster" | "charge" | "cargo";
 function inferFittingPlacement(rootName:string, rack:string|undefined, categoryName:string, marketPath:string[] = []) : FittingPlacement {
+  const category = categoryName.toLowerCase();
+  // Market-group roots also contain blueprints and skills; those records are not fittable.
+  if (category === "blueprint" || category === "skill") return "cargo";
   if (rootName === "Deployable Structures" || rootName === "Filaments" || rootName === "Structure Equipment" || rootName === "Structure Modifications") return "cargo";
   if (rack === "high" || rack === "mid" || rack === "low" || rack === "rig" || rack === "subsystem") return rack;
-  if (rootName === "Ships") return "ship";
-  if (rootName === "Drones") return "drone";
-  if (rootName === "Fighters") return "fighter";
+  if (rootName === "Ships" && category === "ship") return "ship";
+  if (rootName === "Drones" && category === "drone") return "drone";
+  if (rootName === "Fighters" && category === "fighter") return "fighter";
   if (rootName === "Ammunition & Charges") return "charge";
   if (rootName === "Rigs") return "rig";
-  if (rootName === "Subsystems") return "subsystem";
+  if (rootName === "Subsystems" && category === "subsystem") return "subsystem";
   if (rootName === "Implants & Boosters") {
     const rootIndex = marketPath.findIndex((segment) => segment === "Implants & Boosters");
     const path = marketPath.slice(rootIndex >= 0 ? rootIndex + 1 : 0).join(" / ").toLowerCase();
@@ -2046,7 +2049,11 @@ export async function analyzeFittingDogma(input: {
   for (const item of online) {
     const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!source) continue;
-    collectRequiredModifiers(source, "LocationRequiredSkillModifier", true, item.state ?? "active");
+    // Each fitted copy contributes independently. This matters for stackable rigs/modules
+    // represented as LocationRequiredSkillModifier effects (e.g. solidifiers and mining rigs).
+    for (let count = 0; count < (item.quantity ?? 1); count += 1) {
+      collectRequiredModifiers(source, "LocationRequiredSkillModifier", true, item.state ?? "active");
+    }
   }
   // Hull OwnerRequiredSkillModifier effects use hull bonus attributes after the
   // character's hull skills have scaled them.
@@ -2625,10 +2632,19 @@ export async function analyzeFittingDogma(input: {
         signatureResolutionM: effectiveItemAttr(module, 620, item.typeId) / 1000,
       });
     } else if (module?.effects.has(40)) {
+      const missileVelocityMps = Math.max(0, effectiveItemAttr(charge, 37, item.chargeTypeId!));
+      const flightTimeSeconds = Math.max(0, (effectiveItemAttr(charge, 281, item.chargeTypeId!) / 1000) * effectiveItemAttr(charge, 646, item.chargeTypeId!));
+      const fullFlightTicks = Math.floor(flightTimeSeconds);
+      const extraFlightTickChance = Math.max(0, Math.min(1, flightTimeSeconds - fullFlightTicks));
       weaponProfiles.push({
         ...common,
         kind: "missile",
-        maximumRangeM: effectiveItemAttr(charge, 37, item.chargeTypeId!) * (effectiveItemAttr(charge, 281, item.chargeTypeId!) / 1000) * effectiveItemAttr(charge, 646, item.chargeTypeId!),
+        missileVelocityMps,
+        flightTimeSeconds,
+        extraFlightTickChance,
+        fullDamageRangeM: missileVelocityMps * fullFlightTicks,
+        expectedRangeM: missileVelocityMps * flightTimeSeconds,
+        maximumRangeM: missileVelocityMps * Math.ceil(flightTimeSeconds),
         explosionRadiusM: effectiveItemAttr(charge, 654, item.chargeTypeId!),
         explosionVelocity: effectiveItemAttr(charge, 653, item.chargeTypeId!),
         damageReductionFactor: effectiveItemAttr(charge, 1353, item.chargeTypeId!),
@@ -2644,6 +2660,16 @@ export async function analyzeFittingDogma(input: {
   }
 
   const turretExpectedDamageFactor = (hitChance: number) => hitChance <= 0.01 ? 3 * hitChance : 0.5 * hitChance * hitChance + 0.49 * hitChance + 0.02505;
+  // EVE resolves missile flight in whole-second ticks. A fractional final second is
+  // probabilistic: full DPS through floor(flightTime), then fractional hit chance to ceil.
+  const missileRangeHitChance = (profile: Record<string, unknown>, rangeM: number) => {
+    const range = Math.max(0, rangeM);
+    const fullDamageRangeM = Math.max(0, Number(profile.fullDamageRangeM ?? profile.maximumRangeM ?? 0));
+    const maximumRangeM = Math.max(fullDamageRangeM, Number(profile.maximumRangeM ?? fullDamageRangeM));
+    if (range <= fullDamageRangeM) return 1;
+    if (range > maximumRangeM) return 0;
+    return Math.max(0, Math.min(1, Number(profile.extraFlightTickChance ?? 0)));
+  };
   for (const profile of weaponProfiles) {
     const paperDps = Number(profile.paperDps ?? 0);
     if (profile.kind === "turret") {
@@ -2664,8 +2690,9 @@ export async function analyzeFittingDogma(input: {
       const signatureRatio = Math.max(0, targetProfile.signatureRadiusM) / explosionRadius;
       const speed = Math.max(0, targetProfile.velocityMps);
       const velocityTerm = speed <= 0 ? 1 : Math.pow(Math.max(0, signatureRatio * explosionVelocity / speed), drf);
-      const applicationFactor = Math.min(1, signatureRatio, velocityTerm);
-      profile.targetApplication = { hitChance: targetProfile.rangeM <= Number(profile.maximumRangeM) ? 1 : 0, applicationFactor: targetProfile.rangeM <= Number(profile.maximumRangeM) ? applicationFactor : 0, appliedDps: targetProfile.rangeM <= Number(profile.maximumRangeM) ? paperDps * applicationFactor : 0 };
+      const rangeHitChance = missileRangeHitChance(profile, targetProfile.rangeM);
+      const applicationFactor = Math.min(1, signatureRatio, velocityTerm) * rangeHitChance;
+      profile.targetApplication = { hitChance: rangeHitChance, applicationFactor, appliedDps: paperDps * applicationFactor };
     }
   }
 
@@ -2693,6 +2720,7 @@ export async function analyzeFittingDogma(input: {
       const maximumVelocityMps = effectiveItemAttr(itemDogma, 37, item.typeId);
       const orbitVelocityMps = effectiveItemAttr(itemDogma, 508, item.typeId);
       const orbitRangeM = effectiveItemAttr(itemDogma, 154, item.typeId);
+      const webStrength = itemDogma?.effects.has(6690) ? Math.min(.95, Math.abs(effectiveItemAttr(itemDogma, 20, item.typeId)) / 100) : 0;
       const sentry = maximumVelocityMps <= 0.01 && orbitVelocityMps <= 0;
       const candidateQuantity = explicitDroneSelection ? Math.max(0, Math.min(item.quantity ?? 1, Math.floor(item.activeQuantity ?? 0))) : Math.min(item.quantity ?? 1, 50);
       return Array.from({ length: candidateQuantity }, () => ({
@@ -2709,6 +2737,8 @@ export async function analyzeFittingDogma(input: {
         maximumVelocityMps,
         orbitVelocityMps,
         orbitRangeM,
+        webStrength,
+        cycleSeconds: cycle,
         sentry,
       }));
     })
@@ -2763,15 +2793,16 @@ export async function analyzeFittingDogma(input: {
       hitChance = Math.pow(0.5, trackingTerm * trackingTerm + rangeTerm * rangeTerm);
       applicationFactor = turretExpectedDamageFactor(hitChance);
     } else if (profile.kind === "missile") {
-      if (targetProfile.rangeM <= Number(profile.maximumRangeM)) {
+      const rangeHitChance = missileRangeHitChance(profile, targetProfile.rangeM);
+      if (rangeHitChance > 0) {
         const explosionRadius = Math.max(1e-12, Number(profile.explosionRadiusM));
         const explosionVelocity = Math.max(1e-12, Number(profile.explosionVelocity));
         const drf = Math.max(1e-12, Number(profile.damageReductionFactor));
         const signatureRatio = Math.max(0, signatureRadiusM) / explosionRadius;
         const speed = Math.max(0, targetProfile.velocityMps);
         const velocityTerm = speed <= 0 ? 1 : Math.pow(Math.max(0, signatureRatio * explosionVelocity / speed), drf);
-        hitChance = 1;
-        applicationFactor = Math.min(1, signatureRatio, velocityTerm);
+        hitChance = rangeHitChance;
+        applicationFactor = Math.min(1, signatureRatio, velocityTerm) * rangeHitChance;
       }
     }
     return { hitChance, applicationFactor, appliedDps: paperDps * applicationFactor };
@@ -2870,7 +2901,7 @@ export async function analyzeFittingDogma(input: {
   const targetTrueDps = exactTargetDamage && targetTimeToKillSeconds != null && Number.isFinite(targetTimeToKillSeconds) && targetTimeToKillSeconds > 0 ? targetTotalHp / targetTimeToKillSeconds : exactTargetDamage ? 0 : undefined;
 
   const resistance = (attributeIds: number[]) =>
-    attributeIds.map((attributeId) => (shipAttributes.has(attributeId) ? 1 - shipAttr(attributeId) : 0));
+    attributeIds.map((attributeId) => shipAttributes.has(attributeId) ? Math.max(0, Math.min(1, 1 - shipAttr(attributeId))) : 0);
   const baseShieldResists = resistance([271, 274, 273, 272]);
   const baseArmorResists = resistance([267, 270, 269, 268]);
   const baseHullResists = resistance([113, 110, 109, 111]);
@@ -2909,7 +2940,7 @@ export async function analyzeFittingDogma(input: {
 
   // Expose support/ewar modules using the same skill-, hull-, script- and heat-adjusted
   // DOGMA attributes used by the fitter. Wargame consumes this instead of raw SDE stats.
-  const supportSystems = online.flatMap((item): Array<Record<string, unknown>> => {
+  const supportSystems: Array<Record<string, unknown>> = online.flatMap((item): Array<Record<string, unknown>> => {
     if (item.state !== "active" && item.state !== "overheated") return [];
     const source = moduleDogmaFor(item);
     if (!source) return [];
@@ -2945,6 +2976,23 @@ export async function analyzeFittingDogma(input: {
     }
     return [];
   });
+
+  // Web drones are target-side support systems too. Their speedFactor is modified through
+  // the same OwnerRequiredSkillModifier path as Stasis Drone Augmentor rigs, including
+  // the newer hybrid combat-web drones (CCP group 100) and legacy web drones.
+  const webDroneCounts = new Map<number, { drone: typeof activeDrones[number]; quantity:number }>();
+  for (const drone of activeDrones) {
+    if (!(drone.webStrength > 0)) continue;
+    const current = webDroneCounts.get(drone.typeId);
+    if (current) current.quantity += 1; else webDroneCounts.set(drone.typeId, { drone, quantity:1 });
+  }
+  for (const { drone, quantity } of webDroneCounts.values()) {
+    supportSystems.push({
+      typeId:drone.typeId, name:drone.name, groupId:groups.get(drone.typeId) ?? 0, quantity, state:"active",
+      cycleSeconds:drone.cycleSeconds, optimalM:drone.optimalM, falloffM:drone.falloffM,
+      kind:"web", strength:drone.webStrength, sourceKind:"drone",
+    });
+  }
 
   const shieldRechargeSeconds = shipAttr(479) / 1000;
   const passiveShieldPeak =
@@ -3321,6 +3369,28 @@ export async function analyzeFittingDogma(input: {
     racks: heatRacks,
   };
 
+  // Mining/harvesting yield is a first-class DOGMA output too. Keeping this in the
+  // core analysis makes fitted mining rigs, hull/skill bonuses and loaded crystals
+  // observable and regression-testable instead of only existing inside modifiers.
+  const miningSources = online.flatMap((item) => {
+    const source = moduleDogmaFor(item);
+    if (!source) return [];
+    const amountPerCycle = effectiveItemAttr(source, 77, item.typeId);
+    if (!(amountPerCycle > 0)) return [];
+    const quantity = Math.max(1, item.quantity ?? 1);
+    const cycleSeconds = Math.max(0, (effectiveItemAttr(source, 73, item.typeId) || effectiveItemAttr(source, 51, item.typeId)) / 1000);
+    const yieldPerCycleM3 = amountPerCycle * quantity;
+    return [{
+      typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, quantity, state:item.state ?? "active",
+      cycleSeconds, yieldPerCycleM3, yieldPerSecondM3:cycleSeconds > 0 ? yieldPerCycleM3 / cycleSeconds : 0,
+      chargeTypeId:item.chargeTypeId,
+    }];
+  });
+  const mining = {
+    sources:miningSources,
+    totalYieldPerSecondM3:miningSources.reduce((sum, source) => sum + source.yieldPerSecondM3, 0),
+  };
+
   return {
     character: input.snapshot.character.name,
     totalSkillPoints: input.snapshot.skills?.total_sp ?? 0,
@@ -3356,6 +3426,7 @@ export async function analyzeFittingDogma(input: {
     },
     magazines,
     fighterSystem,
+    mining,
     damage: {
       weaponDps,
       weaponVolley,

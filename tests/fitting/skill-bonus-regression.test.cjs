@@ -48,8 +48,8 @@ const snapshot = levels => ({
   const projectionV = (await missileFit({ ...missileBase, 12442:5 })).damage.weaponProfiles[0];
   const precisionV = (await missileFit({ ...missileBase, 20312:5 })).damage.weaponProfiles[0];
   const predictionV = (await missileFit({ ...missileBase, 20314:5 })).damage.weaponProfiles[0];
-  approx(bombardmentV.maximumRangeM / baseProfile.maximumRangeM, 1.5, 1e-12, 'Missile Bombardment V range');
-  approx(projectionV.maximumRangeM / baseProfile.maximumRangeM, 1.5, 1e-12, 'Missile Projection V range');
+  approx(bombardmentV.expectedRangeM / baseProfile.expectedRangeM, 1.5, 1e-12, 'Missile Bombardment V expected range');
+  approx(projectionV.expectedRangeM / baseProfile.expectedRangeM, 1.5, 1e-12, 'Missile Projection V expected range');
   approx(precisionV.explosionRadiusM / baseProfile.explosionRadiusM, 0.75, 1e-12, 'Guided Missile Precision V explosion radius');
   approx(predictionV.explosionVelocity / baseProfile.explosionVelocity, 1.5, 1e-12, 'Target Navigation Prediction V explosion velocity');
 
