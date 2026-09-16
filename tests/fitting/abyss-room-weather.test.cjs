@@ -128,11 +128,13 @@ const snapshot = {
   assert.equal(benthic.droneNavigation.mode, 'mobile');
   assert.ok(benthic.droneNavigation.effectiveMaxVelocityMps > 0, 'effective drone velocity missing');
   assert.ok(benthic.droneNavigationSeconds > 0, 'mobile drones should add practical navigation time');
-  approx(benthic.clearSeconds, benthic.combatSeconds + benthic.droneNavigationSeconds + benthic.shipNavigationSeconds, 1e-8, 'whole-room elapsed clear time');
+  approx(benthic.clearSeconds, benthic.combatSeconds + benthic.droneNavigationSeconds, 1e-8, 'whole-room elapsed clear time');
   assert.ok(benthic.clearSeconds > benthic.combatSeconds, 'navigation must not be folded into a fake DPS number');
 
-  assert.ok(exotic.abyss.rooms.some(room => room.shipNavigationSeconds > 0), 'Abyss clear times should include meaningful ship target-to-target repositioning');
-  assert.match(exotic.abyss.clearTimeCaveat, /target-to-target ship repositioning/i);
+  assert.ok(exotic.abyss.rooms.every(room => room.shipNavigationSeconds === 0), 'Abyss clear times must not invent hull target-to-target movement');
+  assert.ok(exotic.abyss.rooms.every(room => room.shipNavigation?.mode === 'none'), 'Abyss ship navigation model must remain disabled');
+  assert.match(exotic.abyss.clearTimeCaveat, /mobile-drone launch and target-to-target travel/i);
+  assert.match(exotic.abyss.clearTimeCaveat, /hull is not assumed to move between targets/i);
   assert.match(exotic.abyss.clearTimeCaveat, /not a guarantee/i);
   assert.equal(exotic.abyss.siteEstimate.roomCount, 3);
   const finiteT5Rooms = exotic.abyss.rooms.filter(room => Number.isFinite(room.clearSeconds));

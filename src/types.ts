@@ -1200,6 +1200,7 @@ declare global {
       downloadUpdate(): Promise<unknown>;
       installUpdate(): Promise<boolean>;
       openSupportPage(): Promise<void>;
+      openWindowsSnip(): Promise<boolean>;
       openZkillboard(killmailId?: number): Promise<void>;
       openExternalUrl(url:string): Promise<void>;
       openDiscordUrl(url:string): Promise<void>;

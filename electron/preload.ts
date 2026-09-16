@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld("sage", {
   downloadUpdate: () => ipcRenderer.invoke("update:download"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
   openSupportPage: () => ipcRenderer.invoke("external:open-support"),
+  openWindowsSnip: () => ipcRenderer.invoke("windows:open-snipping-overlay"),
   openZkillboard: (killmailId?: number) => ipcRenderer.invoke("external:open-zkillboard", killmailId),
   openExternalUrl: (url:string) => ipcRenderer.invoke("external:open-url", url),
   openDiscordUrl: (url:string) => ipcRenderer.invoke("external:open-discord-url", url),

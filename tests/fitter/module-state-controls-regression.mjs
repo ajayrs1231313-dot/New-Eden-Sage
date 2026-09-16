@@ -26,11 +26,11 @@ assert.ok(!/>OFF<|>ON<|>OH<|>OVERHEAT</.test(fittings),"state controls must not 
 assert.ok(fittings.includes('side==="rig"||side==="subsystem"?["online"]:["offline","online","active","overheated"]'),"rigs and subsystems must remain online-only and receive no state lights");
 
 assert.match(css,/fit-module-state-lights/,"light strip styling missing");
-assert.match(css,/width:7px!important/,"lights must remain compact");
-assert.match(css,/border-radius:50%!important/,"state controls must be circular lights");
+assert.match(css,/width:9px!important/,"state lamps must remain compact but visibly clickable");
+assert.match(css,/border-radius:1px!important/,"state controls must be compact rectangular lamps rather than mystery dots");
 assert.match(css,/fit-module-state-light-on\.active[^}]*background:#40dfaf/is,"selected ON light must be solid green");
 assert.match(css,/fit-module-state-light-overheat\.active[^}]*background:#ff8a3d/is,"selected OVERHEAT light must be solid orange");
-assert.match(css,/fit-module-state-light-off\.active[^}]*background:#aeb9bb/is,"selected OFF light must be solid grey");
+assert.match(css,/fit-module-state-light-off\.active[^}]*background:#eef4f4/is,"selected OFF light must be solid white");
 assert.match(css,/misty-teal-orbital-shipyard-hangar\.webp/,"production fitter background not referenced");
 
 console.log("Fitter module-state light regression: PASS");

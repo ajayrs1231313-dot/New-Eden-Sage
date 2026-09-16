@@ -136,6 +136,14 @@ export default function App() {
   const [assetCommandTab, setAssetCommandTab] = useState<AssetCommandTab>("loot");
   const [walletCommandView, setWalletCommandView] = useState<WalletCommandView>("full");
   const [activityCommandTab, setActivityCommandTab] = useState<SkillsTab>("activity-planner");
+  useEffect(() => {
+    const handlePrintScreen = (event: KeyboardEvent) => {
+      if (event.key !== "PrintScreen" && event.code !== "PrintScreen") return;
+      void window.sage.openWindowsSnip();
+    };
+    window.addEventListener("keydown", handlePrintScreen, true);
+    return () => window.removeEventListener("keydown", handlePrintScreen, true);
+  }, []);
   const sidebarRef = useRef<HTMLElement>(null);
   const sidebarEdgeTriggerRef = useRef<HTMLButtonElement>(null);
   const [sidebarNavigation, setSidebarNavigation] = useState(() => {

@@ -6,7 +6,7 @@ import { gzip, gunzip } from "node:zlib";
 import { STATIC_DATA_ROOT } from "./data-paths";
 import { ensureStaticDataArchive, FITTING_CATALOGUE_CACHE, FITTING_PREPARED_CACHE, prepareStaticDataForProcess } from "./type-volumes";
 import { ABYSS_DATASET_PROVENANCE, abyssEncountersForTier, applyAbyssWeatherHp, applyAbyssWeatherResists, normalizeAbyssPenalty, validAbyssPenalties, type AbyssTier, type AbyssWeather } from "./abyss-encounters";
-import { PVE_CLEAR_TIME_CAVEAT, aggregatePveSiteClearTime, calculatePveRoomClearTime, estimateClusteredPveGeometry } from "./pve-clear-time";
+import { aggregatePveSiteClearTime, calculatePveRoomClearTime, estimateClusteredPveGeometry } from "./pve-clear-time";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const REQUIREMENTS = [
@@ -3090,20 +3090,14 @@ export async function analyzeFittingDogma(input: {
       const clearTiming = calculatePveRoomClearTime({
         targets:timingTargets, geometry:"estimated",
         droneTravel:{ mode:droneTravelMode, effectiveVelocityMps:effectiveDroneTravelVelocityMps, engagementRangeM:droneEngagementRangeM },
-        shipTravel:{
-          mode:"average-reposition",
-          effectiveVelocityMps:maximumVelocity,
-          minimumLegDistanceM:4_000,
-          maximumLegDistanceM:8_000,
-          velocityUtilization:0.8,
-        },
+        // Abyss movement timing is drone movement; do not invent hull burns between NPC targets.
       });
       const clearSeconds=clearTiming.estimatedClearSeconds;
       return {
         key:encounter.key,name:encounter.name,family:encounter.family,notes:encounter.notes,maxHostiles:encounter.maxHostiles,variable:encounter.maxHostiles != null || encounter.members.some(member=>member.minCount!==member.maxCount||member.typeIds.length>1),
-        totalHostiles:targets.reduce((sum,target)=>sum+target.count,0), targets, clearSeconds, combatSeconds:clearTiming.combatSeconds, droneNavigationSeconds:clearTiming.droneNavigationSeconds, shipNavigationSeconds:clearTiming.shipNavigationSeconds,
+        totalHostiles:targets.reduce((sum,target)=>sum+target.count,0), targets, clearSeconds, combatSeconds:clearTiming.combatSeconds, droneNavigationSeconds:clearTiming.droneNavigationSeconds, shipNavigationSeconds:0,
         droneNavigation:{mode:droneTravelMode,effectiveMaxVelocityMps:clearTiming.effectiveDroneVelocityMps,engagementRangeM:droneEngagementRangeM,distanceM:clearTiming.droneNavigationDistanceM,route:clearTiming.route},
-        shipNavigation:{mode:"average-reposition",effectiveMaxVelocityMps:clearTiming.effectiveShipVelocityMps,distanceM:clearTiming.shipNavigationDistanceM,legCount:clearTiming.shipNavigationLegCount,averageSecondsPerLeg:clearTiming.averageShipNavigationSecondsPerLeg,route:clearTiming.shipRoute}, timingGeometry:clearTiming.geometry,
+        shipNavigation:{mode:"none",effectiveMaxVelocityMps:0,distanceM:0,legCount:0,averageSecondsPerLeg:0,route:[]}, timingGeometry:clearTiming.geometry,
         incoming:{em:incoming[0],thermal:incoming[1],kinetic:incoming[2],explosive:incoming[3],totalDps,maxRamp:{em:incomingMax[0],thermal:incomingMax[1],kinetic:incomingMax[2],explosive:incomingMax[3],totalDps:maxRampTotalDps},shares:{em:totalDps?incoming[0]/totalDps:0,thermal:totalDps?incoming[1]/totalDps:0,kinetic:totalDps?incoming[2]/totalDps:0,explosive:totalDps?incoming[3]/totalDps:0}},
         playerTank:fitTankAgainst(incoming),
       };
@@ -3174,17 +3168,17 @@ export async function analyzeFittingDogma(input: {
       siteEstimate:{
         roomCount:3,timerSeconds:abyssTimerSeconds,
         representative:{...representativeSite,timerMarginSeconds:abyssTimerSeconds-representativeSite.estimatedClearSeconds,basis:"Simple mean of Sage current known room catalogue; not spawn-weighted and not guaranteed."},
-        heavyKnown:{...heavyKnownSite,timerMarginSeconds:abyssTimerSeconds-heavyKnownSite.estimatedClearSeconds,basis:"Three times the longest current known room, including modeled target-to-target travel; conservative known-room envelope, not a probability claim."},
+        heavyKnown:{...heavyKnownSite,timerMarginSeconds:abyssTimerSeconds-heavyKnownSite.estimatedClearSeconds,basis:"Three times the longest current known room, including modeled mobile-drone launch and target-to-target travel; conservative known-room envelope, not a probability claim."},
       },
-      clearTimeCaveat:PVE_CLEAR_TIME_CAVEAT,
+      clearTimeCaveat:"Estimated clear time includes combat plus mobile-drone launch and target-to-target travel. The hull is not assumed to move between targets. These times are estimates, not a guarantee.",
       provenance:ABYSS_DATASET_PROVENANCE,
       limitations:[
         "Room counts with documented ranges/alternatives are evaluated as a deterministic threat envelope, while documented whole-room hostile caps are enforced.",
         "NPC incoming turret/missile range, tracking and movement application are not simulated; incoming DPS is raw SDE weapon DPS. Triglavian max-ramp DPS is also reported separately.",
         "Outgoing room TTK reuses the fitter current target range/transversal/velocity assumptions per NPC signature. Sentry drones use turret-style tracking/range application; mobile drones use effective DOGMA velocity, orbit, tracking, optimal, falloff and signature resolution.",
-        "Abyss target coordinates are not present in Sage current room catalogue. Clear-time geometry is therefore estimated: targets are clustered around the selected range, dangerous targets are routed in SDE max-DPS priority bands, then nearest-neighbour within each band. Drone travel is target-to-target and does not reset to the ship after every kill. Ship repositioning counts only meaningful modeled target-to-target legs (4-8 km) at 80% of the fit current active-prop maximum velocity.",
-        "Sentries add zero drone navigation time. The ship reposition allowance remains separate and applies to meaningful target-to-target movement regardless of drone type.",
-        PVE_CLEAR_TIME_CAVEAT,
+        "Abyss target coordinates are not present in Sage current room catalogue. Clear-time geometry is therefore estimated: targets are clustered around the selected range, dangerous targets are routed in SDE max-DPS priority bands, then nearest-neighbour within each band. Mobile-drone travel follows launch-to-first-target then target-to-target routing and does not reset to the ship after every kill. The hull is not assumed to reposition between targets.",
+        "Sentries add zero drone navigation time. Mobile-drone navigation time uses the fitted flight current effective DOGMA velocity.",
+        "Estimated clear time includes combat plus mobile-drone launch and target-to-target travel. The hull is not assumed to move between targets. These times are estimates, not a guarantee.",
         "The representative 3-room site estimate is a simple mean across Sage current known room catalogue, not a spawn-frequency-weighted guarantee. The heavy estimate is a conservative known-room envelope.",
         ...(abyssConfig.tier===6?[ABYSS_DATASET_PROVENANCE.limitation]:[]),
       ],

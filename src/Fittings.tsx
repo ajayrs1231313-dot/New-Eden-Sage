@@ -354,12 +354,23 @@ const emptyFit = (): Fit => ({
   instructions: [],
   source: "",
 });
+type FittingTypeInfo = Awaited<ReturnType<typeof window.sage.getFittingTypeInfoLocal>>;
 type ModuleStateCapabilities = { canActivate:boolean; canOverheat:boolean };
+const fittingTypeInfoCache = new Map<number,Promise<FittingTypeInfo>>();
 const moduleStateCapabilityCache = new Map<number,Promise<ModuleStateCapabilities>>();
+function getFittingTypeInfoCached(typeId:number) {
+  let pending=fittingTypeInfoCache.get(typeId);
+  if(!pending){
+    pending=window.sage.getFittingTypeInfoLocal(typeId);
+    fittingTypeInfoCache.set(typeId,pending);
+    void pending.catch(()=>fittingTypeInfoCache.delete(typeId));
+  }
+  return pending;
+}
 function getModuleStateCapabilities(typeId:number) {
   let pending=moduleStateCapabilityCache.get(typeId);
   if(!pending){
-    pending=window.sage.getFittingTypeInfoLocal(typeId).then((info)=>{
+    pending=getFittingTypeInfoCached(typeId).then((info)=>{
       const effects=info.effects??[];
       const canOverheat=effects.some((effect)=>Number(effect.category)===5);
       const canActivate=effects.some((effect)=>Number(effect.effectId)!==16 && (Number(effect.category)===1 || Number(effect.category)===2));
@@ -1220,6 +1231,15 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
     } catch { return []; }
   });
   const liveReadyRef=useRef(Boolean(sharedPreparationResult));
+  const [catalogueHover,setCatalogueHover]=useState<{item:CatalogueItem;anchor:DOMRect}|null>(null);
+  const [catalogueHoverTypeInfo,setCatalogueHoverTypeInfo]=useState<FittingTypeInfo|null>(null);
+  useEffect(()=>{
+    let cancelled=false;
+    setCatalogueHoverTypeInfo(null);
+    if(!catalogueHover)return()=>{cancelled=true;};
+    void getFittingTypeInfoCached(catalogueHover.item.id).then(info=>{if(!cancelled)setCatalogueHoverTypeInfo(info);}).catch(()=>{if(!cancelled)setCatalogueHoverTypeInfo(null);});
+    return()=>{cancelled=true;};
+  },[catalogueHover?.item.id]);
 
   useEffect(() => {
     void window.sage.listShips().then((items: ShipChoice[]) => { if(items.length)setShips(items); }).catch(()=>undefined);
@@ -1410,7 +1430,7 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
     if(!automatic){setCatalogueStatus(item.name+" has no fitting destination in the current CCP SDE; added to Cargo for review.");const added=await onAdd("cargo",{...item,placement:"cargo"});if(added)rememberRecent(item);return;}
     const added=await onAdd(automatic,item);if(added)rememberRecent(item);setCatalogueStatus(added?"Added "+item.name+" to "+automatic+".":"Item was rejected by the fitting rules.");
   };
-  const renderItem=(item:CatalogueItem)=><div className="fit-catalogue-item" key={item.id} draggable onDragStart={(event)=>writeFittingDrag(event,item)} onContextMenu={(event)=>{event.preventDefault();setMutationMenu({x:event.clientX,y:event.clientY,item});}}><img src={imageUrl(item.id,"icon",64)}/><span><strong>{item.name}</strong><small>{item.rack ? (item.rack + " slot") : item.categoryName}{item.metaLevel>0?(" - meta " + item.metaLevel):""}</small></span><button type="button" className="fit-catalogue-add" aria-label={"Add "+item.name} title={item.categoryId===8?"Load into the first compatible fitted module":"Add to fit"} onClick={()=>void addResult(item)}>+</button></div>;
+  const renderItem=(item:CatalogueItem)=><div className="fit-catalogue-item" key={item.id} draggable onMouseEnter={(event)=>setCatalogueHover({item,anchor:event.currentTarget.getBoundingClientRect()})} onMouseLeave={()=>setCatalogueHover(current=>current?.item.id===item.id?null:current)} onDragStart={(event)=>writeFittingDrag(event,item)} onContextMenu={(event)=>{event.preventDefault();setMutationMenu({x:event.clientX,y:event.clientY,item});}}><img src={imageUrl(item.id,"icon",64)}/><span><strong>{item.name}</strong><small>{item.rack ? (item.rack + " slot") : item.categoryName}{item.metaLevel>0?(" - meta " + item.metaLevel):""}</small></span><button type="button" className="fit-catalogue-add" aria-label={"Add "+item.name} title={item.categoryId===8?"Load into the first compatible fitted module":"Add to fit"} onClick={()=>void addResult(item)}>+</button></div>;
 
   const renderCategoryContent=(category:CatalogueCategory)=>{
     const rawItems=rawItemsForCategory(category);
@@ -1493,6 +1513,7 @@ function FitBuilder({ fit, characterId, onCreate, onAdd, onRemove, onQuantity, o
       {catalogueStatus&&<small className="fit-catalogue-action-status">{catalogueStatus}</small>}
       <div className="fit-catalogue-tree">{catalogueFilter.trim()?catalogue.items.length===0?<div className="fit-category-loading">Preparing modules...</div>:catalogueSearchResults.length?catalogueSearchResults.map(renderItem):<small>No matching catalogue items.</small>:!browseCategories&&contextualCatalogueItems.length?<><div className="fit-catalogue-context-feed">{contextualCatalogueItems.map(renderItem)}</div><button type="button" className="fit-catalogue-browse-all" onClick={()=>setBrowseCategories(true)}>Browse all categories</button></>:<><button type="button" className="fit-catalogue-browse-all back" onClick={()=>setBrowseCategories(false)}>Contextual modules</button>{renderCategoryNavigation()}</>}</div>
     </div>}
+    {catalogueHover&&<ModuleHoverCard item={{name:catalogueHover.item.name,typeId:catalogueHover.item.id,quantity:1}} rack={catalogueHover.item.rack} analysis={null} typeInfo={catalogueHoverTypeInfo} anchor={catalogueHover.anchor} />}
     {mutationMenu&&<div className="mutation-context-menu" style={{left:mutationMenu.x,top:mutationMenu.y}}><button type="button" onClick={()=>{onShowInfo(mutationMenu.item.id,mutationMenu.item.name);setMutationMenu(undefined);}}>Show Info</button>{mutationMenu.item.rack && <button type="button" onClick={()=>void openMutationEditor(mutationMenu.item)}>Mutate...</button>}<button type="button" onClick={()=>setMutationMenu(undefined)}>Cancel</button></div>}
     {mutationEditor&&<div className="mutation-backdrop" onMouseDown={()=>setMutationEditor(undefined)}><div className="mutation-editor" onMouseDown={event=>event.stopPropagation()}><div className="mutation-editor-head"><div><p className="eyebrow">ABYSSAL MUTATION</p><h3>{mutationEditor.item.name}</h3></div><button type="button" onClick={()=>setMutationEditor(undefined)}>X</button></div><label>Mutaplasmid<select value={mutationEditor.selected} onChange={event=>selectMutation(Number(event.target.value))}>{mutationEditor.options.map((option,index)=><option key={option.mutaplasmidTypeId} value={index}>{option.mutaplasmidName}</option>)}</select></label><div className="mutation-attributes">{mutationEditor.options[mutationEditor.selected].attributes.map(attribute=>{const key=String(attribute.attributeId);const value=mutationEditor.values[key]??attribute.baseValue;const delta=attribute.baseValue?((value/attribute.baseValue)-1)*100:0;return <div className="mutation-attribute" key={attribute.attributeId}><div><strong>{attribute.name}</strong><small>Base {attribute.baseValue.toFixed(3)} - legal {attribute.minValue.toFixed(3)} to {attribute.maxValue.toFixed(3)}</small></div><input type="range" min={attribute.minValue} max={attribute.maxValue} step={Math.max(Math.abs(attribute.maxValue-attribute.minValue)/1000,0.000001)} value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Number(event.target.value)}})}/><input type="number" min={attribute.minValue} max={attribute.maxValue} step="any" value={value} onChange={event=>setMutationEditor({...mutationEditor,values:{...mutationEditor.values,[key]:Math.min(attribute.maxValue,Math.max(attribute.minValue,Number(event.target.value)))}})}/><em className={(attribute.highIsGood?delta>=0:delta<=0)?"good":"bad"}>{delta>=0?"+":""}{delta.toFixed(1)}%</em></div>})}</div><div className="mutation-editor-foot"><span>{mutationEditor.options[mutationEditor.selected].resultingTypeName}</span><button type="button" onClick={()=>void addMutated()}>Add mutated module</button></div></div></div>}
     {mutationStatus&&<small className="mutation-status">{mutationStatus}</small>}
@@ -1689,6 +1710,10 @@ function FitDisplay({
   useEffect(() => {
     if (!characterId || !fit.hull.typeId) return;
     let cancelled = false;
+    // Never leave requirements/issues from the previous fit state visible while the new analysis is running.
+    // This is especially important for temporary enhancements such as boosters: removing one must immediately
+    // remove its stale skill warning instead of showing the old result until the worker returns.
+    setAnalysis(null);
     setRemedies([]);
     setAnalysisRefreshing(true);
     setAnalysisStatus("Checking hull attributes and character skills...");
@@ -1760,7 +1785,7 @@ function FitDisplay({
     return () => {
       cancelled = true;
     };
-  }, [tab, characterId, fit.id, fit.hull.typeId, fit.low, fit.mid, fit.high, fit.rig, fit.subsystem, fit.drones, fit.fighters, fit.cargo, fit.implants, fit.boosters, targetProfile.rangeM, targetProfile.signatureRadiusM, targetProfile.transverseVelocityMps, targetProfile.velocityMps, damageProfilePreset, targetNpc?.id, externalEffects, selectedBoosterSideEffectKeys.join("|"), abyssSelection.enabled, abyssSelection.tier, abyssSelection.weather, abyssSelection.penalty, abyssSelection.roomKey]);
+  }, [characterId, fit.id, fit.hull.typeId, fit.low, fit.mid, fit.high, fit.rig, fit.subsystem, fit.drones, fit.fighters, fit.cargo, fit.implants, fit.boosters, targetProfile.rangeM, targetProfile.signatureRadiusM, targetProfile.transverseVelocityMps, targetProfile.velocityMps, damageProfilePreset, targetNpc?.id, externalEffects, selectedBoosterSideEffectKeys.join("|"), abyssSelection.enabled, abyssSelection.tier, abyssSelection.weather, abyssSelection.penalty, abyssSelection.roomKey]);
   const exportResolution = (source: "dream-fit" | "fit-issues") => {
     if (!fit.hull.typeId) return;
     onExportToPlanner({
@@ -1948,9 +1973,9 @@ function FitDisplay({
         <>
           <div className="fit-v2-center-stage fit-concept-fitting-stage">
             <div className="fit-v2-selected fit-concept-racks fit-concept-racks-left">
-              <SlotRack title="HIGH SLOTS" side="high" items={fit.high} limit={effectiveSlots?.high ?? fit.high.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              <SlotRack title="MID SLOTS" side="mid" items={fit.mid} limit={effectiveSlots?.mid ?? fit.mid.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              <SlotRack title="LOW SLOTS" side="low" items={fit.low} limit={effectiveSlots?.low ?? fit.low.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
+              <SlotRack title="HIGH SLOTS" side="high" items={fit.high} limit={effectiveSlots?.high ?? fit.high.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} analysis={analysis} />
+              <SlotRack title="MID SLOTS" side="mid" items={fit.mid} limit={effectiveSlots?.mid ?? fit.mid.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} analysis={analysis} />
+              <SlotRack title="LOW SLOTS" side="low" items={fit.low} limit={effectiveSlots?.low ?? fit.low.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} analysis={analysis} />
             </div>
             <div className="fit-v2-ship fit-concept-ship-core">
               <div className="fit-concept-core-orbit orbit-a" aria-hidden="true" />
@@ -1959,8 +1984,8 @@ function FitDisplay({
               <div className="fit-concept-core-status"><i/><span>SYSTEMS ONLINE</span><small>READY FOR DEPLOYMENT</small></div>
             </div>
             <div className="fit-v2-selected fit-concept-racks fit-concept-racks-right">
-              <SlotRack title="RIG SLOTS" side="rig" items={fit.rig} limit={effectiveSlots?.rig ?? fit.rig.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />
-              {((effectiveSlots?.subsystem ?? 0) > 0 || fit.subsystem.length > 0) && <SlotRack title="SUBSYSTEMS" side="subsystem" items={fit.subsystem} limit={effectiveSlots?.subsystem ?? fit.subsystem.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} />}            </div>
+              <SlotRack title="RIG SLOTS" side="rig" items={fit.rig} limit={effectiveSlots?.rig ?? fit.rig.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} analysis={analysis} />
+              {((effectiveSlots?.subsystem ?? 0) > 0 || fit.subsystem.length > 0) && <SlotRack title="SUBSYSTEMS" side="subsystem" items={fit.subsystem} limit={effectiveSlots?.subsystem ?? fit.subsystem.length} onStateChange={onModuleStateChange} onRemove={onRemoveItem} onDropItem={onAddItem} onLoadCharge={onLoadCharge} onShowInfo={onShowInfo} analysis={analysis} />}            </div>
           </div>
           <div className="fit-v2-additions"><FitAdditionsPanel fit={fit} analysis={analysis} externalEffects={externalEffects} onBayActiveQuantityChange={onBayActiveQuantityChange} onRemoveItem={onRemoveItem} onShowInfo={onShowInfo} onAddDrones={()=>onBrowseDamageItems("drones")} onInstructionsChange={onInstructionsChange} /></div>
         </>
@@ -2299,10 +2324,6 @@ function FitCombatScenario({
     +Number(averageIncoming?.playerTank?.effectiveArmorRepairPerSecond??analysis?.defence?.effectiveArmorRepairPerSecond??0)
     +Number(averageIncoming?.playerTank?.effectiveStructureRepairPerSecond??analysis?.defence?.effectiveStructureRepairPerSecond??0)
     +Number(averageIncoming?.playerTank?.effectivePassiveShieldPeak??analysis?.defence?.effectivePassiveShieldPeak??0);
-  const activeScenarioTank=Number(averageIncoming?.playerTank?.effectiveShieldRepairPerSecond??analysis?.defence?.effectiveShieldRepairPerSecond??0)
-    +Number(averageIncoming?.playerTank?.effectiveArmorRepairPerSecond??analysis?.defence?.effectiveArmorRepairPerSecond??0)
-    +Number(averageIncoming?.playerTank?.effectiveStructureRepairPerSecond??analysis?.defence?.effectiveStructureRepairPerSecond??0);
-  const passiveScenarioTank=Number(averageIncoming?.playerTank?.effectivePassiveShieldPeak??analysis?.defence?.effectivePassiveShieldPeak??0);
   const averageIncomingDps=Number(averageIncoming?.totalDps??0);
   const averageTankHolds=averageIncomingDps>0&&scenarioTank>=averageIncomingDps;
   const averageTankCapStable=Boolean(analysis?.capacitor?.stable);
@@ -2316,11 +2337,16 @@ function FitCombatScenario({
     return `${Math.floor(safe/60)}m ${String(safe%60).padStart(2,"0")}s`;
   };
   const averageTankStable=averageTankHolds&&averageTankCapStable;
+  const averageTankMargin=averageIncomingDps>0?scenarioTank/averageIncomingDps:0;
+  const averageTankShortfall=Math.max(0,averageIncomingDps-scenarioTank);
   const averageTankStatus=averageTankStable
-    ? `Tank stable · ${scenarioTank.toFixed(1)} EHP/s`
+    ? "Tank stable indefinitely"
     : averageTankHolds
-      ? `Tank holds · cap ${seconds(Number(analysis?.capacitor?.depletionSeconds??0))}`
-      : `Tank breaks · ${scenarioTank.toFixed(1)} EHP/s`;
+      ? `Tank holds while cap lasts - ${seconds(Number(analysis?.capacitor?.depletionSeconds??0))}`
+      : `Tank breaks - ${averageTankShortfall.toFixed(1)} EHP/s short`;
+  const averageTankComparison=averageIncomingDps>0
+    ? `${scenarioTank.toFixed(1)} EHP/s effective tank vs ${averageIncomingDps.toFixed(1)} DPS incoming${averageTankHolds?` - ${averageTankMargin.toFixed(1)}x margin`:""}`
+    : `${scenarioTank.toFixed(1)} EHP/s effective tank`;
   const averageTankStatusClass=averageTankStable?"tank-stable":averageTankHolds?"tank-cap-limited":"tank-breaks";
   const selectDroneFlight=(typeId:number)=>{
     if(!typeId){onDroneFlightChange(null);return;}
@@ -2403,9 +2429,10 @@ function FitCombatScenario({
     : recommendedDamage.startsWith("Thermal") ? ["Ogre","Hammerhead","Hobgoblin"]
     : recommendedDamage.startsWith("Explosive") ? ["Berserker","Valkyrie","Warrior"] : [];
   const recommendedFittedDrone = fit.drones.find(item=>recommendedDroneTokens.some(token=>item.name.includes(token)));
-  const modeledShipLegCount=(abyss?.rooms??[]).reduce((sum:number,candidate:any)=>sum+Number(candidate?.shipNavigation?.legCount??0),0);
-  const modeledShipTravelSeconds=(abyss?.rooms??[]).reduce((sum:number,candidate:any)=>sum+Number(candidate?.shipNavigationSeconds??0),0);
-  const averageTargetTravelSeconds=modeledShipLegCount?modeledShipTravelSeconds/modeledShipLegCount:0;
+  const modeledDroneSwitchLegs=(abyss?.rooms??[]).flatMap((candidate:any)=>Array.isArray(candidate?.droneNavigation?.route)?candidate.droneNavigation.route.slice(1):[]);
+  const averageTargetTravelSeconds=modeledDroneSwitchLegs.length
+    ? modeledDroneSwitchLegs.reduce((sum:number,leg:any)=>sum+Number(leg?.travelSeconds??0),0)/modeledDroneSwitchLegs.length
+    : 0;
   const room=abyss?.selectedRoom??abyss?.summary?.worstIncoming;
   return <div className="fit-combat-scenario-stage">
     <section className="combat-scenario-builder">
@@ -2462,16 +2489,16 @@ function FitCombatScenario({
       {averageTarget&&averageIncoming?<>
         <div className="combat-scenario-abyss-metrics">
           <article><span>Average target DPS</span><strong>{averageTarget.trueDps.toFixed(1)}</strong><small>weather-adjusted target mix</small></article>
-          <article className={averageTankStatusClass}><span>Average incoming</span><strong>{averageIncoming.totalDps.toFixed(1)} DPS</strong><small>{averageTankStatus}</small><small>{activeScenarioTank>0?`active reps ${activeScenarioTank.toFixed(1)} + passive ${passiveScenarioTank.toFixed(1)} EHP/s after hardeners/resists`:`passive ${passiveScenarioTank.toFixed(1)} EHP/s after hardeners/resists`}</small></article>
+          <article className={averageTankStatusClass} title="Effective tank includes current active reps, passive shield regeneration and the current resistance/hardener profile."><span>Average incoming</span><strong>{averageIncoming.totalDps.toFixed(1)} DPS</strong><small>{averageTankStatus}</small><small>{averageTankComparison}</small><small>includes current reps, passive regen and resists</small></article>
           <article><span>Average hostiles</span><strong>{averageTarget.averageHostilesPerRoom.toFixed(1)}</strong><small>per documented room</small></article>
-          <article><span>Avg target travel</span><strong>{seconds(averageTargetTravelSeconds)}</strong><small>ship reposition / modeled leg</small></article>
+          <article><span>Avg drone travel</span><strong>{seconds(averageTargetTravelSeconds)}</strong><small>target-to-target drone switch</small></article>
           <article className="clear-time"><span>Representative clear</span><strong>{seconds(abyss?.siteEstimate?.representative?.estimatedClearSeconds)}</strong><small>3-room estimate</small></article>
           <article className="worst-clear-time"><span>Worst-case 3-room total</span><strong>{seconds(abyss?.siteEstimate?.heavyKnown?.estimatedClearSeconds)}</strong><small>3x longest documented room</small></article>
           <article><span>Timer margin</span><strong>{seconds(abyss?.siteEstimate?.representative?.timerMarginSeconds)}</strong><small>{Number(abyss?.siteEstimate?.representative?.timerMarginSeconds??0)>=0?"spare":"over 20-minute limit"}</small></article>
         </div>
         <div className="combat-scenario-clear-time-caveat" title={abyss?.clearTimeCaveat ?? ""}>
           <strong>Clear-time estimate</strong>
-          <span>Includes estimated target-to-target ship and drone travel. These times are estimates, not a guarantee.</span>
+          <span>Includes mobile-drone launch and target-to-target travel. The hull is not assumed to move between targets. These times are estimates, not a guarantee.</span>
         </div>
         <details className="combat-scenario-room-breakdown">
           <summary><span>Room breakdown & exact NPC data</span><small>{abyss?.summary?.roomCount??0} room profiles</small></summary>
@@ -2938,14 +2965,306 @@ function FitRouteScreen({
   );
 }
 
-function SlotRack({ title, side, items, limit, onStateChange, onRemove, onDropItem, onLoadCharge, onShowInfo }: { title:string; side:FitModuleRack; items:FitItem[]; limit:number; onStateChange(rack:FitModuleRack,index:number,state:ModuleState):void; onRemove(target:BuilderTarget,index:number):void; onDropItem(target:BuilderTarget,item:FittingSearchResult):Promise<boolean>; onLoadCharge(target:FitModuleRack,index:number,item:FittingSearchResult):Promise<boolean>; onShowInfo(typeId:number,name?:string):void }) {
+type ModuleHoverStat = { label:string; value:string; wide?:boolean };
+type ModuleHoverContent = { primary:ModuleHoverStat[]; fitting:ModuleHoverStat[] };
+type ModuleHoverAttribute = FittingTypeInfo["attributes"][number];
+const moduleHoverNumber=(value:unknown,digits=1)=>{const number=Number(value);return Number.isFinite(number)?number.toLocaleString(undefined,{maximumFractionDigits:digits}):"n/a";};
+const moduleHoverDistance=(value:unknown)=>{const number=Number(value);if(!Number.isFinite(number))return "n/a";return number>=1000?`${moduleHoverNumber(number/1000,1)} km`:`${moduleHoverNumber(number,0)} m`;};
+const moduleHoverValue=(value:number,unit?:string)=>{const shown=Math.abs(value)>=1000?value.toLocaleString(undefined,{maximumFractionDigits:2}):Number(value.toFixed(4)).toLocaleString();return unit?`${shown} ${unit}`:shown;};
+const moduleHoverSeconds=(milliseconds:unknown)=>{const value=Number(milliseconds);return Number.isFinite(value)&&value>0?`${moduleHoverNumber(value/1000,2)} s`:"n/a";};
+const moduleHoverPercent=(value:unknown,{absolute=false,invert=false}:{absolute?:boolean;invert?:boolean}={})=>{let number=Number(value);if(!Number.isFinite(number))return "n/a";if(invert)number=-number;if(absolute)number=Math.abs(number);return `${number>0?"+":""}${moduleHoverNumber(number,2)}%`;};
+const moduleHoverAttributeText=(attribute:ModuleHoverAttribute)=>`${attribute.name} ${attribute.internalName??""}`.toLowerCase();
+const moduleHoverAttribute=(typeInfo:FittingTypeInfo|null,attributeId:number)=>typeInfo?.attributes?.find(attribute=>Number(attribute.attributeId)===attributeId);
+const moduleHoverAttributeMatch=(typeInfo:FittingTypeInfo|null,...patterns:RegExp[])=>typeInfo?.attributes?.find(attribute=>patterns.some(pattern=>pattern.test(moduleHoverAttributeText(attribute))));
+const moduleHoverAttributesMatch=(typeInfo:FittingTypeInfo|null,...patterns:RegExp[])=>(typeInfo?.attributes??[]).filter(attribute=>patterns.some(pattern=>pattern.test(moduleHoverAttributeText(attribute))));
+const moduleHoverSemanticText=(item:FitItem,typeInfo:FittingTypeInfo|null)=>[item.name,typeInfo?.group?.name,typeInfo?.category?.name,typeInfo?.marketGroup?.name,...(typeInfo?.marketGroup?.path??[])].filter(Boolean).join(" ").toLowerCase();
+const moduleHoverStatValue=(attribute:ModuleHoverAttribute)=>{
+  const value=Number(attribute.value);
+  const internal=String(attribute.internalName??"");
+  if([51,73,1795,669].includes(Number(attribute.attributeId)))return moduleHoverSeconds(value);
+  if([54,158,2044].includes(Number(attribute.attributeId)))return moduleHoverDistance(value);
+  if(Number(attribute.attributeId)===160)return moduleHoverNumber(value/1000,3);
+  // CCP DOGMA frequently stores percentage effects as multipliers (0.85 = 15% reduction, 1.10 = 10% increase).
+  // Never print those raw as "0.85%" / "1.10%" in a pilot-facing card.
+  if(attribute.unit==="%"&&/multiplier/i.test(internal)&&value>0&&value<3)return moduleHoverPercent((value-1)*100);
+  if(/warpspeedadd/i.test(internal))return `${value>0?"+":""}${moduleHoverNumber(value,2)} AU/s`;
+  return moduleHoverValue(value,attribute.unit);
+};
+const moduleHoverAttributeIsNeutral=(attribute:ModuleHoverAttribute)=>{
+  const value=Number(attribute.value);
+  if(!Number.isFinite(value))return true;
+  if(Math.abs(value)<1e-9)return true;
+  if(attribute.unit==="%"&&/multiplier/i.test(String(attribute.internalName??""))&&Math.abs(value-1)<1e-9)return true;
+  return false;
+};
+const MODULE_HOVER_FALLBACK_EXCLUDE=/required skill|requiredskill|meta level|metagroup|tech level|structure hitpoints|\bhp\b|maxgroup|charge group|used with|charge size|charges per cycle|charge rate|can fit|can only be fitted|heat damage|thermodynamics|overload|typecolorscheme|slots|skill level|entitycapacitorlevel|remote resistance id|deadspaceunsafe|canactivate|cannot auto repeat|disallowrepeating|disallow.*activation|thrust|stabilize cloak duration|critical success/i;
+const MODULE_HOVER_FALLBACK_PRIORITY=/damage|repair|shield|armor|armour|resist|resonan|capacitor|recharge|neutral|drain|transfer|velocity|speed|inertia|agility|warp|scram|web|signature|target|scan|sensor|tracking|optimal|falloff|range|jam|ecm|mining|harvest|yield|tractor|salvag|cloak|cycle|duration|access difficulty/i;
+function buildModuleHoverStats(item:FitItem,rack:FitModuleRack|undefined,analysis:any,typeInfo:FittingTypeInfo|null):ModuleHoverContent{
+  const primary:ModuleHoverStat[]=[];
+  const fitting:ModuleHoverStat[]=[];
+  const consumedAttributeIds=new Set<number>();
+  const consumeAttribute=(attribute:ModuleHoverAttribute)=>{consumedAttributeIds.add(Number(attribute.attributeId));return attribute;};
+  const consumeAttributeId=(attributeId:number)=>{const attribute=moduleHoverAttribute(typeInfo,attributeId);if(attribute)consumeAttribute(attribute);return attribute;};
+  const displayValueIsZero=(value:string)=>/^[+-]?0(?:\.0+)?(?:\s*(?:%|gj|mw|tf|hp|hp\/s|m|km|m\/s|s|au\/s|x))?$/i.test(value.trim());
+  const push=(label:string,value:string,wide=false)=>{if(value&&value!=="n/a"&&!displayValueIsZero(value)&&!primary.some(row=>row.label.toLowerCase()===label.toLowerCase()))primary.push({label,value,wide});};
+  const pushFitting=(label:string,value:string)=>{if(value&&value!=="n/a"&&!fitting.some(row=>row.label===label))fitting.push({label,value});};
+  const attr=(id:number)=>moduleHoverAttribute(typeInfo,id);
+  const pushAttr=(label:string,id:number,format?:(attribute:ModuleHoverAttribute)=>string)=>{const attribute=attr(id);if(attribute&&!consumedAttributeIds.has(Number(attribute.attributeId))){consumeAttribute(attribute);push(label,format?format(attribute):moduleHoverStatValue(attribute));}};
+  const match=(...patterns:RegExp[])=>moduleHoverAttributesMatch(typeInfo,...patterns).find(attribute=>!consumedAttributeIds.has(Number(attribute.attributeId)));
+  const pushMatch=(label:string,patterns:RegExp[],format?:(attribute:ModuleHoverAttribute)=>string)=>{const attribute=match(...patterns);if(attribute){consumeAttribute(attribute);push(label,format?format(attribute):moduleHoverStatValue(attribute));}};
+  const consumeNeutralMultiplier=(id:number)=>{const attribute=attr(id);if(!attribute||consumedAttributeIds.has(id))return null;consumeAttribute(attribute);const raw=Number(attribute.value);if(!Number.isFinite(raw)||raw<=0)return null;const delta=(raw-1)*100;return Math.abs(delta)<0.005?null:{attribute,delta};};
+  const pushMultiplier=(label:string,id:number)=>{const effect=consumeNeutralMultiplier(id);if(effect)push(label,moduleHoverPercent(effect.delta));};
+  const text=moduleHoverSemanticText(item,typeInfo);
+  const cycle=()=>attr(73)??attr(51);
+  const capNeed=()=>attr(6);
+  const pushCycle=()=>{const value=cycle();if(value){consumeAttribute(value);push("Cycle",moduleHoverSeconds(value.value));}};
+  const pushCap=()=>{const value=capNeed();if(value&&Number(value.value)!==0){consumeAttribute(value);push("Cap / cycle",`${moduleHoverNumber(value.value,1)} GJ`);}};
+  const pushRange=()=>{const value=attr(54);if(value){consumeAttribute(value);push("Range",moduleHoverDistance(value.value));}};
+
+  const profile=(analysis?.damage?.weaponProfiles??[]).find((row:any)=>Number(row?.typeId)===Number(item.typeId));
+  if(profile){
+    push("DPS",moduleHoverNumber(profile.paperDps,1));
+    push("Volley",moduleHoverNumber(profile.volley,1));
+    if(profile.kind==="turret"){
+      push("Optimal",moduleHoverDistance(profile.optimalM));
+      push("Falloff",moduleHoverDistance(profile.falloffM));
+      push("Tracking",moduleHoverNumber(profile.tracking,3));
+    }else if(profile.kind==="missile"){
+      push("Max range",moduleHoverDistance(profile.maximumRangeM));
+      push("Explosion radius",moduleHoverDistance(profile.explosionRadiusM));
+      push("Explosion velocity",`${moduleHoverNumber(profile.explosionVelocity,0)} m/s`);
+    }
+    if(Number(profile.cycleSeconds)>0){consumeAttributeId(51);consumeAttributeId(73);push("Cycle",`${moduleHoverNumber(profile.cycleSeconds,2)} s`);}
+  }
+
+  const isLauncher=/missile launcher|rocket launcher|torpedo launcher|cruise launcher|rapid .*launcher/.test(text);
+  const isTurret=!isLauncher&&/autocannon|artillery|blaster|railgun|rail gun|pulse laser|beam laser|turret/.test(text);
+  if(!profile&&isTurret){
+    pushAttr("Damage multiplier",64,attribute=>`${moduleHoverNumber(attribute.value,3)}x`);
+    pushAttr("Optimal",54,attribute=>moduleHoverDistance(attribute.value));
+    pushAttr("Falloff",158,attribute=>moduleHoverDistance(attribute.value));
+    pushAttr("Tracking",160,attribute=>moduleHoverNumber(Number(attribute.value)/1000,3));
+    const rof=attr(51);if(rof){consumeAttribute(rof);push("Cycle",moduleHoverSeconds(rof.value));}
+  }
+  if(!profile&&isLauncher){
+    const rof=attr(51);if(rof){consumeAttribute(rof);push("Cycle",moduleHoverSeconds(rof.value));}
+    const reload=attr(1795);if(reload&&!consumedAttributeIds.has(1795)){consumeAttribute(reload);push("Reload",moduleHoverSeconds(reload.value));}
+    if(!item.charge)push("Combat stats","Load a missile for DPS, volley, range & explosion stats",true);
+  }
+  if(!profile&&isTurret&&!item.charge)push("DPS / volley","Depends on loaded ammo / crystal",true);
+
+  if(/fighter support unit/.test(text)){
+    const fighterMultiplier=(label:string,id:number)=>{const attribute=attr(id);if(!attribute||consumedAttributeIds.has(id))return;consumeAttribute(attribute);const delta=(Number(attribute.value)-1)*100;if(Math.abs(delta)>=0.005)push(label,moduleHoverPercent(delta));};
+    fighterMultiplier("Fighter cycle time",2337);
+    fighterMultiplier("Fighter shield HP",2335);
+    fighterMultiplier("Fighter shield recharge",2338);
+    fighterMultiplier("Fighter velocity",2336);
+  }
+
+  if(attr(1255))pushAttr("Drone damage",1255,attribute=>moduleHoverPercent(attribute.value));
+  if(/drone navigation computer/.test(text))pushAttr("Drone velocity",20,attribute=>moduleHoverPercent(attribute.value));
+  if(/omnidirectional tracking (link|enhancer)/.test(text)){
+    pushAttr("Drone optimal",351,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Drone falloff",349,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Drone tracking",767,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Drone explosion velocity",847,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Drone explosion radius",848,attribute=>moduleHoverPercent(attribute.value));
+    if(/omnidirectional tracking link/.test(text)){pushCap();pushCycle();}
+  }
+  if(/drone link augmentor/.test(text))pushMatch("Drone control range",[/drone.*control.*range|drone.*range.*bonus/],attribute=>moduleHoverDistance(attribute.value));
+
+  if(attr(77)||/miner|strip miner|ice harvester|gas cloud harvester|gas harvester/.test(text)){
+    pushAttr("Yield / cycle",77,attribute=>`${moduleHoverNumber(attribute.value,2)} m\u00B3`);
+    pushCycle();
+    pushRange();
+    pushCap();
+  }
+  if(/mining survey chipset/.test(text)){
+    pushAttr("Critical chance",6049,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Critical yield",6050,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Residue probability",6053,attribute=>moduleHoverPercent(attribute.value));
+  }
+
+  if(/afterburner|microwarpdrive|micro warp drive|mwd/.test(text)){
+    pushAttr("Speed bonus",20,attribute=>moduleHoverPercent(attribute.value));
+    const prop=(analysis?.navigation?.activePropulsion??[]).find((row:any)=>Number(row?.typeId)===Number(item.typeId));
+    if(prop?.maximumVelocity>0)push("Resulting max velocity",`${moduleHoverNumber(prop.maximumVelocity,0)} m/s`);
+    pushCap();pushCycle();
+    if(attr(554))pushAttr("Signature radius",554,attribute=>moduleHoverPercent(attribute.value));
+    pushMultiplier("Capacitor capacity",147);
+  }
+
+  if(attr(72))pushAttr("Shield HP",72,attribute=>`+${moduleHoverNumber(attribute.value,0)} HP`);
+  if(attr(983))pushAttr("Signature radius",983,attribute=>`+${moduleHoverNumber(attribute.value,0)} m`);
+  if(attr(68)){
+    const amount=consumeAttribute(attr(68)!);push(/remote.*shield/.test(text)?"Remote shield / cycle":"Shield boost / cycle",`${moduleHoverNumber(amount.value,1)} HP`);
+    const duration=cycle();if(duration&&Number(duration.value)>0)push("Boost / second",`${moduleHoverNumber(Number(amount.value)/(Number(duration.value)/1000),1)} HP/s`);
+    pushCycle();pushCap();if(/remote/.test(text)){pushRange();const falloff=attr(2044);if(falloff&&!consumedAttributeIds.has(2044)){consumeAttribute(falloff);push("Falloff",moduleHoverDistance(falloff.value));}}
+  }
+  const resistBonusIds:[[number,string],[number,string],[number,string],[number,string]]=[[984,"EM resist"],[987,"Thermal resist"],[986,"Kinetic resist"],[985,"Explosive resist"]];
+  if(resistBonusIds.some(([id])=>Boolean(attr(id))))for(const [id,label] of resistBonusIds)pushAttr(label,id,attribute=>moduleHoverPercent(Math.abs(Number(attribute.value))));
+  const resonanceLayer=(ids:number[],label:string)=>{const values=ids.map(id=>attr(id)).filter(Boolean) as ModuleHoverAttribute[];if(!values.length)return;values.forEach(consumeAttribute);const bonuses=values.map(attribute=>(1-Number(attribute.value))*100);const first=bonuses[0];if(bonuses.every(value=>Math.abs(value-first)<0.001))push(label,moduleHoverPercent(first));else values.forEach((attribute,index)=>push(`${label} ${["EM","Therm","Kin","Exp"][index]}`,moduleHoverPercent((1-Number(attribute.value))*100)));};
+  resonanceLayer([271,274,273,272],"Shield resists");
+  resonanceLayer([267,270,269,268],"Armor resists");
+  resonanceLayer([974,977,976,975],"Hull resists");
+  if(/reactive armor hardener/.test(text))push("Adaptive behaviour","Resists redistribute toward recent incoming damage",true);
+  if(/hardener/.test(text)){pushCap();pushCycle();}
+  // Passive shield/cap modules commonly expose time multipliers rather than human-readable percentages.
+  pushMultiplier("Shield recharge time",134);
+  if(attr(338)&&!consumedAttributeIds.has(338))pushAttr("Shield recharge time",338,attribute=>moduleHoverPercent(attribute.value));
+  pushMultiplier("Shield HP",146);
+
+  if(attr(1159))pushAttr("Armor HP",1159,attribute=>`+${moduleHoverNumber(attribute.value,0)} HP`);
+  if(attr(84)){
+    const amount=consumeAttribute(attr(84)!);push(/remote/.test(text)?"Remote armor / cycle":"Armor repair / cycle",`${moduleHoverNumber(amount.value,1)} HP`);
+    const duration=cycle();if(duration&&Number(duration.value)>0)push("Repair / second",`${moduleHoverNumber(Number(amount.value)/(Number(duration.value)/1000),1)} HP/s`);
+    pushCycle();pushCap();if(/remote/.test(text)){pushRange();const falloff=attr(2044);if(falloff&&!consumedAttributeIds.has(2044)){consumeAttribute(falloff);push("Falloff",moduleHoverDistance(falloff.value));}}
+  }
+  pushMultiplier("Hull HP",150);
+  if(!consumedAttributeIds.has(150))pushMatch("Hull HP",[/structure.*hitpoint.*bonus|hull.*hitpoint.*bonus|structurehpbonus/],attribute=>moduleHoverStatValue(attribute));
+
+  pushMultiplier("Cap recharge time",144);
+  pushMultiplier("Capacitor amount",147);
+  if(/cap battery/.test(text)){
+    pushAttr("Capacitor bonus",67,attribute=>`+${moduleHoverNumber(attribute.value,0)} GJ`);
+    pushAttr("Cap warfare resistance",2267,attribute=>moduleHoverPercent(Math.abs(Number(attribute.value))));
+  }
+  pushMultiplier("Powergrid output",145);
+  pushMultiplier("CPU output",202);
+  if(attr(549)&&!consumedAttributeIds.has(549))pushAttr("Powergrid bonus",549,attribute=>`+${moduleHoverNumber(attribute.value,1)} MW`);
+  const injector=(analysis?.capacitor?.capacitorInjectors??[]).find((row:any)=>Number(row?.typeId)===Number(item.typeId));
+  if(injector){
+    push("Cap injected / charge",`${moduleHoverNumber(injector.injectionPerCycleGj,0)} GJ`);
+    push("Sustained injection",`${moduleHoverNumber(injector.sustainedGjPerSecond,1)} GJ/s`);
+    if(Number(injector.cycleSeconds)>0)push("Cycle",`${moduleHoverNumber(injector.cycleSeconds,2)} s`);
+  }else if(/capacitor booster/.test(text)){pushCycle();const reload=attr(1795);if(reload){consumeAttribute(reload);push("Reload",moduleHoverSeconds(reload.value));}if(!item.charge)push("Cap injection","Depends on loaded booster charge",true);}
+
+  if(/warp scrambler|warp disruptor/.test(text)){
+    pushRange();pushAttr("Warp strength",105,attribute=>moduleHoverNumber(attribute.value,0));
+    if(/warp scrambler/.test(text))push("MWD shutdown","Yes");
+    pushCap();pushCycle();
+  }
+  if(/stasis webifier/.test(text)){pushAttr("Speed reduction",20,attribute=>`${moduleHoverNumber(Math.abs(Number(attribute.value)),1)}%`);pushRange();pushCap();pushCycle();}
+  if(/target painter/.test(text)){pushMatch("Signature radius",[/signature radius (?:bonus|modifier)/],attribute=>moduleHoverPercent(attribute.value));pushRange();const falloff=attr(2044);if(falloff&&!consumedAttributeIds.has(2044)){consumeAttribute(falloff);push("Falloff",moduleHoverDistance(falloff.value));}pushCap();pushCycle();}
+  if(/tracking disruptor|weapon disruptor/.test(text)){
+    pushAttr("Turret optimal",351,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Turret falloff",349,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Turret tracking",767,attribute=>moduleHoverPercent(attribute.value));
+    pushRange();const falloff=attr(2044);if(falloff&&!consumedAttributeIds.has(2044)){consumeAttribute(falloff);push("Falloff",moduleHoverDistance(falloff.value));}pushCap();pushCycle();
+  }
+  if(/sensor dampener/.test(text)){pushAttr("Targeting range",309,attribute=>moduleHoverPercent(attribute.value));pushAttr("Scan resolution",566,attribute=>moduleHoverPercent(attribute.value));pushRange();const falloff=attr(2044);if(falloff&&!consumedAttributeIds.has(2044)){consumeAttribute(falloff);push("Falloff",moduleHoverDistance(falloff.value));}pushCap();pushCycle();}
+  if(/ecm|jammer/.test(text)){
+    for(const attribute of moduleHoverAttributesMatch(typeInfo,/(gravimetric|ladar|magnetometric|radar).*(jam|ecm)|(?:jam|ecm).*(gravimetric|ladar|magnetometric|radar)/).slice(0,4)){consumeAttribute(attribute);push(attribute.name.replace(/strength.*$/i,"strength"),moduleHoverStatValue(attribute));}
+    pushRange();const falloff=attr(2044)??attr(158);if(falloff&&!consumedAttributeIds.has(Number(falloff.attributeId))){consumeAttribute(falloff);push("Falloff",moduleHoverDistance(falloff.value));}pushCap();pushCycle();
+  }
+
+  if(/sensor booster|signal amplifier|eccm/.test(text)){
+    pushAttr("Targeting range",309,attribute=>moduleHoverPercent(attribute.value));
+    pushAttr("Scan resolution",566,attribute=>moduleHoverPercent(attribute.value));
+    const sensorStrengths=[1027,1028,1029,1030].map(id=>attr(id)).filter(Boolean) as ModuleHoverAttribute[];
+    if(sensorStrengths.length){sensorStrengths.forEach(consumeAttribute);const values=sensorStrengths.map(attribute=>Number(attribute.value));if(values.every(value=>Math.abs(value-values[0])<0.001))push("Sensor strength",moduleHoverPercent(values[0]));else sensorStrengths.forEach(attribute=>push(attribute.name,moduleHoverPercent(attribute.value)));}
+    pushAttr("Locked targets",235,attribute=>`+${moduleHoverNumber(attribute.value,0)}`);
+    pushCap();pushCycle();
+  }
+
+  if(/inertial stabilizer|nanofiber|overdrive|warp core stabilizer|hyperspatial/.test(text)){
+    pushMatch("Inertia / agility",[/inertia.*modifier|agility.*(?:bonus|modifier)/],attribute=>attribute.unit==="%"?moduleHoverPercent(attribute.value):moduleHoverStatValue(attribute));
+    if(!/drone navigation/.test(text))pushMatch("Velocity",[/maximum velocity (?:bonus|modifier)|velocity modifier|maxvelocitymodifier|implantbonusvelocity/],attribute=>attribute.unit==="%"?moduleHoverPercent(attribute.value):moduleHoverStatValue(attribute));
+    pushMatch("Warp speed",[/warp speed.*(?:bonus|multiplier|increase)|warpspeed/],attribute=>attribute.unit==="%"?moduleHoverPercent(attribute.value):moduleHoverStatValue(attribute));
+    if(/inertial stabilizer/.test(text))pushAttr("Signature radius",554,attribute=>moduleHoverPercent(attribute.value));
+    if(/overdrive injector/.test(text))pushMultiplier("Cargo capacity",149);
+    if(/warp core stabilizer/.test(text)){
+      pushAttr("Warp core strength",105,attribute=>`+${moduleHoverNumber(Math.abs(Number(attribute.value)),0)}`);
+      pushAttr("Targeting range",309,attribute=>moduleHoverPercent(attribute.value));
+      pushAttr("Scan resolution",565,attribute=>moduleHoverPercent((Number(attribute.value)-1)*100));
+      pushAttr("Drone bandwidth",3124,attribute=>moduleHoverPercent(attribute.value));
+      pushCap();pushCycle();
+      const delay=attr(669);if(delay&&!consumedAttributeIds.has(669)){consumeAttribute(delay);push("Reactivation delay",moduleHoverSeconds(delay.value));}
+    }
+  }
+  if(/reinforced bulkhead/.test(text)){
+    pushMultiplier("Hull HP",150);
+    pushMultiplier("Cargo capacity",149);
+    pushMatch("Inertia / agility",[/inertia.*modifier|agility.*(?:bonus|modifier)/],attribute=>attribute.unit==="%"?moduleHoverPercent(attribute.value):moduleHoverStatValue(attribute));
+  }
+
+  if(/remote.*armor/.test(text)&&!attr(84)){pushMatch("Repair / transfer",[/armor.*(?:repair|transfer).*amount/],attribute=>moduleHoverStatValue(attribute));pushRange();pushCycle();pushCap();}
+  if(/remote.*shield/.test(text)&&!attr(68)){pushMatch("Repair / transfer",[/shield.*(?:repair|transfer).*amount/],attribute=>moduleHoverStatValue(attribute));pushRange();pushCycle();pushCap();}
+  if(/remote.*capacitor|energy transfer|capacitor transmitter/.test(text)){pushMatch("Cap transferred",[/power transfer amount|capacitor.*transfer.*amount|energy.*transfer.*amount/],attribute=>`${moduleHoverNumber(attribute.value,1)} GJ`);pushRange();pushCycle();pushCap();}
+
+  if(/energy neutralizer|energy nosferatu|nosferatu/.test(text)){
+    if(attr(97))pushAttr(/nosferatu/.test(text)?"Energy drained":"Energy neutralized",97,attribute=>`${moduleHoverNumber(attribute.value,1)} GJ`);
+    else pushMatch(/nosferatu/.test(text)?"Energy drained":"Energy neutralized",[/neutralization amount|energy.*(?:drain|transfer).*amount|power transfer amount/],attribute=>`${moduleHoverNumber(attribute.value,1)} GJ`);
+    pushRange();const effectiveness=attr(2044);if(effectiveness){consumeAttribute(effectiveness);push("Falloff",moduleHoverDistance(effectiveness.value));}pushCycle();pushCap();
+  }
+
+  if(/smartbomb/.test(text)){
+    const damage=moduleHoverAttributesMatch(typeInfo,/^(em|thermal|kinetic|explosive) damage /i,/^(em|thermal|kinetic|explosive) damage$/i).filter(attribute=>!/resist|bonus/i.test(moduleHoverAttributeText(attribute)));
+    if(damage.length){damage.forEach(consumeAttribute);push("Damage / cycle",`${moduleHoverNumber(damage.reduce((sum,attribute)=>sum+Math.max(0,Number(attribute.value)),0),1)} HP`);}
+    pushMatch("Radius",[/area of effect radius|smartbomb.*radius/],attribute=>moduleHoverDistance(attribute.value));pushCycle();pushCap();
+  }
+  if(/tractor beam/.test(text)){pushRange();pushMatch("Tractor velocity",[/tractor.*velocity/],attribute=>`${moduleHoverNumber(attribute.value,0)} m/s`);pushCap();pushCycle();}
+  if(/salvager/.test(text)){pushCycle();pushMatch("Access / salvage bonus",[/access difficulty|salvag.*(?:chance|bonus)/],attribute=>attribute.unit==="%"?moduleHoverPercent(attribute.value):moduleHoverStatValue(attribute));pushRange();pushCap();}
+  if(/cloak|cloaking device/.test(text)){
+    const cloakSpeed=attr(306);if(cloakSpeed&&!consumedAttributeIds.has(306)){consumeAttribute(cloakSpeed);push("Cloaked speed",`${moduleHoverNumber(Number(cloakSpeed.value)*100,1)}% normal`);}
+    const recalibration=attr(560);if(recalibration&&!consumedAttributeIds.has(560)){consumeAttribute(recalibration);push("Lock recalibration",moduleHoverSeconds(recalibration.value));}
+    const reactivation=attr(669);if(reactivation&&!consumedAttributeIds.has(669)){consumeAttribute(reactivation);push("Reactivation delay",moduleHoverSeconds(reactivation.value));}
+    push("Cloak type",/covert ops|covert.*cloak/.test(text)?"Covert Ops":"Standard cloak");
+  }
+
+  if(primary.length<6){
+    const fallback=(typeInfo?.attributes??[])
+      .filter(attribute=>![30,50,1153,1132,1547,128,56].includes(Number(attribute.attributeId)))
+      .filter(attribute=>!consumedAttributeIds.has(Number(attribute.attributeId)))
+      .filter(attribute=>!moduleHoverAttributeIsNeutral(attribute))
+      .filter(attribute=>!MODULE_HOVER_FALLBACK_EXCLUDE.test(moduleHoverAttributeText(attribute)))
+      .map(attribute=>({attribute,score:MODULE_HOVER_FALLBACK_PRIORITY.test(moduleHoverAttributeText(attribute))?2:0}))
+      .filter(row=>row.score>0)
+      .sort((a,b)=>b.score-a.score||String(a.attribute.category??"").localeCompare(String(b.attribute.category??""))||a.attribute.name.localeCompare(b.attribute.name));
+    for(const {attribute} of fallback){if(primary.length>=8)break;const label=attribute.name.replace(/\s+/g," ").trim();if(!primary.some(row=>row.label.toLowerCase()===label.toLowerCase()))push(label,moduleHoverStatValue(attribute));}
+  }
+  if(!primary.length&&typeInfo?.description){const purpose=typeInfo.description.replace(/\s+/g," ").trim().split(/(?<=[.!?])\s/)[0]?.slice(0,150);if(purpose)push("Purpose",purpose,true);}
+
+  for(const value of typeInfo?.fitting??[]){
+    if(value.attributeId===50)pushFitting("CPU",moduleHoverValue(value.value,value.unit));
+    else if(value.attributeId===30)pushFitting("Powergrid",moduleHoverValue(value.value,value.unit));
+    else if(value.attributeId===1153)pushFitting("Calibration",moduleHoverValue(value.value,value.unit));
+  }
+  return {primary:primary.slice(0,8),fitting:fitting.slice(0,3)};
+}
+function ModuleHoverCard({ item, rack, currentState, analysis, typeInfo, anchor }: { item:FitItem; rack?:FitModuleRack; currentState?:ModuleState; analysis:any; typeInfo:FittingTypeInfo|null; anchor:DOMRect }) {
+  const content=useMemo(()=>buildModuleHoverStats(item,rack,analysis,typeInfo),[item,rack,analysis,typeInfo]);
+  const width=320;
+  const roomRight=anchor.right+12+width<=window.innerWidth-8;
+  const left=roomRight?anchor.right+10:Math.max(8,anchor.left-width-10);
+  const top=Math.max(8,Math.min(anchor.top-8,window.innerHeight-410));
+  const stateLabel=currentState==="overheated"?"OVERHEAT":currentState==="offline"?"OFF":currentState==="active"?"ON":currentState==="online"?"ONLINE":"";
+  const categoryLabel=typeInfo?.group?.name??typeInfo?.marketGroup?.name??typeInfo?.category?.name??"Module";
+  return createPortal(
+    <aside className="fit-module-hover-card" style={{left,top,width}} role="tooltip" aria-hidden="true">
+      <header className="fit-module-hover-head">
+        <span className="fit-module-hover-icon">{item.typeId?<img src={imageUrl(item.typeId,"icon",64)} />:<b>?</b>}</span>
+        <span className="fit-module-hover-title"><strong>{item.name}</strong>{item.mutation?<em>Abyssal module</em>:<em>{categoryLabel}</em>}</span>
+        {currentState&&<i className={`fit-module-hover-state state-${currentState}`}>{stateLabel}</i>}
+      </header>
+      {item.charge&&<div className="fit-module-hover-charge">{item.chargeTypeId?<img src={imageUrl(item.chargeTypeId,"icon",32)} />:null}<span><small>Loaded charge / script / crystal</small><strong>{item.charge}</strong></span></div>}
+      {content.primary.length>0?<div className="fit-module-hover-stats primary">{content.primary.map(stat=><span className={stat.wide?"wide":""} key={stat.label}><small>{stat.label}</small><strong>{stat.value}</strong></span>)}</div>:<div className="fit-module-hover-loading">{typeInfo?"No compact effect stats are published for this type.":"Loading module stats..."}</div>}
+      {content.fitting.length>0&&<div className="fit-module-hover-fitting"><small>Fitting cost</small><div>{content.fitting.map(stat=><span key={stat.label}><em>{stat.label}</em><strong>{stat.value}</strong></span>)}</div></div>}
+      <footer><span>{categoryLabel}</span><span>Right-click for full Show Info</span></footer>
+    </aside>,
+    document.body,
+  );
+}
+function SlotRack({ title, side, items, limit, onStateChange, onRemove, onDropItem, onLoadCharge, onShowInfo, analysis }: { title:string; side:FitModuleRack; items:FitItem[]; limit:number; onStateChange(rack:FitModuleRack,index:number,state:ModuleState):void; onRemove(target:BuilderTarget,index:number):void; onDropItem(target:BuilderTarget,item:FittingSearchResult):Promise<boolean>; onLoadCharge(target:FitModuleRack,index:number,item:FittingSearchResult):Promise<boolean>; onShowInfo(typeId:number,name?:string):void; analysis:any }) {
   const states:ModuleState[]=side==="rig"||side==="subsystem"?["online"]:["offline","online","active","overheated"];
   const count=Math.max(items.length,Math.max(0,Math.floor(limit||0)));
   const allowDrag=(event:DragEvent<HTMLElement>)=>{if(event.dataTransfer.types.includes(FITTING_DRAG_MIME)){event.preventDefault();event.dataTransfer.dropEffect="copy";}};
-  return <div className={"slot-rack "+side} onDragOver={allowDrag}><span>{title}<small>{items.length} / {limit || count}</small></span><div>{Array.from({length:count},(_,index)=>{const item=items[index];return item?<FittedSlotTile item={item} states={states} onStateChange={state=>onStateChange(side,index,state)} onRemove={()=>onRemove(side,index)} onChargeDrop={charge=>onLoadCharge(side,index,charge)} onShowInfo={onShowInfo} key={(item.name)+"-"+index}/>:<div className="fit-item fitted-slot-empty fit-empty-slot" key={"empty-"+side+"-"+index} title={"Drop a "+side+" module here"} onDragOver={allowDrag} onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onDropItem(side,dragged);}}><b>+</b><span>Drop / Empty</span></div>;})}</div></div>;
+  return <div className={"slot-rack "+side} onDragOver={allowDrag}><span>{title}<small>{items.length} / {limit || count}</small></span><div>{Array.from({length:count},(_,index)=>{const item=items[index];return item?<FittedSlotTile item={item} rack={side} analysis={analysis} states={states} onStateChange={state=>onStateChange(side,index,state)} onRemove={()=>onRemove(side,index)} onChargeDrop={charge=>onLoadCharge(side,index,charge)} onShowInfo={onShowInfo} key={(item.name)+"-"+index}/>:<div className="fit-item fitted-slot-empty fit-empty-slot" key={"empty-"+side+"-"+index} title={"Drop a "+side+" module here"} onDragOver={allowDrag} onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onDropItem(side,dragged);}}><b>+</b><span>Drop / Empty</span></div>;})}</div></div>;
 }
 function FittedSlotTile({
   item,
+  rack,
+  analysis,
   states,
   onStateChange,
   onRemove,
@@ -2953,6 +3272,8 @@ function FittedSlotTile({
   onShowInfo,
 }: {
   item: FitItem;
+  rack: FitModuleRack;
+  analysis: any;
   states: ModuleState[];
   onStateChange(state: ModuleState): void;
   onRemove(): void;
@@ -2960,12 +3281,21 @@ function FittedSlotTile({
   onShowInfo(typeId:number,name?:string):void;
 }) {
   const [capabilities,setCapabilities]=useState<ModuleStateCapabilities|null>(null);
+  const [hoverAnchor,setHoverAnchor]=useState<DOMRect|null>(null);
+  const [typeInfo,setTypeInfo]=useState<FittingTypeInfo|null>(null);
   useEffect(()=>{
     if(!item.typeId||!states.includes("active")){setCapabilities(null);return;}
     let cancelled=false;
     void getModuleStateCapabilities(item.typeId).then((value)=>{if(!cancelled)setCapabilities(value);});
     return()=>{cancelled=true;};
   },[item.typeId,states.includes("active")]);
+  useEffect(()=>{setTypeInfo(null);},[item.typeId]);
+  useEffect(()=>{
+    if(!hoverAnchor||!item.typeId)return;
+    let cancelled=false;
+    void getFittingTypeInfoCached(item.typeId).then((value)=>{if(!cancelled)setTypeInfo(value);}).catch(()=>undefined);
+    return()=>{cancelled=true;};
+  },[hoverAnchor!==null,item.typeId]);
   const allowedStates:ModuleState[]=states.includes("active")&&capabilities
     ? ["offline","online",...(capabilities.canActivate?["active" as ModuleState]:[]),...(capabilities.canOverheat?["overheated" as ModuleState]:[])]
     : states;
@@ -2983,15 +3313,16 @@ function FittedSlotTile({
   return (
     <div
       className={`fit-item fitted-slot-tile state-${currentState}`}
-      title={`${item.name}${item.charge ? `, ${item.charge}` : ""} - drop compatible ammo / script here`}
+      onMouseEnter={(event)=>setHoverAnchor(event.currentTarget.getBoundingClientRect())}
+      onMouseLeave={()=>setHoverAnchor(null)}
       onDragOver={allowCharge}
       onContextMenu={(event)=>{if(!item.typeId)return;event.preventDefault();onShowInfo(item.typeId,item.name);}}
       onDrop={(event)=>{event.preventDefault();const dragged=readFittingDrag(event);if(dragged)void onChargeDrop(dragged);}}
     >
       {item.typeId ? <img src={imageUrl(item.typeId, "icon", 64)} /> : <b>?</b>}
-      {item.charge && <span className="fitted-slot-charge-indicator" title={`Loaded: ${item.charge}`} aria-label={`Loaded charge ${item.charge}`} />}
+      {item.charge && <span className="fitted-slot-charge-indicator" aria-label={`Loaded charge ${item.charge}`} />}
       {item.quantity > 1 && <em>{item.quantity}</em>}{item.mutation && <i className="abyssal-badge" title={item.mutation.mutaplasmidName}>A</i>}
-      <span className="fit-item-copy"><strong className="fit-module-name" title={item.name}>{item.name}</strong><small className="fit-loaded-charge" title={item.charge ?? ""} onContextMenu={(event)=>{if(!item.chargeTypeId)return;event.preventDefault();event.stopPropagation();onShowInfo(item.chargeTypeId,item.charge);}}>{item.charge ?? "\u00a0"}</small></span>
+      <span className="fit-item-copy"><strong className="fit-module-name">{item.name}</strong><small className="fit-loaded-charge" onContextMenu={(event)=>{if(!item.chargeTypeId)return;event.preventDefault();event.stopPropagation();onShowInfo(item.chargeTypeId,item.charge);}}>{item.charge ?? "\u00a0"}</small></span>
       <button type="button" className="fit-item-remove" aria-label={`Remove ${item.name}`} onClick={onRemove}>X</button>
       {stateLights.length > 0 && <div className="fit-module-state-lights" role="group" aria-label={`${item.name} module state`}>
         {stateLights.map((light)=><button
@@ -3004,6 +3335,7 @@ function FittedSlotTile({
           onClick={(event)=>{event.stopPropagation();onStateChange(light.state);}}
         />)}
       </div>}
+      {hoverAnchor&&<ModuleHoverCard item={item} rack={rack} currentState={currentState} analysis={analysis} typeInfo={typeInfo} anchor={hoverAnchor} />}
     </div>
   );
 }

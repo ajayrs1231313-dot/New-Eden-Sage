@@ -1036,6 +1036,28 @@ function scheduleResponsiveDisplayScale(target: BrowserWindow, delay = 120) {
 }
 
 
+let lastWindowsSnipLaunchAt = 0;
+
+async function openWindowsSnippingOverlay(source: "native-window" | "electron-input" | "renderer") {
+  const now = Date.now();
+  if (now - lastWindowsSnipLaunchAt < 600) return true;
+  lastWindowsSnipLaunchAt = now;
+
+  await logEvent("info", "windows.print_screen_fallback_invoked", { source });
+  // Let the physical Print Screen key-up complete before Windows takes foreground.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  try {
+    await shell.openExternal("ms-screenclip:");
+    return true;
+  } catch (error) {
+    await logEvent("warn", "windows.snip_overlay_launch_failed", {
+      source,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 function createWindow() {
   const createdWindow = new BrowserWindow({
     width: 1360,
@@ -1052,6 +1074,30 @@ function createWindow() {
     },
   });
   window = createdWindow;
+
+  // Windows 11 can intermittently fail to hand Print Screen off to Snipping Tool while
+  // an Electron window owns the foreground. Sage listens at the native window, Electron
+  // input, and renderer layers, then funnels all three through one deduped overlay launch.
+  createdWindow.webContents.on("before-input-event", (_event, input) => {
+    if (input.type !== "keyDown") return;
+    const key = String(input.key ?? "");
+    const code = String(input.code ?? "");
+    if (key !== "PrintScreen" && code !== "PrintScreen") return;
+    void openWindowsSnippingOverlay("electron-input");
+  });
+
+  if (process.platform === "win32") {
+    const WM_KEYDOWN = 0x0100;
+    const WM_KEYUP = 0x0101;
+    const VK_SNAPSHOT = 0x2c;
+    const handleNativePrintScreen = (wParam: Buffer) => {
+      const virtualKey = wParam.length >= 4 ? wParam.readUInt32LE(0) : 0;
+      if (virtualKey !== VK_SNAPSHOT) return;
+      void openWindowsSnippingOverlay("native-window");
+    };
+    createdWindow.hookWindowMessage(WM_KEYDOWN, handleNativePrintScreen);
+    createdWindow.hookWindowMessage(WM_KEYUP, handleNativePrintScreen);
+  }
 
   void applyResponsiveDisplayScale(createdWindow);
   createdWindow.on("resize", () => scheduleResponsiveDisplayScale(createdWindow));
@@ -1181,6 +1227,7 @@ if (!hasSingleInstanceLock) {
     autoUpdater.quitAndInstall(true, true);
     return true;
   });
+  ipcMain.handle("windows:open-snipping-overlay", () => openWindowsSnippingOverlay("renderer"));
   ipcMain.handle("external:open-support", () =>
     shell.openExternal("https://www.paypal.com/donate/?hosted_button_id=5ZE4R48W6UWMC"),
   );
