@@ -13,11 +13,15 @@ _HERE = Path(__file__).resolve()
 ROOT = _HERE.parents[2] if len(_HERE.parents) > 2 and (_HERE.parents[2] / "package.json").exists() else Path("/app")
 PUBLISHED_VOLUME_NAME = "new-eden-sage-market-trial"
 HISTORY_VOLUME_NAME = "new-eden-sage-public-history"
+REFRESH_GUARD_DICT_NAME = "new-eden-sage-public-refresh-guard"
+REFRESH_GUARD_KEY = "public-refresh"
+REFRESH_GUARD_LEASE_SECONDS = 15 * 60
 HISTORY_RETENTION_DAYS = int(os.environ.get("NEW_EDEN_SAGE_PUBLIC_HISTORY_RETENTION_DAYS", "120"))
 
 app = modal.App("new-eden-sage-market-benchmark")
 published_volume = modal.Volume.from_name(PUBLISHED_VOLUME_NAME, create_if_missing=True)
 history_volume = modal.Volume.from_name(HISTORY_VOLUME_NAME, create_if_missing=True)
+refresh_guard = modal.Dict.from_name(REFRESH_GUARD_DICT_NAME, create_if_missing=True)
 
 image = (
     modal.Image.from_registry("node:22-bookworm-slim", add_python="3.12")
@@ -129,35 +133,67 @@ def benchmark_market_pipeline() -> dict:
     cpu=0.25,
     memory=256,
     timeout=700,
-    max_containers=1,
+    max_containers=4,
 )
 @modal.concurrent(max_inputs=1)
 def refresh_market_if_stale() -> dict:
-    """Compatibility name: this now performs one cache-aware public scheduler evaluation, not a blind stale-market pull."""
+    """Run one cache-aware public scheduler evaluation, skipping immediately when another refresh owns the lease."""
     published_volume.reload()
     history_volume.reload()
     previous = _read_manifest()
-    result = benchmark_market_pipeline.remote()
-    published_volume.reload()
-    history_volume.reload()
-    current = _read_manifest()
-    if current is None and previous is None:
-        raise RuntimeError("Public refresh completed without a valid known-good manifest.")
-    return {
-        "manifest": current or previous,
-        "refreshed": bool(result.get("published")),
-        "published": bool(result.get("published")),
-        "generation": result.get("generation"),
-        "marketChanged": bool(result.get("marketChanged")),
-        "contractsChanged": bool(result.get("contractsChanged")),
-        "publicChanged": bool(result.get("publicChanged")),
-        "contractSourceId": result.get("contractSourceId"),
-        "contractPendingDetailCount": result.get("contractPendingDetailCount"),
-        "contractComputeMs": result.get("contractComputeMs"),
-        "scheduler": result.get("scheduler"),
-        "history": result.get("history"),
-        "refreshWallMs": result.get("wallMs"),
+
+    now = time.time()
+    existing = refresh_guard.get(REFRESH_GUARD_KEY)
+    if isinstance(existing, dict) and float(existing.get("expiresAt", 0) or 0) <= now:
+        refresh_guard.pop(REFRESH_GUARD_KEY, None)
+
+    lease_token = f"{time.time_ns()}-{os.getpid()}"
+    lease = {
+        "token": lease_token,
+        "startedAt": datetime.now(timezone.utc).isoformat(),
+        "expiresAt": now + REFRESH_GUARD_LEASE_SECONDS,
     }
+    if not refresh_guard.put(REFRESH_GUARD_KEY, lease, skip_if_exists=True):
+        active = refresh_guard.get(REFRESH_GUARD_KEY)
+        if previous is None:
+            raise RuntimeError("Public refresh already in progress and no known-good manifest is available yet.")
+        return {
+            "manifest": previous,
+            "refreshed": False,
+            "published": False,
+            "generation": previous.get("generation"),
+            "skipped": True,
+            "skipReason": "refresh-in-progress",
+            "activeRefresh": active,
+            "scheduler": _read_scheduler_status(),
+        }
+
+    try:
+        result = benchmark_market_pipeline.remote()
+        published_volume.reload()
+        history_volume.reload()
+        current = _read_manifest()
+        if current is None and previous is None:
+            raise RuntimeError("Public refresh completed without a valid known-good manifest.")
+        return {
+            "manifest": current or previous,
+            "refreshed": bool(result.get("published")),
+            "published": bool(result.get("published")),
+            "generation": result.get("generation"),
+            "marketChanged": bool(result.get("marketChanged")),
+            "contractsChanged": bool(result.get("contractsChanged")),
+            "publicChanged": bool(result.get("publicChanged")),
+            "contractSourceId": result.get("contractSourceId"),
+            "contractPendingDetailCount": result.get("contractPendingDetailCount"),
+            "contractComputeMs": result.get("contractComputeMs"),
+            "scheduler": result.get("scheduler"),
+            "history": result.get("history"),
+            "refreshWallMs": result.get("wallMs"),
+        }
+    finally:
+        active = refresh_guard.get(REFRESH_GUARD_KEY)
+        if isinstance(active, dict) and active.get("token") == lease_token:
+            refresh_guard.pop(REFRESH_GUARD_KEY, None)
 
 
 @app.function(image=image, schedule=modal.Period(minutes=5), timeout=720)
