@@ -3671,6 +3671,86 @@ export async function analyzeFittingDogma(input: {
       })),
     };
   });
+  // Surface fit capabilities that CCP encodes through subsystem effects rather than
+  // ordinary ship stats. These values stay data-driven so UI/simulators do not need
+  // to infer strategic-cruiser mechanics from subsystem names.
+  const scanProbeBonusChanges: Array<{ value:number; operation:number }> = [];
+  const nullifierRoleChanges = new Map<number, Array<{ value:number; operation:number }>>();
+  for (const item of online) {
+    const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
+    if (!source) continue;
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect || effect.category !== 0) continue;
+      for (const modifier of effect.modifiers) {
+        if (modifier.modifyingAttributeID == null || modifier.modifiedAttributeID == null) continue;
+        if (
+          modifier.domain === "charID" &&
+          modifier.func === "OwnerRequiredSkillModifier" &&
+          modifier.skillTypeID === 3412 &&
+          modifier.modifiedAttributeID === 1371
+        ) {
+          scanProbeBonusChanges.push({ value: attr(source, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
+        }
+        if (
+          modifier.domain === "shipID" &&
+          modifier.func === "LocationGroupModifier" &&
+          modifier.groupID === 4117
+        ) {
+          const list = nullifierRoleChanges.get(modifier.modifiedAttributeID) ?? [];
+          list.push({ value: attr(source, modifier.modifyingAttributeID), operation: modifier.operation ?? 0 });
+          nullifierRoleChanges.set(modifier.modifiedAttributeID, list);
+        }
+      }
+    }
+  }
+  const nullifierRolePercentResult = (attributeId:number) => {
+    const changes = nullifierRoleChanges.get(attributeId) ?? [];
+    return changes.length ? applyOrderedChanges(100, changes, false, [1]) : 100;
+  };
+  const scanProbeStrengthMultiplier = scanProbeBonusChanges.length
+    ? applyOrderedChanges(100, scanProbeBonusChanges, false, [1]) / 100
+    : 1;
+  const coreScannerProbeTypeId = 30013;
+  const coreScannerProbe = dogma.get(coreScannerProbeTypeId);
+  const fittedInterdictionNullifiers = online
+    .filter((item) => groups.get(item.typeId) === 4117)
+    .map((item) => {
+      const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
+      return {
+        typeId: item.typeId,
+        name: names.get(item.typeId) ?? `Type ${item.typeId}`,
+        state: item.state ?? "online",
+        targetingRangeBonusPercent: effectiveItemAttr(source, 309, item.typeId),
+        scanResolutionMultiplier: effectiveItemAttr(source, 565, item.typeId),
+        reactivationDelaySeconds: effectiveItemAttr(source, 669, item.typeId) / 1000,
+        activationDurationSeconds: effectiveItemAttr(source, 3115, item.typeId) / 1000,
+      };
+    });
+  const capabilities = {
+    scanning: {
+      probeStrengthBonusPercent: (scanProbeStrengthMultiplier - 1) * 100,
+      probeStrengthMultiplier: scanProbeStrengthMultiplier,
+      coreScannerProbeStrength: coreScannerProbe ? effectiveItemAttr(coreScannerProbe, 1371, coreScannerProbeTypeId) : 0,
+      referenceProbeTypeId: coreScannerProbeTypeId,
+      referenceProbe: names.get(coreScannerProbeTypeId) ?? "Core Scanner Probe I",
+    },
+    blackOps: {
+      jumpPortalPassenger: shipAttr(3320) > 0,
+      jumpConduitPassenger: shipAttr(3322) > 0,
+    },
+    interdictionNullifier: {
+      moduleRoleBonus: nullifierRoleChanges.size > 0,
+      providesPassiveNullification: false,
+      moduleGroupId: 4117,
+      targetingRangePenaltyReductionPercent: Math.max(0, 100 - nullifierRolePercentResult(309)),
+      reactivationDelayReductionPercent: Math.max(0, 100 - nullifierRolePercentResult(669)),
+      activationDurationBonusPercent: nullifierRolePercentResult(3115) - 100,
+      scanResolutionPenaltyReductionPercent: Math.max(0, 100 - nullifierRolePercentResult(565)),
+      fittedModules: fittedInterdictionNullifiers,
+    },
+  };
+
   const heat = {
     stochastic: true,
     occupiedSlotFactor,
@@ -3818,6 +3898,7 @@ export async function analyzeFittingDogma(input: {
     projectedSources,
     commandBurstSources,
     supportSystems,
+    capabilities,
     environmentSources: environmentSources.map((environment) => ({ typeId: environment.typeId, name: environment.name })),
     abyss: abyssAnalysis,
     source: "CCP EVE static data (offline)",
