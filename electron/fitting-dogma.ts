@@ -1467,6 +1467,7 @@ export async function analyzeFittingDogma(input: {
   commandBurstItems?: Array<FittingItem & { effectiveness?: number }>;
   environmentTypeIds?: number[];
   abyssProfile?: { tier: AbyssTier; weather: AbyssWeather; penalty?: number; roomKey?: string };
+  mechanicState?: { reactiveArmorCycles?: number };
 }) {
   const { dogma, names, groups, volumes, masses, capacities, modifiers, penalized, dbuffs } = await index();
   const targetProfile = input.targetProfile ?? { rangeM: 10_000, signatureRadiusM: 125, transverseVelocityMps: 0, velocityMps: 0 };
@@ -2229,6 +2230,26 @@ export async function analyzeFittingDogma(input: {
     return current;
   };
 
+  // Stateful self-effects (especially heat) must read their modifying attributes only
+  // after hull/subsystem/skill modifiers have been applied. moduleDogmaFor deliberately
+  // remains the legacy eager path; this helper is used where cycle-to-cycle state matters.
+  const effectiveStatefulItemAttr = (item: FittingItem, attributeId: number) => {
+    const baseState = item.state === "overheated" ? "active" : item.state;
+    const source = moduleDogmaFor({ ...item, state: baseState });
+    let current = effectiveItemAttr(source, attributeId, item.typeId);
+    if (!source || item.state !== "overheated") return current;
+    const changes: Array<{ value:number; operation:number }> = [];
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect || effect.category !== 5) continue;
+      for (const modifier of effect.modifiers) {
+        if (modifier.domain !== "itemID" || modifier.func !== "ItemModifier" || modifier.modifiedAttributeID !== attributeId || modifier.modifyingAttributeID == null) continue;
+        changes.push({ value: effectiveItemAttr(source, modifier.modifyingAttributeID, item.typeId), operation: modifier.operation ?? 0 });
+      }
+    }
+    return changes.length ? applyOrderedChanges(current, changes, false, [1]) : current;
+  };
+
   for (const item of online) {
     const itemDogma = moduleDogmaFor(item);
     const quantity = item.quantity ?? 1;
@@ -2503,9 +2524,12 @@ export async function analyzeFittingDogma(input: {
     const cyclesPerMagazine = rawCharges > 0 ? Math.floor(rawCharges / chargesPerCycle) : 0;
     const cycleSeconds = (effectiveItemAttr(module, 73, item.typeId) || effectiveItemAttr(module, 51, item.typeId)) / 1000;
     const reloadSeconds = effectiveItemAttr(module, 1795, item.typeId) / 1000;
-    const activeSeconds = cyclesPerMagazine * cycleSeconds;
-    const sustainedDutyCycle = activeSeconds > 0 ? activeSeconds / (activeSeconds + reloadSeconds) : 1;
-    return { moduleCapacityM3, chargeVolumeM3, chargesPerCycle, rawCharges, loadedCharges, cyclesLoaded, cyclesPerMagazine, cycleSeconds, reloadSeconds, activeSeconds, sustainedDutyCycle };
+    const activeSecondsFromLoadedCharges = cyclesLoaded * cycleSeconds;
+    const fullMagazineActiveSeconds = cyclesPerMagazine * cycleSeconds;
+    const explicitLoadedState = item.chargeQuantity != null;
+    const activeSeconds = explicitLoadedState ? activeSecondsFromLoadedCharges : fullMagazineActiveSeconds;
+    const sustainedDutyCycle = activeSeconds > 0 ? activeSeconds / (activeSeconds + reloadSeconds) : 0;
+    return { moduleCapacityM3, chargeVolumeM3, chargesPerCycle, rawCharges, loadedCharges, cyclesLoaded, cyclesPerMagazine, cycleSeconds, reloadSeconds, activeSeconds, activeSecondsFromLoadedCharges, fullMagazineActiveSeconds, explicitLoadedState, sustainedDutyCycle };
   };
   for (const item of fitted) {
     if (!item.chargeTypeId || item.chargeQuantity == null) continue;
@@ -2526,13 +2550,13 @@ export async function analyzeFittingDogma(input: {
     .filter((item) => item.state === "active" || item.state === "overheated")
     .reduce((total, item) => {
       const itemDogma = moduleDogmaFor(item);
-      const cycleSeconds = effectiveItemAttr(itemDogma, 73, item.typeId) / 1000;
-      return (
-        total +
-        (cycleSeconds > 0
-          ? (effectiveItemAttr(itemDogma, 6, item.typeId) / cycleSeconds) * (item.quantity ?? 1)
-          : 0)
-      );
+      const groupId = groups.get(item.typeId) ?? 0;
+      const magazine = magazineFor(item, itemDogma);
+      const ancillaryShield = groupId === 1156 || groupId === 1697;
+      const emptySelectedBooster = ancillaryShield && item.chargeTypeId && groups.get(item.chargeTypeId) === 87 && magazine?.cyclesLoaded === 0;
+      const capSourceItem = emptySelectedBooster ? { ...item, chargeTypeId: undefined } : item;
+      const cycleSeconds = effectiveStatefulItemAttr(capSourceItem, 73) / 1000;
+      return total + (cycleSeconds > 0 ? (effectiveStatefulItemAttr(capSourceItem, 6) / cycleSeconds) * (item.quantity ?? 1) : 0);
     }, 0);
   const capacitorInjectors = online.flatMap((item) => {
     if (item.state !== "active" && item.state !== "overheated") return [];
@@ -2612,15 +2636,32 @@ export async function analyzeFittingDogma(input: {
     weaponVolley += volley;
     if (cycleSeconds > 0) weaponDps += volley / cycleSeconds;
 
+    const paperDps = cycleSeconds > 0 ? volley / cycleSeconds : 0;
+    const magazine = magazineFor(item, module);
+    const loadedCycles = magazine?.cyclesLoaded ?? 0;
+    const magazineCycles = magazine?.cyclesPerMagazine ?? 0;
+    const explicitLoadedState = Boolean(magazine?.explicitLoadedState);
+    const hasCurrentAmmo = !magazine || !explicitLoadedState || loadedCycles > 0;
+    const burstDps = paperDps;
+    const currentDps = hasCurrentAmmo ? burstDps : 0;
+    const sustainedDps = magazine && magazine.reloadSeconds > 0 ? burstDps * magazine.sustainedDutyCycle : burstDps;
+    const rampPerCycle = Math.max(0, effectiveItemAttr(module, 2733, item.typeId));
+    const maxRampMultiplier = Math.max(1, effectiveItemAttr(module, 2734, item.typeId) || 1);
+    const cyclesToMaxRamp = rampPerCycle > 0 ? Math.max(0, Math.ceil((maxRampMultiplier - 1) / rampPerCycle - 1e-12)) : 0;
     const common = {
       typeId: item.typeId,
       name: names.get(item.typeId) ?? `Type ${item.typeId}`,
+      chargeTypeId: item.chargeTypeId,
       charge: names.get(item.chargeTypeId!),
       quantity,
       cycleSeconds,
       volley,
       damageVector,
-      paperDps: cycleSeconds > 0 ? volley / cycleSeconds : 0,
+      paperDps, burstDps, currentDps, sustainedDps,
+      magazine, loadedCycles, magazineCycles, reloadSeconds: magazine?.reloadSeconds ?? 0,
+      activeSecondsFromLoadedCharges: magazine?.activeSecondsFromLoadedCharges ?? 0, sustainedDutyCycle: magazine?.sustainedDutyCycle ?? 1,
+      rampPerCycle, maxRampMultiplier, maxRampDps: paperDps * maxRampMultiplier, cyclesToMaxRamp, secondsToMaxRamp: cyclesToMaxRamp * cycleSeconds,
+      spoolReset: rampPerCycle > 0 ? "Resets when the weapon deactivates or changes target." : undefined,
     };
     if (module?.effects.has(42)) {
       weaponProfiles.push({
@@ -2651,6 +2692,16 @@ export async function analyzeFittingDogma(input: {
       });
     }
   }
+  const aoeDamageSources = online.flatMap((item) => {
+    if ((groups.get(item.typeId) ?? 0) !== 72 || (item.state !== "active" && item.state !== "overheated")) return [];
+    const source=moduleDogmaFor(item);
+    if(!source)return [];
+    const quantity=Math.max(1,item.quantity ?? 1);
+    const damageVector=effectiveDamageVectorFor(source,item.typeId).map((amount)=>amount*quantity) as DamageVector;
+    const damagePerPulse=damageVector.reduce((sum,amount)=>sum+amount,0);
+    const cycleSeconds=Math.max(0,effectiveStatefulItemAttr(item,73)/1000);
+    return damagePerPulse>0 && cycleSeconds>0 ? [{typeId:item.typeId,name:names.get(item.typeId) ?? `Type ${item.typeId}`,sourceKind:"aoe",kind:"smartbomb",quantity,damagePerPulse,damageVector,cycleSeconds,radiusM:Math.max(0,effectiveItemAttr(source,99,item.typeId)),capacitorPerCycleGj:Math.max(0,effectiveStatefulItemAttr(item,6)),friendlyFireEligible:true}] : [];
+  });
   for (const profile of weaponProfiles) {
     if (profile.kind !== "turret") continue;
     const darkRangeMultiplier = abyssConfig?.weather === "dark" ? 1 - abyssConfig.penalty : 1;
@@ -2671,7 +2722,7 @@ export async function analyzeFittingDogma(input: {
     return Math.max(0, Math.min(1, Number(profile.extraFlightTickChance ?? 0)));
   };
   for (const profile of weaponProfiles) {
-    const paperDps = Number(profile.paperDps ?? 0);
+    const paperDps = Number(profile.currentDps ?? profile.paperDps ?? 0);
     if (profile.kind === "turret") {
       const rangeM = Math.max(1, targetProfile.rangeM);
       const tracking = Math.max(1e-12, Number(profile.tracking));
@@ -2707,6 +2758,8 @@ export async function analyzeFittingDogma(input: {
       const itemDogma = moduleDogmaFor(item);
       const bandwidth = effectiveItemAttr(itemDogma, 1272, item.typeId);
       const cycle = effectiveItemAttr(itemDogma, 51, item.typeId) / 1000;
+      const miningCycleSeconds = (effectiveItemAttr(itemDogma, 73, item.typeId) || effectiveItemAttr(itemDogma, 51, item.typeId)) / 1000;
+      const miningAmountPerCycle = Math.max(0, effectiveItemAttr(itemDogma, 77, item.typeId));
       const multiplier = effectiveItemAttr(itemDogma, 64, item.typeId) || 1;
       const damageVector = effectiveDamageVectorFor(itemDogma, item.typeId).map((amount) => amount * multiplier) as DamageVector;
       const volley = damageVector.reduce((sum, amount) => sum + amount, 0);
@@ -2739,6 +2792,8 @@ export async function analyzeFittingDogma(input: {
         orbitRangeM,
         webStrength,
         cycleSeconds: cycle,
+        miningCycleSeconds,
+        miningAmountPerCycle,
         sentry,
       }));
     })
@@ -2772,6 +2827,62 @@ export async function analyzeFittingDogma(input: {
 
   const droneControlDistanceM = characterAttr(458);
 
+  // Active fighter squadrons are independent combat sources, not drones. Fighter attack
+  // attributes are per individual fighter; multiply by effective squadron size and the
+  // number of active squadrons only after hull/skill modifiers have been applied.
+  const fighterDamageSources = input.items.filter((item) => item.rack === "fighter-active").flatMap((item) => {
+    const source = moduleDogmaFor(item);
+    if (!source) return [];
+    const squadrons = Math.max(0, item.quantity ?? 1);
+    const squadronSize = Math.max(0, Math.floor(effectiveItemAttr(source, 2215, item.typeId)));
+    const fighterCount = squadrons * squadronSize;
+    if (!(fighterCount > 0)) return [];
+    const perFighterHp = {shield:Math.max(0,effectiveItemAttr(source,263,item.typeId)),armor:Math.max(0,effectiveItemAttr(source,265,item.typeId)),structure:Math.max(0,effectiveItemAttr(source,9,item.typeId))};
+    const squadronHp = (perFighterHp.shield + perFighterHp.armor + perFighterHp.structure) * squadronSize;
+    const channel = (config:{ability:string; damage:[number,number,number,number]; multiplier:number; duration:number; optimal:number; falloff?:number; explosionRadius:number; explosionVelocity:number}) => {
+      const multiplier = effectiveItemAttr(source, config.multiplier, item.typeId) || 1;
+      const perFighterVector = config.damage.map((attributeId) => Math.max(0, effectiveItemAttr(source,attributeId,item.typeId)) * multiplier) as DamageVector;
+      const damageVector = perFighterVector.map((amount) => amount * fighterCount) as DamageVector;
+      const volley = damageVector.reduce((sum,amount) => sum + amount,0);
+      const cycleSeconds = Math.max(0, effectiveItemAttr(source,config.duration,item.typeId) / 1000);
+      if (!(volley > 0) || !(cycleSeconds > 0)) return [];
+      return [{
+        typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, sourceKind:"fighter", kind:"fighter", ability:config.ability,
+        quantity:squadrons, squadronSize, fighterCount, cycleSeconds, volley, dps:volley/cycleSeconds, damageVector,
+        optimalM:Math.max(0,effectiveItemAttr(source,config.optimal,item.typeId)), falloffM:Math.max(0,config.falloff ? effectiveItemAttr(source,config.falloff,item.typeId) : 0),
+        explosionRadiusM:Math.max(0,effectiveItemAttr(source,config.explosionRadius,item.typeId)), explosionVelocity:Math.max(0,effectiveItemAttr(source,config.explosionVelocity,item.typeId)),
+        perFighterHp, squadronHp,
+      }];
+    };
+    return [
+      ...channel({ability:"missiles",damage:[2131,2132,2133,2134],multiplier:2130,duration:2182,optimal:2149,explosionRadius:2125,explosionVelocity:2126}),
+      ...channel({ability:"attack-missile",damage:[2227,2228,2229,2230],multiplier:2226,duration:2233,optimal:2236,falloff:2237,explosionRadius:2234,explosionVelocity:2235}),
+    ];
+  });
+  const fighterDps = fighterDamageSources.reduce((sum,source) => sum + source.dps,0);
+  const fighterVolley = fighterDamageSources.reduce((sum,source) => sum + source.volley,0);
+
+  const fighterSupportSystems: Array<Record<string, unknown>> = input.items.filter((item) => item.rack === "fighter-active").flatMap((item) => {
+    const source = moduleDogmaFor(item);
+    if (!source) return [];
+    const squadrons=Math.max(0,item.quantity ?? 1);
+    const squadronSize=Math.max(0,Math.floor(effectiveItemAttr(source,2215,item.typeId)));
+    const fighterCount=squadrons*squadronSize;
+    const common={typeId:item.typeId,name:names.get(item.typeId) ?? `Type ${item.typeId}`,groupId:groups.get(item.typeId) ?? 0,quantity:squadrons,state:"active",sourceKind:"fighter",fighterCount,squadronSize};
+    const systems:Array<Record<string,unknown>>=[];
+    const neutAmount=Math.max(0,effectiveItemAttr(source,2211,item.typeId));
+    if(neutAmount>0)systems.push({...common,kind:"energyNeutralizer",cycleSeconds:Math.max(0,effectiveItemAttr(source,2208,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2209,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2210,item.typeId)),amountPerCycle:neutAmount*fighterCount,perSecond:effectiveItemAttr(source,2208,item.typeId)>0?neutAmount*fighterCount/(effectiveItemAttr(source,2208,item.typeId)/1000):0});
+    const warpStrength=Math.max(0,effectiveItemAttr(source,2205,item.typeId));
+    if(warpStrength>0)systems.push({...common,kind:"tackle",cycleSeconds:Math.max(0,effectiveItemAttr(source,2203,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2204,item.typeId)),falloffM:0,warpStrength:warpStrength*fighterCount,mwdShutdown:false});
+    const webPenalty=Math.min(0,effectiveItemAttr(source,2184,item.typeId));
+    if(webPenalty<0)systems.push({...common,kind:"web",cycleSeconds:Math.max(0,effectiveItemAttr(source,2183,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2186,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2187,item.typeId)),perFighterStrength:Math.abs(webPenalty)/100,strength:1-Math.pow(1-Math.abs(webPenalty)/100,fighterCount)});
+    const ecmStrengths=[2246,2247,2248,2249].map((attributeId)=>Math.max(0,effectiveItemAttr(source,attributeId,item.typeId)));
+    if(Math.max(...ecmStrengths)>0)systems.push({...common,kind:"ecm",cycleSeconds:Math.max(0,effectiveItemAttr(source,2220,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2221,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2222,item.typeId)),sensorStrengths:ecmStrengths,strength:Math.max(...ecmStrengths),independentFighterRolls:fighterCount});
+    return systems;
+  });
+
+
+
   const resistAdjustedSourceDps = (sourceDps: number, vector: DamageVector, resists: DamageVector) => {
     const total = vector.reduce((sum, amount) => sum + Math.max(0, amount), 0);
     if (!(sourceDps > 0) || !(total > 0)) return 0;
@@ -2779,7 +2890,7 @@ export async function analyzeFittingDogma(input: {
   };
 
   const weaponApplicationAtSignature = (profile: Record<string, unknown>, signatureRadiusM: number) => {
-    const paperDps = Number(profile.paperDps ?? 0);
+    const paperDps = Number(profile.currentDps ?? profile.paperDps ?? 0);
     let hitChance = 0;
     let applicationFactor = 0;
     if (profile.kind === "turret") {
@@ -2856,10 +2967,25 @@ export async function analyzeFittingDogma(input: {
     };
   };
 
+  const fighterApplicationAtSignature = (fighter: typeof fighterDamageSources[number], signatureRadiusM: number) => {
+    const signature=Math.max(1e-12,signatureRadiusM);
+    const explosionRadius=Math.max(1e-12,Number(fighter.explosionRadiusM)||1);
+    const explosionVelocity=Math.max(1e-12,Number(fighter.explosionVelocity)||1);
+    const signatureRatio=signature/explosionRadius;
+    const speed=Math.max(0,targetProfile.velocityMps);
+    const velocityTerm=speed<=0?1:Math.pow(Math.max(0,signatureRatio*explosionVelocity/speed),.5);
+    const optimal=Math.max(0,Number(fighter.optimalM)||0), falloff=Math.max(1e-12,Number(fighter.falloffM)||0);
+    const rangeTerm=Math.max(0,targetProfile.rangeM-optimal)/falloff;
+    const rangeFactor=targetProfile.rangeM<=optimal?1:Math.pow(.5,rangeTerm*rangeTerm);
+    const applicationFactor=Math.max(0,Math.min(1,signatureRatio,velocityTerm))*rangeFactor;
+    return {applicationFactor,appliedDps:fighter.dps*applicationFactor};
+  };
+
   const targetApplicationAgainstSignature = (signatureRadiusM: number) => {
     const signature = Math.max(1e-12, signatureRadiusM || targetProfile.signatureRadiusM);
     let weaponApplied = 0;
     let droneApplied = 0;
+    let fighterApplied = 0;
     const weaponAppliedSources = weaponProfiles.map((profile) => {
       const application = weaponApplicationAtSignature(profile, signature);
       weaponApplied += application.appliedDps;
@@ -2870,16 +2996,41 @@ export async function analyzeFittingDogma(input: {
       droneApplied += application.appliedDps;
       return { drone, application };
     });
-    const beforeResists = weaponApplied + droneApplied;
+    const fighterAppliedSources = fighterDamageSources.map((fighter) => {
+      const application=fighterApplicationAtSignature(fighter,signature); fighterApplied+=application.appliedDps; return {fighter,application};
+    });
+    const beforeResists = weaponApplied + droneApplied + fighterApplied;
     const layer = (resists: DamageVector) =>
       weaponAppliedSources.reduce((sum, source) => sum + resistAdjustedSourceDps(source.appliedDps, source.vector, resists), 0) +
-      droneAppliedSources.reduce((sum, source) => sum + resistAdjustedSourceDps(source.application.appliedDps, source.drone.damageVector, resists), 0);
-    return { beforeResists, layer, weaponApplied, droneApplied, droneAppliedSources };
+      droneAppliedSources.reduce((sum, source) => sum + resistAdjustedSourceDps(source.application.appliedDps, source.drone.damageVector, resists), 0) +
+      fighterAppliedSources.reduce((sum, source) => sum + resistAdjustedSourceDps(source.application.appliedDps, source.fighter.damageVector, resists), 0);
+    return { beforeResists, layer, weaponApplied, droneApplied, fighterApplied, droneAppliedSources, fighterAppliedSources };
+  };
+
+  const timeDomainTtkForTarget = (profile: {shieldHp:number;armorHp:number;structureHp:number;shieldResists:DamageVector;armorResists:DamageVector;hullResists:DamageVector;signatureRadiusM:number}) => {
+    type TdSource={kind:"weapon"|"drone"|"fighter";cycle:number;next:number;volley:number;vector:DamageVector;application:number;loaded:number;magazine:number;reload:number;ramp:number;maxRamp:number;spool:number};
+    const sources:TdSource[]=[];
+    for(const weapon of weaponProfiles){
+      const application=weaponApplicationAtSignature(weapon,profile.signatureRadiusM);
+      const magazine=Math.max(0,Number(weapon.magazineCycles)||0), loaded=Math.max(0,Number(weapon.loadedCycles)||0), reload=Math.max(0,Number(weapon.reloadSeconds)||0);
+      const explicit=Boolean((weapon.magazine as any)?.explicitLoadedState);
+      const initialLoaded=magazine>0?(explicit?loaded:Math.max(loaded,magazine)):0;
+      const initialNext=magazine>0 && initialLoaded<=0 ? (reload>0?reload:Infinity) : 0;
+      sources.push({kind:"weapon",cycle:Math.max(.001,Number(weapon.cycleSeconds)||1),next:initialNext,volley:Math.max(0,Number(weapon.volley)||0),vector:(weapon.damageVector as DamageVector)||[0,0,0,0],application:Math.max(0,Number(application.applicationFactor)||0),loaded:initialLoaded,magazine,reload,ramp:Math.max(0,Number(weapon.rampPerCycle)||0),maxRamp:Math.max(1,Number(weapon.maxRampMultiplier)||1),spool:0});
+    }
+    for(const drone of activeDrones){const application=droneApplicationAtSignature(drone,profile.signatureRadiusM);sources.push({kind:"drone",cycle:Math.max(.001,Number(drone.cycleSeconds)||1),next:0,volley:Math.max(0,drone.volley),vector:drone.damageVector,application:application.applicationFactor,loaded:0,magazine:0,reload:0,ramp:0,maxRamp:1,spool:0});}
+    for(const fighter of fighterDamageSources){const application=fighterApplicationAtSignature(fighter,profile.signatureRadiusM);sources.push({kind:"fighter",cycle:Math.max(.001,fighter.cycleSeconds),next:0,volley:fighter.volley,vector:fighter.damageVector,application:application.applicationFactor,loaded:0,magazine:0,reload:0,ramp:0,maxRamp:1,spool:0});}
+    const hp=[Math.max(0,profile.shieldHp),Math.max(0,profile.armorHp),Math.max(0,profile.structureHp)]; const resists=[profile.shieldResists,profile.armorResists,profile.hullResists];
+    const applyRaw=(raw:number,vector:DamageVector)=>{let remaining=Math.max(0,raw);for(let layer=0;layer<3&&remaining>1e-12;layer+=1){if(hp[layer]<=1e-12)continue;const total=vector.reduce((sum,v)=>sum+Math.max(0,v),0);if(!(total>0))return;const fraction=vector.reduce((sum,v,index)=>sum+(Math.max(0,v)/total)*(1-(resists[layer][index]??0)),0);if(!(fraction>0))continue;const rawNeeded=hp[layer]/fraction;if(remaining>=rawNeeded){hp[layer]=0;remaining-=rawNeeded;}else{hp[layer]=Math.max(0,hp[layer]-remaining*fraction);remaining=0;}}};
+    let elapsed=0,events=0; const maxSeconds=86400;
+    while(hp.some(value=>value>1e-9)&&events++<250000){const nextTime=Math.min(...sources.map(source=>source.next));if(!Number.isFinite(nextTime)||nextTime>maxSeconds)return {seconds:Infinity,events};elapsed=nextTime;for(const source of sources){if(Math.abs(source.next-nextTime)>1e-9)continue;if(source.magazine>0&&source.loaded<=0){source.loaded=source.magazine;source.spool=0;}const multiplier=source.kind==="weapon"?Math.min(source.maxRamp,1+source.ramp*source.spool):1;applyRaw(source.volley*source.application*multiplier,source.vector);if(source.kind==="weapon"&&source.ramp>0)source.spool+=1;if(source.magazine>0){source.loaded=Math.max(0,source.loaded-1);source.next=elapsed+source.cycle+(source.loaded<=0?source.reload:0);if(source.loaded<=0&&source.reload>0)source.spool=0;}else source.next=elapsed+source.cycle;if(!hp.some(value=>value>1e-9))break;}}
+    return {seconds:elapsed,events};
   };
 
   const currentTargetApplication = targetApplicationAgainstSignature(targetProfile.signatureRadiusM);
   const appliedWeaponDps = currentTargetApplication.weaponApplied;
   const appliedDroneDps = currentTargetApplication.droneApplied;
+  const appliedFighterDps = currentTargetApplication.fighterApplied;
   const weatherTargetCombatProfile = targetCombatProfile && abyssConfig ? (() => {
     const weatherHp = applyAbyssWeatherHp(targetCombatProfile, abyssConfig.weather);
     return { ...targetCombatProfile, ...weatherHp, shieldResists: applyAbyssWeatherResists(targetCombatProfile.shieldResists, abyssConfig.weather, abyssConfig.penalty), armorResists: applyAbyssWeatherResists(targetCombatProfile.armorResists, abyssConfig.weather, abyssConfig.penalty), hullResists: applyAbyssWeatherResists(targetCombatProfile.hullResists, abyssConfig.weather, abyssConfig.penalty) };
@@ -2896,7 +3047,10 @@ export async function analyzeFittingDogma(input: {
     structureDps: exactTargetApplication.layer(weatherTargetCombatProfile.hullResists),
   } : undefined;
   const layerSeconds = (hp: number, dps: number) => hp <= 0 ? 0 : dps > 0 ? hp / dps : Infinity;
-  const targetTimeToKillSeconds = exactTargetDamage ? layerSeconds(weatherTargetCombatProfile!.shieldHp, exactTargetDamage.shieldDps) + layerSeconds(weatherTargetCombatProfile!.armorHp, exactTargetDamage.armorDps) + layerSeconds(weatherTargetCombatProfile!.structureHp, exactTargetDamage.structureDps) : undefined;
+  const targetStaticTimeToKillSeconds = exactTargetDamage ? layerSeconds(weatherTargetCombatProfile!.shieldHp, exactTargetDamage.shieldDps) + layerSeconds(weatherTargetCombatProfile!.armorHp, exactTargetDamage.armorDps) + layerSeconds(weatherTargetCombatProfile!.structureHp, exactTargetDamage.structureDps) : undefined;
+  const hasStatefulWeaponTimeline = weaponProfiles.some((profile) => Number(profile.rampPerCycle ?? 0) > 0 || Number(profile.reloadSeconds ?? 0) > 0.001 || Boolean((profile.magazine as any)?.explicitLoadedState));
+  const targetTimeDomain = weatherTargetCombatProfile && hasStatefulWeaponTimeline ? timeDomainTtkForTarget(weatherTargetCombatProfile) : undefined;
+  const targetTimeToKillSeconds = targetTimeDomain?.seconds ?? targetStaticTimeToKillSeconds;
   const targetTotalHp = weatherTargetCombatProfile ? weatherTargetCombatProfile.shieldHp + weatherTargetCombatProfile.armorHp + weatherTargetCombatProfile.structureHp : 0;
   const targetTrueDps = exactTargetDamage && targetTimeToKillSeconds != null && Number.isFinite(targetTimeToKillSeconds) && targetTimeToKillSeconds > 0 ? targetTotalHp / targetTimeToKillSeconds : exactTargetDamage ? 0 : undefined;
 
@@ -2905,8 +3059,64 @@ export async function analyzeFittingDogma(input: {
   const baseShieldResists = resistance([271, 274, 273, 272]);
   const baseArmorResists = resistance([267, 270, 269, 268]);
   const baseHullResists = resistance([113, 110, 109, 111]);
+
+  // Reactive Armor Hardeners are stateful and have no ordinary modifierInfo effect.
+  // Their pool starts from the module's four published resonance attributes and each
+  // completed cycle moves up to resistanceShiftAmount out of every overrepresented
+  // resistance into the currently underrepresented damage types. This preserves the
+  // module's complete resistance pool and reproduces 15/15/15/15 -> 33/9/9/9
+  // for one pure-damage cycle without pretending the module is instantly optimized.
+  const reactiveArmorItem = online.find((item) => (groups.get(item.typeId) ?? 0) === 1150 && (item.state === "active" || item.state === "overheated"));
+  const reactiveArmor = reactiveArmorItem ? (() => {
+    const source = moduleDogmaFor(reactiveArmorItem);
+    const initialDistribution = [267,270,269,268].map((attributeId) => Math.max(0, Math.min(1, 1 - effectiveItemAttr(source, attributeId, reactiveArmorItem.typeId))));
+    const pool = initialDistribution.reduce((sum,value) => sum + value, 0);
+    const shiftPerDonor = Math.max(0, effectiveItemAttr(source, 1849, reactiveArmorItem.typeId) / 100);
+    const targetDistribution = damageProfile.map((weight) => weight * pool);
+    const step = (state:number[]) => {
+      const next = [...state];
+      let transfer = 0;
+      for (let index=0; index<4; index+=1) {
+        const excess = Math.max(0, state[index] - targetDistribution[index]);
+        const moved = Math.min(shiftPerDonor, excess);
+        next[index] -= moved;
+        transfer += moved;
+      }
+      const deficits = targetDistribution.map((target,index) => Math.max(0, target - next[index]));
+      const totalDeficit = deficits.reduce((sum,value) => sum + value, 0);
+      if (transfer > 1e-12 && totalDeficit > 1e-12) {
+        for (let index=0; index<4; index+=1) next[index] += transfer * deficits[index] / totalDeficit;
+      }
+      const drift = pool - next.reduce((sum,value) => sum + value, 0);
+      if (Math.abs(drift) > 1e-12) {
+        const receiver = targetDistribution.reduce((best,value,index) => value > targetDistribution[best] ? index : best, 0);
+        next[receiver] += drift;
+      }
+      return next.map((value) => Math.max(0, Math.min(pool, value)));
+    };
+    const trajectory:number[][] = [initialDistribution];
+    for (let cycle=0; cycle<64; cycle+=1) {
+      const next = step(trajectory[trajectory.length-1]);
+      trajectory.push(next);
+      if (next.every((value,index) => Math.abs(value - trajectory[trajectory.length-2][index]) < 1e-9)) break;
+    }
+    const cyclesToAdapt = Math.max(0, trajectory.length - 2);
+    const requestedCycles = Math.max(0, Math.floor(Number(input.mechanicState?.reactiveArmorCycles ?? 0)));
+    const currentCycle = Math.min(requestedCycles, cyclesToAdapt);
+    const cycleSeconds = Math.max(0, effectiveStatefulItemAttr(reactiveArmorItem, 73) / 1000);
+    return {
+      typeId:reactiveArmorItem.typeId, name:names.get(reactiveArmorItem.typeId) ?? `Type ${reactiveArmorItem.typeId}`,
+      initialDistribution, currentDistribution:trajectory[currentCycle] ?? initialDistribution, adaptedDistribution:trajectory[trajectory.length-1] ?? initialDistribution,
+      targetDistribution, pool, shiftPerDonor, currentCycle, requestedCycles, cyclesToAdapt, cycleSeconds,
+      timeToCurrentSeconds:currentCycle * cycleSeconds, timeToAdaptSeconds:cyclesToAdapt * cycleSeconds,
+      resetSemantics:"Fitter analysis starts at the module initial distribution unless mechanicState.reactiveArmorCycles is supplied; deactivation/refit resets to initial state.",
+      trajectory,
+    };
+  })() : undefined;
+  const applyReactiveArmor = (resists:number[], distribution:number[]) => resists.map((value,index) => 1 - (1 - value) * (1 - (distribution[index] ?? 0)));
+  const reactiveBaseArmorResists = reactiveArmor ? applyReactiveArmor(baseArmorResists, reactiveArmor.currentDistribution) : baseArmorResists;
   const shieldResists = abyssConfig ? applyAbyssWeatherResists(baseShieldResists, abyssConfig.weather, abyssConfig.penalty) : baseShieldResists;
-  const armorResists = abyssConfig ? applyAbyssWeatherResists(baseArmorResists, abyssConfig.weather, abyssConfig.penalty) : baseArmorResists;
+  const armorResists = abyssConfig ? applyAbyssWeatherResists(reactiveBaseArmorResists, abyssConfig.weather, abyssConfig.penalty) : reactiveBaseArmorResists;
   const hullResists = abyssConfig ? applyAbyssWeatherResists(baseHullResists, abyssConfig.weather, abyssConfig.penalty) : baseHullResists;
   const incomingDamageFraction = (resists: number[]) => damageProfile.reduce((sum, weight, index) => sum + weight * (1 - (resists[index] ?? 0)), 0);
   const layerEhp = (hp: number, resists: number[]) => hp / Math.max(1e-12, incomingDamageFraction(resists));
@@ -2919,23 +3129,44 @@ export async function analyzeFittingDogma(input: {
   let shieldRepair = 0;
   let armorRepair = 0;
   let structureRepair = 0;
+  const localRepairSystems: Array<Record<string, unknown>> = [];
   for (const item of online.filter(
     (candidate) => candidate.state === "active" || candidate.state === "overheated",
   )) {
     const itemDogma = moduleDogmaFor(item);
-    const cycle =
-      (effectiveItemAttr(itemDogma, 73, item.typeId) || effectiveItemAttr(itemDogma, 51, item.typeId)) / 1000;
+    const cycle = (effectiveStatefulItemAttr(item, 73) || effectiveStatefulItemAttr(item, 51)) / 1000;
     if (cycle <= 0) continue;
     const magazine = magazineFor(item, itemDogma);
-    const charge = item.chargeTypeId ? dogma.get(item.chargeTypeId) : undefined;
-    const chargedArmorMultiplier = charge && groups.get(item.chargeTypeId!) === 916 ? (effectiveItemAttr(itemDogma, 1886, item.typeId) || 1) : 1;
-    const shieldPerSecond = (effectiveItemAttr(itemDogma, 68, item.typeId) / cycle) * (item.quantity ?? 1);
-    const armorPerSecond = (effectiveItemAttr(itemDogma, 84, item.typeId) * chargedArmorMultiplier / cycle) * (item.quantity ?? 1);
-    const structurePerSecond = (effectiveItemAttr(itemDogma, 83, item.typeId) / cycle) * (item.quantity ?? 1);
-    const duty = magazine && magazine.reloadSeconds > 0 ? magazine.sustainedDutyCycle : 1;
-    shieldRepair += shieldPerSecond * duty;
-    armorRepair += armorPerSecond * duty;
-    structureRepair += structurePerSecond * duty;
+    const groupId = groups.get(item.typeId) ?? 0;
+    const chargeGroupId = item.chargeTypeId ? (groups.get(item.chargeTypeId) ?? 0) : 0;
+    const quantity = item.quantity ?? 1;
+    const baseShieldPerCycle = Math.max(0, effectiveStatefulItemAttr(item, 68)) * quantity;
+    const baseArmorPerCycle = Math.max(0, effectiveStatefulItemAttr(item, 84)) * quantity;
+    const baseStructurePerCycle = Math.max(0, effectiveStatefulItemAttr(item, 83)) * quantity;
+    const usableChargedCycles = magazine?.cyclesLoaded ?? 0;
+    const isAncillaryShield = groupId === 1156;
+    const isAncillaryArmor = groupId === 1199;
+    const shieldCharged = isAncillaryShield && chargeGroupId === 87 && usableChargedCycles > 0;
+    const armorCharged = isAncillaryArmor && chargeGroupId === 916 && usableChargedCycles > 0;
+    const armorMultiplier = armorCharged ? (effectiveItemAttr(itemDogma, 1886, item.typeId) || 1) : 1;
+    const shieldBurstPerSecond = baseShieldPerCycle / cycle;
+    const armorUnchargedPerSecond = baseArmorPerCycle / cycle;
+    const armorBurstPerSecond = baseArmorPerCycle * armorMultiplier / cycle;
+    const structurePerSecond = baseStructurePerCycle / cycle;
+    const explicitMagazine = Boolean(magazine?.explicitLoadedState);
+    const chargedDuty = magazine && magazine.reloadSeconds > 0 ? magazine.sustainedDutyCycle : 1;
+    const shieldSustained = isAncillaryShield && chargeGroupId === 87 ? (shieldCharged ? shieldBurstPerSecond * chargedDuty : shieldBurstPerSecond) : shieldBurstPerSecond * (magazine && magazine.reloadSeconds > 0 ? chargedDuty : 1);
+    const armorSustained = isAncillaryArmor && chargeGroupId === 916 ? (armorCharged ? armorBurstPerSecond * chargedDuty : armorUnchargedPerSecond) : armorBurstPerSecond * (magazine && magazine.reloadSeconds > 0 ? chargedDuty : 1);
+    shieldRepair += shieldSustained;
+    armorRepair += armorSustained;
+    structureRepair += structurePerSecond;
+    if (baseShieldPerCycle > 0 || baseArmorPerCycle > 0 || baseStructurePerCycle > 0) localRepairSystems.push({
+      typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, groupId, state:item.state, quantity, cycleSeconds:cycle,
+      magazine, explicitMagazine, chargedCycles:usableChargedCycles,
+      shield:{ perCycle:baseShieldPerCycle, burstPerSecond:shieldBurstPerSecond, sustainedPerSecond:shieldSustained, charged:shieldCharged },
+      armor:{ perCycle:baseArmorPerCycle, unchargedPerSecond:armorUnchargedPerSecond, burstPerSecond:armorBurstPerSecond, sustainedPerSecond:armorSustained, charged:armorCharged, chargedMultiplier:armorMultiplier },
+      structure:{ perCycle:baseStructurePerCycle, perSecond:structurePerSecond },
+    });
   }
 
   // Expose support/ewar modules using the same skill-, hull-, script- and heat-adjusted
@@ -2946,12 +3177,35 @@ export async function analyzeFittingDogma(input: {
     if (!source) return [];
     const groupId = groups.get(item.typeId) ?? 0;
     const quantity = Math.max(1, item.quantity ?? 1);
-    const cycleSeconds = Math.max(0, (effectiveItemAttr(source, 73, item.typeId) || effectiveItemAttr(source, 51, item.typeId)) / 1000);
+    const cycleSeconds = Math.max(0, (effectiveStatefulItemAttr(item, 73) || effectiveStatefulItemAttr(item, 51)) / 1000);
     const optimalM = Math.max(0, effectiveItemAttr(source, 54, item.typeId));
     const falloffM = Math.max(0, effectiveItemAttr(source, 2044, item.typeId));
     const common = { typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, groupId, quantity, state:item.state, cycleSeconds, optimalM, falloffM, chargeTypeId:item.chargeTypeId };
-    if (groupId === 41) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,68,item.typeId))*quantity; return [{...common,kind:"remoteShieldRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
-    if (groupId === 325) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,84,item.typeId))*quantity; return [{...common,kind:"remoteArmorRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 41) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,68))*quantity; return [{...common,kind:"remoteShieldRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 325) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,84))*quantity; return [{...common,kind:"remoteArmorRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 1697 || groupId === 1698) {
+      const magazine = magazineFor(item, source);
+      const chargedCycles = magazine?.cyclesLoaded ?? 0;
+      const chargeGroupId = item.chargeTypeId ? (groups.get(item.chargeTypeId) ?? 0) : 0;
+      const shield = groupId === 1697;
+      const charged = chargedCycles > 0 && chargeGroupId === (shield ? 87 : 916);
+      const baseAmountPerCycle = Math.max(0, effectiveStatefulItemAttr(item, shield ? 68 : 84)) * quantity;
+      const chargedMultiplier = !shield && charged ? (effectiveItemAttr(source,1886,item.typeId) || 1) : 1;
+      const burstAmountPerCycle = baseAmountPerCycle * chargedMultiplier;
+      const burstPerSecond = cycleSeconds > 0 ? burstAmountPerCycle / cycleSeconds : 0;
+      const unchargedPerSecond = cycleSeconds > 0 ? baseAmountPerCycle / cycleSeconds : 0;
+      const duty = magazine && magazine.reloadSeconds > 0 ? magazine.sustainedDutyCycle : 1;
+      const sustainedPerSecond = charged ? burstPerSecond * duty : unchargedPerSecond;
+      return [{...common,kind:shield?"remoteShieldRep":"remoteArmorRep",ancillary:true,magazine,charged,chargedCycles,baseAmountPerCycle,amountPerCycle:burstAmountPerCycle,unchargedPerSecond,burstPerSecond,sustainedPerSecond,perSecond:sustainedPerSecond,chargedMultiplier}];
+    }
+    if (groupId === 2018) {
+      const amountPerCycle = Math.max(0, effectiveStatefulItemAttr(item,84)) * quantity;
+      const rampPerCycle = Math.max(0, effectiveItemAttr(source,2796,item.typeId));
+      const maxMultiplier = Math.max(1, effectiveItemAttr(source,2797,item.typeId) || 1);
+      const cyclesToMax = rampPerCycle > 0 ? Math.max(0, Math.ceil((maxMultiplier - 1) / rampPerCycle - 1e-12)) : 0;
+      const perSecond = cycleSeconds > 0 ? amountPerCycle / cycleSeconds : 0;
+      return [{...common,kind:"remoteArmorRep",mutadaptive:true,amountPerCycle,perSecond,rampPerCycle,maxMultiplier,maxAmountPerCycle:amountPerCycle*maxMultiplier,maxPerSecond:perSecond*maxMultiplier,cyclesToMax,secondsToMax:cyclesToMax*cycleSeconds,spoolReset:"Resets on deactivation or target change."}];
+    }
     if (groupId === 65) return [{...common,kind:"web",strength:Math.min(.95,Math.abs(effectiveItemAttr(source,20,item.typeId))/100)}];
     if (groupId === 52) return [{...common,kind:"tackle",warpStrength:Math.max(0,effectiveItemAttr(source,105,item.typeId)),mwdShutdown:(names.get(item.typeId)??"").toLowerCase().includes("scrambler")}];
     if (groupId === 379) return [{...common,kind:"targetPainter",signatureBonus:Math.max(0,effectiveItemAttr(source,554,item.typeId))/100}];
@@ -2976,6 +3230,7 @@ export async function analyzeFittingDogma(input: {
     }
     return [];
   });
+  supportSystems.push(...fighterSupportSystems);
 
   // Web drones are target-side support systems too. Their speedFactor is modified through
   // the same OwnerRequiredSkillModifier path as Stasis Drone Augmentor rigs, including
@@ -3071,7 +3326,8 @@ export async function analyzeFittingDogma(input: {
       const shieldDps = application.layer(weather.shieldResists);
       const armorDps = application.layer(weather.armorResists);
       const structureDps = application.layer(weather.hullResists);
-      const ttkSeconds = layerSeconds(weather.shieldHp,shieldDps)+layerSeconds(weather.armorHp,armorDps)+layerSeconds(weather.structureHp,structureDps);
+      const staticTtkSeconds = layerSeconds(weather.shieldHp,shieldDps)+layerSeconds(weather.armorHp,armorDps)+layerSeconds(weather.structureHp,structureDps);
+      const ttkSeconds = timeDomainTtkForTarget(weather).seconds ?? staticTtkSeconds;
       const totalHp = weather.shieldHp+weather.armorHp+weather.structureHp;
       const trueDps = Number.isFinite(ttkSeconds) && ttkSeconds > 0 ? totalHp / ttkSeconds : 0;
       const effectiveHpAgainstFit = Number.isFinite(ttkSeconds) ? ttkSeconds * application.beforeResists : Infinity;
@@ -3083,7 +3339,7 @@ export async function analyzeFittingDogma(input: {
         baseResists:{shield:base.shieldResists,armor:base.armorResists,hull:base.hullResists},
         weatherResists:{shield:weather.shieldResists,armor:weather.armorResists,hull:weather.hullResists},
         outgoingDamage:base.outgoingDamage, outgoingDps:base.outgoingDps, outgoingDpsTotal:base.outgoingDpsTotal, outgoingDpsMax:base.outgoingDpsMax, outgoingDpsMaxTotal:base.outgoingDpsMaxTotal,
-        appliedDpsBeforeResists:application.beforeResists, appliedWeaponDpsBeforeResists:application.weaponApplied, appliedDroneDpsBeforeResists:application.droneApplied, appliedMobileDroneDpsBeforeResists:application.droneAppliedSources.filter((source)=>!source.drone.sentry).reduce((sum,source)=>sum+source.application.appliedDps,0), shieldDps, armorDps, structureDps, trueDps, ttkSeconds, effectiveHpAgainstFit, signatureRadiusM:base.signatureRadiusM,
+        appliedDpsBeforeResists:application.beforeResists, appliedWeaponDpsBeforeResists:application.weaponApplied, appliedDroneDpsBeforeResists:application.droneApplied, appliedFighterDpsBeforeResists:application.fighterApplied, appliedMobileDroneDpsBeforeResists:application.droneAppliedSources.filter((source)=>!source.drone.sentry).reduce((sum,source)=>sum+source.application.appliedDps,0), shieldDps, armorDps, structureDps, trueDps, ttkSeconds, effectiveHpAgainstFit, signatureRadiusM:base.signatureRadiusM,
       };
     };
     const rooms = encounterDefinitions.map((encounter) => {
@@ -3268,7 +3524,7 @@ export async function analyzeFittingDogma(input: {
       .flatMap((item) => Array.from({ length: Math.max(0, item.quantity ?? 1) }, () => item))
       .map((item, position) => {
         const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
-        const cycleSeconds = (effectiveItemAttr(module, 73, item.typeId) || effectiveItemAttr(module, 51, item.typeId)) / 1000;
+        const cycleSeconds = (effectiveStatefulItemAttr(item, 73) || effectiveStatefulItemAttr(item, 51)) / 1000;
         return {
           position,
           typeId: item.typeId,
@@ -3372,7 +3628,7 @@ export async function analyzeFittingDogma(input: {
   // Mining/harvesting yield is a first-class DOGMA output too. Keeping this in the
   // core analysis makes fitted mining rigs, hull/skill bonuses and loaded crystals
   // observable and regression-testable instead of only existing inside modifiers.
-  const miningSources = online.flatMap((item) => {
+  const moduleMiningSources = online.flatMap((item) => {
     const source = moduleDogmaFor(item);
     if (!source) return [];
     const amountPerCycle = effectiveItemAttr(source, 77, item.typeId);
@@ -3386,6 +3642,17 @@ export async function analyzeFittingDogma(input: {
       chargeTypeId:item.chargeTypeId,
     }];
   });
+  const droneMiningCounts = new Map<number, { drone: typeof activeDrones[number]; quantity:number }>();
+  for (const drone of activeDrones) {
+    if (!(drone.miningAmountPerCycle > 0) || !(drone.miningCycleSeconds > 0)) continue;
+    const current = droneMiningCounts.get(drone.typeId);
+    if (current) current.quantity += 1; else droneMiningCounts.set(drone.typeId, { drone, quantity:1 });
+  }
+  const droneMiningSources = [...droneMiningCounts.values()].map(({ drone, quantity }) => {
+    const yieldPerCycleM3 = drone.miningAmountPerCycle * quantity;
+    return { typeId:drone.typeId, name:drone.name, quantity, state:"active", sourceKind:"drone", cycleSeconds:drone.miningCycleSeconds, yieldPerCycleM3, yieldPerSecondM3:yieldPerCycleM3 / drone.miningCycleSeconds };
+  });
+  const miningSources = [...moduleMiningSources, ...droneMiningSources];
   const mining = {
     sources:miningSources,
     totalYieldPerSecondM3:miningSources.reduce((sum, source) => sum + source.yieldPerSecondM3, 0),
@@ -3425,20 +3692,25 @@ export async function analyzeFittingDogma(input: {
       depletionSeconds,
     },
     magazines,
-    fighterSystem,
+    fighterSystem: { ...fighterSystem, damageSources:fighterDamageSources, supportSystems:fighterSupportSystems },
     mining,
     damage: {
       weaponDps,
       weaponVolley,
       droneDps,
       droneVolley,
-      totalDps: weaponDps + droneDps,
-      totalVolley: weaponVolley + droneVolley,
+      fighterDps,
+      fighterVolley,
+      totalDps: weaponDps + droneDps + fighterDps,
+      totalVolley: weaponVolley + droneVolley + fighterVolley,
       weaponProfiles,
+      fighterDamageSources,
+      aoeDamageSources,
       appliedDpsBeforeTargetResists,
-      target: exactTargetDamage ? { ...exactTargetDamage, trueDps: targetTrueDps, timeToKillSeconds: targetTimeToKillSeconds, totalHp: targetTotalHp } : undefined,
+      target: exactTargetDamage ? { ...exactTargetDamage, trueDps: targetTrueDps, timeToKillSeconds: targetTimeToKillSeconds, staticTimeToKillSeconds:targetStaticTimeToKillSeconds, timeDomain:targetTimeDomain, totalHp: targetTotalHp } : undefined,
       appliedWeaponDps,
       appliedDroneDps,
+      appliedFighterDps,
       droneControlDistanceM,
       activeDrones: activeDrones.map((drone) => ({
         typeId: drone.typeId,
@@ -3474,6 +3746,8 @@ export async function analyzeFittingDogma(input: {
         layerEhp(armorHp, armorResists) +
         layerEhp(structureHp, hullResists),
       damageProfile: { em: damageProfile[0], thermal: damageProfile[1], kinetic: damageProfile[2], explosive: damageProfile[3] },
+      reactiveArmor,
+      localRepairSystems,
       shieldRepairPerSecond: shieldRepair,
       armorRepairPerSecond: armorRepair,
       structureRepairPerSecond: structureRepair,

@@ -350,6 +350,7 @@ export function prepareWargameUnit(unit: WargameUnit): WargameUnit {
     supportTargetIds: { ...(unit.supportTargetIds ?? {}) },
     supportLastTargetIds: { ...(unit.supportLastTargetIds ?? {}) },
     supportLockRemaining: { ...(unit.supportLockRemaining ?? {}) },
+    supportSystems: unit.supportSystems?.map((system) => ({ ...system, magazine: system.magazine ? { ...system.magazine } : undefined, buffs: system.buffs?.map((buff) => ({ ...buff })), sensorStrengths: system.sensorStrengths ? [...system.sensorStrengths] : undefined })),
     damageSources: cloneDamageSources(unit.damageSources),
     orderChain: cloneOrderChain(unit.orderChain),
     activeOrderIndex: Math.max(0, unit.activeOrderIndex ?? 0),
@@ -460,7 +461,7 @@ export function resistanceScale(attacker: WargameUnit, target: WargameUnit) {
 export function damageSourceAsAttacker(unit: WargameUnit, source: WargameDamageSource): WargameUnit {
   return {
     ...unit,
-    weaponModel: source.kind,
+    weaponModel: source.applicationKind ?? (source.kind === "fighter" ? "missile" : source.kind === "aoe" ? "support" : source.kind),
     range: source.maxRangeKm,
     optimalRange: source.optimalKm,
     falloffRange: source.falloffKm,
@@ -477,6 +478,7 @@ export function damageSourceAsAttacker(unit: WargameUnit, source: WargameDamageS
 }
 
 export function damageSourceApplication(unit: WargameUnit, source: WargameDamageSource, target: WargameUnit, rangeKm = wargameDistanceKm(unit, target)) {
+  if (source.kind === "aoe") return rangeKm <= Math.max(0, source.radiusKm ?? source.maxRangeKm) ? 1 : 0;
   if (source.kind !== "drone") return weaponApplication(damageSourceAsAttacker(unit, source), target, rangeKm);
   const signature = Math.max(1, (target.signature ?? 160) * (target.ewarSignatureMultiplier ?? 1));
   const sentry = Boolean(source.sentry);
@@ -973,14 +975,36 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
             if(previous!==repairTarget.id){
               logi.supportLastTargetIds[key]=repairTarget.id;
               logi.supportLockRemaining[key]=Math.max(0,logi.repLockTime??2.5);
+              if(system.mutadaptive){system.spoolCycles=0;system.spoolTargetId=repairTarget.id;}
               events.push(logi.name+": "+system.name+" locking "+repairTarget.name+" for reps.");
             } else logi.supportLockRemaining[key]=Math.max(0,(logi.supportLockRemaining[key]??0)-1);
+            if((system.reloadRemaining??0)>0){
+              system.reloadRemaining=Math.max(0,(system.reloadRemaining??0)-1);
+              if((system.reloadRemaining??0)<=0 && (system.magazineCycles??0)>0)system.loadedCyclesRemaining=system.magazineCycles;
+              if((system.reloadRemaining??0)>0)continue;
+            }
             if((logi.supportLockRemaining[key]??0)>0 || (logi.supportCooldowns?.[key]??0)>0)continue;
             const effectiveness=supportEffectiveness(system,wargameDistanceKm(logi,repairTarget),logi);
             if(effectiveness<=.01)continue;
-            const amount=Math.max(0,Number(system.amountPerCycle)||0)*Math.max(1,liveShipCount(logi))*effectiveness;
+            const cycle=Math.max(1,Number(system.cycleSeconds)||1);
+            if(system.ancillary && system.charged && (system.loadedCyclesRemaining??0)<=0){
+              system.reloadRemaining=Math.max(0,system.reloadSeconds??0);
+              if((system.reloadRemaining??0)>0)continue;
+            }
+            let perCycle=Math.max(0,Number(system.amountPerCycle)||0);
+            if(system.ancillary && (!system.charged || (system.loadedCyclesRemaining??0)<=0))perCycle=Math.max(0,Number(system.baseAmountPerCycle ?? system.amountPerCycle)||0);
+            if(system.mutadaptive){
+              const multiplier=Math.min(Math.max(1,Number(system.maxMultiplier)||1),1+Math.max(0,Number(system.rampPerCycle)||0)*Math.max(0,system.spoolCycles??0));
+              perCycle*=multiplier;
+            }
+            const amount=perCycle*Math.max(1,liveShipCount(logi))*effectiveness;
             repIntents.push({logi,targetId:repairTarget.id,targetAlive:liveShipCount(repairTarget),amount,kind:system.kind==="remoteShieldRep"?"shield":"armor"});
-            logi.supportCooldowns??={}; logi.supportCooldowns[key]=Math.max(1,Number(system.cycleSeconds)||1);
+            logi.supportCooldowns??={}; logi.supportCooldowns[key]=cycle;
+            if(system.mutadaptive){system.spoolTargetId=repairTarget.id;system.spoolCycles=Math.max(0,system.spoolCycles??0)+1;}
+            if(system.ancillary && system.charged && (system.loadedCyclesRemaining??0)>0){
+              system.loadedCyclesRemaining=Math.max(0,(system.loadedCyclesRemaining??0)-1);
+              if((system.loadedCyclesRemaining??0)<=0 && (system.reloadSeconds??0)>0)system.reloadRemaining=Math.max(0,system.reloadSeconds??0)+cycle;
+            }
           }
           logi.repTargetId=firstRepTarget;
           continue;
@@ -1012,9 +1036,36 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
           let applicationWeight = 0;
           for (const source of sources) {
             source.fireCooldown = Math.max(0, (source.fireCooldown ?? 0) - 1);
+            if ((source.reloadRemaining ?? 0) > 0) {
+              source.reloadRemaining = Math.max(0, (source.reloadRemaining ?? 0) - 1);
+              if ((source.rampPerCycle ?? 0) > 0) { source.spoolCycles = 0; source.spoolTargetId = undefined; }
+              if ((source.reloadRemaining ?? 0) <= 0 && (source.magazineCycles ?? 0) > 0) source.loadedCyclesRemaining = source.magazineCycles;
+            }
+
+            if (source.kind === "aoe") {
+              if ((source.fireCooldown ?? 0) > 0 || (source.reloadRemaining ?? 0) > 0) continue;
+              const cycle = Math.max(.1, source.cycleSeconds || 1);
+              const pulse = sourcePaperVolley(attacker, source) || sourcePaperDps(attacker, source) * cycle;
+              if (!(pulse > 0)) continue;
+              const syntheticAttacker = damageSourceAsAttacker(attacker, source);
+              syntheticAttacker.name = attacker.name + " / " + source.name;
+              let hit = false;
+              for (const candidate of next) {
+                if (candidate.id === attacker.id || candidate.simulationReady === false || candidate.ehp <= 0) continue;
+                if (!source.friendlyFireEligible && candidate.side === attacker.side) continue;
+                if (wargameDistanceKm(attacker, candidate) > Math.max(0, source.radiusKm ?? source.maxRangeKm)) continue;
+                volleys.push({ attacker: syntheticAttacker, owner: attacker, sourceId: source.id, targetId: candidate.id, damage: pulse });
+                hit = true;
+              }
+              if (hit) { source.lastVolleyDamage = pulse; attacker.lastVolleyDamage = (attacker.lastVolleyDamage ?? 0) + pulse; }
+              source.fireCooldown = cycle;
+              continue;
+            }
+
             const target = findById(source.targetId);
             if (!target || target.simulationReady === false || target.side === attacker.side) {
               source.lastTargetId = undefined;
+              source.spoolCycles = 0; source.spoolTargetId = undefined;
               source.droneOnTargetId = source.kind === "drone" ? undefined : source.droneOnTargetId;
               continue;
             }
@@ -1023,18 +1074,16 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
             const droneAlreadyCommitted = source.kind === "drone" && source.droneOnTargetId === target.id;
             if (source.lastTargetId !== target.id) {
               source.lastTargetId = target.id;
+              source.spoolCycles = 0; source.spoolTargetId = target.id;
               const scanMultiplier = Math.max(.05, attacker.ewarScanResolutionMultiplier ?? 1);
               source.lockRemaining = (attacker.targetSwitchDelay ?? defaultTargetSwitchDelay(attacker)) / scanMultiplier;
-              if (source.kind === "drone") {
-                source.droneOnTargetId = undefined;
-                source.droneArrivalRemaining = 0;
-              }
+              if (source.kind === "drone") { source.droneOnTargetId = undefined; source.droneArrivalRemaining = 0; }
             } else {
               source.lockRemaining = Math.max(0, (source.lockRemaining ?? 0) - 1);
             }
             const jammedAway = (attacker.jamRemaining ?? 0) > 0 && attacker.jammedBy !== target.id;
-            if (jammedAway) continue;
-            if (!droneAlreadyCommitted && rangeKm > effectiveTargetingRange) continue;
+            if (jammedAway) { source.spoolCycles = 0; continue; }
+            if (!droneAlreadyCommitted && rangeKm > effectiveTargetingRange) { source.spoolCycles = 0; continue; }
             if (source.kind === "drone" && !droneAlreadyCommitted && rangeKm > Math.max(.1, source.droneControlRangeKm ?? source.maxRangeKm)) continue;
             if ((source.lockRemaining ?? 0) > 0) continue;
 
@@ -1052,15 +1101,30 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
             const application = damageSourceApplication(attacker, source, target, rangeKm);
             applicationTotal += application * Math.max(0, source.dpsPerShip);
             applicationWeight += Math.max(0, source.dpsPerShip);
-            if ((source.fireCooldown ?? 0) > 0 || application <= 0) continue;
+            if ((source.fireCooldown ?? 0) > 0 || (source.reloadRemaining ?? 0) > 0 || application <= 0) continue;
+            if ((source.magazineCycles ?? 0) > 0 && (source.loadedCyclesRemaining ?? 0) <= 0) {
+              source.reloadRemaining = Math.max(0, source.reloadSeconds ?? 0);
+              source.spoolCycles = 0; source.spoolTargetId = undefined;
+              continue;
+            }
             const cycle = Math.max(.1, source.cycleSeconds || 1);
-            const paperVolley = sourcePaperVolley(attacker, source) || sourcePaperDps(attacker, source) * cycle;
+            const baseVolley = sourcePaperVolley(attacker, source) || sourcePaperDps(attacker, source) * cycle;
+            const rampMultiplier = Math.min(Math.max(1, source.maxRampMultiplier ?? 1), 1 + Math.max(0, source.rampPerCycle ?? 0) * Math.max(0, source.spoolCycles ?? 0));
+            const paperVolley = baseVolley * rampMultiplier;
             const volley = paperVolley * application;
             if (volley <= 0) continue;
             const syntheticAttacker = damageSourceAsAttacker(attacker, source);
             syntheticAttacker.name = attacker.name + " / " + source.name;
             source.lastVolleyDamage = volley;
             source.fireCooldown = cycle;
+            if ((source.rampPerCycle ?? 0) > 0) { source.spoolTargetId = target.id; source.spoolCycles = Math.max(0, source.spoolCycles ?? 0) + 1; }
+            if ((source.magazineCycles ?? 0) > 0) {
+              source.loadedCyclesRemaining = Math.max(0, (source.loadedCyclesRemaining ?? 0) - 1);
+              if ((source.loadedCyclesRemaining ?? 0) <= 0 && (source.reloadSeconds ?? 0) > 0) {
+                source.reloadRemaining = Math.max(0, source.reloadSeconds ?? 0) + cycle;
+                if ((source.rampPerCycle ?? 0) > 0) { source.spoolCycles = 0; source.spoolTargetId = undefined; }
+              }
+            }
             attacker.lastVolleyDamage = (attacker.lastVolleyDamage ?? 0) + volley;
             volleys.push({ attacker: syntheticAttacker, owner: attacker, sourceId: source.id, targetId: target.id, damage: volley });
           }

@@ -1,4 +1,4 @@
-export type WargameDamageKind = "turret" | "missile" | "drone";
+export type WargameDamageKind = "turret" | "missile" | "drone" | "fighter" | "aoe";
 
 export type WargameDamageProfile = {
   em: number;
@@ -35,6 +35,19 @@ export type WargameDamageSource = {
   droneOnTargetId?: string;
   droneArrivalRemaining?: number;
   lastVolleyDamage?: number;
+  applicationKind?: "turret" | "missile";
+  burstDpsPerShip?: number;
+  sustainedDpsPerShip?: number;
+  loadedCyclesRemaining?: number;
+  magazineCycles?: number;
+  reloadSeconds?: number;
+  reloadRemaining?: number;
+  rampPerCycle?: number;
+  maxRampMultiplier?: number;
+  spoolCycles?: number;
+  spoolTargetId?: string;
+  radiusKm?: number;
+  friendlyFireEligible?: boolean;
 };
 
 export type WargameOrderTrigger = "immediate" | "target-destroyed" | "after-seconds";
