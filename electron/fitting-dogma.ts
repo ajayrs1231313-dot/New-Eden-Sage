@@ -1709,10 +1709,11 @@ export async function analyzeFittingDogma(input: {
   // Collect every direct ship modifier first, then apply CCP DOGMA operations in
   // their global precedence order. Applying skills/implants immediately and fitted
   // modules later changes Add/PostMul/PostPercent semantics (notably cap batteries).
-  const pending = new Map<number, Array<{ value: number; operation: number }>>();
-  const queueShipModifier = (attributeId: number, value: number, operation: number) => {
+  type PendingShipChange = { value:number; operation:number; sourceItem?:FittingItem; modifyingAttributeId?:number };
+  const pending = new Map<number, PendingShipChange[]>();
+  const queueShipModifier = (attributeId: number, value: number, operation: number, sourceItem?:FittingItem, modifyingAttributeId?:number) => {
     const list = pending.get(attributeId) ?? [];
-    list.push({ value, operation });
+    list.push({ value, operation, sourceItem, modifyingAttributeId });
     pending.set(attributeId, list);
   };
   // CCP stores a ship's base cargo hold in the type physical capacity field,
@@ -1810,14 +1811,15 @@ export async function analyzeFittingDogma(input: {
         ) {
           continue;
         }
-        const list = pending.get(modifier.modifiedAttributeID) ?? [];
         for (let count = 0; count < (item.quantity ?? 1); count += 1) {
-          list.push({
-            value: attr(module, modifier.modifyingAttributeID),
-            operation: modifier.operation ?? 0,
-          });
+          queueShipModifier(
+            modifier.modifiedAttributeID,
+            attr(module, modifier.modifyingAttributeID),
+            modifier.operation ?? 0,
+            item,
+            modifier.modifyingAttributeID,
+          );
         }
-        pending.set(modifier.modifiedAttributeID, list);
       }
     }
   }
@@ -1940,8 +1942,9 @@ export async function analyzeFittingDogma(input: {
     0.006403,
     0.001,
   ];
+  const shipAttributesBeforePending = new Map(shipAttributes);
   for (const [attributeId, changes] of pending) {
-    const current = shipAttributes.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
+    const current = shipAttributesBeforePending.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
     shipAttributes.set(attributeId, applyOrderedChanges(current, changes, penalized.has(attributeId), penalties));
   }
 
@@ -2069,6 +2072,38 @@ export async function analyzeFittingDogma(input: {
     if (!source) continue;
     for (let count = 0; count < (item.quantity ?? 1); count += 1) {
       collectRequiredModifiers(source, "OwnerRequiredSkillModifier", true);
+    }
+  }
+
+  // Fitted sources can also project a shipID LocationModifier onto every item in the
+  // ship location. Strategic-cruiser core subsystems use this path for generic
+  // module heat-damage reduction (attribute 1211). Evaluate the source after its
+  // subsystem skill has scaled the modifying attribute, and respect fitted state.
+  for (const item of online) {
+    const source = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
+    if (!source) continue;
+    const state = item.state ?? "active";
+    for (const effectId of source.effects) {
+      const effect = modifiers.get(effectId);
+      if (!effect) continue;
+      if (effect.category === 5 && state !== "overheated") continue;
+      if (effect.category === 1 && state !== "active" && state !== "overheated") continue;
+      if (effect.category === 2 || effect.category === 3) continue;
+      for (const modifier of effect.modifiers) {
+        if (
+          modifier.domain !== "shipID" ||
+          modifier.func !== "LocationModifier" ||
+          modifier.modifiedAttributeID == null ||
+          modifier.modifyingAttributeID == null
+        ) continue;
+        for (let count = 0; count < (item.quantity ?? 1); count += 1) {
+          locationItemModifiers.push({
+            attributeId: modifier.modifiedAttributeID,
+            value: attr(source, modifier.modifyingAttributeID),
+            operation: modifier.operation ?? 0,
+          });
+        }
+      }
     }
   }
 
@@ -2250,6 +2285,24 @@ export async function analyzeFittingDogma(input: {
     return changes.length ? applyOrderedChanges(current, changes, false, [1]) : current;
   };
 
+
+  // Fitted active modules can modify the ship using a source attribute that is itself
+  // changed by hull/subsystem/skill DOGMA. Re-resolve those lazy source values now
+  // that all item-targeting modifiers are known, then rebuild the affected ship
+  // attribute from its pre-modifier baseline so global operation precedence is kept.
+  for (const [attributeId, changes] of pending) {
+    if (!changes.some(change => change.sourceItem && change.modifyingAttributeId != null)) continue;
+    let changed = false;
+    const resolved = changes.map(change => {
+      if (!change.sourceItem || change.modifyingAttributeId == null) return change;
+      const value = effectiveStatefulItemAttr(change.sourceItem, change.modifyingAttributeId);
+      if (Math.abs(value - change.value) > 1e-12) changed = true;
+      return { ...change, value };
+    });
+    if (!changed) continue;
+    const current = shipAttributesBeforePending.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
+    shipAttributes.set(attributeId, applyOrderedChanges(current, resolved, penalized.has(attributeId), penalties));
+  }
   for (const item of online) {
     const itemDogma = moduleDogmaFor(item);
     const quantity = item.quantity ?? 1;
@@ -2555,7 +2608,7 @@ export async function analyzeFittingDogma(input: {
       const ancillaryShield = groupId === 1156 || groupId === 1697;
       const emptySelectedBooster = ancillaryShield && item.chargeTypeId && groups.get(item.chargeTypeId) === 87 && magazine?.cyclesLoaded === 0;
       const capSourceItem = emptySelectedBooster ? { ...item, chargeTypeId: undefined } : item;
-      const cycleSeconds = effectiveStatefulItemAttr(capSourceItem, 73) / 1000;
+      const cycleSeconds = (effectiveStatefulItemAttr(capSourceItem, 73) || effectiveStatefulItemAttr(capSourceItem, 51)) / 1000;
       return total + (cycleSeconds > 0 ? (effectiveStatefulItemAttr(capSourceItem, 6) / cycleSeconds) * (item.quantity ?? 1) : 0);
     }, 0);
   const capacitorInjectors = online.flatMap((item) => {
@@ -3178,8 +3231,8 @@ export async function analyzeFittingDogma(input: {
     const groupId = groups.get(item.typeId) ?? 0;
     const quantity = Math.max(1, item.quantity ?? 1);
     const cycleSeconds = Math.max(0, (effectiveStatefulItemAttr(item, 73) || effectiveStatefulItemAttr(item, 51)) / 1000);
-    const optimalM = Math.max(0, effectiveItemAttr(source, 54, item.typeId));
-    const falloffM = Math.max(0, effectiveItemAttr(source, 2044, item.typeId));
+    const optimalM = Math.max(0, effectiveStatefulItemAttr(item, 54));
+    const falloffM = Math.max(0, effectiveStatefulItemAttr(item, 2044));
     const common = { typeId:item.typeId, name:names.get(item.typeId) ?? `Type ${item.typeId}`, groupId, quantity, state:item.state, cycleSeconds, optimalM, falloffM, chargeTypeId:item.chargeTypeId };
     if (groupId === 41) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,68))*quantity; return [{...common,kind:"remoteShieldRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
     if (groupId === 325) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,84))*quantity; return [{...common,kind:"remoteArmorRep",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
@@ -3206,17 +3259,17 @@ export async function analyzeFittingDogma(input: {
       const perSecond = cycleSeconds > 0 ? amountPerCycle / cycleSeconds : 0;
       return [{...common,kind:"remoteArmorRep",mutadaptive:true,amountPerCycle,perSecond,rampPerCycle,maxMultiplier,maxAmountPerCycle:amountPerCycle*maxMultiplier,maxPerSecond:perSecond*maxMultiplier,cyclesToMax,secondsToMax:cyclesToMax*cycleSeconds,spoolReset:"Resets on deactivation or target change."}];
     }
-    if (groupId === 65) return [{...common,kind:"web",strength:Math.min(.95,Math.abs(effectiveItemAttr(source,20,item.typeId))/100)}];
-    if (groupId === 52) return [{...common,kind:"tackle",warpStrength:Math.max(0,effectiveItemAttr(source,105,item.typeId)),mwdShutdown:(names.get(item.typeId)??"").toLowerCase().includes("scrambler")}];
-    if (groupId === 379) return [{...common,kind:"targetPainter",signatureBonus:Math.max(0,effectiveItemAttr(source,554,item.typeId))/100}];
-    if (groupId === 208) return [{...common,kind:"sensorDamp",maxTargetRangeBonus:effectiveItemAttr(source,309,item.typeId)/100,scanResolutionBonus:effectiveItemAttr(source,566,item.typeId)/100}];
-    if (groupId === 291) return [{...common,kind:"trackingDisruptor",optimalBonus:effectiveItemAttr(source,351,item.typeId)/100,falloffBonus:effectiveItemAttr(source,349,item.typeId)/100,trackingBonus:effectiveItemAttr(source,767,item.typeId)/100}];
-    if (groupId === 201) { const sensorStrengths=[238,239,240,241].map((attributeId)=>Math.max(0,effectiveItemAttr(source,attributeId,item.typeId))); return [{...common,kind:"ecm",sensorStrengths,strength:Math.max(...sensorStrengths)}]; }
-    if (groupId === 71) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,97,item.typeId))*quantity; return [{...common,kind:"energyNeutralizer",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
-    if (groupId === 68) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,90,item.typeId))*quantity; return [{...common,kind:"energyNosferatu",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
-    if (groupId === 67) { const amountPerCycle=Math.max(0,effectiveItemAttr(source,90,item.typeId))*quantity; return [{...common,kind:"remoteCapacitor",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
-    if (groupId === 290) return [{...common,kind:"remoteSensorBooster",maxTargetRangeBonus:effectiveItemAttr(source,309,item.typeId)/100,scanResolutionBonus:effectiveItemAttr(source,566,item.typeId)/100,sensorStrengthBonus:Math.max(...[1027,1028,1029,1030].map((attributeId)=>effectiveItemAttr(source,attributeId,item.typeId)/100))}];
-    if (groupId === 209) return [{...common,kind:"remoteTrackingComputer",optimalBonus:effectiveItemAttr(source,351,item.typeId)/100,falloffBonus:effectiveItemAttr(source,349,item.typeId)/100,trackingBonus:effectiveItemAttr(source,767,item.typeId)/100}];
+    if (groupId === 65) return [{...common,kind:"web",strength:Math.min(.95,Math.abs(effectiveStatefulItemAttr(item,20))/100)}];
+    if (groupId === 52) return [{...common,kind:"tackle",warpStrength:Math.max(0,effectiveStatefulItemAttr(item,105)),mwdShutdown:(names.get(item.typeId)??"").toLowerCase().includes("scrambler")}];
+    if (groupId === 379) return [{...common,kind:"targetPainter",signatureBonus:Math.max(0,effectiveStatefulItemAttr(item,554))/100}];
+    if (groupId === 208) return [{...common,kind:"sensorDamp",maxTargetRangeBonus:effectiveStatefulItemAttr(item,309)/100,scanResolutionBonus:effectiveStatefulItemAttr(item,566)/100}];
+    if (groupId === 291) return [{...common,kind:"trackingDisruptor",optimalBonus:effectiveStatefulItemAttr(item,351)/100,falloffBonus:effectiveStatefulItemAttr(item,349)/100,trackingBonus:effectiveStatefulItemAttr(item,767)/100}];
+    if (groupId === 201) { const sensorStrengths=[238,239,240,241].map((attributeId)=>Math.max(0,effectiveStatefulItemAttr(item,attributeId))); return [{...common,kind:"ecm",sensorStrengths,strength:Math.max(...sensorStrengths)}]; }
+    if (groupId === 71) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,97))*quantity; return [{...common,kind:"energyNeutralizer",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 68) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,90))*quantity; return [{...common,kind:"energyNosferatu",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 67) { const amountPerCycle=Math.max(0,effectiveStatefulItemAttr(item,90))*quantity; return [{...common,kind:"remoteCapacitor",amountPerCycle,perSecond:cycleSeconds>0?amountPerCycle/cycleSeconds:0}]; }
+    if (groupId === 290) return [{...common,kind:"remoteSensorBooster",maxTargetRangeBonus:effectiveStatefulItemAttr(item,309)/100,scanResolutionBonus:effectiveStatefulItemAttr(item,566)/100,sensorStrengthBonus:Math.max(...[1027,1028,1029,1030].map((attributeId)=>effectiveStatefulItemAttr(item,attributeId)/100))}];
+    if (groupId === 209) return [{...common,kind:"remoteTrackingComputer",optimalBonus:effectiveStatefulItemAttr(item,351)/100,falloffBonus:effectiveStatefulItemAttr(item,349)/100,trackingBonus:effectiveStatefulItemAttr(item,767)/100}];
     if (groupId === 1770) {
       const buffs = ([[2468,2469],[2470,2471],[2472,2473],[2536,2537]] as const).flatMap(([idAttr,valueAttr]) => {
         const buffId=Math.trunc(effectiveItemAttr(source,idAttr,item.typeId));
@@ -3264,15 +3317,15 @@ export async function analyzeFittingDogma(input: {
     if (item.state !== "active" && item.state !== "overheated") return [];
     const module = skillScaledSourceFor(moduleDogmaFor(item), item.typeId);
     if (!module || (!module.effects.has(6730) && !module.effects.has(6731))) return [];
-    const speedFactorPercent = effectiveItemAttr(module, 20, item.typeId);
+    const speedFactorPercent = effectiveStatefulItemAttr(item, 20);
     return [{
       typeId: item.typeId,
       name: names.get(item.typeId) ?? `Type ${item.typeId}`,
       quantity: item.quantity ?? 1,
       speedFactorPercent,
-      thrust: effectiveItemAttr(module, 567, item.typeId),
-      massAdditionKg: effectiveItemAttr(module, 796, item.typeId) * (item.quantity ?? 1),
-      signatureRadiusBonusPercent: module.effects.has(6730) ? effectiveItemAttr(module, 554, item.typeId) : 0,
+      thrust: effectiveStatefulItemAttr(item, 567),
+      massAdditionKg: effectiveStatefulItemAttr(item, 796) * (item.quantity ?? 1),
+      signatureRadiusBonusPercent: module.effects.has(6730) ? effectiveStatefulItemAttr(item, 554) : 0,
       kind: module.effects.has(6730) ? "mwd" : "afterburner",
     }];
   });
