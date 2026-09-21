@@ -16,6 +16,7 @@ const intelligence = read("src/CommandIntelligence.tsx");
 const skills = read("src/SkillsWorkspace.tsx");
 const routeTypes = read("src/character-navigation.ts");
 const app = read("src/App.tsx");
+const commandHeader = read("src/CharacterCommandHeader.tsx");
 const css = read("src/character-command.css");
 
 for (const label of ["PvE Combat", "PvP Combat", "Mining", "Exploration", "Logistics", "Hauling", "Salvage", "Support", "Other / General"])
@@ -43,14 +44,15 @@ assert.match(css, /\.character-command \.capability-hud-dial > svg\s*\{\s*transf
 assert.match(ui, /useEffect\(\(\) => \{\s*if \(!compact\) void refresh\(\);\s*\}, \[compact, refresh\]\);/, "compact mode must not start full capability analysis on mount");
 assert.ok(ui.includes("if (!compact && (!analysis || !selected)) return null;"), "full-analysis null gate must only apply outside compact mode");
 assert.ok(ui.includes("if (compact) void refreshShipCapability(shipUseProfile);"), "compact mode must immediately start only focused ship readiness");
-assert.ok(ui.includes("Training guidance ready on demand"), "compact Next Moves must remain useful without reading full analysis");
+assert.ok(ui.includes("CustomNotificationsPanel") && ui.includes("<CustomNotificationsPanel characterId={snapshot.characterId} />"), "compact Character Command must render the live notifications panel without requiring full capability analysis");
 assert.ok(!/if \(compact\)[^\n]*getCapabilities/.test(ui), "compact mode must not directly request full capability analysis");
 
-const headerActionsStart = app.indexOf('<div className="header-actions">');
-const updateControlAt = app.indexOf("<UpdateControl />", headerActionsStart);
-const dataAgeAt = app.indexOf("<DataAgeBadge ", headerActionsStart);
-assert.ok(headerActionsStart >= 0 && dataAgeAt > headerActionsStart && dataAgeAt < updateControlAt, "data age/sync badge must live immediately to the left of Check for updates in the shared header");
-assert.equal((app.match(/<DataAgeBadge /g) || []).length, 1, "data age/sync badge must not also consume a standalone content row");
+const dataSectorAt = commandHeader.indexOf('<div className="cc-data-sector">');
+const updateActionAt = commandHeader.indexOf("<AppUpdateAction />");
+assert.ok(dataSectorAt >= 0 && updateActionAt > dataSectorAt, "freshness/data controls must precede the application update action in the shared command header");
+assert.match(commandHeader, /<FreshnessNode tone="public" label="PUBLIC DATA"/, "shared header must expose public-data freshness");
+assert.match(commandHeader, /<FreshnessNode tone="private" label="PRIVATE DATA"/, "shared header must expose private-data freshness");
+assert.equal((commandHeader.match(/<FreshnessNode /g) || []).length, 2, "shared header must render exactly the public/private freshness pair");
 
 const characterFontSizes = [...css.matchAll(/font-size:\s*([0-9.]+)px/g)].map((match) => Number(match[1]));
 assert.ok(characterFontSizes.length > 0 && Math.min(...characterFontSizes) >= 8, "Character Command body text must not fall below the readability floor");
@@ -83,9 +85,9 @@ assert.match(app, /case "asset-wallet-ledger":\s*setWalletCommandView\("ledger"\
 assert.match(app, /case "navigation":\s*setView\("navigation"\);/s, "Regional must route to Navigation Command");
 assert.match(app, /case "industrial":\s*setView\("industrial"\);/s, "Industrial Feed must route to Industrial Command");
 
-// Command Priority severity and exact Activity Command / My Skills route.
-assert.match(intelligence, /id: "skill-queue",\s*severity: "red",/s, "skill queue attention item must use red rather than success green");
-assert.match(intelligence, /action: "Add another skill",\s*target: "activity-skills",/s, "Add another skill must use the exact Skills deep route");
+// Removed skill-queue CTA must stay gone while My Skills deep routing remains available.
+assert.doesNotMatch(intelligence, /id: "skill-queue"/, "Command Priority must not duplicate the removed skill-queue card");
+assert.doesNotMatch(intelligence, /action: "Add another skill"/, "removed Add another skill CTA must stay out of Command Priority");
 assert.match(app, /case "activity-skills":\s*setActivityCommandTab\("my-skills"\);\s*setView\("skills"\);/s, "Add another skill must land on Activity Command / My Skills");
 assert.ok(skills.includes("activeTab?: SkillsTab") && skills.includes("onTabChange?(tab: SkillsTab)"), "Activity Command tab selection must be externally routable without remounting/recalculation");
 assert.match(css, /\.command-priority-panel\.danger\s*\{[^}]*border-color:#71313b[^}]*box-shadow:/s, "urgent priority panel must have a pronounced but dark red warning treatment");

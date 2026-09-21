@@ -37,6 +37,6 @@ test("Assets tab renders prepared valuation evidence and never calls contract hi
 });
 
 test("database reads normalize prepared snapshot valuation without a network query", () => {
-  assert.match(databaseSource, /normalizeSnapshotBlueprintAssetValuation\(JSON\.parse/);
+  assert.match(databaseSource, /normalizeSnapshotBlueprintAssetValuation\(decryptSnapshotPayload/);
   assert.doesNotMatch(databaseSource, /loadBlueprintContractValuations|contract-history\/blueprint-valuations/);
 });

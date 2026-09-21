@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "1.1.26",
+  "version": "1.1.27",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "author": "New Eden Sage contributors",
@@ -15,7 +15,7 @@
     "build": "tsc --noEmit && tsc -p tsconfig.electron.json && vite build",
     "preview": "vite preview",
     "icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --win nsis --publish never",
+    "dist:win": "npm run verify:release-resources && npm run icon && npm run build && npm run test:all && node scripts/build-windows-release.cjs --smoke-install",
     "dist:linux": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --linux AppImage deb --publish never",
     "verify:release-resources": "node scripts/verify-release-resources.cjs",
     "fitting:refresh-bundle": "tsc -p tsconfig.electron.json && node scripts/build-fitting-bundle.cjs",
@@ -29,7 +29,10 @@
     "test:planetary": "tsc -p tsconfig.electron.json && node tests/planetary/run-all.cjs",
     "test:progression": "node --experimental-strip-types tests/progression/activity-ship-rules.test.mjs && node --experimental-strip-types tests/progression/fit-cluster-selection.test.mjs",
     "test:activity-accuracy": "tsc -p tsconfig.electron.json && node tests/progression/activity-readiness-accuracy.test.cjs",
-    "test:updater": "node tests/updater/silent-update.test.mjs"
+    "test:updater": "node tests/updater/silent-update.test.mjs",
+    "dist:win:package": "npm run verify:release-resources && npm run icon && npm run build && node scripts/build-windows-release.cjs",
+    "test:installer": "node scripts/verify-windows-installer.cjs",
+    "test:all": "node scripts/run-all-tests.cjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

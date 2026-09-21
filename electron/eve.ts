@@ -817,6 +817,9 @@ export async function fetchCharacterSnapshot(
   const enrichedAssets = Array.isArray(assets)
     ? await enrichAssets(assets as AssetRecord[], headers, blueprints)
     : assets;
+  const enrichedCorporationAssets = Array.isArray(corporationAssets)
+    ? await enrichAssetLocations(corporationAssets as AssetRecord[], headers)
+    : corporationAssets;
   const assetSummary = Array.isArray(enrichedAssets)
     ? summarizeAssets(enrichedAssets)
     : null;
@@ -934,7 +937,7 @@ export async function fetchCharacterSnapshot(
         titles: corporationTitles,
         divisions: corporationDivisions,
         memberLimit: corporationMemberLimit,
-        assets: corporationAssets,
+        assets: enrichedCorporationAssets,
         assetNames: corporationAssetNames,
         blueprints: corporationBlueprints,
         contacts: corporationContacts,
@@ -974,6 +977,130 @@ type AssetRecord = {
   quantity: number;
   type_id: number;
 };
+
+async function enrichAssetLocations(
+  assets: AssetRecord[],
+  headers: Record<string, string>,
+) {
+  const assetById = new Map(assets.map((asset) => [asset.item_id, asset]));
+  const rootLocation = (asset: AssetRecord) => {
+    let current = asset;
+    const visited = new Set<number>();
+    while (current.location_type === "item" && !visited.has(current.item_id)) {
+      visited.add(current.item_id);
+      const parent = assetById.get(current.location_id);
+      if (!parent) break;
+      current = parent;
+    }
+    return {
+      id: current.location_id,
+      type: current.location_type,
+    };
+  };
+
+  const roots = [
+    ...new Map(
+      assets.map((asset) => {
+        const root = rootLocation(asset);
+        return [`${root.type}:${root.id}`, root] as const;
+      }),
+    ).values(),
+  ];
+
+  const resolvedRoots = await mapLimited(roots, 12, async (root) => {
+    const key = `${root.type}:${root.id}`;
+    try {
+      if (root.type === "station") {
+        const stationResponse = await fetch(
+          `https://esi.evetech.net/universe/stations/${root.id}/`,
+          { headers },
+        );
+        if (!stationResponse.ok) throw new Error("station unavailable");
+        const station = (await stationResponse.json()) as {
+          name: string;
+          system_id: number;
+        };
+        const systemResponse = await fetch(
+          `https://esi.evetech.net/universe/systems/${station.system_id}/`,
+          { headers },
+        );
+        const system = systemResponse.ok
+          ? ((await systemResponse.json()) as { name: string })
+          : null;
+        return {
+          key,
+          station: station.name,
+          system: system?.name ?? `System ${station.system_id}`,
+          systemId: station.system_id,
+        };
+      }
+
+      if (root.type === "solar_system") {
+        const response = await fetch(
+          `https://esi.evetech.net/universe/systems/${root.id}/`,
+          { headers },
+        );
+        const system = response.ok
+          ? ((await response.json()) as { name: string })
+          : null;
+        return {
+          key,
+          station: null,
+          system: system?.name ?? `System ${root.id}`,
+          systemId: root.id,
+        };
+      }
+
+      // Corporation assets in player-owned Upwell structures commonly surface
+      // their top-level location as "other". Structure IDs are also in the
+      // trillion-plus range, so try the authenticated structure endpoint for
+      // either signal and leave the raw ESI location intact if access is denied.
+      if (root.type === "other" || root.id > 1_000_000_000_000) {
+        const response = await fetch(
+          `https://esi.evetech.net/universe/structures/${root.id}/`,
+          { headers },
+        );
+        if (response.ok) {
+          const structure = (await response.json()) as {
+            name: string;
+            solar_system_id: number;
+          };
+          const systemResponse = await fetch(
+            `https://esi.evetech.net/universe/systems/${structure.solar_system_id}/`,
+            { headers },
+          );
+          const system = systemResponse.ok
+            ? ((await systemResponse.json()) as { name: string })
+            : null;
+          return {
+            key,
+            station: structure.name,
+            system: system?.name ?? `System ${structure.solar_system_id}`,
+            systemId: structure.solar_system_id,
+          };
+        }
+      }
+    } catch {
+      /* Preserve the raw location when ESI cannot resolve it. */
+    }
+    return { key, station: null, system: null, systemId: null };
+  });
+
+  const rootByKey = new Map(resolvedRoots.map((root) => [root.key, root]));
+  return assets.map((asset) => {
+    const root = rootLocation(asset);
+    const resolved = rootByKey.get(`${root.type}:${root.id}`);
+    return {
+      ...asset,
+      station: resolved?.station ?? null,
+      system: resolved?.system ?? null,
+      system_id: resolved?.systemId ?? null,
+      root_location_id: root.id,
+      container_item_id:
+        asset.location_type === "item" ? asset.location_id : null,
+    };
+  });
+}
 
 async function enrichAssets(
   assets: AssetRecord[],

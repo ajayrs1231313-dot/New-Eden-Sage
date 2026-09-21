@@ -23,7 +23,12 @@ for (const title of ["How buy orders work", "Trading strategies", "Fees and taxe
   assert.ok(orderDesk.includes(`title: "${title}"`), `missing guide: ${title}`);
 }
 assert.match(orderDesk, /More in-depth guides are coming soon\./, "guide modal footer addendum should be present");
-assert.match(orderDesk, /This feature is coming soon\./, "Set Alerts should show the coming-soon message");
+assert.match(orderDesk, /orderCompetitionNotification/, "Order Desk alerts must use the competition notification rule builder");
+assert.ok(orderDesk.includes("ensureNotificationRule(orderCompetitionNotification"), "Order Desk must create a real persisted notification rule");
+assert.ok(orderDesk.includes("\"Notify me\""), "Order Desk must expose the live notification action");
+assert.ok(orderDesk.includes("\"Outbid alert\""), "buy orders must identify outbid monitoring");
+assert.ok(orderDesk.includes("\"Undercut alert\""), "sell orders must identify undercut monitoring");
+assert.ok(!orderDesk.includes("This feature is coming soon."), "implemented Order Desk alerts must not fall back to the old placeholder");
 assert.doesNotMatch(orderDesk, /Create Buy Order|Create Sell Order/, "Order Desk must not offer fake order-creation actions");
 assert.match(orderDesk, /Create \$\{view\} orders in EVE and they will appear here after the next character sync\./, "empty state should direct order creation to EVE");
 assert.match(orderDesk, /role="dialog" aria-modal="true"/, "guidance and alert content should use a modal dialog");

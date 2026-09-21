@@ -240,3 +240,5 @@ html[data-fit-to-monitor="on"] .contracts-reference .contract-opportunity-metric
   .contracts-reference .contract-value-grid,.contracts-reference .contract-value-grid.character-net,.contracts-reference .contract-value-grid.sell-order{grid-template-columns:1fr}
   .contract-sell-order-heading{align-items:flex-start;flex-direction:column}.contract-sell-order-heading>span{text-align:left}
 }
+
+.contracts-reference .contract-detail-actions .sage-notify-button{min-width:104px}.contracts-reference .contract-detail-actions .sage-notify-button.active{border-color:#2f7d6f!important;background:#09231f!important;color:#6be1cd!important}.contract-notification-status{margin-top:6px;padding:6px 8px;border:1px solid #6d5319;background:#171308;color:#ddb858;font-size:8.5px;line-height:1.35}

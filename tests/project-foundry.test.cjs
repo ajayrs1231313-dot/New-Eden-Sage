@@ -43,6 +43,17 @@ assert.equal(analyzed.requirements[1].outstanding, 250);
 assert.equal(analyzed.progress, 1250 / 1500);
 assert.equal(analyzed.workPackages[1].ready, false);
 
+// Per-build-line store routes override the project default without affecting other lines.
+const divisionTwo = [{ kind: 'division', key: 'division:CorpSAG2', locationFlag: 'CorpSAG2', name: 'Corporation Hangar 2' }];
+const routedProject = {
+  ...baseProject,
+  storeRoutes: [{ targetId: 'root:2/legacy-0:34', stores: divisionTwo }],
+};
+const routed = analyzeFoundryProject(routedProject, [routedProject], assets);
+assert.equal(routed.requirements[0].delivered, 500, 'Tritanium route must read only Corp Hangar 2');
+assert.equal(routed.requirements[0].outstanding, 500, 'routed source must drive the target shortage');
+assert.equal(routed.requirements[1].delivered, 250, 'unrouted Pyerite must keep using the project default source');
+
 const competing = {
   ...baseProject,
   id: 'orca-b', name: 'Second Orca',

@@ -10,6 +10,7 @@ export type WargameDamageProfile = {
 export type WargameDamageSource = {
   id: string;
   name: string;
+  typeId?: number;
   kind: WargameDamageKind;
   dpsPerShip: number;
   volleyPerShip: number;
@@ -48,6 +49,13 @@ export type WargameDamageSource = {
   spoolTargetId?: string;
   radiusKm?: number;
   friendlyFireEligible?: boolean;
+  fighterAbility?: string;
+  fighterCountInitial?: number;
+  fighterCountRemaining?: number;
+  fighterMaximumVelocityMps?: number;
+  fighterOrbitRangeKm?: number;
+  fighterOnTargetId?: string;
+  fighterArrivalRemaining?: number;
 };
 
 export type WargameOrderTrigger = "immediate" | "target-destroyed" | "after-seconds";

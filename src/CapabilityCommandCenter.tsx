@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CapabilityAnalysis, CapabilityResult, CharacterSnapshot, ShipUseProfileId } from "./types";
 import { TrainingTimeNotice } from "./TrainingTimeNotice";
 import { friendlyAnalysisError, isExpectedAnalysisCancellation } from "./analysis-errors";
+import { CustomNotificationsPanel } from "./CustomNotificationsPanel";
 
 type CloneState = "alpha" | "omega";
 
@@ -186,31 +187,30 @@ export function CapabilityCommandCenter({ snapshot, cloneState, onOpenProgressio
 
   return (
     <div className={`capability-command-center${compact ? " compact" : ""}`}>
-      <article className="capability-next-moves">
+      {compact ? <CustomNotificationsPanel characterId={snapshot.characterId} /> : <article className="capability-next-moves">
         <div className="capability-heading">
           <div><p className="eyebrow">SUGGESTED NEXT MOVES</p><h3>Highest-impact upgrades</h3></div>
-          {!compact && <button onClick={onOpenProgression}>Open Activity Command</button>}
+          <button onClick={onOpenProgression}>Open Activity Command</button>
         </div>
-        {!compact && <TrainingTimeNotice cloneState={cloneState} />}
-        {!compact && <ol>
+        <TrainingTimeNotice cloneState={cloneState} />
+        <ol>
           {analysis!.topRecommendations.slice(0, 5).map((item, index) => (
-            <li key={`${item.capabilityId}-${item.upgrade.type}-${item.upgrade.label}`}>
+            <li key={item.capabilityId + "-" + item.upgrade.type + "-" + item.upgrade.label}>
               <span>{index + 1}</span>
               <div>
                 <strong>{item.upgrade.label}</strong>
                 <small>{item.capability} / {item.upgrade.why}</small>
-                {!compact && (item.upgrade.estimatedSeconds != null || item.upgrade.estimatedCost != null) && (
-                  <em>{item.upgrade.estimatedSeconds != null ? duration(item.upgrade.estimatedSeconds) : ""}{item.upgrade.estimatedSeconds != null && item.upgrade.estimatedCost != null ? " / " : ""}{item.upgrade.estimatedCost != null ? `~${money(item.upgrade.estimatedCost)} ISK` : ""}</em>
+                {(item.upgrade.estimatedSeconds != null || item.upgrade.estimatedCost != null) && (
+                  <em>{item.upgrade.estimatedSeconds != null ? duration(item.upgrade.estimatedSeconds) : ""}{item.upgrade.estimatedSeconds != null && item.upgrade.estimatedCost != null ? " / " : ""}{item.upgrade.estimatedCost != null ? "~" + money(item.upgrade.estimatedCost) + " ISK" : ""}</em>
                 )}
               </div>
               <b>+{item.upgrade.estimatedGain}%</b>
             </li>
           ))}
-        </ol>}
-        {compact && <div className="capability-next-moves-ready"><strong>Training guidance ready on demand</strong><small>Open Activity Command for full recommendations without blocking current-ship readiness.</small></div>}
+        </ol>
         <button className="capability-open-activity" onClick={onOpenProgression}>View all suggestions <span>&rarr;</span></button>
-        {!compact && <small className="capability-data-line">Using {analysis!.dataSignals.ownedShips} owned ship records / {analysis!.dataSignals.modules} module assets / {analysis!.dataSignals.blueprints} blueprints / {analysis!.dataSignals.savedFittings} saved fits / {money(analysis!.dataSignals.wallet)} ISK</small>}
-      </article>
+        <small className="capability-data-line">Using {analysis!.dataSignals.ownedShips} owned ship records / {analysis!.dataSignals.modules} module assets / {analysis!.dataSignals.blueprints} blueprints / {analysis!.dataSignals.savedFittings} saved fits / {money(analysis!.dataSignals.wallet)} ISK</small>
+      </article>}
 
       <article className="capability-radar capability-radar-v2">
         <div className="capability-heading">

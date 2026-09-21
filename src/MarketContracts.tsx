@@ -1,13 +1,15 @@
-﻿import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { CharacterSnapshot, MarketContractOpportunity, MarketContractSearchResult, MarketContractWorkspace } from "./types";
 import { accountingTaxPercentFromLevel, brokerEstimatePercentFromLevel } from "./market-day-trader";
 import { projectContractOpportunities, type ContractFeeProfile } from "./contract-profit-projection";
 import { IskGlyph } from "./IskIcons";
+import { contractBidNotification, ensureNotificationRule } from "./notifications";
+import "./custom-notifications.css";
 import "./market-contracts-polish.css";
 
-const money=(value:number|null|undefined)=>value==null?"â€”":new Intl.NumberFormat("en-GB",{maximumFractionDigits:0}).format(value);
-const percent=(value:number|null|undefined)=>value==null?"â€”":`${value.toFixed(1)}%`;
-const cargoVolume=(value:number|null|undefined)=>value==null||!Number.isFinite(value)?"â€”":new Intl.NumberFormat("en-GB",{maximumFractionDigits:2}).format(value);
+const money=(value:number|null|undefined)=>value==null?"—":new Intl.NumberFormat("en-GB",{maximumFractionDigits:0}).format(value);
+const percent=(value:number|null|undefined)=>value==null?"—":`${value.toFixed(1)}%`;
+const cargoVolume=(value:number|null|undefined)=>value==null||!Number.isFinite(value)?"—":new Intl.NumberFormat("en-GB",{maximumFractionDigits:2}).format(value);
 type RecommendedExit={kind:"immediate"|"haul";profit:number;roi:number|null;revenue:number;netRevenue:number;salesTaxAmount:number;salesTaxRate:number;brokerFeeAmount:number;brokerFeeRate:number;system:string|null};
 const recommendedExitFor=(row:MarketContractOpportunity):RecommendedExit|null=>{
   const immediateProfit=row.characterProjection?row.immediateNetProfit:row.immediateProfit;
@@ -86,6 +88,8 @@ export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:Charact
   const [findingContractId,setFindingContractId]=useState<number|null>(null);
   const [findStatus,setFindStatus]=useState("");
   const [completionStatus,setCompletionStatus]=useState<Record<number,string>>({});
+  const [watchedContractIds,setWatchedContractIds]=useState<Set<number>>(()=>new Set());
+  const [notificationStatus,setNotificationStatus]=useState<Record<number,string>>({});
 
   const [itemSearch,setItemSearch]=useState("");
   const [regionId,setRegionId]=useState("all");
@@ -121,6 +125,26 @@ export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:Charact
   }
   useEffect(()=>{void load();},[marketDataRevision]);
   useEffect(()=>window.sage.onMarketProgress(progress=>{if(progress.mode!=="contracts")return;const complete=progress.regionsTotal>0&&progress.regionsDone>=progress.regionsTotal;contractRefreshActive=!complete;setBusy(!complete);setStatus(complete?"Contract data is ready.":`Preparing server data…`);}),[]);
+  useEffect(()=>{
+    let cancelled=false;
+    void window.sage.getNotificationRules().then(({rules})=>{
+      if(cancelled)return;
+      setWatchedContractIds(new Set(rules.filter(rule=>rule.enabled!==false&&rule.metadata?.source==="contracts").map(rule=>Number(rule.metadata?.contractId??0)).filter(id=>id>0)));
+    }).catch(()=>undefined);
+    return()=>{cancelled=true;};
+  },[]);
+
+  async function watchAuctionBids(row:MarketContractOpportunity){
+    if(row.contractType!=="auction")return;
+    setNotificationStatus(current=>({...current,[row.contractId]:"Creating server-side bid watch…"}));
+    try{
+      const created=await ensureNotificationRule(contractBidNotification({contractId:row.contractId,title:row.title||`Contract ${row.contractId}`}));
+      setWatchedContractIds(current=>new Set([...current,row.contractId]));
+      setNotificationStatus(current=>({...current,[row.contractId]:created.created?"Bid watch armed. Sage will notify you when a new bid arrives.":"This auction is already being watched."}));
+    }catch(caught){
+      setNotificationStatus(current=>({...current,[row.contractId]:caught instanceof Error?caught.message.replace(/^Error invoking remote method .*?: Error: /,""):"Could not create bid watch."}));
+    }
+  }
 
   async function refresh(){
     contractRefreshActive=true;setBusy(true);setFindStatus("");setStatus("Preparing server data…");
@@ -225,7 +249,7 @@ export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:Charact
       </aside>
       <main className="contract-search-results contract-results-reference">
         <div className="contract-results-head"><div><p className="eyebrow">RESULTS</p><h3>{searchResult.total.toLocaleString()} matching contracts</h3></div><div className="contract-results-actions"><small>{searchResult.total>shownContracts.length?`Showing first ${shownContracts.length.toLocaleString()}`:`${shownContracts.length.toLocaleString()} shown`}</small><div className="contract-density-toggle" aria-label="Contract row density"><button type="button" className={searchDensity==="compact"?"active":""} onClick={()=>setSearchDensity("compact")} title="Compact rows"><IskGlyph name="bars"/></button><button type="button" className={searchDensity==="comfortable"?"active":""} onClick={()=>setSearchDensity("comfortable")} title="Comfortable rows"><IskGlyph name="cubes"/></button></div></div></div>
-        <div className={`contract-list contract-list-v2 contract-list-reference density-${searchDensity}`}>{shownContracts.map(row=><Fragment key={row.contractId}><ContractSearchRow row={row} selected={selected?.contractId===row.contractId} onSelect={()=>setSelected(row)}/>{selected?.contractId===row.contractId&&<ContractDetail row={row} finding={findingContractId===row.contractId} findStatus={findStatus} completionStatus={completionStatus[row.contractId]??""} onFind={()=>void findInEve(row)} onComplete={()=>void completeDeal(row)}/>}</Fragment>)}{!shownContracts.length&&<div className="market-empty">No retained contracts match these filters.</div>}</div>
+        <div className={`contract-list contract-list-v2 contract-list-reference density-${searchDensity}`}>{shownContracts.map(row=><Fragment key={row.contractId}><ContractSearchRow row={row} selected={selected?.contractId===row.contractId} onSelect={()=>setSelected(row)}/>{selected?.contractId===row.contractId&&<ContractDetail row={row} finding={findingContractId===row.contractId} findStatus={findStatus} completionStatus={completionStatus[row.contractId]??""} notificationStatus={notificationStatus[row.contractId]??""} watching={watchedContractIds.has(row.contractId)} onFind={()=>void findInEve(row)} onComplete={()=>void completeDeal(row)} onWatch={()=>void watchAuctionBids(row)}/>}</Fragment>)}{!shownContracts.length&&<div className="market-empty">No retained contracts match these filters.</div>}</div>
       </main>
     </div>}
 
@@ -240,7 +264,7 @@ export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:Charact
         <label><span>Rank</span><select value={opportunitySort} onChange={event=>setOpportunitySort(event.target.value as "profit"|"roi")}><option value="profit">Most profit</option><option value="roi">Best ROI</option></select></label>
         <button type="button" className="contract-reset-filter" onClick={resetProfit}><IskGlyph name="reset"/> Reset Filters</button>
       </div>
-      <div className="contract-opportunity-list contract-profit-list contract-opportunity-reference">{visibleOpportunities.map(row=><Fragment key={row.contractId}><OpportunityRow row={row} selected={selected?.contractId===row.contractId} onSelect={()=>setSelected(row)}/>{selected?.contractId===row.contractId&&<ContractDetail row={row} finding={findingContractId===row.contractId} findStatus={findStatus} completionStatus={completionStatus[row.contractId]??""} onFind={()=>void findInEve(row)} onComplete={()=>void completeDeal(row)}/>}</Fragment>)}{data&&visibleOpportunities.length===0&&<div className="market-empty">No opportunities match these filters.</div>}</div>
+      <div className="contract-opportunity-list contract-profit-list contract-opportunity-reference">{visibleOpportunities.map(row=><Fragment key={row.contractId}><OpportunityRow row={row} selected={selected?.contractId===row.contractId} onSelect={()=>setSelected(row)}/>{selected?.contractId===row.contractId&&<ContractDetail row={row} finding={findingContractId===row.contractId} findStatus={findStatus} completionStatus={completionStatus[row.contractId]??""} notificationStatus={notificationStatus[row.contractId]??""} watching={watchedContractIds.has(row.contractId)} onFind={()=>void findInEve(row)} onComplete={()=>void completeDeal(row)} onWatch={()=>void watchAuctionBids(row)}/>}</Fragment>)}{data&&visibleOpportunities.length===0&&<div className="market-empty">No opportunities match these filters.</div>}</div>
     </section>}
   </section>;
 }
@@ -303,7 +327,7 @@ function OpportunityRow({row,selected,onSelect}:{row:MarketContractOpportunity;s
 
 function SecurityBadge({band}:{band:"low"|"null"}){return <span className={`contract-security-badge ${band}`}>{band==="low"?"LOW SEC":"NULL SEC"}</span>;}
 
-function ContractDetail({row,finding,findStatus,completionStatus,onFind,onComplete}:{row:MarketContractOpportunity;finding:boolean;findStatus:string;completionStatus:string;onFind():void;onComplete():void}){
+function ContractDetail({row,finding,findStatus,completionStatus,notificationStatus,watching,onFind,onComplete,onWatch}:{row:MarketContractOpportunity;finding:boolean;findStatus:string;completionStatus:string;notificationStatus:string;watching:boolean;onFind():void;onComplete():void;onWatch():void}){
   const recommended=recommendedExitFor(row);
   const exit=recommended;
   const contractCost=row.price+(row.requestedItemsFullyPriced?row.requestedItemCost:0);
@@ -312,7 +336,7 @@ function ContractDetail({row,finding,findStatus,completionStatus,onFind,onComple
   const pilotLabel=hasCapitalPilot?"CAPITAL - PILOT REQUIRED":"LARGE HULL - PILOT REQUIRED";
   const profile=row.characterProjection;
   const sellOrderProjected=profile&&row.sellOrderNetProfit!=null;
-  return <div className="contract-detail"><div className="contract-detail-head"><div><p className="eyebrow">CONTRACT {row.contractId}</p><h3>{row.title}</h3><small className="contract-detail-location">{row.station} — {row.systemName}{row.securityBand!=="high"&&row.securityBand&&<SecurityBadge band={row.securityBand}/>} — expires {new Date(row.expires).toLocaleString()}</small><div className="contract-detail-meta"><span>{contractTypeLabel(row.contractType||"item_exchange")}</span><span>{availabilityLabel(row.availability||"public")}</span>{row.issuerName&&<span>Issuer: {row.issuerName}</span>}{row.issuerCorporationName&&row.issuerCorporationName!==row.issuerName&&<span>{row.issuerCorporationName}</span>}{row.dateIssued&&<span>Issued {new Date(row.dateIssued).toLocaleString()}</span>}{profile&&<span>{profile.characterName} · Accounting {profile.accountingLevel} · Broker Relations {profile.brokerRelationsLevel}</span>}</div></div><div className="contract-detail-actions"><strong>{money(row.price)} ISK</strong><button type="button" className="find-in-eve" disabled={finding} onClick={onFind}>{finding?"Opening in EVE...":"Find in EVE"}</button>{exit&&exit.profit>0&&<button type="button" className="contract-complete-deal" onClick={onComplete}>I completed this deal</button>}</div></div>
+  return <div className="contract-detail"><div className="contract-detail-head"><div><p className="eyebrow">CONTRACT {row.contractId}</p><h3>{row.title}</h3><small className="contract-detail-location">{row.station} — {row.systemName}{row.securityBand!=="high"&&row.securityBand&&<SecurityBadge band={row.securityBand}/>} — expires {new Date(row.expires).toLocaleString()}</small><div className="contract-detail-meta"><span>{contractTypeLabel(row.contractType||"item_exchange")}</span><span>{availabilityLabel(row.availability||"public")}</span>{row.issuerName&&<span>Issuer: {row.issuerName}</span>}{row.issuerCorporationName&&row.issuerCorporationName!==row.issuerName&&<span>{row.issuerCorporationName}</span>}{row.dateIssued&&<span>Issued {new Date(row.dateIssued).toLocaleString()}</span>}{profile&&<span>{profile.characterName} · Accounting {profile.accountingLevel} · Broker Relations {profile.brokerRelationsLevel}</span>}</div></div><div className="contract-detail-actions"><strong>{money(row.price)} ISK</strong><button type="button" className="find-in-eve" disabled={finding} onClick={onFind}>{finding?"Opening in EVE...":"Find in EVE"}</button>{row.contractType==="auction"&&<button type="button" className={`sage-notify-button${watching?" active":""}`} onClick={onWatch}>🔔 {watching?"Watching bids":"Watch bids"}</button>}{exit&&exit.profit>0&&<button type="button" className="contract-complete-deal" onClick={onComplete}>I completed this deal</button>}</div></div>
     <div className="contract-value-grid character-net">
       <span><small>COST OF CONTRACT</small><strong>{money(contractCost)} ISK</strong></span>
       <span><small>GROSS SALE REVENUE</small><strong>{exit==null?"-":money(exit.revenue)+" ISK"}</strong></span>
@@ -334,6 +358,6 @@ function ContractDetail({row,finding,findStatus,completionStatus,onFind,onComple
       </div>
     </section>}
     <div className="contract-item-table"><div className="contract-item-row heading"><span>Side</span><span>Item</span><span>Qty</span><span>Best buy</span><span>Best sell</span></div>{row.items.map((item,index)=><div className="contract-item-row" key={`${item.typeId}-${index}`}><span className={item.included?"included":"requested"}>{item.included?"YOU GET":"YOU GIVE"}</span><strong>{item.typeName}</strong><span>{item.quantity.toLocaleString()}</span><span>{!item.recoverableForResale?(item.valuationNote??"NON-RECOVERABLE"):item.bestBuy==null?"—":`${money(item.bestBuy)} ISK`}</span><span>{!item.recoverableForResale?"EXCLUDED":item.bestSell==null?"—":`${money(item.bestSell)} ISK`}</span></div>)}</div>
-    <small className="contract-detail-note">{row.note}</small>{findStatus&&<div className="contract-find-status" role="status">{findStatus}</div>}{completionStatus&&<div className="contract-completion-status" role="status">{completionStatus}</div>}
+    <small className="contract-detail-note">{row.note}</small>{notificationStatus&&<div className="contract-notification-status" role="status">{notificationStatus}</div>}{findStatus&&<div className="contract-find-status" role="status">{findStatus}</div>}{completionStatus&&<div className="contract-completion-status" role="status">{completionStatus}</div>}
   </div>;
 }

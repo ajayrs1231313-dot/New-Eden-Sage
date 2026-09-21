@@ -684,7 +684,7 @@ async function discordOauthCallback(request:Request,env:SageEnv,url:URL){
     env.DB.prepare("DELETE FROM discord_oauth_states WHERE state=?1").bind(state),
     env.DB.prepare(`INSERT INTO audit_log (workspace_id,actor_account_id,action,resource_type,resource_id,detail_json) VALUES (?1,?2,'discord.user_link','discord.user',?3,?4)`).bind(row.workspace_id,row.account_id,user.id,JSON.stringify({eve_character_id:row.eve_character_id,discord_username:user.username??null})),
   ]);
-  return new Response(`<!doctype html><meta charset="utf-8"><title>New Eden Sage Ã‚Â· Discord Linked</title><style>body{font-family:system-ui;background:#071014;color:#dce8ee;display:grid;place-items:center;height:100vh;margin:0}.c{border:1px solid #385261;background:#0c171d;padding:28px;max-width:520px}h1{color:#9cdb93}</style><div class="c"><h1>Discord linked to New Eden Sage</h1><p>${String(user.global_name??user.username??"Discord user")} is now opted in for Sage Discord alerts on this corporation workspace.</p><p>You can close this window and return to Sage.</p></div>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+  return new Response(`<!doctype html><meta charset="utf-8"><title>New Eden Sage · Discord Linked</title><style>body{font-family:system-ui;background:#071014;color:#dce8ee;display:grid;place-items:center;height:100vh;margin:0}.c{border:1px solid #385261;background:#0c171d;padding:28px;max-width:520px}h1{color:#9cdb93}</style><div class="c"><h1>Discord linked to New Eden Sage</h1><p>${String(user.global_name??user.username??"Discord user")} is now opted in for Sage Discord alerts on this corporation workspace.</p><p>You can close this window and return to Sage.</p></div>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
 }
 async function updateDiscordNotificationTargets(request:Request,env:SageEnv,principal:Principal,workspaceId:string){
   const actorCharacterId=Number(request.headers.get("X-Sage-Character-ID")??0);
@@ -816,7 +816,7 @@ async function discordAnnounceOperation(request:Request,env:SageEnv,principal:Pr
 async function cancelCorporationOperation(request:Request,env:SageEnv,principal:Principal,workspaceId:string,objectId:string){
   const actorCharacterId=Number(request.headers.get("X-Sage-Character-ID")??0);
   if(!Number.isSafeInteger(actorCharacterId)||actorCharacterId<=0||!(await hasPermission(env,workspaceId,principal.accountId,"fleet.manage",actorCharacterId)))return error(403,"permission_denied","Cancelling an operation requires Command Ops authority for the selected character.");
-  let body:{object_id?:string;cancellation_message?:string};try{body=await request.json();}catch{return error(400,"invalid_json","Request body must be valid JSON.");}
+  let body:{object_id?:string;cancellation_message?:string;announce_cancellation?:boolean};try{body=await request.json();}catch{return error(400,"invalid_json","Request body must be valid JSON.");}
   if(String(body.object_id??"")!==objectId)return error(400,"operation_mismatch","The signed cancellation does not match this operation.");
   const current=await env.DB.prepare(`SELECT so.current_version,sov.payload_json FROM shared_objects so JOIN shared_object_versions sov ON sov.object_id=so.id AND sov.version=so.current_version WHERE so.id=?1 AND so.workspace_id=?2 AND so.object_type='sage.operation' AND so.archived_at IS NULL LIMIT 1`).bind(objectId,workspaceId).first<{current_version:number;payload_json:string}>();
   if(!current)return error(404,"operation_not_found","That corporation operation no longer exists.");
@@ -824,6 +824,7 @@ async function cancelCorporationOperation(request:Request,env:SageEnv,principal:
   if(payload?.status==="cancelled")return error(409,"operation_cancelled","This operation is already cancelled.");
   if(payload?.status==="complete")return error(409,"operation_complete","Completed operations cannot be cancelled.");
   const cancellationMessage=String(body.cancellation_message??"").trim().slice(0,600);
+  const announceCancellation=typeof body.announce_cancellation==="boolean"?body.announce_cancellation:payload?.discordAnnouncementEnabled!==false;
   let discordDeleted=false;let discordCleanupWarning="";let cleanupChannelId="";let cleanupMessageId="";let legacyLookup=false;let discordCancellationSent=false;let discordCancellationMessageId="";let discordCancellationWarning="";
   const tracked=await env.DB.prepare("SELECT channel_id,message_id FROM operation_discord_messages WHERE workspace_id=?1 AND object_id=?2 AND deleted_at IS NULL LIMIT 1").bind(workspaceId,objectId).first<{channel_id:string;message_id:string}>();
   if(tracked?.channel_id&&tracked?.message_id){
@@ -849,7 +850,7 @@ async function cancelCorporationOperation(request:Request,env:SageEnv,principal:
     const data=await response.json() as Record<string,unknown>;
     const requestedRoleIds=Array.isArray(payload?.discordNotifyRoleIds)?payload.discordNotifyRoleIds.map(String).filter(Boolean):[];
     const requestedUserIds=Array.isArray(payload?.discordNotifyUserIds)?payload.discordNotifyUserIds.map(String).filter(Boolean):[];
-    if(payload?.discordAnnouncementEnabled!==false){
+    if(announceCancellation){
       try{
         const target=await validateDiscordSendTarget(env,workspaceId,cleanupChannelId||undefined,requestedRoleIds,requestedUserIds);
         if(target.error){const targetBody=await target.error.clone().json().catch(()=>({})) as Record<string,unknown>;discordCancellationWarning=String(targetBody.message??targetBody.error??"Discord cancellation notice could not be routed.");}
@@ -859,12 +860,12 @@ async function cancelCorporationOperation(request:Request,env:SageEnv,principal:
           const cancellationText=`${discordMentionPrefix(roleIds,userIds)}\n${cancellationContent}`;
           const sent=await sendDiscordChannelMessage(env,target.channelId!,cancellationText,{mentionEveryone:roleIds.length===0&&userIds.length===0,roleIds,userIds});
           discordCancellationMessageId=String(sent.id??"");discordCancellationSent=Boolean(discordCancellationMessageId);
-          await env.DB.prepare("INSERT INTO audit_log (workspace_id,actor_account_id,action,resource_type,resource_id,detail_json) VALUES (?1,?2,'operation.discord_cancel_notice','sage.operation',?3,?4)").bind(workspaceId,principal.accountId,objectId,JSON.stringify({channel_id:target.channelId,message_id:discordCancellationMessageId||null,role_ids:roleIds,user_ids:userIds,mention_everyone:roleIds.length===0&&userIds.length===0,cancellation_message:cancellationMessage||null})).run();
+          await env.DB.prepare("INSERT INTO audit_log (workspace_id,actor_account_id,action,resource_type,resource_id,detail_json) VALUES (?1,?2,'operation.discord_cancel_notice','sage.operation',?3,?4)").bind(workspaceId,principal.accountId,objectId,JSON.stringify({channel_id:target.channelId,message_id:discordCancellationMessageId||null,role_ids:roleIds,user_ids:userIds,mention_everyone:roleIds.length===0&&userIds.length===0,cancellation_message:cancellationMessage||null,requested:announceCancellation})).run();
         }
       }catch(cause){discordCancellationWarning=cause instanceof Error?cause.message:"Discord cancellation notice failed.";}
     }
     await env.DB.prepare("INSERT INTO audit_log (workspace_id,actor_account_id,action,resource_type,resource_id,detail_json) VALUES (?1,?2,'operation.discord_delete','sage.operation',?3,?4)").bind(workspaceId,principal.accountId,objectId,JSON.stringify({channel_id:cleanupChannelId||null,message_id:cleanupMessageId||null,deleted:discordDeleted,legacy_lookup:legacyLookup,warning:discordCleanupWarning||null})).run();
-    return json({...data,discordDeleted,discordCleanupWarning,legacyLookup,discordCancellationSent,discordCancellationMessageId,discordCancellationWarning});
+    return json({...data,discordDeleted,discordCleanupWarning,legacyLookup,discordCancellationRequested:announceCancellation,discordCancellationSent,discordCancellationMessageId,discordCancellationWarning});
   }catch(cause){if(cause instanceof Error&&cause.message==="OPERATION_CANCELLED")return error(409,"operation_cancelled","This operation is already cancelled.");if(cause instanceof Error&&cause.message==="OPERATION_COMPLETE")return error(409,"operation_complete","Completed operations cannot be cancelled.");throw cause;}
 }
 

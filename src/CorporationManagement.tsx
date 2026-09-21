@@ -6,6 +6,7 @@ import { CorporationDiscordIntegration } from "./CorporationDiscordIntegration";
 import { CorporationFindHome } from "./CorporationFindHome";
 import { CorporationHr } from "./CorporationHr";
 import { CorporationOreBuyback } from "./CorporationOreBuyback";
+import { buildCorporationReadData } from "./corporation-command-data";
 import { buildSystemNewsKillmailWindows, mergeSystemNewsKillmails, type KillmailWindowKey } from "./system-news-killmail-windows";
 
 type SystemHit = { systemId: number; name: string; regionName: string; constellationName: string; securityStatus: number };
@@ -117,8 +118,9 @@ function unavailable(value: any) {
 
 function unavailableText(value: any, fallback: string, characterName = "this character") {
   if (!unavailable(value)) return fallback;
-  if ([401, 403].includes(Number(value.status))) return `Not available to ${characterName} with that character's current EVE corporation permissions. Other corporation datasets remain available.`;
-  return `This dataset was unavailable during ${characterName}'s last sync${value.status ? ` (HTTP ${value.status})` : ""}. Other corporation datasets remain available.`;
+  const status = Number(value.status) || Number(String(value.error ?? "").match(/\((\d{3})\)/)?.[1] ?? 0);
+  if ([401, 403].includes(status)) return `Not available to ${characterName} with that character's current EVE corporation permissions. Other corporation datasets remain available.`;
+  return `This dataset was unavailable during ${characterName}'s last sync${status ? ` (HTTP ${status})` : ""}. Other corporation datasets remain available.`;
 }
 
 function assetUrl(typeId: number, variation: "icon" | "render" = "icon", size = 64) {
@@ -188,8 +190,8 @@ export function CorporationManagement() {
     const corporationId = Number(snapshot?.character?.corporation_id ?? 0);
     const characterId = String(snapshot?.characterId ?? "");
     if (!corporationId || !characterId) return [];
-    const data = snapshot?.extended?.corporation ?? {};
-    const publicData = data.publicData ?? snapshot?.character?.corporation_data ?? {};
+    const readData = buildCorporationReadData(snapshots, corporationId, characterId);
+    const publicData = readData.publicData;
     return [{
       characterId,
       characterName: String(snapshot?.character?.name ?? `Character ${characterId}`),
@@ -197,9 +199,12 @@ export function CorporationManagement() {
       name: String(publicData?.name ?? snapshot?.character?.corporation_name ?? `Corporation ${corporationId}`),
       snapshot,
       publicData,
-      data,
+      data: readData.data,
     }];
-  }).sort((a, b) => a.characterName.localeCompare(b.characterName)), [snapshots]);
+  }).sort((a, b) => {
+    const timeDelta = Date.parse(String(b.snapshot?.updatedAt ?? "")) - Date.parse(String(a.snapshot?.updatedAt ?? ""));
+    return Number.isFinite(timeDelta) && timeDelta !== 0 ? timeDelta : a.characterName.localeCompare(b.characterName);
+  }), [snapshots]);
 
   useEffect(() => {
     if (!corporations.length) { setSelectedCharacterId(null); return; }
@@ -268,16 +273,18 @@ function CorporationOverview({ corporation }: { corporation: CorpRecord }) {
   const orders = asArray(d.marketOrders);
   const contracts = asArray(d.contracts);
   const wallets = asArray(d.wallets);
+  const members = asArray(d.members);
+  const memberCount = !unavailable(d.members) && members.length ? members.length : Number(p.member_count ?? 0);
 
   return <div className="corp-data-view">
     <div className="corp-identity-card">
       <div className="corp-monogram">{String(p.ticker ?? corporation.name).slice(0, 4).toUpperCase()}</div>
       <div><p className="eyebrow">CORPORATION {corporation.corporationId}</p><h3>{corporation.name}</h3><strong>{p.ticker ? `[${p.ticker}]` : "Ticker unavailable"}</strong></div>
-      <div className="corp-identity-stats"><span>Members <strong>{number(p.member_count ?? 0)}</strong></span><span>Tax <strong>{formatPercent(p.tax_rate)}</strong></span><span>War eligible <strong>{p.war_eligible == null ? "—" : p.war_eligible ? "Yes" : "No"}</strong></span></div>
+      <div className="corp-identity-stats"><span>Members <strong>{number(memberCount)}</strong></span><span>Tax <strong>{formatCorporationTax(p.tax_rates?.isk ?? p.tax_rate)}</strong></span><span>War eligible <strong>{p.war_eligible == null ? "—" : p.war_eligible ? "Yes" : "No"}</strong></span></div>
     </div>
 
     <div className="corp-overview-grid">
-      <Metric label="Members" value={number(p.member_count ?? 0)} detail="Public corporation count" />
+      <Metric label="Members" value={number(memberCount)} detail={!unavailable(d.members) && members.length ? "Latest accessible corporation roster" : "Public corporation count"} />
       <Metric label="Structures" value={unavailable(d.structures) ? "—" : number(structures.length)} detail={unavailable(d.structures) ? unavailableText(d.structures, "", corporation.characterName) : `${starbases.length} legacy starbase${starbases.length === 1 ? "" : "s"}`} />
       <Metric label="Assets" value={unavailable(d.assets) ? "—" : number(assets.length)} detail={unavailable(d.assets) ? unavailableText(d.assets, "", corporation.characterName) : "Corporation asset stacks returned for the selected character"} />
       <Metric label="Blueprints" value={unavailable(d.blueprints) ? "—" : number(blueprints.length)} detail={unavailable(d.blueprints) ? unavailableText(d.blueprints, "", corporation.characterName) : "Corporation blueprint records"} />
@@ -385,7 +392,7 @@ function CorporationStructures({ corporation }: { corporation: CorpRecord }) {
 
     {(starbases.length > 0 || facilities.length > 0) && <div className="corp-detail-grid compact-grid">
       <article><h4>Legacy starbases</h4>{starbases.map((item, index) => <div className="intel-row" key={String(item.starbase_id ?? index)}><strong>{resolve(item.type_id, `Starbase ${item.starbase_id ?? ""}`)}</strong><span>{resolve(item.system_id, `System ${item.system_id ?? ""}`)}</span><small>{String(item.state ?? "State unavailable")}</small></div>)}</article>
-      <article><h4>Industry facilities</h4>{facilities.map((item, index) => <div className="intel-row" key={String(item.facility_id ?? index)}><strong>{resolve(item.type_id, `Facility ${item.facility_id ?? ""}`)}</strong><span>{resolve(item.solar_system_id, `System ${item.solar_system_id ?? ""}`)}</span><small>Facility {item.facility_id ?? "—"}</small></div>)}</article>
+      <article><h4>Industry facilities</h4>{facilities.map((item, index) => <div className="intel-row" key={String(item.facility_id ?? index)}><strong>{resolve(item.type_id, `Facility ${item.facility_id ?? ""}`)}</strong><span>{resolve(item.system_id ?? item.solar_system_id, `System ${item.system_id ?? item.solar_system_id ?? ""}`)}</span><small>Facility {item.facility_id ?? "—"}</small></div>)}</article>
     </div>}
   </div>;
 }

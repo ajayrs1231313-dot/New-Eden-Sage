@@ -5,6 +5,8 @@ import type { ShoppingListAdd } from "./shopping-list";
 export type { ShoppingListAdd } from "./shopping-list";
 import { effectiveMarketOriginId, sortMarketBuyRows, type MarketBuyRanking } from "./market-search-ordering";
 import { queueNavigationRouteIntent } from "./navigation-intent";
+import { MarketAlertDialog } from "./MarketAlertDialog";
+import "./custom-notifications.css";
 
 type HubScope="all-hubs"|"jita"|"amarr"|"dodixie"|"rens"|"hek"|"new-eden";
 
@@ -28,7 +30,7 @@ function scopeSystems(scope:HubScope){
   if(scope==="new-eden")return [];
   return [HUBS[scope]];
 }
-function DetailedOrderTable({orders,side,originName,onRoutePlanner,onEveDestination,canExportRoute,canExportEve}:{orders:RawMarketSearchOrder[];side:"sell"|"buy";originName:string;onRoutePlanner:(order:RawMarketSearchOrder)=>void;onEveDestination:(order:RawMarketSearchOrder)=>void;canExportRoute:boolean;canExportEve:boolean}){
+function DetailedOrderTable({orders,side,originName,onRoutePlanner,onEveDestination,onAlert,canExportRoute,canExportEve}:{orders:RawMarketSearchOrder[];side:"sell"|"buy";originName:string;onRoutePlanner:(order:RawMarketSearchOrder)=>void;onEveDestination:(order:RawMarketSearchOrder)=>void;onAlert:(order:RawMarketSearchOrder)=>void;canExportRoute:boolean;canExportEve:boolean}){
   return <div className="market-v2-order-table">
     <div className="market-v2-depth-head"><span>Price / unit</span><span>Remaining</span><span>Station / system / actions</span><span>Security</span><span>Jumps</span></div>
     {orders.slice(0,60).map((order,index)=><div className={`market-v2-depth-row${index===0?" best":""}`} key={order.orderId}>
@@ -41,6 +43,7 @@ function DetailedOrderTable({orders,side,originName,onRoutePlanner,onEveDestinat
         <span className="market-v2-order-actions">
           <button type="button" disabled={!canExportRoute} title={canExportRoute?`Send ${order.systemName} to Sage Route Planner`:`Choose a sell-from origin before exporting a route`} onClick={()=>onRoutePlanner(order)}>Export to Route Planner</button>
           <button type="button" disabled={!canExportEve} title={canExportEve?`Set ${order.locationName||order.systemName} as the EVE destination`:`Choose a connected character first`} onClick={()=>onEveDestination(order)}>Add Destination in EVE</button>
+          <button type="button" className="market-alert-row-button" title={side==="sell"?"Create a sell price and volume alert":"Create a buy price and volume alert"} onClick={()=>onAlert(order)}>🔔 Set alert</button>
         </span>
       </span>
       <span><strong>{securityLabel(order.securityStatus,order.securityBand)}</strong><small>{order.regionName}</small></span>
@@ -148,6 +151,7 @@ export function GlobalMarketSearch({snapshot,onAddToShoppingList}:{snapshot?:Cha
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
   const [eveStatus,setEveStatus]=useState("");
+  const [alertOrder,setAlertOrder]=useState<RawMarketSearchOrder|null>(null);
 
   const characterOriginId=Number(snapshot?.location?.solar_system_id??0)||null;
   const characterOriginName=String(snapshot?.location?.solar_system_name??"").trim()||(characterOriginId?`System ${characterOriginId}`:"");
@@ -309,14 +313,15 @@ export function GlobalMarketSearch({snapshot,onAddToShoppingList}:{snapshot?:Cha
       <section className="market-v2-depth">
         <article className="market-v2-order-column sell">
           <header><div><span>SELL ORDERS</span><h4>Cheapest sellers</h4><small>Lowest asks first within the active search filters.</small></div><strong>{sellers.length.toLocaleString()} loaded</strong></header>
-          <DetailedOrderTable orders={sellers} side="sell" originName={effectiveOriginName} onRoutePlanner={exportOrderToRoutePlanner} onEveDestination={order=>void addOrderDestinationInEve(order)} canExportRoute={Boolean(effectiveOriginId)} canExportEve={Boolean(snapshot?.characterId)}/>
+          <DetailedOrderTable orders={sellers} side="sell" originName={effectiveOriginName} onRoutePlanner={exportOrderToRoutePlanner} onEveDestination={order=>void addOrderDestinationInEve(order)} onAlert={setAlertOrder} canExportRoute={Boolean(effectiveOriginId)} canExportEve={Boolean(snapshot?.characterId)}/>
         </article>
         <article className="market-v2-order-column buy">
           <header className="market-v2-buy-head"><div><span>BUY ORDERS</span><h4>{buyRanking==="nearest"?"Closest buyers":"Highest-paying buyers"}</h4><small>Rank buyers by distance from your origin or by price.</small></div><div className="market-v2-buy-ranking"><span>RANK BUYERS</span><div><button type="button" className={buyRanking==="nearest"?"active":""} disabled={!effectiveOriginId} onClick={()=>setBuyRanking("nearest")}>Nearest</button><button type="button" className={buyRanking==="highest"?"active":""} onClick={()=>setBuyRanking("highest")}>Highest price</button></div></div></header>
           {regionalBuySignals.length>0&&<RegionalSignals signals={regionalBuySignals} originName={effectiveOriginName} onRoutePlanner={exportOrderToRoutePlanner} onEveDestination={signal=>void addOrderDestinationInEve(signal)} canExportRoute={Boolean(effectiveOriginId)} canExportEve={Boolean(snapshot?.characterId)}/>}
-          <DetailedOrderTable orders={buyers} side="buy" originName={effectiveOriginName} onRoutePlanner={exportOrderToRoutePlanner} onEveDestination={order=>void addOrderDestinationInEve(order)} canExportRoute={Boolean(effectiveOriginId)} canExportEve={Boolean(snapshot?.characterId)}/>
+          <DetailedOrderTable orders={buyers} side="buy" originName={effectiveOriginName} onRoutePlanner={exportOrderToRoutePlanner} onEveDestination={order=>void addOrderDestinationInEve(order)} onAlert={setAlertOrder} canExportRoute={Boolean(effectiveOriginId)} canExportEve={Boolean(snapshot?.characterId)}/>
         </article>
       </section>
     </>}
+    {alertOrder&&<MarketAlertDialog order={alertOrder} onClose={()=>setAlertOrder(null)} onCreated={(message)=>setEveStatus(message)} />}
   </section>;
 }

@@ -3,13 +3,15 @@ import {
   analyzeBlueprintActivities,
   analyzeManufacturingPlan,
   getIndustrySystemCostIndices,
+  getIndustrialBlueprintMaterialTypeIds,
   getIndustrialTypeNames,
 } from "./industrial-engine";
 import { filterRegionalMarket } from "./regional-market-filter";
-import { getMarketSystemIndex } from "./market-static-index";
+import { getMarketSystemIndex, getMarketTypeIndex } from "./market-static-index";
 import { universeRoute } from "./universe-route-graph";
 import { loadCurrentMarketRevision } from "./shared-market-data";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
+import { cacheTypeIconsLocal } from "./eve-assets";
 import {
   exactPreparedPageState,
   lastKnownGoodPreparedPageState,
@@ -42,7 +44,7 @@ export type IndustrialOpportunityInput = {
 };
 
 const INDUSTRIAL_PAGE_MODULE = "industrial.command";
-const INDUSTRIAL_PAGE_MODEL_VERSION = 1;
+const INDUSTRIAL_PAGE_MODEL_VERSION = 3;
 
 function defaultIndustrialOpportunityInput(characterId: string): IndustrialOpportunityInput {
   return {
@@ -489,6 +491,8 @@ type IndustrialPreparedPage = {
   opportunityGeneratedAt: string | null;
   systemCostIndex: any;
   typeNames: Record<string, string>;
+  typeMetadata: Record<string, { categoryId: number; categoryName: string; groupId: number; groupName: string; marketGroupName: string }>;
+  blueprintMaterialTypeIds: number[];
 };
 
 function isIndustrialPreparedPage(value: unknown, characterId: string): value is IndustrialPreparedPage {
@@ -499,6 +503,8 @@ function isIndustrialPreparedPage(value: unknown, characterId: string): value is
     && Array.isArray(candidate.opportunities)
     && (candidate.opportunityStatus == null || typeof candidate.opportunityStatus === "string")
     && candidate.typeNames && typeof candidate.typeNames === "object" && !Array.isArray(candidate.typeNames)
+    && candidate.typeMetadata && typeof candidate.typeMetadata === "object" && !Array.isArray(candidate.typeMetadata)
+    && Array.isArray(candidate.blueprintMaterialTypeIds)
   );
 }
 
@@ -510,13 +516,34 @@ async function buildIndustrialPreparedState(characterId: string) {
   const corpBlueprints = Array.isArray(extended?.corporation?.blueprints) ? extended.corporation.blueprints : [];
   const jobs = Array.isArray(extended?.industryJobs) ? extended.industryJobs : [];
   const corpJobs = Array.isArray(extended?.corporation?.industryJobs) ? extended.corporation.industryJobs : [];
+  const blueprintMaterialTypeIds = await getIndustrialBlueprintMaterialTypeIds();
+  const blueprintMaterialTypeIdSet = new Set(blueprintMaterialTypeIds);
+  const connectedAssetTypeIds = listSnapshots().flatMap((candidate: any) =>
+    (Array.isArray(candidate?.extended?.assets) ? candidate.extended.assets : [])
+      .map((asset: any) => Number(asset?.type_id ?? 0))
+      .filter((typeId: number) => typeId > 0 && blueprintMaterialTypeIdSet.has(typeId)),
+  );
   const typeIds = [...new Set([
     ...blueprints.map((blueprint: any) => Number(blueprint.type_id ?? 0)),
     ...corpBlueprints.map((blueprint: any) => Number(blueprint.type_id ?? 0)),
     ...jobs.flatMap((job: any) => [Number(job.blueprint_type_id ?? 0), Number(job.product_type_id ?? 0)]),
     ...corpJobs.flatMap((job: any) => [Number(job.blueprint_type_id ?? 0), Number(job.product_type_id ?? 0)]),
+    ...connectedAssetTypeIds,
   ].filter((typeId: number) => typeId > 0))];
-  const typeNames = await getIndustrialTypeNames(typeIds);
+  const [typeNames, marketTypes] = await Promise.all([
+    getIndustrialTypeNames(typeIds),
+    getMarketTypeIndex(),
+  ]);
+  const typeMetadata = Object.fromEntries(typeIds.map((typeId) => {
+    const meta = marketTypes.get(typeId);
+    return [typeId, {
+      categoryId: meta?.categoryId ?? 0,
+      categoryName: meta?.categoryName ?? "Unknown",
+      groupId: meta?.groupId ?? 0,
+      groupName: meta?.groupName ?? "Unknown group",
+      marketGroupName: meta?.marketGroupName ?? "",
+    }];
+  }));
   let systemCostIndex: any = null;
   try {
     systemCostIndex = await loadPersistedResult<any>("industry-system-cost", await systemCostKey(characterId, snapshot));
@@ -530,6 +557,8 @@ async function buildIndustrialPreparedState(characterId: string) {
     opportunityGeneratedAt: opportunities?.generatedAt ?? null,
     systemCostIndex,
     typeNames,
+    typeMetadata,
+    blueprintMaterialTypeIds,
   };
 }
 
@@ -573,7 +602,7 @@ export async function loadIndustrialPreparedState(characterId: string) {
     validatePayload: (value): value is IndustrialPreparedPage => isIndustrialPreparedPage(value, characterId),
   });
   if (previous) return { ...previous.payload, pageState: lastKnownGoodPreparedPageState(previous) };
-  return { ...exact, pageState: null };
+  return { ...(exact as IndustrialPreparedPage), pageState: null };
 }
 
 export async function prepareIndustrialCommand(
@@ -586,6 +615,16 @@ export async function prepareIndustrialCommand(
     ...(Array.isArray(extended?.blueprints) ? extended.blueprints : []),
     ...(Array.isArray(extended?.corporation?.blueprints) ? extended.corporation.blueprints : []),
   ].map((blueprint: any) => Number(blueprint.type_id ?? 0)).filter((typeId: number) => typeId > 0))];
+
+  const blueprintMaterialTypeIds = await getIndustrialBlueprintMaterialTypeIds();
+  const blueprintMaterialTypeIdSet = new Set(blueprintMaterialTypeIds);
+  const materialTypeIds = [...new Set(listSnapshots().flatMap((candidate: any) =>
+    (Array.isArray(candidate?.extended?.assets) ? candidate.extended.assets : [])
+      .map((asset: any) => Number(asset?.type_id ?? 0))
+      .filter((typeId: number) => typeId > 0 && blueprintMaterialTypeIdSet.has(typeId)),
+  ))];
+  const materialIconCache = cacheTypeIconsLocal(materialTypeIds, 64);
+  onProgress?.(2, `${snapshot.character?.name ?? "Character"}: warming local EVE material thumbnails.`);
 
   onProgress?.(3, `${snapshot.character?.name ?? "Character"}: preparing current-system industry costs.`);
   try {
@@ -610,9 +649,11 @@ export async function prepareIndustrialCommand(
       sharedCharacterIds: [],
     },
     {
-      onProgress: (percent, message) => onProgress?.(35 + percent * 0.65, `${snapshot.character?.name ?? "Character"}: ${message}`),
+      onProgress: (percent, message) => onProgress?.(35 + percent * 0.6, `${snapshot.character?.name ?? "Character"}: ${message}`),
     },
   );
+  const iconCache = await materialIconCache;
+  onProgress?.(98, `${snapshot.character?.name ?? "Character"}: ${iconCache.ready}/${iconCache.requested} EVE material thumbnails cached locally.`);
   onProgress?.(100, `${snapshot.character?.name ?? "Character"}: Industrial Command ready.`);
   return {
     blueprintActivities: uniqueBlueprintTypeIds.length,

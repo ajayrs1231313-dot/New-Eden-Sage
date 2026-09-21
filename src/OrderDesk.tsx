@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { SVGProps } from "react";
 import type { CharacterSnapshot } from "./types";
 import { IskGlyph } from "./IskIcons";
+import { ensureNotificationRule, orderCompetitionNotification } from "./notifications";
+import "./custom-notifications.css";
 import "./order-desk.css";
 
 type OrderView = "buy" | "sell" | "history";
@@ -111,6 +113,8 @@ export function OrderDesk({ snapshot, onNavigate }: { snapshot?: CharacterSnapsh
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [deskModal, setDeskModal] = useState<{ title: string; points: string[]; kind: "guide" | "soon" } | null>(null);
   const [names, setNames] = useState<Record<number, string>>({});
+  const [watchedOrderIds, setWatchedOrderIds] = useState<Set<number>>(() => new Set());
+  const [alertStatus, setAlertStatus] = useState("");
 
   const orders = useMemo(() => Array.isArray(snapshot?.extended?.marketOrders)
     ? snapshot!.extended!.marketOrders as CharacterMarketOrder[]
@@ -132,6 +136,44 @@ export function OrderDesk({ snapshot, onNavigate }: { snapshot?: CharacterSnapsh
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [orders, transactions, names]);
+  useEffect(() => {
+    let cancelled = false;
+    void window.sage.getNotificationRules().then(({ rules }) => {
+      if (cancelled) return;
+      setWatchedOrderIds(new Set(rules.filter((rule) => rule.enabled !== false && rule.metadata?.source === "order-desk").map((rule) => Number(rule.metadata?.orderId ?? 0)).filter((id) => id > 0)));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [snapshot?.characterId]);
+
+  async function watchOrder(order: CharacterMarketOrder) {
+    const orderId = Number(order.order_id ?? 0);
+    const typeId = Number(order.type_id ?? 0);
+    const regionId = Number(order.region_id ?? 0);
+    const locationId = Number(order.location_id ?? 0);
+    const orderPrice = Number(order.price ?? 0);
+    if (!orderId || !typeId || !regionId || !locationId || !orderPrice) {
+      setAlertStatus("This order does not contain enough market data to create an alert.");
+      return;
+    }
+    setAlertStatus("Creating server-side competition alert...");
+    try {
+      const created = await ensureNotificationRule(orderCompetitionNotification({
+        orderId,
+        typeId,
+        typeName: names[typeId] ?? `Type ${typeId}`,
+        regionId,
+        locationId,
+        side: order.is_buy_order ? "buy" : "sell",
+        orderPrice,
+      }));
+      setWatchedOrderIds((current) => new Set([...current, orderId]));
+      setAlertStatus(created.created
+        ? `${names[typeId] ?? `Type ${typeId}`} is now watched for ${order.is_buy_order ? "outbids" : "undercuts"}.`
+        : `That order alert is already active.`);
+    } catch (caught) {
+      setAlertStatus(caught instanceof Error ? caught.message.replace(/^Error invoking remote method .*?: Error: /, "") : "Could not create order alert.");
+    }
+  }
 
   if (!snapshot) {
     return <div className="market-no-results">Connect and sync a character to view personal market orders.</div>;
@@ -281,7 +323,7 @@ export function OrderDesk({ snapshot, onNavigate }: { snapshot?: CharacterSnapsh
         visibleHistory.length ? <div className="od-history-list">{visibleHistory.slice(0, 80).map((transaction) => <article key={transaction.transaction_id}><span className={transaction.is_buy ? "buy" : "sell"}>{transaction.is_buy ? "BUY" : "SELL"}</span><div><strong>{names[transaction.type_id] ?? `Type ${transaction.type_id}`}</strong><small>{locationLabel(snapshot, transaction.location_id)} · {new Date(transaction.date).toLocaleString()}</small></div><div><strong>{money(transaction.quantity)} × {money(transaction.unit_price)} ISK</strong><small>{money(transactionValue(transaction))} ISK total</small></div></article>)}</div> : <div className="od-empty-state"><span className="od-empty-icon"><DeskGlyph kind="history" /></span><strong>No recent order activity</strong><small>Your synced wallet transactions will appear here.</small></div>
       ) : (
         <div className="od-order-table">
-          <div className="od-order-row heading"><span>Item</span><span>Price</span><span>Filled / remaining</span><span>{view === "buy" ? "Escrow" : "Remaining value"}</span><span>Location</span><span>Expires</span></div>
+          <div className="od-order-row heading"><span>Item</span><span>Price</span><span>Filled / remaining</span><span>{view === "buy" ? "Escrow" : "Remaining value"}</span><span>Location</span><span>Expires</span><span>Alert</span></div>
           {visibleOrders.map((order, index) => {
             const typeId = Number(order.type_id ?? 0);
             const total = Number(order.volume_total ?? order.volume_remain ?? 0);
@@ -289,10 +331,12 @@ export function OrderDesk({ snapshot, onNavigate }: { snapshot?: CharacterSnapsh
             const filled = Math.max(0, total - remaining);
             const price = Number(order.price ?? 0);
             const percent = total > 0 ? (filled / total) * 100 : 0;
-            return <article className="od-order-row" key={order.order_id ?? `${typeId}:${index}`}><span><strong>{names[typeId] ?? (typeId ? `Type ${typeId}` : "Unknown item")}</strong><small>{view === "buy" ? String(order.range ?? "station") : "Sell order"} · ID {order.order_id ?? "—"}</small></span><span><strong>{money(price)} ISK</strong><small>{order.min_volume && order.min_volume > 1 ? `Min ${money(order.min_volume)}` : "Per unit"}</small></span><span><strong>{money(filled)} / {money(remaining)}</strong><small>{percent.toFixed(1)}% filled · {money(total)} total</small><i className="od-fill"><b style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} /></i></span><span><strong>{money(view === "buy" ? Number(order.escrow ?? 0) : price * remaining)} ISK</strong><small>{view === "buy" ? "Current escrow" : "At listed price"}</small></span><span><strong>{locationLabel(snapshot, order.location_id)}</strong><small>{order.is_corporation ? "Corporation order" : "Personal order"}</small></span><span><strong>{timeRemaining(order)}</strong><small>{orderExpiresAt(order)?.toLocaleString() ?? "—"}</small></span></article>;
+            return <article className="od-order-row" key={order.order_id ?? `${typeId}:${index}`}><span><strong>{names[typeId] ?? (typeId ? `Type ${typeId}` : "Unknown item")}</strong><small>{view === "buy" ? String(order.range ?? "station") : "Sell order"} · ID {order.order_id ?? "—"}</small></span><span><strong>{money(price)} ISK</strong><small>{order.min_volume && order.min_volume > 1 ? `Min ${money(order.min_volume)}` : "Per unit"}</small></span><span><strong>{money(filled)} / {money(remaining)}</strong><small>{percent.toFixed(1)}% filled · {money(total)} total</small><i className="od-fill"><b style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} /></i></span><span><strong>{money(view === "buy" ? Number(order.escrow ?? 0) : price * remaining)} ISK</strong><small>{view === "buy" ? "Current escrow" : "At listed price"}</small></span><span><strong>{locationLabel(snapshot, order.location_id)}</strong><small>{order.is_corporation ? "Corporation order" : "Personal order"}</small></span><span><strong>{timeRemaining(order)}</strong><small>{orderExpiresAt(order)?.toLocaleString() ?? "—"}</small></span><span className="od-alert-cell"><button type="button" className={`sage-notify-button${watchedOrderIds.has(Number(order.order_id ?? 0)) ? " active" : ""}`} onClick={() => void watchOrder(order)}>🔔 {watchedOrderIds.has(Number(order.order_id ?? 0)) ? "Watching" : "Notify me"}</button><small>{order.is_buy_order ? "Outbid alert" : "Undercut alert"}</small></span></article>;
           })}
         </div>
       )}
+
+      {alertStatus && <div className="od-alert-status" role="status">{alertStatus}</div>}
 
       <div className="od-lower-grid">
         <section className="od-panel quick">
@@ -321,7 +365,7 @@ export function OrderDesk({ snapshot, onNavigate }: { snapshot?: CharacterSnapsh
             <button type="button" onClick={() => quickNavigate("market-opportunities")}><IskGlyph name="target" /><span><strong>Find Opportunities</strong><small>Discover profitable items</small></span><DeskGlyph kind="arrow" /></button>
             <button type="button" onClick={() => quickNavigate("market")}><IskGlyph name="bars" /><span><strong>Price History</strong><small>View historical data</small></span><DeskGlyph kind="arrow" /></button>
             <button type="button" onClick={() => quickNavigate("market")}><IskGlyph name="route" /><span><strong>Region Comparison</strong><small>Compare prices across regions</small></span><DeskGlyph kind="arrow" /></button>
-            <button type="button" onClick={() => setDeskModal({ title: "Set Alerts", points: ["This feature is coming soon.", "Market and order alerting will be added in a future Sage update."], kind: "soon" })}><DeskGlyph kind="clock" /><span><strong>Set Alerts</strong><small>Get notified of price changes</small></span><DeskGlyph kind="arrow" /></button>
+            <button type="button" onClick={() => setDeskModal({ title: "Server Alerts", points: ["Alerts are live and evaluated on every server crunch.", "Use Notify me on any active order for undercut or outbid monitoring.", "Market Search also supports cheaper-price and better-buyer alerts, while auction contracts can be watched for new bids."], kind: "guide" })}><DeskGlyph kind="clock" /><span><strong>Server Alerts</strong><small>Undercuts, outbids and prices</small></span><DeskGlyph kind="arrow" /></button>
           </div>
         </section>
       </div>

@@ -169,6 +169,10 @@ test('operation Discord announcements are tracked and removed on cancellation',(
   assert.match(backend,/operationCancellationDiscordContent/);
   assert.match(backend,/cancellation_message:cancellationMessage\|\|null/);
   assert.match(planner,/discordCancellationSent/);
+  assert.match(planner,/announceCancellation/);
+  assert.match(online,/announce_cancellation:announceCancellation/);
+  assert.match(backend,/announce_cancellation/);
+  assert.match(backend,/if\(announceCancellation\)/);
   assert.match(backend,/discord_previous_message_delete_failed/);
   assert.match(backend,/discord_operation_delete_failed/);
   assert.match(online,/discord\.operation_cancel/);

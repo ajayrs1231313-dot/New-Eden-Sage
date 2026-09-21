@@ -8,7 +8,7 @@ import { ensureStaticDataArchive, INDUSTRIAL_PREPARED_CACHE, prepareStaticDataFo
 import { loadSharedFullMarketAnalysisIndex, loadSharedPublicSource } from "./shared-market-data";
 
 const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
-const INDUSTRIAL_PREPARED_SCHEMA = 2;
+const INDUSTRIAL_PREPARED_SCHEMA = 3;
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
@@ -33,7 +33,7 @@ type IndustrialIndex = {
   names: Map<number, string>;
   volumes: Map<number, number>;
   productBlueprints: Map<number, BlueprintDefinition[]>;
-  typeMeta: Map<number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null }>;
+  typeMeta: Map<number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null; published: boolean }>;
 };
 
 let cache: Promise<IndustrialIndex> | undefined;
@@ -45,7 +45,7 @@ type SerializedIndustrialIndex = {
   names: Array<[number, string]>;
   volumes: Array<[number, number]>;
   productBlueprints: Array<[number, number[]]>;
-  typeMeta: Array<[number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null }]>;
+  typeMeta: Array<[number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null; published: boolean }]>;
 };
 
 async function readPreparedIndustrialIndex(): Promise<IndustrialIndex | undefined> {
@@ -121,15 +121,15 @@ function index() {
       const row = JSON.parse(line) as { _key: number; categoryID?: number; name?: { en?: string } };
       groups.set(row._key, { categoryId: Number(row.categoryID ?? 0), name: row.name?.en ?? `Group ${row._key}` });
     }
-    const typeMeta = new Map<number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null }>();
+    const typeMeta = new Map<number, { categoryId: number; groupId: number; groupName: string; metaGroupId: number | null; techLevel: number | null; published: boolean }>();
     for (const line of typesEntry.getData().toString("utf8").split(/\r?\n/)) {
       if (!line) continue;
-      const row = JSON.parse(line) as { _key: number; name?: { en?: string }; volume?: number; groupID?: number; metaGroupID?: number; techLevel?: number };
+      const row = JSON.parse(line) as { _key: number; name?: { en?: string }; volume?: number; groupID?: number; metaGroupID?: number; techLevel?: number; published?: boolean };
       if (row.name?.en) names.set(row._key, row.name.en);
       volumes.set(row._key, row.volume ?? 0);
       const groupId = Number(row.groupID ?? 0);
       const group = groups.get(groupId);
-      typeMeta.set(row._key, { categoryId: group?.categoryId ?? 0, groupId, groupName: group?.name ?? `Group ${groupId}`, metaGroupId: row.metaGroupID == null ? null : Number(row.metaGroupID), techLevel: row.techLevel == null ? null : Number(row.techLevel) });
+      typeMeta.set(row._key, { categoryId: group?.categoryId ?? 0, groupId, groupName: group?.name ?? `Group ${groupId}`, metaGroupId: row.metaGroupID == null ? null : Number(row.metaGroupID), techLevel: row.techLevel == null ? null : Number(row.techLevel), published: row.published === true });
     }
     const value = { blueprints, names, volumes, productBlueprints, typeMeta };
     await savePreparedIndustrialIndex(value);
@@ -514,6 +514,33 @@ export async function prepareIndustrialDataLocal() {
 export async function getIndustrialTypeNames(typeIds: number[]) {
   const value = await index();
   return Object.fromEntries([...new Set(typeIds.map(Number).filter((typeId) => Number.isInteger(typeId) && typeId > 0))].map((typeId) => [typeId, value.names.get(typeId) ?? `Type ${typeId}`]));
+}
+
+export async function getIndustrialBlueprintMaterialTypeIds() {
+  const { blueprints, typeMeta } = await index();
+  const materialTypeIds = new Set<number>();
+  for (const blueprint of blueprints.values()) {
+    const blueprintTypeId = Number(blueprint.blueprintTypeID ?? blueprint._key);
+    if (!typeMeta.get(blueprintTypeId)?.published) continue;
+    for (const activityName of ["manufacturing", "reaction"] as const) {
+      const activity = blueprint.activities?.[activityName];
+      if (!activity?.products?.length || !activity.materials?.length) continue;
+      const publishedProductIds = new Set(
+        activity.products
+          .map((product) => Number(product.typeID ?? 0))
+          .filter((typeId) => typeId > 0 && typeMeta.get(typeId)?.published),
+      );
+      if (!publishedProductIds.size) continue;
+      for (const material of activity.materials) {
+        const typeId = Number(material.typeID ?? 0);
+        if (!Number.isInteger(typeId) || typeId <= 0) continue;
+        if (!typeMeta.get(typeId)?.published) continue;
+        if (publishedProductIds.has(typeId)) continue;
+        materialTypeIds.add(typeId);
+      }
+    }
+  }
+  return [...materialTypeIds].sort((a, b) => a - b);
 }
 
 export async function searchIndustrialBlueprints(query: string, limit = 40) {

@@ -13,7 +13,7 @@ test('Asset Command exposes Loot Sources and a retained Assets workspace',()=>{
   assert.match(app,/type AssetCommandTab = "loot" \| "assets" \| "market" \| "wallet"/);
   assert.match(app,/>Loot Sources<\/button>/);
   assert.match(app,/>Assets<\/button>/);
-  assert.match(app,/RetainedAssetsCommand snapshots=\{snapshots\}/);
+  assert.match(app,/RetainedAssetsCommand snapshots=\{assetsSnapshots\}/);
 });
 
 test('Assets view uses existing snapshot asset data without another refresh path',()=>{

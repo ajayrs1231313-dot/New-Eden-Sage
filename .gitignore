@@ -33,3 +33,5 @@ settings.json
 *.token
 *.pem
 *.pfx
+__pycache__/
+visual-verify-*.png

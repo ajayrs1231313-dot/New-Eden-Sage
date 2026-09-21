@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { availableParallelism } from "node:os";
+import { pageLoadWorkerCount } from "./interactive-processing-policy";
 import { Worker } from "node:worker_threads";
 import { DATA_ROOT } from "./data-paths";
 import { analyzeCapabilities, analyzeCurrentShipUse, type CapabilityAnalysis, type CapabilityResult } from "./capability-engine";
@@ -393,7 +393,7 @@ function runPveReadinessWorker(
 }
 
 async function resolvePveReadiness(snapshot: any, cloneState: CloneState, suppliedCapabilities?: CapabilityAnalysis): Promise<PveReadinessBundle> {
-  const useParallelWorkers = availableParallelism() >= 10;
+  const useParallelWorkers = pageLoadWorkerCount(2) >= 2;
   if (useParallelWorkers) {
     const [capabilitiesResult, currentShipResult] = await Promise.all([
       suppliedCapabilities ? Promise.resolve(suppliedCapabilities) : runPveReadinessWorker("capabilities", snapshot, cloneState),

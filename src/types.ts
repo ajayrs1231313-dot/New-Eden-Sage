@@ -1188,6 +1188,57 @@ export interface ProfitReconciliationReview { recordId:string; characterId:strin
 export interface ProfitPurchaseCandidate { walletTransactionId:number; date:string; typeId:number; materialName:string; quantity:number; unitPrice:number; cost:number; walletScope:"character"|"corporation"; walletDivision?:number; selected:boolean; reservedByOther:boolean }
 export interface ProfitPurchaseReview { recordId:string; characterId:string; title:string; candidates:ProfitPurchaseCandidate[] }
 
+export interface UsageMetricEvent {
+  type:string;
+  at:string;
+  installId:string;
+  sessionId:string;
+  page?:string;
+  appVersion?:string;
+  active?:boolean;
+  data?:Record<string,unknown>;
+}
+export interface UsageMetricBatch { events:UsageMetricEvent[]; }
+export interface UsagePresence { connected:number; windowSeconds:number; asOf?:string; }
+export type SageNotificationRepeatMode = "edge" | "change" | "once" | "always";
+export interface SageNotificationRuleInput {
+  kind:string;
+  label?:string;
+  enabled?:boolean;
+  repeatMode?:SageNotificationRepeatMode;
+  target?:Record<string,unknown>;
+  condition?:Record<string,unknown>;
+  metadata?:Record<string,unknown>;
+}
+export interface SageNotificationRule extends SageNotificationRuleInput {
+  schemaVersion:number;
+  requestId:string;
+  version:number;
+  sageId:string;
+  enabled:boolean;
+  repeatMode:SageNotificationRepeatMode;
+  target:Record<string,unknown>;
+  condition:Record<string,unknown>;
+  metadata:Record<string,unknown>;
+  createdAt:string;
+  updatedAt:string;
+  state?:Record<string,unknown>|null;
+}
+export interface SageNotificationEvent {
+  eventId:string;
+  requestId:string;
+  ruleVersion:number;
+  sageId:string;
+  kind:string;
+  title:string;
+  message:string;
+  data:Record<string,unknown>;
+  triggeredAt:string;
+  acknowledged:boolean;
+}
+export interface SageNotificationInbox { events:SageNotificationEvent[]; unread:number; }
+
+
 declare global {
   interface Window {
     sage: {
@@ -1222,6 +1273,15 @@ declare global {
       getHostClock(): Promise<{now:string;platform:string;timezone:string;offsetMinutes:number;hostname:string}>;
       syncHostClock(): Promise<{ok:boolean;message:string;clock:{now:string;platform:string;timezone:string;offsetMinutes:number}}>;
       setHostClock(value:string): Promise<{ok:boolean;message:string;clock:{now:string;platform:string;timezone:string;offsetMinutes:number}}>;
+      submitUsageMetrics(batch:UsageMetricBatch): Promise<{accepted:number;connected?:number}>;
+      getUsagePresence(): Promise<UsagePresence>;
+      getNotificationRules(): Promise<{rules:SageNotificationRule[]}>;
+      createNotificationRule(input:SageNotificationRuleInput): Promise<{rule:SageNotificationRule}>;
+      updateNotificationRule(requestId:string, rule:Partial<SageNotificationRuleInput>): Promise<{rule:SageNotificationRule}>;
+      deleteNotificationRule(requestId:string): Promise<{deleted:boolean;requestId:string}>;
+      getNotificationInbox(input?:{limit?:number;includeAcknowledged?:boolean}): Promise<SageNotificationInbox>;
+      acknowledgeNotification(eventId:string): Promise<{acknowledged:boolean;eventId:string;acknowledgedAt:string}>;
+      onNotificationsUpdated(callback:(value:SageNotificationInbox)=>void): () => void;
       getGlobalMarketQuotes(typeIds:number[]): Promise<{createdAt:string|null;quotes:Array<{typeId:number;typeName:string;bestBuy:number|null;bestSell:number|null;bestBuySystem:string|null;bestSellSystem:string|null}>}>;
       getLpCorporations(corporationIds:number[]): Promise<Array<{corporationId:number;corporationName:string}>>;
       getLpStoreOffers(corporationId:number, marketRevision?:number): Promise<any>;
@@ -1269,7 +1329,7 @@ declare global {
       publishCorporationOperation(input:{characterId:string;payload:Record<string,unknown>}): Promise<any>;
       updateCorporationOperation(input:{characterId:string;workspaceId:string;objectId:string;payload:Record<string,unknown>;expectedVersion:number}): Promise<any>;
       announceCorporationOperationDiscord(input:{characterId:string;workspaceId:string;objectId:string}): Promise<any>;
-      cancelCorporationOperation(input:{characterId:string;workspaceId:string;objectId:string;message?:string}): Promise<{discordDeleted:boolean;discordCleanupWarning?:string;legacyLookup?:boolean;discordCancellationSent?:boolean;discordCancellationMessageId?:string;discordCancellationWarning?:string}>;
+      cancelCorporationOperation(input:{characterId:string;workspaceId:string;objectId:string;message?:string;announceCancellation?:boolean}): Promise<{discordDeleted:boolean;discordCleanupWarning?:string;legacyLookup?:boolean;discordCancellationRequested?:boolean;discordCancellationSent?:boolean;discordCancellationMessageId?:string;discordCancellationWarning?:string}>;
       takeCorporationOperationOwnership(input:{characterId:string;workspaceId:string;objectId:string}): Promise<any>;
       setCorporationOperationApplicationNotifications(input:{characterId:string;workspaceId:string;objectId:string;enabled:boolean}): Promise<any>;
       applyCorporationOperationRole(input:{characterId:string;workspaceId:string;objectId:string;roleId:string;fitName?:string;fitText?:string;hullName?:string}): Promise<any>;
@@ -1304,6 +1364,7 @@ declare global {
       checkFittingItemCompatibilityLocal(input:{ hullTypeId:number; itemTypeId:number; placement?:string; fitted?:Array<{typeId:number;rack?:string}> }): Promise<{ compatible:boolean; code:string; reason:string }>;
       getFittingRemediesLocal(input: { characterId?:string; hullTypeId:number; issueCodes:string[]; itemTypeIds:number[]; items?:Array<{typeId:number;quantity?:number;rack?:string;chargeTypeId?:number;chargeQuantity?:number;activeQuantity?:number;attributeOverrides?:Record<string,number>;state?:"offline"|"online"|"active"|"overheated"}>; implantTypeIds?:number[]; boosterTypeIds?:number[] }): Promise<FitRemedyCandidate[]>;
       resolveTypeIds(ids: number[]): Promise<Array<{ id: number; name: string }>>;
+      cacheTypeIcons(input: { typeIds: number[]; size?: number }): Promise<{ requested: number; ready: number; failed: number; size: number }>;
       listShips(): Promise<Array<{ typeId: number; name: string; groupId: number; groupName: string; metaGroupId?: number; metaGroupName?: string; factionId?: number; factionName?: string }>>;
       getManufacturingPlan(input: any): Promise<any>;
       getFoundryWorkspace(input: any): Promise<any>;
@@ -1512,7 +1573,7 @@ declare global {
         minBestBuy?: number | null; maxBestBuy?: number | null; minBestSell?: number | null; maxBestSell?: number | null; minBuyOrders?: number | null; maxBuyOrders?: number | null; minSellOrders?: number | null; maxSellOrders?: number | null; minBuyVolume?: number | null; minSellVolume?: number | null; maxSellVolume?: number | null;
         minSpreadPercent?: number | null; maxSpreadPercent?: number | null; minRegionalPremiumPercent?: number | null; minDemandSupplyRatio?: number | null; maxItemVolumeM3?: number | null; sort?: RegionalMarketSort; offset?: number; limit?: number;
       }): Promise<RegionalMarketFilterResult>;
-      searchOreMarketTypes(query:string, limit?:number): Promise<Array<{ typeId:number; name:string; categoryId:number; categoryName:string }>>;
+      searchOreMarketTypes(query:string, limit?:number, kind?:"ore"|"ice"|"gas"|"salvage"): Promise<Array<{ typeId:number; name:string; categoryId:number; categoryName:string }>>;
       quoteMarketDepth(input: {
         items?: Array<{ typeId?: number; name?: string; quantity: number }>;
         typeId?: number;

@@ -302,7 +302,7 @@ export async function analyzeWargameFit(text: string, characterId: string, envir
   const droneDamageSources: WargameDamageSource[] = [...droneGroups.values()].map(({ activeCount, ...source }) => ({ ...source, name: activeCount > 1 ? `${source.name} x${activeCount}` : source.name }));
   const fighterDamageSources: WargameDamageSource[] = (Array.isArray(analysis?.damage?.fighterDamageSources) ? analysis.damage.fighterDamageSources : []).map((profile: any, index: number) => {
     const optimalKm=Math.max(0,Number(profile.optimalM)||0)/1000, falloffKm=Math.max(0,Number(profile.falloffM)||0)/1000;
-    return { id:`fighter-${Number(profile.typeId)||0}-${index}`, name:String(profile.name ?? "Fighter squadron"), kind:"fighter", applicationKind:"missile", dpsPerShip:Math.max(0,Number(profile.dps)||0), burstDpsPerShip:Math.max(0,Number(profile.dps)||0), sustainedDpsPerShip:Math.max(0,Number(profile.dps)||0), volleyPerShip:Math.max(0,Number(profile.volley)||0), cycleSeconds:Math.max(.1,Number(profile.cycleSeconds)||1), maxRangeKm:Math.max(.1,optimalKm+falloffKm*2), optimalKm, falloffKm, explosionRadiusM:Math.max(0,Number(profile.explosionRadiusM)||0), explosionVelocityMps:Math.max(0,Number(profile.explosionVelocity)||0), damageReductionFactor:.5, damageProfile:profileFromVector(profile.damageVector) };
+    return { id:`fighter-${Number(profile.typeId)||0}-${index}`, name:String(profile.name ?? "Fighter squadron"), typeId:Number(profile.typeId)||undefined, kind:"fighter", fighterAbility:String(profile.ability ?? "weapon"), applicationKind:"missile", dpsPerShip:Math.max(0,Number(profile.dps)||0), burstDpsPerShip:Math.max(0,Number(profile.dps)||0), sustainedDpsPerShip:Math.max(0,Number(profile.dps)||0), volleyPerShip:Math.max(0,Number(profile.volley)||0), cycleSeconds:Math.max(.1,Number(profile.cycleSeconds)||1), maxRangeKm:Math.max(.1,optimalKm+falloffKm*2), optimalKm, falloffKm, explosionRadiusM:Math.max(0,Number(profile.explosionRadiusM)||0), explosionVelocityMps:Math.max(0,Number(profile.explosionVelocity)||0), damageReductionFactor:.5, damageProfile:profileFromVector(profile.damageVector), fighterCountInitial:Math.max(0,Number(profile.fighterCountInitial ?? profile.fighterCount)||0), fighterCountRemaining:Math.max(0,Number(profile.fighterCountRemaining ?? profile.fighterCount)||0), fighterMaximumVelocityMps:Math.max(0,Number(profile.fighterMaximumVelocityMps)||0), fighterOrbitRangeKm:Math.max(0,Number(profile.fighterOrbitRangeM)||0)/1000 };
   });
   const aoeDamageSources: WargameDamageSource[] = (Array.isArray(analysis?.damage?.aoeDamageSources) ? analysis.damage.aoeDamageSources : []).map((profile: any,index:number) => {
     const cycleSeconds=Math.max(.1,Number(profile.cycleSeconds)||1), radiusKm=Math.max(0,Number(profile.radiusM)||0)/1000, pulse=Math.max(0,Number(profile.damagePerPulse)||0);
@@ -333,6 +333,10 @@ export async function analyzeWargameFit(text: string, characterId: string, envir
     reloadSeconds: Math.max(0, Number(raw?.magazine?.reloadSeconds ?? 0) || 0),
     reloadRemaining: 0,
     spoolCycles: 0,
+    fighterCountInitial: raw?.sourceKind === "fighter" ? Math.max(0, Number(raw?.fighterCountInitial ?? raw?.fighterCount) || 0) : raw?.fighterCountInitial,
+    fighterCountRemaining: raw?.sourceKind === "fighter" ? Math.max(0, Number(raw?.fighterCountRemaining ?? raw?.fighterCount) || 0) : raw?.fighterCountRemaining,
+    activeRemaining: 0,
+    activeTargetId: undefined,
   })) as WargameSupportSystem[];
   const supportOf = (kind: string) => supportSystems.filter((system) => system.kind === kind);
   const repSystems = supportSystems.filter((system) => system.kind === "remoteShieldRep" || system.kind === "remoteArmorRep");

@@ -1225,7 +1225,7 @@ export async function getFittingRemediesLocal(input: {
             affectedAttributeId:resourceAttribute,
             effectValue:sourceBase-attr(dogma.get(Number(alternative.id)),resourceAttribute),
             operation:3,
-            reason:`Replace ${replaceCount}Ô ${fromName} with ${replaceCount}× ${toName}. They are in the same CCP module market group, and Sage simulated the complete changed fit: the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker is cleared.`,
+            reason:`Replace ${replaceCount}× ${fromName} with ${replaceCount}× ${toName}. They are in the same CCP module market group, and Sage simulated the complete changed fit: the ${issue==="cpu-exceeded"?"CPU":"powergrid"} blocker is cleared.`,
             score:1000-replaceCount*20-Math.abs(Number(alternative.metaLevel??0)-sourceMeta),
             verifiedFix:true,
             replacement:{fromTypeId:sourceItem.typeId,fromName,toTypeId:Number(alternative.id),toName,count:replaceCount},
@@ -2542,7 +2542,7 @@ export async function analyzeFittingDogma(input: {
     issues.push({
       level: "error",
       code: "drone-capacity",
-      message: `Drone volume ${droneVolume} mÂ³ exceeds the ${shipAttr(283)} mÂ³ drone bay.`,
+      message: `Drone volume ${droneVolume} m³ exceeds the ${shipAttr(283)} m³ drone bay.`,
     });
   }
 
@@ -2553,7 +2553,7 @@ export async function analyzeFittingDogma(input: {
     [37, "Maximum velocity", "m/s"],
     [482, "Capacitor capacity", "GJ"],
     [55, "Capacitor recharge", "ms"],
-    [283, "Drone bay", "mÂ³"],
+    [283, "Drone bay", "m³"],
     [1271, "Drone bandwidth", "Mbit/s"],
     [12, "Low slots", ""],
     [13, "Mid slots", ""],
@@ -2905,6 +2905,11 @@ export async function analyzeFittingDogma(input: {
         optimalM:Math.max(0,effectiveItemAttr(source,config.optimal,item.typeId)), falloffM:Math.max(0,config.falloff ? effectiveItemAttr(source,config.falloff,item.typeId) : 0),
         explosionRadiusM:Math.max(0,effectiveItemAttr(source,config.explosionRadius,item.typeId)), explosionVelocity:Math.max(0,effectiveItemAttr(source,config.explosionVelocity,item.typeId)),
         perFighterHp, squadronHp,
+        fighterMaximumVelocityMps:Math.max(0,effectiveItemAttr(source,37,item.typeId)),
+        fighterOrbitRangeM:Math.max(0,effectiveItemAttr(source,2223,item.typeId)),
+        fighterSignatureRadiusM:Math.max(0,effectiveItemAttr(source,552,item.typeId)),
+        fighterCountInitial:fighterCount,
+        fighterCountRemaining:fighterCount,
       }];
     };
     return [
@@ -2912,6 +2917,39 @@ export async function analyzeFittingDogma(input: {
       ...channel({ability:"attack-missile",damage:[2227,2228,2229,2230],multiplier:2226,duration:2233,optimal:2236,falloff:2237,explosionRadius:2234,explosionVelocity:2235}),
     ];
   });
+  const fighterAbilityProfiles = input.items.filter((item) => item.rack === "fighter-active").flatMap((item) => {
+    const source = moduleDogmaFor(item);
+    if (!source) return [];
+    const squadrons=Math.max(0,item.quantity ?? 1);
+    const squadronSize=Math.max(0,Math.floor(effectiveItemAttr(source,2215,item.typeId)));
+    const fighterCount=squadrons*squadronSize;
+    if (!(fighterCount > 0)) return [];
+    const ability=(effectId:number, value:Record<string,unknown>)=>source.effects.has(effectId)?[value]:[];
+    const abilities:Array<Record<string,unknown>>=[];
+    abilities.push(...ability(6431,{ability:"missiles",category:"weapon",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2182,item.typeId)/1000),rangeM:Math.max(0,effectiveItemAttr(source,2149,item.typeId))}));
+    abilities.push(...ability(6465,{ability:"attack-missile",category:"weapon",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2233,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2236,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2237,item.typeId))}));
+    abilities.push(...ability(6434,{ability:"energy-neutralizer",category:"support",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2208,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2209,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2210,item.typeId)),amountPerFighter:Math.max(0,effectiveItemAttr(source,2211,item.typeId))}));
+    abilities.push(...ability(6435,{ability:"stasis-webifier",category:"support",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2183,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2186,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2187,item.typeId)),speedPenaltyPerFighter:Math.min(0,effectiveItemAttr(source,2184,item.typeId))}));
+    abilities.push(...ability(6436,{ability:"warp-disruption",category:"support",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2203,item.typeId)/1000),rangeM:Math.max(0,effectiveItemAttr(source,2204,item.typeId)),warpStrengthPerFighter:Math.max(0,effectiveItemAttr(source,2205,item.typeId))}));
+    abilities.push(...ability(6437,{ability:"ecm",category:"support",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2220,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2221,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2222,item.typeId)),sensorStrengths:[2246,2247,2248,2249].map((attributeId)=>Math.max(0,effectiveItemAttr(source,attributeId,item.typeId)))}));
+    abilities.push(...ability(6464,{ability:"tackle",category:"support",automatic:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2238,item.typeId)/1000),rangeM:Math.max(0,effectiveItemAttr(source,2239,item.typeId)),speedPenaltyPerFighter:Math.min(0,effectiveItemAttr(source,2242,item.typeId)),warpStrengthPerFighter:Math.max(0,effectiveItemAttr(source,2425,item.typeId))}));
+    abilities.push(...ability(6439,{ability:"evasive-maneuvers",category:"defensive",automatic:false,durationSeconds:Math.max(0,effectiveItemAttr(source,2123,item.typeId)/1000),speedBonusPercent:effectiveItemAttr(source,2224,item.typeId),signatureRadiusBonusPercent:effectiveItemAttr(source,2225,item.typeId),shieldResonance:[2118,2119,2120,2121].map((attributeId)=>effectiveItemAttr(source,attributeId,item.typeId))}));
+    abilities.push(...ability(6440,{ability:"afterburner",category:"mobility",automatic:false,durationSeconds:Math.max(0,effectiveItemAttr(source,2158,item.typeId)/1000),speedBonusPercent:effectiveItemAttr(source,2151,item.typeId)}));
+    abilities.push(...ability(6441,{ability:"microwarpdrive",category:"mobility",automatic:false,durationSeconds:Math.max(0,effectiveItemAttr(source,2157,item.typeId)/1000),speedBonusPercent:effectiveItemAttr(source,2152,item.typeId),signatureRadiusBonusPercent:effectiveItemAttr(source,2153,item.typeId)}));
+    abilities.push(...ability(6442,{ability:"micro-jump-drive",category:"mobility",automatic:false,durationSeconds:Math.max(0,effectiveItemAttr(source,2155,item.typeId)/1000),jumpDistanceM:Math.max(0,effectiveItemAttr(source,2154,item.typeId)),signatureRadiusBonusPercent:effectiveItemAttr(source,2156,item.typeId)}));
+    if(source.effects.has(6485)){
+      const bombTypeId=Math.max(0,Math.round(effectiveItemAttr(source,2324,item.typeId)));
+      const bomb=dogma.get(bombTypeId);
+      const damageVector:DamageVector=bomb?[Math.max(0,attr(bomb,114)),Math.max(0,attr(bomb,118)),Math.max(0,attr(bomb,117)),Math.max(0,attr(bomb,116))]:[0,0,0,0];
+      abilities.push({ability:"launch-bomb",category:"special",automatic:false,cooldownSeconds:Math.max(0,effectiveItemAttr(source,2349,item.typeId)/1000),bombTypeId,bombName:names.get(bombTypeId) ?? (bombTypeId?`Type ${bombTypeId}`:undefined),damageVector,damagePerBomb:damageVector.reduce((sum,value)=>sum+value,0),radiusM:bomb?Math.max(0,attr(bomb,107)):0,bombVelocityMps:bomb?Math.max(0,attr(bomb,37)):0,selfDestructive:false});
+    }
+    if(source.effects.has(6554)){
+      const damageVector:DamageVector=[2325,2326,2327,2328].map((attributeId)=>Math.max(0,effectiveItemAttr(source,attributeId,item.typeId))) as DamageVector;
+      abilities.push({ability:"kamikaze",category:"special",automatic:false,oneShot:true,selfDestructive:true,cycleSeconds:Math.max(0,effectiveItemAttr(source,2401,item.typeId)/1000),rangeM:Math.max(0,effectiveItemAttr(source,2330,item.typeId)),damageVector,damagePerFighter:damageVector.reduce((sum,value)=>sum+value,0)});
+    }
+    return [{typeId:item.typeId,name:names.get(item.typeId) ?? `Type ${item.typeId}`,quantity:squadrons,squadronSize,fighterCount,maxVelocityMps:Math.max(0,effectiveItemAttr(source,37,item.typeId)),orbitRangeM:Math.max(0,effectiveItemAttr(source,2223,item.typeId)),signatureRadiusM:Math.max(0,effectiveItemAttr(source,552,item.typeId)),abilities}];
+  });
+
   const fighterDps = fighterDamageSources.reduce((sum,source) => sum + source.dps,0);
   const fighterVolley = fighterDamageSources.reduce((sum,source) => sum + source.volley,0);
 
@@ -2921,16 +2959,23 @@ export async function analyzeFittingDogma(input: {
     const squadrons=Math.max(0,item.quantity ?? 1);
     const squadronSize=Math.max(0,Math.floor(effectiveItemAttr(source,2215,item.typeId)));
     const fighterCount=squadrons*squadronSize;
-    const common={typeId:item.typeId,name:names.get(item.typeId) ?? `Type ${item.typeId}`,groupId:groups.get(item.typeId) ?? 0,quantity:squadrons,state:"active",sourceKind:"fighter",fighterCount,squadronSize};
+    const common={typeId:item.typeId,name:names.get(item.typeId) ?? `Type ${item.typeId}`,groupId:groups.get(item.typeId) ?? 0,quantity:squadrons,state:"active",sourceKind:"fighter",fighterCount,squadronSize,fighterCountInitial:fighterCount,fighterCountRemaining:fighterCount,fighterMaximumVelocityMps:Math.max(0,effectiveItemAttr(source,37,item.typeId)),fighterOrbitRangeM:Math.max(0,effectiveItemAttr(source,2223,item.typeId))};
     const systems:Array<Record<string,unknown>>=[];
     const neutAmount=Math.max(0,effectiveItemAttr(source,2211,item.typeId));
-    if(neutAmount>0)systems.push({...common,kind:"energyNeutralizer",cycleSeconds:Math.max(0,effectiveItemAttr(source,2208,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2209,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2210,item.typeId)),amountPerCycle:neutAmount*fighterCount,perSecond:effectiveItemAttr(source,2208,item.typeId)>0?neutAmount*fighterCount/(effectiveItemAttr(source,2208,item.typeId)/1000):0});
+    if(neutAmount>0)systems.push({...common,kind:"energyNeutralizer",fighterAbility:"energy-neutralizer",cycleSeconds:Math.max(0,effectiveItemAttr(source,2208,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2209,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2210,item.typeId)),amountPerCycle:neutAmount,perSecond:effectiveItemAttr(source,2208,item.typeId)>0?neutAmount/(effectiveItemAttr(source,2208,item.typeId)/1000):0});
     const warpStrength=Math.max(0,effectiveItemAttr(source,2205,item.typeId));
-    if(warpStrength>0)systems.push({...common,kind:"tackle",cycleSeconds:Math.max(0,effectiveItemAttr(source,2203,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2204,item.typeId)),falloffM:0,warpStrength:warpStrength*fighterCount,mwdShutdown:false});
+    if(warpStrength>0)systems.push({...common,kind:"tackle",fighterAbility:"warp-disruption",cycleSeconds:Math.max(0,effectiveItemAttr(source,2203,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2204,item.typeId)),falloffM:0,warpStrength,mwdShutdown:false});
     const webPenalty=Math.min(0,effectiveItemAttr(source,2184,item.typeId));
-    if(webPenalty<0)systems.push({...common,kind:"web",cycleSeconds:Math.max(0,effectiveItemAttr(source,2183,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2186,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2187,item.typeId)),perFighterStrength:Math.abs(webPenalty)/100,strength:1-Math.pow(1-Math.abs(webPenalty)/100,fighterCount)});
+    if(webPenalty<0)systems.push({...common,kind:"web",fighterAbility:"stasis-webifier",cycleSeconds:Math.max(0,effectiveItemAttr(source,2183,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2186,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2187,item.typeId)),perFighterStrength:Math.abs(webPenalty)/100,strength:Math.abs(webPenalty)/100});
     const ecmStrengths=[2246,2247,2248,2249].map((attributeId)=>Math.max(0,effectiveItemAttr(source,attributeId,item.typeId)));
-    if(Math.max(...ecmStrengths)>0)systems.push({...common,kind:"ecm",cycleSeconds:Math.max(0,effectiveItemAttr(source,2220,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2221,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2222,item.typeId)),sensorStrengths:ecmStrengths,strength:Math.max(...ecmStrengths),independentFighterRolls:fighterCount});
+    if(Math.max(...ecmStrengths)>0)systems.push({...common,kind:"ecm",fighterAbility:"ecm",cycleSeconds:Math.max(0,effectiveItemAttr(source,2220,item.typeId)/1000),optimalM:Math.max(0,effectiveItemAttr(source,2221,item.typeId)),falloffM:Math.max(0,effectiveItemAttr(source,2222,item.typeId)),sensorStrengths:ecmStrengths,strength:Math.max(...ecmStrengths),independentFighterRolls:fighterCount});
+    if(source.effects.has(6464)){
+      const tackleWebPenalty=Math.min(0,effectiveItemAttr(source,2242,item.typeId));
+      const tacklePointStrength=Math.max(0,effectiveItemAttr(source,2425,item.typeId));
+      const tackleDuration=Math.max(0,effectiveItemAttr(source,2238,item.typeId)/1000);
+      const tackleRange=Math.max(0,effectiveItemAttr(source,2239,item.typeId));
+      if(tackleWebPenalty<0 || tacklePointStrength>0)systems.push({...common,kind:"tackle",fighterAbility:"tackle",cycleSeconds:tackleDuration,optimalM:tackleRange,falloffM:0,warpStrength:tacklePointStrength,mwdShutdown:false,perFighterStrength:Math.abs(tackleWebPenalty)/100,strength:Math.abs(tackleWebPenalty)/100});
+    }
     return systems;
   });
 
@@ -3825,7 +3870,7 @@ export async function analyzeFittingDogma(input: {
       depletionSeconds,
     },
     magazines,
-    fighterSystem: { ...fighterSystem, damageSources:fighterDamageSources, supportSystems:fighterSupportSystems },
+    fighterSystem: { ...fighterSystem, damageSources:fighterDamageSources, supportSystems:fighterSupportSystems, abilityProfiles:fighterAbilityProfiles },
     mining,
     damage: {
       weaponDps,

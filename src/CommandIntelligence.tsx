@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { CharacterSnapshot, EveNewsItem } from "./types";
 import type { CharacterNavigateTarget } from "./character-navigation";
+import { PanelPager } from "./PanelPager";
+import { buildCommandSignals, type CorporationOperationSummary } from "./command-signals";
 
-type Severity = "red" | "orange" | "yellow" | "green";
+type Severity = "red" | "orange" | "amber" | "yellow" | "green";
 type PriorityItem = {
   id: string;
   severity: Severity;
@@ -16,6 +18,7 @@ type PriorityItem = {
 const severityLabel: Record<Severity, string> = {
   red: "Action required now",
   orange: "Opportunity / expires soon",
+  amber: "Upcoming",
   yellow: "Reminder",
   green: "Informational",
 };
@@ -36,36 +39,6 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
   const now = Date.now();
   const result: PriorityItem[] = [];
   const extended = (snapshot.extended ?? {}) as Record<string, any>;
-
-  const queueFinishDates = snapshot.queue
-    .map((item) => item.finish_date)
-    .filter((value): value is string => Boolean(value))
-    .map((value) => new Date(value))
-    .filter((date) => Number.isFinite(date.getTime()) && date.getTime() > now)
-    .sort((a, b) => a.getTime() - b.getTime());
-  const queueEnd = queueFinishDates.at(-1);
-  if (queueEnd) {
-    const hours = (queueEnd.getTime() - now) / 3600000;
-    result.push({
-      id: "skill-queue",
-      severity: "red",
-      title: `Skill queue ends in ${remaining(queueEnd, now)}`,
-      detail: `${snapshot.queue.length} queued skill${snapshot.queue.length === 1 ? "" : "s"}`,
-      action: "Add another skill",
-      target: "activity-skills",
-      weight: hours <= 3 ? 100 : hours <= 24 ? 75 : 20,
-    });
-  } else {
-    result.push({
-      id: "skill-queue-empty",
-      severity: "red",
-      title: "Skill queue is empty",
-      detail: "Training is currently idle.",
-      action: "Open Skills",
-      target: "activity-skills",
-      weight: 110,
-    });
-  }
 
   const jobs = Array.isArray(extended.industryJobs) ? extended.industryJobs : [];
   const completeJobs = jobs.filter((job: any) => {
@@ -120,9 +93,7 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
     result.push({
       id: "contract-active",
       severity: hours <= 6 ? "orange" : "green",
-      title: `Contract accepted${hours <= 24 ? ` / ${remaining(nearestContract.expires, now)} left` : ""}`,
-      detail: nearestContract.contract?.title || "Active contract requires follow-through.",
-      action: "Review contract",
+      title: "You have a contract needing attention.",
       weight: hours <= 6 ? 82 : 18,
     });
   }
@@ -144,7 +115,6 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
       id: "all-clear",
       severity: "green",
       title: "No urgent character actions detected",
-      detail: `Last sync ${new Date(snapshot.updatedAt).toLocaleString()}.`,
       weight: 5,
     });
   }
@@ -154,13 +124,16 @@ function makePriorityItems(snapshot: CharacterSnapshot): PriorityItem[] {
 
 export function CommandIntelligence({
   snapshot,
+  corporationOps,
   onNavigate,
 }: {
   snapshot: CharacterSnapshot;
+  corporationOps: CorporationOperationSummary[];
   onNavigate(target: CharacterNavigateTarget): void;
 }) {
-  const priorities = useMemo(() => makePriorityItems(snapshot), [snapshot]);
-  const [showAll, setShowAll] = useState(false);
+  const priorities = useMemo(() => buildCommandSignals(snapshot, corporationOps).priority, [snapshot, corporationOps]);
+  const [priorityPage, setPriorityPage] = useState(0);
+  const [newsPage, setNewsPage] = useState(0);
   const [news, setNews] = useState<EveNewsItem[]>([]);
   const [newsFilter, setNewsFilter] = useState<"ccp" | "market" | "war" | "events">("ccp");
   const [newsState, setNewsState] = useState("Loading EVE news...");
@@ -178,21 +151,33 @@ export function CommandIntelligence({
     return () => { cancelled = true; };
   }, []);
 
-  const visiblePriorities = showAll ? priorities : priorities.slice(0, 5);
-  const priorityTone = priorities.some((item) => item.severity === "red") ? "danger" : priorities.some((item) => item.severity === "orange") ? "warning" : "clear";
-  const filteredNews = news.filter((item) => item.category === newsFilter).slice(0, 5);
+  const priorityPageSize = 4;
+  const newsPageSize = 4;
+  const priorityPageCount = Math.max(1, Math.ceil(priorities.length / priorityPageSize));
+  const filteredNewsAll = news.filter((item) => item.category === newsFilter);
+  const newsPageCount = Math.max(1, Math.ceil(filteredNewsAll.length / newsPageSize));
+  const safePriorityPage = Math.min(priorityPage, priorityPageCount - 1);
+  const safeNewsPage = Math.min(newsPage, newsPageCount - 1);
+  const visiblePriorities = priorities.slice(safePriorityPage * priorityPageSize, safePriorityPage * priorityPageSize + priorityPageSize);
+  const priorityTone = priorities.some((item) => item.severity === "red") ? "danger" : "clear";
+  const filteredNews = filteredNewsAll.slice(safeNewsPage * newsPageSize, safeNewsPage * newsPageSize + newsPageSize);
+
+  useEffect(() => { setPriorityPage((current) => Math.min(current, priorityPageCount - 1)); }, [priorityPageCount]);
+  useEffect(() => { setNewsPage(0); }, [newsFilter]);
+  useEffect(() => { setNewsPage((current) => Math.min(current, newsPageCount - 1)); }, [newsPageCount]);
 
   return (
     <div className="command-intelligence-grid">
-      <article className={`command-priority-panel ${priorityTone}`}>
-        <div className="command-panel-heading">
+      <article className={`command-priority-panel frontpage-card ${priorityTone}`}>
+        <div className="command-panel-heading frontpage-card__header">
           <div>
             <p className="eyebrow">COMMAND PRIORITY</p>
             <h3>Needs Attention</h3>
           </div>
           <span>{priorities.length} tracked</span>
         </div>
-        <div className="priority-list">
+        <div className="frontpage-card__body priority-card-body">
+          <div className="priority-list">
           {visiblePriorities.map((item) => (
             <div className={`priority-item priority-${item.severity}`} key={item.id}>
               <span className="priority-dot" title={severityLabel[item.severity]} />
@@ -207,16 +192,13 @@ export function CommandIntelligence({
               )}
             </div>
           ))}
+          </div>
         </div>
-        {priorities.length > 5 && (
-          <button className="priority-view-all" onClick={() => setShowAll((value) => !value)}>
-            {showAll ? "Show top 5" : `View all (${priorities.length})`}
-          </button>
-        )}
+        <PanelPager page={safePriorityPage} pageCount={priorityPageCount} onPageChange={setPriorityPage} label="Command priority pages" />
       </article>
 
-      <article className="eve-news-panel">
-        <div className="command-panel-heading">
+      <article className="eve-news-panel frontpage-card">
+        <div className="command-panel-heading frontpage-card__header">
           <div>
             <p className="eyebrow">EVE NEWS</p>
             <h3>Tranquility Intelligence</h3>
@@ -232,13 +214,7 @@ export function CommandIntelligence({
             }}
           >&#8635;</button>
         </div>
-        <div className="news-filters">
-          {(["ccp", "market", "war", "events"] as const).map((filter) => (
-            <button key={filter} className={newsFilter === filter ? "active" : ""} onClick={() => setNewsFilter(filter)}>
-              {filter === "ccp" ? "CCP" : filter === "market" ? "Market" : filter === "war" ? "War" : "Events"}
-            </button>
-          ))}
-        </div>
+        <div className="frontpage-card__body news-card-body">
         {newsState ? <div className="news-state">{newsState}</div> : (
           <div className="news-list">
             {filteredNews.length ? filteredNews.map((item) => (
@@ -250,6 +226,20 @@ export function CommandIntelligence({
             )) : <div className="news-state">No recent items in this category.</div>}
           </div>
         )}
+        </div>
+        <PanelPager
+          page={safeNewsPage}
+          pageCount={newsPageCount}
+          onPageChange={setNewsPage}
+          label="EVE news pages"
+          leading={<div className="news-filters news-filters--footer">
+            {(["ccp", "market", "war", "events"] as const).map((filter) => (
+              <button key={filter} className={newsFilter === filter ? "active" : ""} onClick={() => setNewsFilter(filter)}>
+                {filter === "ccp" ? "CCP" : filter === "market" ? "Market" : filter === "war" ? "War" : "Events"}
+              </button>
+            ))}
+          </div>}
+        />
       </article>
     </div>
   );

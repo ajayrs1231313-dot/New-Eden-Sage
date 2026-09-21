@@ -4,7 +4,7 @@ import { buildFullMarketAnalysisIndex, loadFullMarketMarginSnapshot, type FullMa
 import { universeRoute } from "./universe-route-graph";
 import { itemCategoryIds } from "./type-volumes";
 import { getFittingTypeInfoLocal } from "./fitting-dogma";
-import { availableParallelism } from "node:os";
+import { pageLoadWorkerCount } from "./interactive-processing-policy";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 
@@ -102,7 +102,7 @@ function securityBand(minimumSecurityStatus: number) {
 
 async function buildCandidatesInParallel(market: any, previousMargins: Record<string, number | null>, cargoCapacity: number, capitalLimit: number, runtime: FullTradeRuntime) {
   const entries = [...market.items] as Array<[number, any]>;
-  const workers = Math.max(1, Math.min(6, availableParallelism(), entries.length));
+  const workers = pageLoadWorkerCount(entries.length);
   const chunkSize = Math.ceil(entries.length / workers);
   let completed = 0;
   const results = await Promise.all(Array.from({ length: workers }, (_, index) => new Promise<{ prelim: any[]; pairCount: number }>((resolve, reject) => {

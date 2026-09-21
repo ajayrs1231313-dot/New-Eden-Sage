@@ -133,7 +133,7 @@ const serverSource = await readFile(new URL("../../electron/mcp-server.ts", impo
 const databaseSource = await readFile(new URL("../../electron/database.ts", import.meta.url), "utf8");
 assert.match(serverSource, /const extended = \(snapshot\.extended[\s\S]*?\?\.\[section\]/);
 assert.match(serverSource, /return result\(\{ characterId, section, data: direct \?\? extended \?\? null \}\)/);
-assert.match(databaseSource, /normalizeSnapshotBlueprintAssetValuation\(JSON\.parse\(row\.payload\)/);
+assert.match(databaseSource, /normalizeSnapshotBlueprintAssetValuation\(decryptSnapshotPayload/);
 assert.match(databaseSource, /JSON\.stringify\(normalized\)/);
 
 console.log(JSON.stringify({

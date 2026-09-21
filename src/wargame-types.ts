@@ -51,6 +51,16 @@ export type WargameSupportSystem = {
   fighterCount?: number;
   squadronSize?: number;
   independentFighterRolls?: number;
+  fighterAbility?: string;
+  fighterCountInitial?: number;
+  fighterCountRemaining?: number;
+  fighterMaximumVelocityMps?: number;
+  fighterOrbitRangeM?: number;
+  perFighterStrength?: number;
+  activeRemaining?: number;
+  activeTargetId?: string;
+  fighterOnTargetId?: string;
+  fighterArrivalRemaining?: number;
 };
 
 export type WargameSide = "blue" | "red";

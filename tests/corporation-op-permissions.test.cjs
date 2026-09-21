@@ -10,6 +10,7 @@ const planner=read('src/CorporationOpPlanner.tsx');
 const rolesUi=read('src/CorporationRoles.tsx');
 const fitPreview=read('src/OperationFitPreview.tsx');
 const eve=read('electron/eve.ts');
+const scopeManifest=read('electron/esi-scope-manifest.ts');
 const mainTask9=read('electron/main-task9.ts');
 
 const defaultRoleKeys=['Personnel_Manager','Communications_Officer','Starbase_Defense_Operator','Skill_Plan_Manager'];
@@ -52,8 +53,9 @@ test('corp authority accepts arbitrary mixes of EVE roles and corporation titles
 });
 
 test('title-capable ESI scopes are requested for the role editor',()=>{
-  assert.match(eve,/esi-characters\.read_titles\.v1/);
-  assert.match(eve,/esi-corporations\.read_titles\.v1/);
+  assert.match(eve,/esi-scope-manifest/);
+  assert.match(scopeManifest,/esi-characters\.read_titles\.v1/);
+  assert.match(scopeManifest,/esi-corporations\.read_titles\.v1/);
 });
 
 test('operation creator can disable fit review or disable approval entirely',()=>{

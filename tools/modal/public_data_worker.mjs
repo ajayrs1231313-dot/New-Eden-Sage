@@ -5,6 +5,7 @@ import { createGzip, gunzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 import AdmZip from 'adm-zip';
 import { pipeline } from 'node:stream/promises';
+import { evaluateNotificationRules } from './notification_engine.mjs';
 
 const ESI = 'https://esi.evetech.net';
 const PUBLISH_ROOT = '/published';
@@ -33,6 +34,8 @@ const HEADERS = {
   'X-Compatibility-Date': '2026-08-02',
   'X-User-Agent': 'NewEdenSage-Public-Producer/1.1.12',
 };
+const NOTIFICATION_INPUT_FILE = String(process.env.NEW_EDEN_SAGE_NOTIFICATION_INPUT_FILE || '').trim();
+const NOTIFICATION_RESULT_FILE = String(process.env.NEW_EDEN_SAGE_NOTIFICATION_RESULT_FILE || '').trim();
 
 const PUBLIC_SOURCES = [
   { key: 'markets-prices', url: '/markets/prices/', history: true },
@@ -176,6 +179,69 @@ async function fetchWithBackoff(url, state, attempts = 4) {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+function notificationSummary(value) {
+  return {
+    evaluatedAt: value?.evaluatedAt ?? null,
+    activeRuleCount: Math.max(0, Number(value?.activeRuleCount || 0)),
+    ruleCount: Math.max(0, Number(value?.ruleCount || 0)),
+    evaluated: Math.max(0, Number(value?.evaluated || 0)),
+    unsupported: Math.max(0, Number(value?.unsupported || 0)),
+    triggered: Math.max(0, Number(value?.triggered || 0)),
+    rawRegionsRead: Math.max(0, Number(value?.rawRegionsRead || 0)),
+    marketBooksBuilt: Math.max(0, Number(value?.marketBooksBuilt || 0)),
+    marketQuoteKeysEvaluated: Math.max(0, Number(value?.marketQuoteKeysEvaluated || 0)),
+    contractBidSourcesRead: Math.max(0, Number(value?.contractBidSourcesRead || 0)),
+    skippedUnchangedMarket: Math.max(0, Number(value?.skippedUnchangedMarket || 0)),
+    errors: Array.isArray(value?.errors) ? value.errors.length : 0,
+  };
+}
+
+async function evaluateNotificationPass(marketSnapshot, marketChangedRegionIds = []) {
+  const empty = { schemaVersion: 1, evaluatedAt: new Date().toISOString(), activeRuleCount: 0, ruleCount: 0, evaluated: 0, unsupported: 0, triggered: 0, rawRegionsRead: 0, marketBooksBuilt: 0, marketQuoteKeysEvaluated: 0, contractBidSourcesRead: 0, skippedUnchangedMarket: 0, events: [], stateUpdates: [], errors: [] };
+  if (!NOTIFICATION_INPUT_FILE) return empty;
+  const input = await readJson(NOTIFICATION_INPUT_FILE, null);
+  const activeRules = Array.isArray(input?.rules) ? input.rules : [];
+  const states = input?.states && typeof input.states === 'object' ? input.states : {};
+  if (!activeRules.length) {
+    if (NOTIFICATION_RESULT_FILE) await writeJsonAtomic(NOTIFICATION_RESULT_FILE, empty);
+    return empty;
+  }
+
+  const changedRegions = new Set((marketChangedRegionIds || []).map(Number));
+  let skippedUnchangedMarket = 0;
+  const rules = activeRules.filter(rule => {
+    if (!String(rule?.kind || '').startsWith('market.')) return true;
+    if (!states?.[String(rule?.requestId || '')]) return true;
+    const regionId = Number(rule?.target?.regionId);
+    const shouldEvaluate = changedRegions.has(regionId);
+    if (!shouldEvaluate) skippedUnchangedMarket++;
+    return shouldEvaluate;
+  });
+
+  const regionEntries = new Map((marketSnapshot?.regions || []).map(entry => [Number(entry.regionId), entry]));
+  const result = await evaluateNotificationRules({
+    rules,
+    states,
+    evaluatedAt: new Date().toISOString(),
+    loadRawRegion: async regionId => {
+      const entry = regionEntries.get(Number(regionId));
+      if (!entry?.file) throw new Error('Notification market region ' + regionId + ' is unavailable in the current raw snapshot.');
+      const payload = await readGzipJson(path.join(RAW_ROOT, entry.file), null);
+      if (!Array.isArray(payload?.orders)) throw new Error('Notification market region ' + regionId + ' could not be read.');
+      return payload;
+    },
+    loadContractBids: async contractId => {
+      const response = await fetchWithBackoff(ESI + '/contracts/public/bids/' + Number(contractId) + '/', null, 2);
+      if (response.status === 204 || response.status === 404) return [];
+      if (!response.ok) throw new Error('Public contract bid lookup failed for ' + contractId + ' with HTTP ' + response.status + '.');
+      const payload = await response.json();
+      return Array.isArray(payload) ? payload : [];
+    },
+  });
+  const completed = { ...result, activeRuleCount: activeRules.length, skippedUnchangedMarket };
+  if (NOTIFICATION_RESULT_FILE) await writeJsonAtomic(NOTIFICATION_RESULT_FILE, completed);
+  return completed;
+}
 function statePath(key) { return path.join(STATE_ROOT, `${safeName(key)}.json`); }
 function currentPublicPath(key) { return path.join(CURRENT_ROOT, 'public', `${safeName(key)}.json`); }
 async function readCurrentPublic(key) { return readJson(currentPublicPath(key), null); }
@@ -433,7 +499,7 @@ async function refreshMarketOrders(regions) {
   const previousEntries = new Map((previous?.regions || []).map(entry => [Number(entry.regionId), entry]));
   const refreshed = await mapLimited(regions, REGION_CONCURRENCY, region => fetchMarketRegion(region, previousEntries.get(region.regionId), previous));
   const changed = !previous || refreshed.some(item => item.changed);
-  if (!changed) return { changed: false, snapshot: previous, durationMs: Math.round(performance.now() - started) };
+  if (!changed) return { changed: false, snapshot: previous, changedRegionIds: [], durationMs: Math.round(performance.now() - started) };
 
   const createdAt = new Date().toISOString();
   const snapshot = { schemaVersion: 1, id: `${safeTimestamp(createdAt)}-all`, mode: 'all', createdAt, complete: false, regionCount: 0, orderCount: 0, regions: [] };
@@ -463,7 +529,7 @@ async function refreshMarketOrders(regions) {
   await writeJsonAtomic(path.join(root, 'manifest.json'), snapshot);
   await writeJsonAtomic(path.join(RAW_ROOT, 'current.json'), snapshot);
   await writeJsonAtomic(path.join(RAW_ROOT, 'current-all.json'), snapshot);
-  return { changed: true, snapshot, durationMs: Math.round(performance.now() - started) };
+  return { changed: true, snapshot, changedRegionIds: refreshed.filter(item => item.changed).map(item => Number(item.region.regionId)), durationMs: Math.round(performance.now() - started) };
 }
 
 
@@ -1022,6 +1088,8 @@ async function main() {
   const regions = await discoverRegions();
   const market = await refreshMarketOrders(regions);
   const contracts = await refreshPublicContracts(regions);
+  const notifications = await evaluateNotificationPass(market.snapshot, market.changedRegionIds);
+  const notificationStatus = notificationSummary(notifications);
   const publicChanged = publicResults.some(item => item.changed);
   const marketSchemaUpgradeRequired = Number(previousManifest?.files?.['market-global']?.schemaVersion || 0) < 2;
   const marketDepthUpgradeRequired = !previousManifest?.files?.['market-hub-depth'];
@@ -1030,7 +1098,7 @@ async function main() {
 
   if (!materialChanged) {
     const history = await historyStats();
-    const result = { published: false, generation: previousManifest?.generation || null, marketChanged: false, contractsChanged: false, publicChanged: false, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, contractComputeMs: contracts.durationMs, scheduler: telemetry, history, pruning, publishedPruning: publishedPruningBeforeRefresh, totalMs: Math.round(performance.now() - overallStarted) };
+    const result = { published: false, generation: previousManifest?.generation || null, marketChanged: false, contractsChanged: false, publicChanged: false, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, contractComputeMs: contracts.durationMs, notifications: notificationStatus, scheduler: telemetry, history, pruning, publishedPruning: publishedPruningBeforeRefresh, totalMs: Math.round(performance.now() - overallStarted) };
     await writeJsonAtomic(path.join(STATE_ROOT, 'scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
     console.log(JSON.stringify(result));
     return;
@@ -1075,7 +1143,7 @@ async function main() {
 
   const publishedPruningAfterRefresh = await prunePublishedStorage(generation, market.snapshot?.id || null);
   const history = await historyStats();
-  const result = { published: true, generation, marketChanged: market.changed, contractsChanged: contracts.changed, publicChanged, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, computeMs: marketPrepared.computeMs, contractComputeMs: contracts.durationMs, scheduler: telemetry, history, pruning, publishedPruning: { before: publishedPruningBeforeRefresh, after: publishedPruningAfterRefresh }, totalMs: Math.round(performance.now() - overallStarted) };
+  const result = { published: true, generation, marketChanged: market.changed, contractsChanged: contracts.changed, publicChanged, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, computeMs: marketPrepared.computeMs, contractComputeMs: contracts.durationMs, notifications: notificationStatus, scheduler: telemetry, history, pruning, publishedPruning: { before: publishedPruningBeforeRefresh, after: publishedPruningAfterRefresh }, totalMs: Math.round(performance.now() - overallStarted) };
   await writeJsonAtomic(path.join(STATE_ROOT, 'scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
   console.log(JSON.stringify(result));
 }

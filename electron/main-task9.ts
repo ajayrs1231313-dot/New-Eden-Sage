@@ -62,6 +62,7 @@ import { searchMarketTypes } from "./market-static-index";
 import { searchMcpMarketOrders } from "./mcp-market-search";
 import { quoteMarketDepth } from "./market-depth";
 import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
+import { acknowledgeSageNotification, createSageNotificationRule, deleteSageNotificationRule, getSageNotificationInbox, listSageNotificationRules, updateSageNotificationRule } from "./sage-notifications";
 import { disposePublicDataRefreshProcess, runPublicDataRefresh } from "./public-data-refresh-manager";
 import { disposeContractIntelligenceProcess, getContractMarketWorkspace, searchContractMarketWorkspace } from "./contract-intelligence-manager";
 import { loadSharedMarketBrowserDataset, loadSharedMarketBrowserRegion, loadSharedMarketBrowserRegions, loadSharedMarketBrowserSummaries } from "./shared-market-browser";
@@ -92,8 +93,9 @@ import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
 import { hydrateCanonicalFittingStore, saveCanonicalFittingStore } from "./fitting-persistence";
 import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility, repairClaudeDesktopDirectConfig, showClaudeDesktopBundle } from "./claude-integration";
-import { typeImageProtocolResponse } from "./eve-assets";
+import { cacheTypeIconsLocal, typeImageProtocolResponse } from "./eve-assets";
 import { getHostClockInfo, setHostClock, syncHostClock } from "./system-time";
+import { getUsagePresence, submitUsageMetrics } from "./usage-metrics";
 import { loadGlobalMarketQuotes } from "./market-intelligence";
 import { analyzeLpCorporation, disposeLpStoreWorker, getLpEarningCandidates, getLpStoreWorkerStatus, resolveLpCorporations } from "./lp-store-worker-manager";
 import { applyProfitBulkBookkeeping, completeProfitDeal, getProfitLedger, getProfitPurchaseReview, getProfitReconciliationReview, reconcileProfitLedger, removeProfitLedgerRecord, setProfitMatchDecision, setProfitMaterialProvenance, setProfitPurchaseTransactionOverride, setProfitTransactionOverride } from "./profit-ledger";
@@ -223,9 +225,28 @@ async function installSharedPublicData() {
   }
 }
 
+async function publishCustomNotificationInbox() {
+  try {
+    const config = await readConfig();
+    if (!config.encryptedSageSessionToken) return null;
+    const inbox = await getSageNotificationInbox(decrypt(config.encryptedSageSessionToken), { limit: 50, includeAcknowledged: false });
+    window?.webContents.send("notifications:updated", inbox);
+    return inbox;
+  } catch (error) {
+    void logEvent("warn", "notifications.inbox_refresh_failed", { error: error instanceof Error ? error.message : String(error) });
+    return null;
+  }
+}
+
 function startSharedPublicDataFlow() {
   stopSharedPublicListener?.();
-  stopSharedPublicListener = startSharedPublicDataListener((notice) => markPublicDataAvailable(notice.generation));
+  stopSharedPublicListener = startSharedPublicDataListener(
+    (notice) => markPublicDataAvailable(notice.generation),
+    (notice) => {
+      const triggered = Number(notice.notifications?.triggered ?? notice.notifications?.delivered ?? 0);
+      if (triggered > 0) void publishCustomNotificationInbox();
+    },
+  );
   if (publicReconcileTimer) clearInterval(publicReconcileTimer);
   publicReconcileTimer = setInterval(() => {
     void refreshPublicDataAvailability().catch((error) => void logEvent("warn", "shared_public.hourly_availability_check_failed", { error: error instanceof Error ? error.message : String(error) }));
@@ -344,6 +365,7 @@ function completeSyncPercent(tracks: PrepTrack[]) {
 }
 
 let featurePrepProcessQueue: Promise<void> = Promise.resolve();
+let featurePrepPrivateDataKey: string | null = null;
 
 async function runFeaturePrepProcessNow<T = unknown>(
   processData: any,
@@ -450,7 +472,10 @@ async function runFeaturePrepProcessNow<T = unknown>(
       }
     });
     child.once("spawn", () => {
-      child.send?.(processData, (error) => {
+      const featureProcessInput = featurePrepPrivateDataKey
+        ? { ...processData, privateDataKey: featurePrepPrivateDataKey }
+        : processData;
+      child.send?.(featureProcessInput, (error) => {
         if (error) finish(() => reject(error));
       });
     });
@@ -962,6 +987,18 @@ async function loadPlanetaryCorporationLibrary(characterId:string) {
 
 let displayScaleTimer: NodeJS.Timeout | null = null;
 let displayFitEnabled = DISPLAY_FIT_DEFAULT_ENABLED;
+const DEV_ZOOM_STEP = 0.1;
+const DEV_ZOOM_MIN = 0.4;
+const DEV_ZOOM_MAX = 1.5;
+let devZoomOverride: number | null = null;
+
+function isDevelopmentRun() {
+  return !app.isPackaged && process.argv.includes("--dev");
+}
+
+function clampDevZoom(value: number) {
+  return Math.max(DEV_ZOOM_MIN, Math.min(DEV_ZOOM_MAX, Math.round(value * 100) / 100));
+}
 
 type DisplayFitMetrics = {
   viewportWidth: number;
@@ -1000,6 +1037,12 @@ async function readDisplayFitMetrics(target: BrowserWindow): Promise<DisplayFitM
 
 async function applyResponsiveDisplayScale(target: BrowserWindow) {
   if (target.isDestroyed() || target.webContents.isDestroyed()) return;
+  if (isDevelopmentRun() && devZoomOverride != null) {
+    if (Math.abs(target.webContents.getZoomFactor() - devZoomOverride) >= 0.004) {
+      target.webContents.setZoomFactor(devZoomOverride);
+    }
+    return;
+  }
   const [contentWidth, contentHeight] = target.getContentSize();
   const baseZoom = responsiveDisplayZoom(contentWidth, contentHeight);
   const currentZoom = target.webContents.getZoomFactor();
@@ -1078,10 +1121,29 @@ function createWindow() {
   // Windows 11 can intermittently fail to hand Print Screen off to Snipping Tool while
   // an Electron window owns the foreground. Sage listens at the native window, Electron
   // input, and renderer layers, then funnels all three through one deduped overlay launch.
-  createdWindow.webContents.on("before-input-event", (_event, input) => {
+  createdWindow.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
     const key = String(input.key ?? "");
     const code = String(input.code ?? "");
+
+    if (isDevelopmentRun() && (input.control || input.meta)) {
+      const zoomOut = key === "-" || code === "Minus" || code === "NumpadSubtract";
+      const zoomIn = key === "+" || key === "=" || code === "Equal" || code === "NumpadAdd";
+      const zoomReset = key === "0" || code === "Digit0" || code === "Numpad0";
+      if (zoomOut || zoomIn || zoomReset) {
+        event.preventDefault();
+        if (zoomReset) {
+          devZoomOverride = null;
+          scheduleResponsiveDisplayScale(createdWindow, 0);
+        } else {
+          const current = devZoomOverride ?? createdWindow.webContents.getZoomFactor();
+          devZoomOverride = clampDevZoom(current + (zoomIn ? DEV_ZOOM_STEP : -DEV_ZOOM_STEP));
+          createdWindow.webContents.setZoomFactor(devZoomOverride);
+        }
+        return;
+      }
+    }
+
     if (key !== "PrintScreen" && code !== "PrintScreen") return;
     void openWindowsSnippingOverlay("electron-input");
   });
@@ -1180,6 +1242,7 @@ if (!hasSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     const privateDataKey = await getOrCreatePrivateDataEncryptionKey();
+    featurePrepPrivateDataKey = privateDataKey;
     configurePrivateEsiEncryptionKey(privateDataKey);
     configureSnapshotEncryptionKey(privateDataKey);
     migratePlaintextSnapshotsToEncrypted();
@@ -1188,6 +1251,7 @@ if (!hasSingleInstanceLock) {
     await ensureOneTimeCharacterResetMigration();
     await ensureEsiScopeSchemaMigration();
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
+  ipcMain.handle("assets:cache-type-icons", (_event, input: { typeIds?: number[]; size?: number }) => cacheTypeIconsLocal(Array.isArray(input?.typeIds) ? input.typeIds : [], Number(input?.size ?? 64)));
   registerWormholeCommandIpc();
   ipcMain.handle("wormhole:reference-list", () => getWormholeReference());
   ipcMain.handle("wormhole:reference-get", (_event, code: unknown) => getWormholeReferenceEntry(code));
@@ -1289,6 +1353,8 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("system-time:get", () => getHostClockInfo());
   ipcMain.handle("system-time:sync", () => syncHostClock());
   ipcMain.handle("system-time:set", (_event, value:string) => setHostClock(String(value ?? "")));
+  ipcMain.handle("metrics:submit", (_event, batch) => submitUsageMetrics(batch));
+  ipcMain.handle("metrics:presence", () => getUsagePresence());
   ipcMain.handle("corp:discord-state", async (_event, characterId:string) => {
     const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
     return {workspace,status:await getSageDiscordStatus(sessionToken,workspace.workspace_id,Number(workspace.character_id))};
@@ -1341,11 +1407,11 @@ if (!hasSingleInstanceLock) {
     if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to announce operations to Discord.");
     return announceSageOperationToDiscord(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId));
   });
-  ipcMain.handle("corp:ops-cancel", async (_event, input:{characterId:string;workspaceId:string;objectId:string;message?:string}) => {
+  ipcMain.handle("corp:ops-cancel", async (_event, input:{characterId:string;workspaceId:string;objectId:string;message?:string;announceCancellation?:boolean}) => {
     const {sessionToken,workspace,eveAccessToken}=await planetaryCorporationContext(String(input?.characterId??""));
     if(workspace.workspace_id!==String(input.workspaceId)) throw new Error("The selected character is not in this operation workspace.");
     if(!workspace.can_manage_fleet_ops) throw new Error("Command Ops authority is required to cancel operations.");
-    return cancelSageOperation(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId),String(input.message??""));
+    return cancelSageOperation(sessionToken,eveAccessToken,workspace.workspace_id,Number(workspace.character_id),String(input.objectId),String(input.message??""),input.announceCancellation!==false);
   });
   ipcMain.handle("corp:ops-take-ownership", async (_event, input:{characterId:string;workspaceId:string;objectId:string}) => {
     const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
@@ -2455,12 +2521,24 @@ if (!hasSingleInstanceLock) {
     });
     return result.filePath;
   });
-  ipcMain.handle("market:search-ore-types", async (_event, input: { query?: string; limit?: number }) => {
+  ipcMain.handle("market:search-ore-types", async (_event, input: {
+    query?: string;
+    limit?: number;
+    kind?: "ore" | "ice" | "gas" | "salvage";
+  }) => {
     const query = String(input?.query ?? "").trim();
     if (query.length < 2) return [];
     const limit = Math.max(1, Math.min(25, Math.floor(Number(input?.limit ?? 12))));
+    const kind = input?.kind === "ice" || input?.kind === "gas" || input?.kind === "salvage" ? input.kind : "ore";
     const matches = await searchMarketTypes(query, 200);
-    return matches.filter((type) => type.categoryName === "Asteroid" && !type.name.startsWith("Batch Compressed ")).slice(0, limit);
+    return matches.filter((type) => {
+      const path = type.marketGroupPath ?? [];
+      const isIce = type.groupName === "Ice" || path.includes("Ice Ores");
+      if (kind === "ice") return type.categoryName === "Asteroid" && isIce && !type.name.startsWith("Batch Compressed ");
+      if (kind === "gas") return type.groupName === "Harvestable Cloud" || path.includes("Gas Clouds Materials");
+      if (kind === "salvage") return type.groupName === "Salvaged Materials" || type.marketGroupName === "Salvaged Materials";
+      return type.categoryName === "Asteroid" && !isIce && !type.name.startsWith("Batch Compressed ");
+    }).slice(0, limit);
   });
   ipcMain.handle("market:quote-depth", async (_event, input) => quoteMarketDepth(input ?? {}));
   ipcMain.handle("market:raw-search", async (_event, input) => {
@@ -2479,6 +2557,28 @@ if (!hasSingleInstanceLock) {
   );
   ipcMain.handle("market:summaries", () => loadSharedMarketBrowserSummaries());
   ipcMain.handle("market:region", (_event, regionId: number) => loadSharedMarketBrowserRegion(Number(regionId)));
+  ipcMain.handle("notifications:rules", async () => listSageNotificationRules(await sageOnlineSessionTokenOnly()));
+  ipcMain.handle("notifications:create", async (_event, input: unknown) => createSageNotificationRule(await sageOnlineSessionTokenOnly(), (input ?? {}) as any));
+  ipcMain.handle("notifications:update", async (_event, input: { requestId?: string; rule?: unknown }) => {
+    const requestId = String(input?.requestId ?? "").trim();
+    if (!requestId) throw new Error("Notification request ID is required.");
+    return updateSageNotificationRule(await sageOnlineSessionTokenOnly(), requestId, (input?.rule ?? {}) as any);
+  });
+  ipcMain.handle("notifications:delete", async (_event, requestId: string) => {
+    const normalized = String(requestId ?? "").trim();
+    if (!normalized) throw new Error("Notification request ID is required.");
+    return deleteSageNotificationRule(await sageOnlineSessionTokenOnly(), normalized);
+  });
+  ipcMain.handle("notifications:inbox", async (_event, input?: { limit?: number; includeAcknowledged?: boolean }) =>
+    getSageNotificationInbox(await sageOnlineSessionTokenOnly(), input ?? {}));
+  ipcMain.handle("notifications:ack", async (_event, eventId: string) => {
+    const normalized = String(eventId ?? "").trim();
+    if (!normalized) throw new Error("Notification event ID is required.");
+    const result = await acknowledgeSageNotification(await sageOnlineSessionTokenOnly(), normalized);
+    void publishCustomNotificationInbox();
+    return result;
+  });
+
   ipcMain.handle("public-data:status", () => loadPublicDataStatus());
   ipcMain.handle("public-data:check-availability", () => refreshPublicDataAvailability());
   ipcMain.handle("public-data:check", () => installSharedPublicData());

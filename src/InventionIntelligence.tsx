@@ -12,6 +12,7 @@ interface Props {
   decryptor: string;
   onDecryptorChange(value: string): void;
   onRefresh(): void;
+  variant?: "isk" | "industrial";
 }
 
 const PAGE_SIZE = 12;
@@ -82,7 +83,7 @@ function updateAge(timestamp: string | null | undefined) {
   return `${Math.floor(minutes / 1440)}d ago`;
 }
 
-export function InventionIntelligence({ analysis, busy, decryptor, onDecryptorChange, onRefresh }: Props) {
+export function InventionIntelligence({ analysis, busy, decryptor, onDecryptorChange, onRefresh, variant = "isk" }: Props) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<InventionCategory>("all");
   const [tech, setTech] = useState<TechFilter>("all");
@@ -167,7 +168,7 @@ export function InventionIntelligence({ analysis, busy, decryptor, onDecryptorCh
   };
 
   return (
-    <section className="invention-intelligence">
+    <section className={`invention-intelligence${variant === "industrial" ? " invention-intelligence-industrial" : ""}`}>
       <div className="ii-kpi-grid">
         <article className="ii-kpi ii-kpi-gold">
           <div><span>TOTAL PROFIT POTENTIAL</span><strong>{metrics.top50Potential > 0 ? isk(metrics.top50Potential, true) : "—"}</strong><small>Positive expected profit across top 50 routes</small></div>
@@ -276,7 +277,7 @@ export function InventionIntelligence({ analysis, busy, decryptor, onDecryptorCh
       </div>
 
       <footer className="ii-premium-banner">
-        <span>★</span><strong>PREMIUM OPPORTUNITY</strong><p>{best ? `${best.productName} leads the current ranked set at ${isk(best.expectedProfitPerAttempt, true)} expected profit per invention attempt.` : "No positive expected-profit route is currently priced."}</p><small>Last updated: {updateAge(analysis?.generatedAt)}</small><button onClick={onRefresh} disabled={busy} title="Refresh invention prices"><IskGlyph name="reset" /></button>
+        <span>{variant === "industrial" ? "◆" : "★"}</span><strong>{variant === "industrial" ? "TOP INVENTION SIGNAL" : "PREMIUM OPPORTUNITY"}</strong><p>{best ? `${best.productName} leads the current ranked set at ${isk(best.expectedProfitPerAttempt, true)} expected profit per invention attempt.` : "No positive expected-profit route is currently priced."}</p><small>Last updated: {updateAge(analysis?.generatedAt)}</small><button onClick={onRefresh} disabled={busy} title="Refresh invention prices"><IskGlyph name="reset" /></button>
       </footer>
     </section>
   );

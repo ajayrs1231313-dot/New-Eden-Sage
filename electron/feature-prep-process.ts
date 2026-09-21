@@ -4,13 +4,15 @@ import { prepareIndustrialCommand } from "./industrial-preparation";
 import { savePersistedResult } from "./persistent-result-cache";
 import { prepareRefineryStaticDataLocal } from "./refinery-engine";
 import { analyzeShipReadiness } from "./readiness";
+import { configureSnapshotEncryptionKey } from "./snapshot-crypto";
 
-type FeaturePrepInput =
+type FeaturePrepInput = (
   | { task: "industry" }
   | { task: "refinery" }
   | { task: "industrial-command"; characterId: string }
   | { task: "invention"; characterId: string; decryptorTypeId?: number | null; cacheKey: unknown }
-  | { task: "ship-readiness"; characterId: string; hullTypeId: number; cloneState: "alpha" | "omega"; masteryLevel: number; cacheKey: unknown };
+  | { task: "ship-readiness"; characterId: string; hullTypeId: number; cloneState: "alpha" | "omega"; masteryLevel: number; cacheKey: unknown }
+) & { privateDataKey?: string };
 
 function send(message: unknown) {
   process.send?.(message);
@@ -28,6 +30,7 @@ function sendAndExit(message: unknown) {
 
 async function main(input: FeaturePrepInput) {
   if (!input?.task) throw new Error("Feature preparation task is missing.");
+  if (input.privateDataKey) configureSnapshotEncryptionKey(String(input.privateDataKey));
 
   if (input.task === "industry") {
     send({ type: "progress", percent: 10, message: "Preparing industrial blueprint data." });

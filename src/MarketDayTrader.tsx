@@ -183,7 +183,7 @@ export function MarketDayTrader({ analysis, snapshot, onCargoCapacityChange, mar
   const lanes = useMemo(() => {
     const grouped = new Map<string, { source: string; target: string; count: number; bestNet: number; bestRoi: number }>();
     for (const row of rows) {
-      const key = `${row.trade.sell.regionName}â†’${row.trade.buy.regionName}`;
+      const key = `${row.trade.sell.regionName}→${row.trade.buy.regionName}`;
       const lane = grouped.get(key) ?? { source: row.trade.sell.regionName, target: row.trade.buy.regionName, count: 0, bestNet: -Infinity, bestRoi: -Infinity };
       lane.count += 1;
       lane.bestNet = Math.max(lane.bestNet, row.netProfit);

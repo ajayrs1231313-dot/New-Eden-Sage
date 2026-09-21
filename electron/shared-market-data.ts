@@ -683,7 +683,10 @@ export async function loadSharedPublicSource<T>(source: string): Promise<{ fetch
   return value ? { fetchedAt: value.fetchedAt, data: value.data as T } : null;
 }
 
-export function startSharedPublicDataListener(onAvailable?: (notice: { generation: string }) => void) {
+export function startSharedPublicDataListener(
+  onAvailable?: (notice: { generation: string }) => void,
+  onNotificationCheck?: (notice: { evaluatedAt?: string; notifications?: Record<string, unknown> }) => void,
+) {
   let stopped = false;
   let controller: AbortController | null = null;
   let lastNotifiedGeneration = "";
@@ -710,7 +713,13 @@ export function startSharedPublicDataListener(onAvailable?: (notice: { generatio
             buffer = buffer.slice(boundary + 2);
             const event = frame.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
             const data = frame.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
-            if (event !== "public-data-ready" || !data) continue;
+            if (!data) continue;
+            if (event === "notification-check") {
+              const notice = JSON.parse(data) as { evaluatedAt?: string; notifications?: Record<string, unknown> };
+              onNotificationCheck?.(notice);
+              continue;
+            }
+            if (event !== "public-data-ready") continue;
             const notice = JSON.parse(data) as { generation?: string };
             const installed = await loadCurrentSharedMarketManifest();
             if (!notice.generation || notice.generation === installed?.generation || notice.generation === lastNotifiedGeneration) continue;

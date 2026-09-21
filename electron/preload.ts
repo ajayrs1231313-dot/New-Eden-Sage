@@ -110,6 +110,20 @@ contextBridge.exposeInMainWorld("sage", {
   getHostClock: () => ipcRenderer.invoke("system-time:get"),
   syncHostClock: () => ipcRenderer.invoke("system-time:sync"),
   setHostClock: (value:string) => ipcRenderer.invoke("system-time:set", value),
+  submitUsageMetrics: (batch: unknown) => ipcRenderer.invoke("metrics:submit", batch),
+  getUsagePresence: () => ipcRenderer.invoke("metrics:presence"),
+  getNotificationRules: () => ipcRenderer.invoke("notifications:rules"),
+  createNotificationRule: (input: unknown) => ipcRenderer.invoke("notifications:create", input),
+  updateNotificationRule: (requestId: string, rule: unknown) => ipcRenderer.invoke("notifications:update", { requestId, rule }),
+  deleteNotificationRule: (requestId: string) => ipcRenderer.invoke("notifications:delete", requestId),
+  getNotificationInbox: (input?: { limit?: number; includeAcknowledged?: boolean }) => ipcRenderer.invoke("notifications:inbox", input),
+  acknowledgeNotification: (eventId: string) => ipcRenderer.invoke("notifications:ack", eventId),
+  onNotificationsUpdated: (callback: (value: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
+    ipcRenderer.on("notifications:updated", listener);
+    return () => ipcRenderer.removeListener("notifications:updated", listener);
+  },
+
   getGlobalMarketQuotes: (typeIds:number[]) => ipcRenderer.invoke("market:global-quotes", typeIds),
   getLpCorporations: (corporationIds:number[]) => ipcRenderer.invoke("lp-store:corporations", corporationIds),
   getLpStoreOffers: (corporationId:number, marketRevision = 0) => ipcRenderer.invoke("lp-store:offers", corporationId, marketRevision),
@@ -203,6 +217,7 @@ contextBridge.exposeInMainWorld("sage", {
   getFittingRemediesLocal: (input: unknown) => ipcRenderer.invoke("fitting:remedies-local", input),
   resolveTypeIds: (ids: number[]) =>
     ipcRenderer.invoke("universe:resolve-type-ids", ids),
+  cacheTypeIcons: (input: { typeIds: number[]; size?: number }) => ipcRenderer.invoke("assets:cache-type-icons", input),
   listShips: () => ipcRenderer.invoke("universe:ships"),
   searchLootItems: (query: string, limit = 60) => ipcRenderer.invoke("loot:search", { query, limit }),
   getLootAcquisition: (typeId: number) => ipcRenderer.invoke("loot:acquisition", typeId),
@@ -357,7 +372,7 @@ contextBridge.exposeInMainWorld("sage", {
     return () => ipcRenderer.removeListener("analysis:progress", listener);
   },
   exportTopArbitrage: () => ipcRenderer.invoke("trade:export-top1000"),
-  searchOreMarketTypes: (query: string, limit = 12) => ipcRenderer.invoke("market:search-ore-types", { query, limit }),
+  searchOreMarketTypes: (query: string, limit = 12, kind: "ore" | "ice" | "gas" | "salvage" = "ore") => ipcRenderer.invoke("market:search-ore-types", { query, limit, kind }),
   quoteMarketDepth: (input: unknown) => ipcRenderer.invoke("market:quote-depth", input),
   searchRawMarket: (input: unknown) => invokeAnalysis("market:raw-search", input),
   filterRegionalMarket: (input: unknown) => invokeAnalysis("market:regional-filter", input),

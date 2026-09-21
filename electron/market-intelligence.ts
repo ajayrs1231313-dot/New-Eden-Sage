@@ -382,7 +382,7 @@ export async function getContractMarketIntelligence() {
         return (
           group.endsWith(" rig") ||
           group === "rig" ||
-          marketPath.split(" â€º ").some((part) => part === "rig" || part === "rigs" || part.endsWith(" rigs"))
+          marketPath.split(" › ").some((part) => part === "rig" || part === "rigs" || part.endsWith(" rigs"))
         );
       };
 

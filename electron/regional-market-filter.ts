@@ -1,3 +1,4 @@
+import { pageLoadWorkerCount } from "./interactive-processing-policy";
 import {
   buildRegionalMarketAggregateIndex,
   type RegionalMarketAggregateIndex,
@@ -286,7 +287,7 @@ export async function filterRegionalMarket(
 
   runtime.progress?.({ stage: "regional-filter-index", message: "Preparing the regional market index…", percent: 5 });
   const [index, typeIndex, systemIndex] = await Promise.all([
-    buildRegionalMarketAggregateIndex({ progress: runtime.progress }),
+    buildRegionalMarketAggregateIndex({ progress: runtime.progress }, pageLoadWorkerCount()),
     getMarketTypeIndex(),
     getMarketSystemIndex(),
   ]);

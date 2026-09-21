@@ -270,7 +270,7 @@ export function IskLab({ snapshot, active = true, cloneState, marketDataRevision
           inventionAutoBuildKey.current = inventionBuildKey;
           setInventionAnalysis(prepared.invention);
           setInventionStatus(
-            `${prepared.invention.candidateCount.toLocaleString()} invention outcomes ready ┬À ${prepared.invention.ownedSourceCount.toLocaleString()} use an owned source BPO.`,
+            `${prepared.invention.candidateCount.toLocaleString()} invention outcomes ready · ${prepared.invention.ownedSourceCount.toLocaleString()} use an owned source BPO.`,
           );
         } else {
           setInventionStatus("Invention is prepared on demand. Building it from the current local character and installed public market generation...");

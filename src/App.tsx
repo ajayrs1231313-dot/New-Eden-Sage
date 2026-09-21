@@ -43,6 +43,7 @@ import {
   transitionSidebarAutoHide,
   type SidebarHideScheduler,
 } from "./sidebar-auto-hide-state";
+import { initializeUsageMetrics, setUsageMetricPage, setUsageMetricsAppVersion } from "./usage-metrics";
 
 type View =
   | "overview"
@@ -118,7 +119,7 @@ const RetainedIskLab = memo(IskLab);
 const RetainedFittingsWorkspace = memo(FittingsWorkspace, (a, b) => a.activeCharacterId === b.activeCharacterId);
 const RetainedLoot = memo(Loot, () => true);
 const RetainedAssetsCommand = memo(AssetsCommand, (a, b) => a.snapshots === b.snapshots);
-const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId && a.active === b.active);
+const RetainedIndustrialCommand = memo(IndustrialCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId && a.active === b.active && a.marketDataRevision === b.marketDataRevision);
 const RetainedNavigationCommand = memo(NavigationCommand, () => true);
 const RetainedWormholeCommand = memo(WormholeCommand, (a, b) => a.snapshots === b.snapshots && a.activeCharacterId === b.activeCharacterId);
 const RetainedFleetCommand = memo(FleetCommand);
@@ -132,10 +133,41 @@ function useVisibleValue<T>(value: T, visible: boolean): T {
 export default function App() {
   const [view, setView] = useState<View>("overview");
   const [fleetWargameActive, setFleetWargameActive] = useState(false);
+  const [industrialSelectionCount, setIndustrialSelectionCount] = useState(0);
+  const [industrialSection, setIndustrialSection] = useState("overview");
+  const [appVersion, setAppVersion] = useState("");
   const [fitToMonitor, setFitToMonitor] = useState(false);
   const [assetCommandTab, setAssetCommandTab] = useState<AssetCommandTab>("loot");
   const [walletCommandView, setWalletCommandView] = useState<WalletCommandView>("full");
   const [activityCommandTab, setActivityCommandTab] = useState<SkillsTab>("activity-planner");
+  useEffect(() => {
+    initializeUsageMetrics();
+    void window.sage.getUpdateState().then((state) => setAppVersion(state.version)).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    setUsageMetricsAppVersion(appVersion);
+  }, [appVersion]);
+  const metricPage = view === "skills"
+    ? `skills/${activityCommandTab}`
+    : view === "loot"
+      ? `loot/${assetCommandTab}${assetCommandTab === "wallet" ? `/${walletCommandView}` : ""}`
+      : view === "industrial"
+        ? `industrial/${industrialSection}`
+        : view === "fleet" && fleetWargameActive
+          ? "fleet/wargame"
+          : view;
+  useEffect(() => {
+    setUsageMetricPage(metricPage);
+  }, [metricPage]);
+  useEffect(() => {
+    const handleIndustrialSection = (event: Event) => {
+      const detail = (event as CustomEvent<{ tab?: string; foundryTab?: string }>).detail ?? {};
+      const next = detail.tab === "foundry" ? `foundry:${detail.foundryTab ?? "projects"}` : String(detail.tab ?? "overview");
+      setIndustrialSection(next);
+    };
+    window.addEventListener("sage:industrial-section-changed", handleIndustrialSection as EventListener);
+    return () => window.removeEventListener("sage:industrial-section-changed", handleIndustrialSection as EventListener);
+  }, []);
   useEffect(() => {
     const handlePrintScreen = (event: KeyboardEvent) => {
       if (event.key !== "PrintScreen" && event.code !== "PrintScreen") return;
@@ -480,6 +512,7 @@ export default function App() {
 
   const allCommandTabsVisited = commandNav.every((item) => visitedCommandViews.has(item.id));
   const active = snapshots.find((item) => item.characterId === activeId) ?? snapshots[0];
+  const ownerConnectedCountVisible = snapshots.some((snapshot) => snapshot.characterId === "569399317" || snapshot.characterId === "769483498");
   const overviewSnapshot = useVisibleValue(active, view === "overview");
   const overviewSnapshots = useVisibleValue(snapshots, view === "overview");
   const skillsSnapshot = useVisibleValue(active, view === "skills");
@@ -495,7 +528,7 @@ export default function App() {
   if (!config) return <div className="boot">Waking New Eden Sage...</div>;
 
   return (
-    <div className={`app-shell ${view === "fittings" ? "fittings-shell-active" : ""} ${view === "fleet" && fleetWargameActive ? "wargame-shell-active" : ""}`}>
+    <div className={`app-shell ${view === "fittings" ? "fittings-shell-active" : ""} ${view === "industrial" ? "industrial-shell-active" : ""} ${view === "fleet" && fleetWargameActive ? "wargame-shell-active" : ""}`}>
       {(!initialSetupComplete && !syncProgress?.running) && (
         <div className="sync-overlay" role="status" aria-live="polite">
           <div className="sync-dialog">
@@ -688,9 +721,11 @@ export default function App() {
               ? "Command and control for your capsuleer assets"
               : view === "skills"
                 ? "Plan activities, fittings and training for the selected capsuleer"
-                : "Unified public and private data controls for this command workspace"
+                : view === "industrial"
+                  ? "Live production, shared assets and industrial planning across your selected capsuleers"
+                  : "Unified public and private data controls for this command workspace"
           }
-          kicker={view === "overview" ? "COMMAND DECK" : "CAPSULEER INTELLIGENCE"}
+          kicker={view === "overview" ? "COMMAND DECK" : view === "industrial" ? "CAPSULEER PRODUCTION CONTROL" : "CAPSULEER INTELLIGENCE"}
           snapshot={active}
           busy={busy}
           privateRefreshing={privateRefreshActive}
@@ -699,6 +734,7 @@ export default function App() {
           onRefreshPrivate={refreshPrivateData}
           onAddCharacter={connect}
           onSupportDeveloper={() => window.sage.openSupportPage()}
+          showConnectedCount={ownerConnectedCountVisible}
         />}
         {mountedViews.current.has("overview") && (
           <div className="cached-view" hidden={view !== "overview"}>
@@ -777,7 +813,9 @@ export default function App() {
               snapshots={industrialSnapshots}
               activeCharacterId={industrialCharacterId}
               active={view === "industrial"}
+              marketDataRevision={marketDataRevision}
               onSelectCharacter={selectCharacter}
+              onSelectionCountChange={setIndustrialSelectionCount}
             />
           </div>
         )}
@@ -789,8 +827,8 @@ export default function App() {
         )}
         <footer>
           <span className="pulse" />
-          {message}
-          <span className="footer-right">Tranquility / local database</span>
+          {view === "industrial" ? "All systems nominal" : message}
+          <span className="footer-right">{view === "industrial" ? `New Eden Sage${appVersion ? ` v${appVersion}` : ""} | ESI ${snapshots.length ? "Connected" : "Offline"} | ${industrialSelectionCount} Character${industrialSelectionCount === 1 ? "" : "s"} Selected` : "Tranquility / local database"}</span>
         </footer>
       </main>
     </div>

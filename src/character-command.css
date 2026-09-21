@@ -1,4 +1,4 @@
-/* Character Command asset pass â€” screenshot-driven HUD composition. Scoped to Character Command only. */
+/* Character Command asset pass — screenshot-driven HUD composition. Scoped to Character Command only. */
 .character-command {
   --ch-bg: #020a0f;
   --ch-panel: #061319;
@@ -136,7 +136,7 @@
 .character-command .character-hero-copy > strong b,.character-command .character-hero-copy > small b { color:#4f7b82; font-weight:400; }
 .character-command .character-hero-copy > small { margin-top:8px; color:#68858d; font-size:11px;font-size:clamp(11px, calc(8.8px + 0.204vmin), 13.2px); letter-spacing:.02em; }
 
-/* JOURNEY â€” dedicated vector nodes/rail */
+/* JOURNEY — dedicated vector nodes/rail */
 .character-command .character-journey { position:absolute; z-index:4; left:190px; right:12px; bottom:10px; height:87px; padding:9px 11px 6px; border:1px solid #14333c; border-radius:2px; background:linear-gradient(180deg,rgba(3,14,19,.86),rgba(3,12,17,.96)); box-shadow:inset 0 1px rgba(75,219,209,.025); }
 .character-command .character-journey-heading { display:flex; align-items:center; gap:13px; height:13px; }
 .character-command .character-journey-heading strong { color:#55d8cf; font-size:10px;font-size:clamp(10px, calc(8px + 0.185vmin), 12px); letter-spacing:.12em; }
@@ -185,7 +185,7 @@
 .character-command .character-status-readiness small { color:#607b82; font-size:8.9px;font-size:clamp(8.9px, calc(7.12px + 0.165vmin), 10.7px); }
 
 /* MAIN REFERENCE GRID */
-.character-command .character-reference-grid { display:grid; grid-template-columns:1.05fr .9fr 1.06fr 1.12fr; grid-template-areas:"start alerts news moves" "quick quick radar radar"; gap:8px; align-items:stretch; min-width:0; }
+.character-command .character-reference-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); grid-template-areas:"start alerts news moves" "quick quick radar radar"; gap:8px; align-items:stretch; min-width:0; }
 .character-command .character-reference-grid > .command-intelligence-grid,
 .character-command .character-reference-grid > .capability-command-center { display:contents; }
 .character-command .character-console-panel,
@@ -194,9 +194,9 @@
 .character-command .character-reference-grid .capability-next-moves,
 .character-command .character-reference-grid .capability-radar-v2,
 .character-command .character-reference-grid .capability-loading { min-width:0; margin:0; border:1px solid #163741; border-radius:2px; background:linear-gradient(180deg,#06161c,#041117); box-shadow:inset 0 1px rgba(89,222,213,.02); }
-.character-command .character-start-panel { grid-area:start; height:210px; padding:9px; }
+.character-command .character-start-panel { grid-area:news; height:210px; padding:9px; }
 .character-command .character-reference-grid .command-priority-panel { grid-area:alerts; height:210px; padding:9px; border-color:#473037; }
-.character-command .character-reference-grid .eve-news-panel { grid-area:news; height:210px; padding:9px; border-color:#15403f; }
+.character-command .character-reference-grid .eve-news-panel { grid-area:start; height:210px; padding:9px; border-color:#15403f; }
 .character-command .character-reference-grid .capability-next-moves { grid-area:moves; height:210px; padding:9px; overflow:hidden; border-color:#173d40; }
 .character-command .character-quick-panel { grid-area:quick; min-height:154px; padding:9px; }
 .character-command .character-reference-grid .capability-radar-v2 { grid-area:radar; min-height:154px; padding:9px; }
@@ -399,7 +399,7 @@
   .character-command > .command-subtabs button { min-width:104px; flex:1; }
 }
 
-/* Character Command polish pass â€” 2026-08-24 background / identity / onboarding / ship masks */
+/* Character Command polish pass — 2026-08-24 background / identity / onboarding / ship masks */
 .character-command .character-hero-v2 {
   height: 348px;
   background:
@@ -984,3 +984,634 @@
 
 .character-command .character-journey{border-color:#1a4650;background:linear-gradient(180deg,rgba(4,18,24,.94),rgba(2,10,15,.98));box-shadow:inset 0 1px rgba(94,231,220,.06),0 8px 22px rgba(0,0,0,.16)}
 .character-command .character-journey-track{height:2px;background:#16343d}.character-command .character-journey-track i{height:2px}.character-command .character-journey-node svg{filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}.character-command .character-journey-node.complete strong{color:#c8dedf}.character-command .character-journey-node.active strong{color:#dffefd;font-weight:750}.character-command .character-journey-node.active small{color:#e4b65a}.character-command .character-journey-node.active .ring{fill:#09252a;filter:drop-shadow(0 0 5px rgba(79,229,219,.38))}.character-command .character-journey-heading{border-bottom:1px solid rgba(62,124,132,.18);padding-bottom:4px;height:17px}.character-command .character-journey-rail{margin-top:4px}
+
+/* Character Command priority handoff: EVE News now leads the grid and the former
+   Getting Started slot is an amber Skills priority panel until alert routing lands. */
+.character-command .character-start-panel.amber-priority-panel {
+  border-color:#6f5424;
+  background:linear-gradient(180deg,rgba(31,23,8,.72),rgba(10,13,14,.96));
+  box-shadow:inset 2px 0 rgba(224,166,55,.34),inset 0 0 28px rgba(165,112,27,.10),0 0 12px rgba(104,70,19,.07);
+}
+.character-command .amber-priority-panel .skill-priority-heading {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  min-height:25px;
+  margin:0 0 7px;
+  padding:0;
+}
+.character-command .amber-priority-panel .skill-priority-heading h3 {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-sizing:border-box;
+  flex:1 1 auto;
+  min-width:0;
+  min-height:25px;
+  margin:0;
+  padding:4px 30px;
+  border:1px solid #e0a637;
+  clip-path:polygon(8px 0,calc(100% - 8px) 0,100% 8px,100% calc(100% - 5px),calc(100% - 5px) 100%,8px 100%,0 calc(100% - 8px),0 5px);
+  background:linear-gradient(90deg,rgba(35,24,6,.94),rgba(72,48,10,.76) 50%,rgba(35,24,6,.94));
+  color:#ffd166;
+  font-size:11px;
+  font-size:clamp(11px,calc(8.8px + .204vmin),13.2px);
+  font-weight:900;
+  line-height:1;
+  letter-spacing:.14em;
+  text-align:center;
+  text-transform:uppercase;
+  text-shadow:0 0 4px rgba(255,201,83,.72),0 0 10px rgba(255,190,55,.32);
+  box-shadow:inset 0 0 12px rgba(224,166,55,.13);
+}
+.character-command .amber-priority-panel .skill-priority-heading > span {
+  flex:0 0 auto;
+  min-width:44px;
+  padding:3px 6px;
+  border:1px solid #725522;
+  background:#171208;
+  color:#d8aa50;
+  font-size:8.8px;
+  font-size:clamp(8.8px,calc(7.04px + .163vmin),10.6px);
+  font-weight:800;
+  text-align:center;
+  white-space:nowrap;
+}
+.character-command .amber-priority-panel > div:last-child {
+  display:grid;
+  gap:4px;
+}
+.character-command .amber-priority-panel button {
+  border-color:#4d3a1d;
+  background:linear-gradient(90deg,rgba(35,26,9,.74),rgba(8,19,21,.88));
+}
+.character-command .amber-priority-panel button:hover {
+  border-color:#8d6929;
+  background:linear-gradient(90deg,rgba(50,36,10,.82),rgba(10,26,27,.92));
+}
+.character-command .amber-priority-panel button > span {
+  border-color:#8f6828;
+  color:#e8b64f;
+  background:#191509;
+  box-shadow:inset 0 0 10px rgba(224,166,55,.06);
+}
+.character-command .amber-priority-panel button strong { color:#ead9b5; }
+.character-command .amber-priority-panel button small { color:#9d8558; }
+.character-command .amber-priority-panel button b { color:#b78b37; }
+
+.character-command .amber-priority-panel .skill-priority-single {
+  min-height:145px;
+  grid-template-columns:38px minmax(0,1fr) 18px;
+  gap:11px;
+  padding:14px 13px;
+  border-color:#5e461f;
+  background:
+    radial-gradient(circle at 72% 36%,rgba(210,151,43,.09),transparent 38%),
+    linear-gradient(90deg,rgba(38,27,7,.78),rgba(8,18,20,.92));
+}
+.character-command .amber-priority-panel .skill-priority-single > span {
+  width:34px;
+  height:34px;
+  border-color:#a6782d;
+  color:#f1bb50;
+}
+.character-command .amber-priority-panel .skill-priority-single strong {
+  color:#eadbb9;
+  font-size:12px;
+  font-size:clamp(12px,calc(9.6px + .222vmin),14.4px);
+  font-weight:700;
+  letter-spacing:.025em;
+}
+.character-command .amber-priority-panel .skill-priority-single small {
+  margin-top:8px;
+  overflow:visible;
+  color:#ffd166;
+  font:700 25px/1 "Space Grotesk",sans-serif;
+  font-size:clamp(25px,calc(20px + .463vmin),30px);
+  letter-spacing:-.02em;
+  text-overflow:clip;
+  text-shadow:0 0 12px rgba(224,166,55,.22);
+}
+.character-command .amber-priority-panel .skill-priority-single b {
+  color:#d29b3d;
+  font-size:21px;
+}
+
+/* Amber treatment for temporary skill-queue Command Priority. */
+.character-command .character-reference-grid .command-priority-panel.warning {
+  border-color:#6f5424;
+  background:linear-gradient(180deg,rgba(31,23,8,.64),rgba(8,14,17,.96));
+  box-shadow:inset 2px 0 rgba(224,166,55,.30),inset 0 0 28px rgba(165,112,27,.08),0 0 12px rgba(104,70,19,.06);
+}
+.character-command .character-reference-grid .command-priority-panel.warning .command-panel-heading .eyebrow {
+  color:#ffd166;
+  border-color:#e0a637;
+  background:linear-gradient(90deg,rgba(35,24,6,.94),rgba(72,48,10,.76) 50%,rgba(35,24,6,.94));
+  text-shadow:0 0 4px rgba(255,201,83,.72),0 0 10px rgba(255,190,55,.30);
+}
+.character-command .character-reference-grid .command-priority-panel.warning .command-panel-heading > span {
+  border-color:#725522;
+  color:#d8aa50;
+  background:#171208;
+}
+.character-command .character-reference-grid .command-priority-panel.warning .priority-item:first-child,
+.character-command .character-reference-grid .command-priority-panel.warning .priority-item.priority-orange {
+  border-color:#5e461f;
+  background:linear-gradient(90deg,rgba(47,33,9,.74),rgba(7,18,21,.88));
+}
+.character-command .character-reference-grid .command-priority-panel.warning .priority-orange .priority-dot {
+  color:#e0a637;
+}
+
+/* Compact amber queue alert: mirror Command Priority row geometry, no tile/action chrome. */
+.character-command .amber-priority-panel .skill-priority-row {
+  display:grid;
+  grid-template-columns:8px minmax(0,1fr);
+  align-items:center;
+  gap:7px;
+  width:100%;
+  min-height:43px;
+  box-sizing:border-box;
+  padding:6px 8px;
+  border:1px solid #60491f;
+  border-radius:2px;
+  background:linear-gradient(90deg,rgba(48,34,9,.58),rgba(7,18,21,.88));
+}
+.character-command .amber-priority-panel .skill-priority-row > div { min-width:0; }
+.character-command .amber-priority-panel .skill-priority-row strong,
+.character-command .amber-priority-panel .skill-priority-row small {
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.character-command .amber-priority-panel .skill-priority-row strong {
+  color:#f0d69b;
+  font-size:10.8px;
+  font-size:clamp(10.8px,calc(8.64px + .2vmin),13px);
+  font-weight:700;
+}
+.character-command .amber-priority-panel .skill-priority-row small {
+  margin-top:2px;
+  color:#a98b55;
+  font-size:9px;
+  font-size:clamp(9px,calc(7.2px + .167vmin),10.8px);
+}
+.character-command .amber-priority-panel .skill-priority-dot {
+  position:relative;
+  width:7px;
+  height:7px;
+  box-sizing:border-box;
+  border:1px solid #e0a637;
+  border-radius:50%;
+  color:#e0a637;
+}
+.character-command .amber-priority-panel .skill-priority-dot::after {
+  content:"";
+  position:absolute;
+  inset:2px;
+  border-radius:50%;
+  background:currentColor;
+  box-shadow:0 0 6px currentColor;
+}
+
+/* Retire the previous oversized Getting Started tile treatment. */
+.character-command .amber-priority-panel .skill-priority-single { display:none; }
+
+
+
+/* Top-panel paging + News identity */
+.character-command .character-reference-grid .command-priority-panel,
+.character-command .character-reference-grid .eve-news-panel,
+.character-command .character-start-panel.amber-priority-panel,
+.character-command .character-reference-grid .capability-next-moves{
+  display:flex;
+  flex-direction:column;
+}
+.character-command .character-reference-grid .command-priority-panel .panel-pager,
+.character-command .character-reference-grid .eve-news-panel .panel-pager,
+.character-command .character-start-panel.amber-priority-panel .panel-pager{
+  flex:0 0 auto;
+  margin-top:auto;
+}
+
+/* EVE News gets its own blue-violet identity, distinct from notification teal. */
+.character-command .character-reference-grid .eve-news-panel{
+  border-color:#324d78;
+  background:
+    radial-gradient(circle at 78% 8%,rgba(82,104,191,.09),transparent 38%),
+    linear-gradient(180deg,rgba(7,16,31,.98),rgba(4,13,22,.98));
+  box-shadow:inset 2px 0 rgba(93,132,224,.22),inset 0 0 26px rgba(72,95,174,.07);
+}
+.character-command .character-reference-grid .eve-news-panel .command-panel-heading .eyebrow{
+  color:#91b1ff;
+  border-color:#5d84df;
+  background:linear-gradient(90deg,rgba(10,18,43,.96),rgba(30,49,99,.76) 50%,rgba(10,18,43,.96));
+  text-shadow:0 0 4px rgba(125,164,255,.64),0 0 10px rgba(93,132,223,.26);
+}
+.character-command .character-reference-grid .eve-news-panel .command-panel-heading h3{color:#d8e1fa}
+.character-command .character-reference-grid .eve-news-panel .news-refresh{
+  border-color:#314c76;
+  background:#0a1325;
+  color:#789de5;
+}
+.character-command .character-reference-grid .eve-news-panel .news-refresh:hover{
+  border-color:#648ae0;
+  color:#b1c7ff;
+}
+.character-command .character-reference-grid .eve-news-panel .news-filters button{
+  border-color:#223754;
+  background:#071321;
+  color:#647fae;
+}
+.character-command .character-reference-grid .eve-news-panel .news-filters button.active{
+  border-color:#587ed1;
+  background:#101e3b;
+  color:#9eb9ff;
+  box-shadow:inset 0 0 9px rgba(92,132,218,.08);
+}
+.character-command .character-reference-grid .eve-news-panel .news-list a{border-bottom-color:#172944}
+.character-command .character-reference-grid .eve-news-panel .news-list a:hover{background:#0a182a}
+.character-command .character-reference-grid .eve-news-panel .news-category{
+  border-color:#36588d;
+  color:#86a9ee;
+  background:rgba(20,37,69,.28);
+}
+.character-command .character-reference-grid .eve-news-panel .news-list strong{color:#c8d4ee}
+.character-command .character-reference-grid .eve-news-panel .news-list small{color:#667d9f}
+.character-command .character-reference-grid .eve-news-panel .panel-pager{border-top-color:rgba(76,101,165,.22)}
+.character-command .character-reference-grid .eve-news-panel .panel-pager__arrow{
+  border-color:#30476d;
+  background:linear-gradient(180deg,#0d172a,#08111f);
+  color:#7597d9;
+}
+.character-command .character-reference-grid .eve-news-panel .panel-pager__arrow:not(:disabled):hover{
+  border-color:#6387d8;
+  color:#b1c8ff;
+  background:linear-gradient(180deg,#132344,#0b1930);
+}
+.character-command .character-reference-grid .eve-news-panel .panel-pager__count b{color:#9bb5ea}
+.character-command .character-reference-grid .eve-news-panel .panel-pager__count{color:#526b99}
+
+/* Priority pager picks up the panel alert tone. */
+.character-command .character-reference-grid .command-priority-panel .panel-pager{border-top-color:rgba(111,51,62,.22)}
+.character-command .character-reference-grid .command-priority-panel .panel-pager__arrow{
+  border-color:#57323a;
+  background:linear-gradient(180deg,#1b1014,#100c0f);
+  color:#b86470;
+}
+.character-command .character-reference-grid .command-priority-panel .panel-pager__arrow:not(:disabled):hover{
+  border-color:#a44b5a;
+  color:#f18492;
+}
+.character-command .character-reference-grid .command-priority-panel .panel-pager__count b{color:#c97a84}
+
+/* Skill priority pager stays amber. */
+.character-command .character-start-panel.amber-priority-panel .panel-pager{border-top-color:rgba(139,100,34,.22)}
+.character-command .character-start-panel.amber-priority-panel .panel-pager__arrow{
+  border-color:#60491f;
+  background:linear-gradient(180deg,#1a1408,#100d07);
+  color:#c0913d;
+}
+.character-command .character-start-panel.amber-priority-panel .panel-pager__arrow:not(:disabled):hover{
+  border-color:#99712c;
+  color:#f3c25e;
+}
+.character-command .character-start-panel.amber-priority-panel .panel-pager__count b{color:#d5a84c}
+
+/* Uniform compact top-panel pagers. Keep panel geometry untouched. */
+.character-command .character-reference-grid .panel-pager,
+.character-command .character-start-panel>.panel-pager{
+  display:flex!important;
+  align-items:center!important;
+  justify-content:center!important;
+  gap:0!important;
+  min-height:18px!important;
+  margin-top:auto!important;
+  padding-top:3px!important;
+}
+.character-command .character-start-panel>.panel-pager{
+  grid-template-columns:none!important;
+}
+.character-command .character-reference-grid .panel-pager__arrow,
+.character-command .character-start-panel .panel-pager__arrow{
+  all:unset;
+  box-sizing:border-box;
+  display:grid;
+  place-items:center;
+  width:20px;
+  height:16px;
+  cursor:pointer;
+}
+.character-command .character-reference-grid .panel-pager__arrow svg,
+.character-command .character-start-panel .panel-pager__arrow svg{
+  width:10px;
+  height:10px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.7;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+.character-command .character-reference-grid .panel-pager__arrow:disabled,
+.character-command .character-start-panel .panel-pager__arrow:disabled{
+  opacity:.20;
+  cursor:default;
+}
+.character-command .character-reference-grid .panel-pager__arrow:not(:disabled):hover,
+.character-command .character-start-panel .panel-pager__arrow:not(:disabled):hover{
+  text-shadow:0 0 7px currentColor;
+}
+.character-command .character-reference-grid .eve-news-panel .panel-pager__arrow{color:#779be1}
+.character-command .character-reference-grid .eve-news-panel .panel-pager__arrow:not(:disabled):hover{color:#b1c8ff}
+.character-command .character-reference-grid .command-priority-panel .panel-pager__arrow{color:#b86470}
+.character-command .character-reference-grid .command-priority-panel .panel-pager__arrow:not(:disabled):hover{color:#f18492}
+.character-command .character-start-panel.amber-priority-panel .panel-pager__arrow{color:#bf903d}
+.character-command .character-start-panel.amber-priority-panel .panel-pager__arrow:not(:disabled):hover{color:#f3c25e}
+.character-command .character-reference-grid .panel-pager__count,
+.character-command .character-start-panel .panel-pager__count{
+  height:16px;
+  min-width:48px;
+  padding:0 5px;
+  border-left:1px solid rgba(77,103,110,.30);
+  border-right:1px solid rgba(77,103,110,.30);
+}
+
+
+/* Lock top command-card height across pager pages. */
+@media (min-width:821px){
+  .character-command .character-reference-grid .eve-news-panel,
+  .character-command .character-reference-grid .command-priority-panel,
+  .character-command .character-start-panel.amber-priority-panel,
+  .character-command .character-reference-grid .capability-next-moves{
+    height:260px!important;
+    min-height:260px!important;
+    max-height:260px!important;
+    box-sizing:border-box;
+    overflow:hidden;
+  }
+}
+
+
+.character-command .amber-priority-panel .skill-priority-subtitle{
+  margin:-2px 0 6px;
+  color:#e2cf9d;
+  font-size:9.6px;
+  font-size:clamp(9.6px,calc(7.68px + .178vmin),11.5px);
+  font-weight:650;
+  line-height:1.1;
+  text-align:center;
+}
+
+
+/* Front page unified card frame — 2026-09-21
+   Geometry only: all four cards share one header/body/pager rhythm. */
+.character-command .frontpage-card{
+  --frontpage-line:#183740;
+  --frontpage-surface:rgba(4,16,21,.72);
+  display:grid!important;
+  grid-template-rows:46px minmax(0,1fr) 19px!important;
+  row-gap:4px!important;
+  box-sizing:border-box;
+  overflow:hidden;
+}
+.character-command .frontpage-card.eve-news-panel{
+  --frontpage-line:#263e67;
+  --frontpage-surface:rgba(6,15,30,.72);
+}
+.character-command .frontpage-card.command-priority-panel{
+  --frontpage-line:#4c2932;
+  --frontpage-surface:rgba(13,13,17,.72);
+}
+.character-command .frontpage-card.amber-priority-panel{
+  --frontpage-line:#5c451e;
+  --frontpage-surface:rgba(22,18,8,.68);
+}
+.character-command .frontpage-card.custom-notifications-panel{
+  --frontpage-line:#174047;
+  --frontpage-surface:rgba(4,18,22,.72);
+}
+
+.character-command .frontpage-card>.frontpage-card__header{
+  box-sizing:border-box;
+  width:100%;
+  height:46px!important;
+  min-height:46px!important;
+  max-height:46px!important;
+  margin:0!important;
+  overflow:hidden;
+}
+.character-command .frontpage-card>.command-panel-heading.frontpage-card__header,
+.character-command .frontpage-card>.capability-heading.frontpage-card__header{
+  align-items:flex-start;
+}
+.character-command .frontpage-card .amber-watch-header{
+  display:flex;
+  flex-direction:column;
+  gap:0;
+}
+.character-command .frontpage-card .amber-watch-header .skill-priority-heading{
+  flex:0 0 27px;
+  min-height:27px;
+  height:27px;
+  margin:0;
+}
+.character-command .frontpage-card .amber-watch-header .skill-priority-subtitle{
+  flex:0 0 15px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin:0;
+  padding-top:2px;
+}
+
+.character-command .frontpage-card>.frontpage-card__body{
+  box-sizing:border-box!important;
+  width:100%;
+  height:100%!important;
+  min-height:0!important;
+  max-height:none!important;
+  margin:0!important;
+  padding:4px!important;
+  overflow:hidden!important;
+  border:1px solid var(--frontpage-line)!important;
+  border-radius:2px;
+  background:var(--frontpage-surface)!important;
+}
+.character-command .frontpage-card>.priority-card-body,
+.character-command .frontpage-card>.news-card-body,
+.character-command .frontpage-card>.watch-card-body,
+.character-command .frontpage-card>.custom-notifications-content{
+  display:flex!important;
+  flex-direction:column!important;
+}
+.character-command .frontpage-card>.priority-card-body .priority-list,
+.character-command .frontpage-card>.news-card-body .news-list,
+.character-command .frontpage-card>.watch-card-body .skill-priority-row,
+.character-command .frontpage-card>.custom-notifications-content .custom-notification-events,
+.character-command .frontpage-card>.custom-notifications-content .custom-notification-rules{
+  flex:0 0 auto;
+}
+
+/* Keep the first content row aligned to the same top inset in every card. */
+.character-command .frontpage-card>.priority-card-body .priority-list,
+.character-command .frontpage-card>.watch-card-body .skill-priority-row{
+  margin:0!important;
+}
+.character-command .frontpage-card>.news-card-body .news-filters{
+  flex:0 0 20px;
+  margin:0 0 4px!important;
+}
+.character-command .frontpage-card>.custom-notifications-content .custom-notifications-foot{
+  margin-top:auto!important;
+}
+
+/* One pager slot, one baseline, regardless of how much content is on the page. */
+.character-command .frontpage-card>.panel-pager{
+  align-self:stretch;
+  box-sizing:border-box;
+  width:100%;
+  height:19px!important;
+  min-height:19px!important;
+  max-height:19px!important;
+  margin:0!important;
+  padding:2px 0 0!important;
+  border-top:1px solid color-mix(in srgb,var(--frontpage-line) 78%,transparent)!important;
+}
+
+
+/* Uniform front-page content row geometry */
+.character-command .frontpage-card{
+  --frontpage-row-height:32px;
+}
+.character-command .frontpage-card .priority-list,
+.character-command .frontpage-card .news-list{
+  gap:3px!important;
+}
+.character-command .frontpage-card .priority-item,
+.character-command .frontpage-card .news-list>a,
+.character-command .frontpage-card .skill-priority-row{
+  box-sizing:border-box!important;
+  width:100%!important;
+  height:var(--frontpage-row-height)!important;
+  min-height:var(--frontpage-row-height)!important;
+  max-height:var(--frontpage-row-height)!important;
+  margin:0!important;
+  border-radius:2px!important;
+}
+.character-command .frontpage-card .priority-item{
+  grid-template-columns:7px minmax(0,1fr) auto!important;
+  gap:6px!important;
+  padding:3px 5px!important;
+}
+.character-command .frontpage-card .priority-copy strong,
+.character-command .frontpage-card .priority-copy small{
+  line-height:1.05!important;
+}
+.character-command .frontpage-card .priority-copy small{
+  margin-top:2px!important;
+}
+.character-command .frontpage-card .priority-item button{
+  height:20px!important;
+  min-height:20px!important;
+  padding:1px 6px!important;
+}
+.character-command .frontpage-card .news-list>a{
+  grid-template-columns:45px minmax(0,1fr) auto!important;
+  gap:5px!important;
+  padding:2px 4px!important;
+  border:1px solid #1d3152!important;
+  background:rgba(7,18,35,.45)!important;
+}
+.character-command .frontpage-card .news-list>a:hover{
+  border-color:#35598f!important;
+  background:rgba(11,27,51,.72)!important;
+}
+.character-command .frontpage-card .news-category{
+  box-sizing:border-box;
+  min-width:40px!important;
+  height:20px;
+  padding:2px 5px!important;
+}
+.character-command .frontpage-card .skill-priority-row{
+  grid-template-columns:8px minmax(0,1fr)!important;
+  gap:7px!important;
+  padding:3px 7px!important;
+}
+.character-command .frontpage-card .skill-priority-row strong,
+.character-command .frontpage-card .skill-priority-row small{
+  line-height:1.05!important;
+}
+.character-command .frontpage-card .skill-priority-row small{
+  margin-top:2px!important;
+}
+
+
+/* Footer nav alignment: filters left, pager controls right. */
+.character-command .frontpage-card>.panel-pager{
+  display:flex!important;
+  align-items:center!important;
+  justify-content:space-between!important;
+  gap:8px!important;
+  padding:2px 2px 0!important;
+}
+.character-command .frontpage-card>.panel-pager .panel-pager__leading{
+  display:flex!important;
+  align-items:center!important;
+  justify-content:flex-start!important;
+  flex:1 1 auto!important;
+  min-width:0!important;
+  overflow:hidden!important;
+}
+.character-command .frontpage-card>.panel-pager .panel-pager__controls{
+  display:flex!important;
+  align-items:center!important;
+  justify-content:flex-end!important;
+  flex:0 0 auto!important;
+  gap:1px!important;
+  margin-left:auto!important;
+}
+.character-command .frontpage-card>.panel-pager .panel-pager__count{
+  border:0!important;
+  min-width:42px!important;
+  padding:0 3px!important;
+}
+.character-command .frontpage-card .news-filters--footer{
+  display:flex!important;
+  align-items:center!important;
+  gap:3px!important;
+  margin:0!important;
+  min-width:0!important;
+}
+.character-command .frontpage-card .news-filters--footer button{
+  box-sizing:border-box!important;
+  height:15px!important;
+  min-height:15px!important;
+  padding:1px 6px!important;
+  border-radius:1px!important;
+  font-size:8px!important;
+  line-height:1!important;
+}
+.character-command .frontpage-card>.news-card-body{
+  justify-content:flex-start!important;
+}
+
+
+/* Command Watch signal list */
+.character-command .command-watch-list{
+  display:grid;
+  gap:3px;
+  width:100%;
+}
+.character-command .command-watch-list .skill-priority-row{
+  width:100%;
+}
+.character-command .command-watch-list .watch-green .skill-priority-dot{
+  border-color:#2b8b73;
+  background:#174a3d;
+  box-shadow:0 0 5px rgba(73,211,164,.22);
+}
+.character-command .command-watch-list .watch-green strong{
+  color:#b7d7c9;
+}

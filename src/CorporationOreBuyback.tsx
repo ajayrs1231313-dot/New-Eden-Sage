@@ -23,6 +23,15 @@ type OreSearchMatch = {
   categoryName: string;
 };
 
+type BuybackResourceKind = "ore" | "ice" | "gas" | "salvage";
+
+const BUYBACK_RESOURCE_LABELS: Record<BuybackResourceKind, string> = {
+  ore: "Ore",
+  ice: "Ice",
+  gas: "Gas",
+  salvage: "T2 Salvage",
+};
+
 type DepthQuote = {
   createdAt: string;
   locationName: string;
@@ -74,7 +83,7 @@ export function parseCorpOreBuybackText(text: string) {
 function buildSummary(quote: DepthQuote, payoutPercent: number) {
   const payout = quote.grandTotalRealisedIsk * payoutPercent / 100;
   const lines = [
-    `Corp Ore Buyback — ${quote.locationName}`,
+    `Corp Resource Buyback — ${quote.locationName}`,
     `Gross realised Jita value: ${isk(quote.grandTotalRealisedIsk)} ISK`,
     `Corp payout (${payoutPercent}%): ${isk(payout)} ISK`,
     "",
@@ -86,15 +95,16 @@ function buildSummary(quote: DepthQuote, payoutPercent: number) {
 export function CorporationOreBuyback() {
   const [text, setText] = useState(EXAMPLE);
   const [payoutPercent, setPayoutPercent] = useState(90);
+  const [resourceKind, setResourceKind] = useState<BuybackResourceKind>("ore");
   const [oreSearch, setOreSearch] = useState("");
   const [oreMatches, setOreMatches] = useState<OreSearchMatch[]>([]);
   const [selectedOre, setSelectedOre] = useState<OreSearchMatch | null>(null);
   const [addQuantity, setAddQuantity] = useState("");
   const [oreSearchBusy, setOreSearchBusy] = useState(false);
-  const [oreSearchMessage, setOreSearchMessage] = useState("Search published ore and ice types, then add the stack to the list.");
+  const [oreSearchMessage, setOreSearchMessage] = useState("Search ore market types, then add the stack to the list.");
   const [quote, setQuote] = useState<DepthQuote | null>(null);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("Paste ore and quantities. Sage resolves exact EVE types before walking Jita 4-4 buy-order depth.");
+  const [message, setMessage] = useState("Paste resources and quantities. Sage resolves exact EVE types, then values them against live Jita 4-4 ESI buy orders.");
   const parsed = useMemo(() => parseCorpOreBuybackText(text), [text]);
 
   useEffect(() => {
@@ -103,16 +113,16 @@ export function CorporationOreBuyback() {
     if (query.length < 2) {
       setOreMatches([]);
       setOreSearchBusy(false);
-      if (query) setOreSearchMessage("Type at least 2 characters to search ore and ice market types.");
+      if (query) setOreSearchMessage(`Type at least 2 characters to search ${BUYBACK_RESOURCE_LABELS[resourceKind].toLowerCase()} market types.`);
       return;
     }
     let cancelled = false;
     const timer = window.setTimeout(() => {
       setOreSearchBusy(true);
-      void window.sage.searchOreMarketTypes(query, 12).then((matches) => {
+      void window.sage.searchOreMarketTypes(query, 12, resourceKind).then((matches) => {
         if (cancelled) return;
         setOreMatches(matches);
-        setOreSearchMessage(matches.length ? "Choose a Jita buyback item, enter the quantity, then add it." : "No ore or ice market type matched that search.");
+        setOreSearchMessage(matches.length ? `Choose a ${BUYBACK_RESOURCE_LABELS[resourceKind].toLowerCase()} item, enter the quantity, then add it.` : `No ${BUYBACK_RESOURCE_LABELS[resourceKind].toLowerCase()} market type matched that search.`);
       }).catch((error) => {
         if (cancelled) return;
         setOreMatches([]);
@@ -122,7 +132,7 @@ export function CorporationOreBuyback() {
       });
     }, 180);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [oreSearch, selectedOre]);
+  }, [oreSearch, selectedOre, resourceKind]);
 
   function chooseOre(match: OreSearchMatch) {
     setSelectedOre(match);
@@ -132,7 +142,7 @@ export function CorporationOreBuyback() {
   }
 
   function addOreToList() {
-    if (!selectedOre) { setOreSearchMessage("Choose an ore or ice type from the search results first."); return; }
+    if (!selectedOre) { setOreSearchMessage(`Choose a ${BUYBACK_RESOURCE_LABELS[resourceKind].toLowerCase()} type from the search results first.`); return; }
     const amount = Number(addQuantity.replace(/[,_ .]/g, ""));
     if (!Number.isSafeInteger(amount) || amount <= 0) { setOreSearchMessage("Enter a positive whole-number quantity."); return; }
     const line = `${selectedOre.name}: ${qty(amount)}`;
@@ -148,17 +158,17 @@ export function CorporationOreBuyback() {
     setOreSearchMessage(`Added ${selectedOre.name} × ${qty(amount)} to the buyback list.`);
   }
 
-  async function calculate(fresh = false) {
-    if (!parsed.items.length || parsed.errors.length) { setMessage(parsed.errors[0] ?? "Add at least one ore stack."); return; }
+  async function calculate(_fresh = true) {
+    if (!parsed.items.length || parsed.errors.length) { setMessage(parsed.errors[0] ?? "Add at least one resource stack."); return; }
     setBusy(true);
-    setMessage(fresh ? "Refreshing exact Jita depth…" : "Walking Jita 4-4 market depth…");
+    setMessage("Requesting the latest Jita 4-4 buy orders directly from ESI…");
     try {
       const result = await window.sage.quoteMarketDepth({
         items: parsed.items,
         regionId: 10000002,
         locationId: 60003760,
         side: "buy",
-        fresh,
+        fresh: true,
       }) as DepthQuote;
       setQuote(result);
       const failures = result.items.filter((item) => item.error || item.unfilledQuantity > 0);
@@ -176,20 +186,36 @@ export function CorporationOreBuyback() {
   const payout = quote ? quote.grandTotalRealisedIsk * payoutPercent / 100 : 0;
   return <div className="corp-buyback">
     <div className="corp-buyback-head">
-      <div><p className="eyebrow">CORPORATION · MARKET OPERATIONS</p><h3>Corp Ore Buyback</h3><p>Instant-sell valuation walks the actual Jita 4-4 buy book. It does not multiply the whole stack by the top bid.</p></div>
+      <div><p className="eyebrow">CORPORATION · MARKET OPERATIONS</p><h3>Corp Resource Buyback</h3><p>Ore, ice, gas and T2 exploration salvage are valued against the latest Jita 4-4 buy orders returned directly by ESI.</p></div>
       <div className="corp-buyback-hub"><span>PRICING HUB</span><strong>Jita 4-4</strong><small>Station 60003760 · Buy orders</small></div>
     </div>
 
     <div className="corp-buyback-controls">
       <div className="corp-buyback-entry">
+        <div className="corp-buyback-kind-tabs" role="tablist" aria-label="Buyback resource type">
+          {(Object.keys(BUYBACK_RESOURCE_LABELS) as BuybackResourceKind[]).map((kind) => <button
+            type="button"
+            key={kind}
+            role="tab"
+            aria-selected={resourceKind === kind}
+            className={resourceKind === kind ? "active" : ""}
+            onClick={() => {
+              setResourceKind(kind);
+              setOreSearch("");
+              setSelectedOre(null);
+              setOreMatches([]);
+              setOreSearchMessage(`Search ${BUYBACK_RESOURCE_LABELS[kind].toLowerCase()} market types, then add the stack to the list.`);
+            }}
+          >{BUYBACK_RESOURCE_LABELS[kind]}</button>)}
+        </div>
         <div className="corp-buyback-quick-add">
           <div className="corp-buyback-search-field">
-            <span>Jita ore search</span>
+            <span>Jita {BUYBACK_RESOURCE_LABELS[resourceKind]} search</span>
             <input
               className="corp-buyback-search-input"
               value={oreSearch}
               onChange={(event) => { setOreSearch(event.target.value); setSelectedOre(null); }}
-              placeholder="Search ore / ice type…"
+              placeholder={`Search ${BUYBACK_RESOURCE_LABELS[resourceKind].toLowerCase()} type…`}
               autoComplete="off"
               spellCheck={false}
             />
@@ -210,7 +236,7 @@ export function CorporationOreBuyback() {
           <button type="button" className="corp-buyback-add-button" disabled={!selectedOre || !addQuantity.trim()} onClick={addOreToList}>Add to list</button>
         </div>
         <div className="corp-buyback-search-message">{oreSearchMessage}</div>
-        <label><span>Ore + quantities</span><textarea value={text} onChange={(event) => { setText(event.target.value); setQuote(null); }} spellCheck={false} /></label>
+        <label><span>Resources + quantities</span><textarea value={text} onChange={(event) => { setText(event.target.value); setQuote(null); }} spellCheck={false} /></label>
       </div>
       <div className="corp-buyback-policy">
         <label><span>Corp payout %</span><input type="number" min="0" max="100" step="0.1" value={payoutPercent} onChange={(event) => setPayoutPercent(Math.max(0, Math.min(100, Number(event.target.value) || 0)))} /></label>

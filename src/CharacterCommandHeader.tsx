@@ -15,6 +15,7 @@ type Props = {
   onRefreshPrivate: () => void | Promise<void>;
   onAddCharacter: () => void | Promise<void>;
   onSupportDeveloper: () => void | Promise<void>;
+  showConnectedCount?: boolean;
 };
 
 function validTimestamp(value?: string | null) {
@@ -99,6 +100,37 @@ function AppUpdateAction() {
     </button>
   );
 }
+function ConnectedSageCount({ visible }: { visible: boolean }) {
+  const [count, setCount] = useState<number | null>(null);
+  const [windowSeconds, setWindowSeconds] = useState(75);
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const value = await window.sage.getUsagePresence();
+        if (!cancelled) {
+          setCount(value.connected);
+          setWindowSeconds(value.windowSeconds);
+        }
+      } catch {
+        if (!cancelled) setCount(null);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [visible]);
+  if (!visible) return null;
+  return <span className="cc-connected-count" title={`Sage clients active in the last ${windowSeconds} seconds`} aria-label={`${count ?? "unknown"} Sage clients connected`}>
+    <i aria-hidden="true" />
+    <b>{count ?? "—"}</b>
+  </span>;
+}
+
 function DataActionIcon({ kind }: { kind: "public" | "private" }) {
   if (kind === "public") {
     return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h3l2-5 4 10 2-5h5" /><path d="M4 5v14M20 5v14" /></svg>;
@@ -106,7 +138,7 @@ function DataActionIcon({ kind }: { kind: "public" | "private" }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a8 8 0 1 0 1 7" /><path d="M19 4v4h-4" /></svg>;
 }
 
-export function CharacterCommandHeader({ title = "Character Command", subtitle = "Command and control for your capsuleer assets", kicker = "COMMAND DECK", snapshot, busy, privateRefreshing, privateProgress, marketDataRevision, onRefreshPrivate, onAddCharacter, onSupportDeveloper }: Props) {
+export function CharacterCommandHeader({ title = "Character Command", subtitle = "Command and control for your capsuleer assets", kicker = "COMMAND DECK", snapshot, busy, privateRefreshing, privateProgress, marketDataRevision, onRefreshPrivate, onAddCharacter, onSupportDeveloper, showConnectedCount = false }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [publicStatus, setPublicStatus] = useState<PublicDataStatus | null>(null);
   const [publicBusy, setPublicBusy] = useState(false);
@@ -188,6 +220,7 @@ export function CharacterCommandHeader({ title = "Character Command", subtitle =
         <div className="cc-utility-clock">
           <small>LOCAL</small>
           <SystemClock />
+          <ConnectedSageCount visible={showConnectedCount} />
         </div>
       </div>
 

@@ -13,11 +13,15 @@ import { reconcileProfitLedger, upsertIndustryProductionLot } from "./profit-led
 export type FoundryProjectStatus = "planning" | "active" | "complete" | "archived";
 export type FoundryWorkStatus = "open" | "in-progress" | "complete";
 export type FoundryStoreBinding = {
-  kind: "container" | "division";
+  kind: "container" | "division" | "personal";
   key: string;
   itemId?: number;
   locationFlag?: string;
   name: string;
+};
+export type FoundryStoreRoute = {
+  targetId: string;
+  stores: FoundryStoreBinding[];
 };
 export type FoundryRequirement = {
   typeId: number;
@@ -71,6 +75,7 @@ export type FoundryProject = {
   productName: string;
   quantity: number;
   outputPerRun?: number;
+  availableRuns?: number;
   materialEfficiency: number;
   timeEfficiency: number;
   requirements: FoundryRequirement[];
@@ -79,6 +84,7 @@ export type FoundryProject = {
   groups?: FoundryWorkGroup[];
   workPackages: FoundryWorkPackage[];
   linkedStores: FoundryStoreBinding[];
+  storeRoutes?: FoundryStoreRoute[];
   industryJobIds?: number[];
   productionLots?: FoundryProductionLot[];
   producedQuantity?: number;
@@ -204,7 +210,23 @@ export function sumBoundStock(bindings: FoundryStoreBinding[], assets: CorpAsset
 }
 
 function bindingKeys(project: FoundryProject) {
-  return new Set((project.linkedStores ?? []).map((store) => store.key));
+  return new Set([
+    ...(project.linkedStores ?? []).map((store) => store.key),
+    ...((project.storeRoutes ?? []).flatMap((route) => (route.stores ?? []).map((store) => store.key))),
+  ]);
+}
+
+function routeBindings(project: FoundryProject, targetId?: string) {
+  if (!targetId) return null;
+  const route = (project.storeRoutes ?? []).find((row) => row.targetId === targetId);
+  return route?.stores?.length ? route.stores : null;
+}
+
+function sourceKeysForTarget(project: FoundryProject, targetId?: string) {
+  const routed = routeBindings(project, targetId);
+  const stores = routed ?? project.linkedStores ?? [];
+  if (stores.length) return new Set(stores.map((store) => store.key));
+  return projectMode(project) === "solo" ? new Set(["personal:owner"]) : new Set<string>();
 }
 
 export function projectMode(project: FoundryProject): FoundryProjectMode {
@@ -220,6 +242,30 @@ function sumAssetStock(assets: CorpAsset[]) {
     quantities.set(typeId, (quantities.get(typeId) ?? 0) + quantity);
   }
   return quantities;
+}
+
+function mergeStock(target: Map<number, number>, source: Map<number, number>) {
+  for (const [typeId, quantity] of source) target.set(typeId, (target.get(typeId) ?? 0) + quantity);
+  return target;
+}
+
+function sumSourceStock(bindings: FoundryStoreBinding[], personalAssets: CorpAsset[], corporationAssets: CorpAsset[]) {
+  const quantities = new Map<number, number>();
+  const corpBindings = bindings.filter((binding) => binding.kind !== "personal");
+  if (corpBindings.length) mergeStock(quantities, sumBoundStock(corpBindings, corporationAssets));
+  if (bindings.some((binding) => binding.kind === "personal")) mergeStock(quantities, sumAssetStock(personalAssets));
+  return quantities;
+}
+
+function directTargetByType(project: FoundryProject) {
+  const map = new Map<number, string>();
+  for (const node of project.buildTree ?? []) {
+    if (Number(node.depth ?? 0) <= 0) continue;
+    if (!node.direct && Number(node.depth ?? 0) !== 1) continue;
+    const typeId = Number(node.typeId ?? 0);
+    if (typeId > 0 && !map.has(typeId)) map.set(typeId, node.id);
+  }
+  return map;
 }
 
 function legacyBuildTree(project: FoundryProject): FoundryBuildNode[] {
@@ -240,29 +286,57 @@ function normalizeFoundryProject(project: FoundryProject): FoundryProject {
     groups: Array.isArray(project.groups) ? project.groups : [],
     workPackages: Array.isArray(project.workPackages) ? project.workPackages : [],
     linkedStores: Array.isArray(project.linkedStores) ? project.linkedStores : [],
+    storeRoutes: Array.isArray(project.storeRoutes) ? project.storeRoutes.filter((route) => route && String(route.targetId ?? "").trim()).map((route) => ({ targetId: String(route.targetId), stores: Array.isArray(route.stores) ? route.stores : [] })) : [],
   };
 }
 
-export function analyzeFoundryProject(projectInput: FoundryProject, projectsInput: FoundryProject[], assets: CorpAsset[]) {
+export function analyzeFoundryProject(projectInput: FoundryProject, projectsInput: FoundryProject[], assets: CorpAsset[], inventory?: { personal?: CorpAsset[]; corporation?: CorpAsset[] }) {
   const project = normalizeFoundryProject(projectInput);
   const projects = projectsInput.map(normalizeFoundryProject);
   const mode = projectMode(project);
-  const stock = mode === "solo" ? sumAssetStock(assets) : sumBoundStock(project.linkedStores ?? [], assets);
+  const personalAssets = inventory?.personal ?? (mode === "solo" ? assets : []);
+  const corporationAssets = inventory?.corporation ?? (mode === "corporation" ? assets : assets);
+  const defaultStock = (project.linkedStores ?? []).length
+    ? sumSourceStock(project.linkedStores ?? [], personalAssets, corporationAssets)
+    : mode === "solo" ? sumAssetStock(personalAssets) : new Map<number, number>();
+  const stockCache = new Map<string, Map<number, number>>();
+  const stockForTarget = (targetId?: string) => {
+    const routed = routeBindings(project, targetId);
+    if (!routed) return defaultStock;
+    const key = routed.map((store) => store.key).sort().join("|");
+    const cached = stockCache.get(key);
+    if (cached) return cached;
+    const stock = sumSourceStock(routed, personalAssets, corporationAssets);
+    stockCache.set(key, stock);
+    return stock;
+  };
   const ownKeys = bindingKeys(project);
-  const competing = mode === "corporation" ? projects.filter((other) =>
+  if (mode === "solo" && !(project.linkedStores ?? []).length) ownKeys.add("personal:owner");
+  const competing = projects.filter((other) =>
     other.id !== project.id
-    && projectMode(other) === "corporation"
     && other.status !== "archived"
     && other.status !== "complete"
-    && [...bindingKeys(other)].some((key) => ownKeys.has(key)),
-  ) : [];
-  const reservations = new Map<number, number>();
-  for (const other of competing) {
-    for (const requirement of other.requirements ?? []) reservations.set(requirement.typeId, (reservations.get(requirement.typeId) ?? 0) + Math.max(0, requirement.required));
-  }
-  const analyzeLine = (typeId: number, required: number) => {
+    && [...bindingKeys(other), ...(projectMode(other) === "solo" && !(other.linkedStores ?? []).length ? ["personal:owner"] : [])].some((key) => ownKeys.has(key)),
+  );
+  const currentDirectTargets = directTargetByType(project);
+  const otherDirectTargets = new Map(competing.map((other) => [other.id, directTargetByType(other)]));
+  const reservationFor = (typeId: number, targetId?: string) => {
+    const sourceKeys = sourceKeysForTarget(project, targetId);
+    if (!sourceKeys.size) return 0;
+    let reserved = 0;
+    for (const other of competing) {
+      const otherTargetId = otherDirectTargets.get(other.id)?.get(typeId);
+      const otherKeys = sourceKeysForTarget(other, otherTargetId);
+      if (![...otherKeys].some((key) => sourceKeys.has(key))) continue;
+      const requirement = (other.requirements ?? []).find((line) => Number(line.typeId) === typeId);
+      reserved += Math.max(0, Number(requirement?.required ?? 0));
+    }
+    return reserved;
+  };
+  const analyzeLine = (typeId: number, required: number, targetId?: string) => {
+    const stock = stockForTarget(targetId);
     const physicallyPresent = stock.get(typeId) ?? 0;
-    const reservedByOtherProjects = mode === "corporation" ? Math.min(physicallyPresent, reservations.get(typeId) ?? 0) : 0;
+    const reservedByOtherProjects = Math.min(physicallyPresent, reservationFor(typeId, targetId));
     const availableToProject = Math.max(0, physicallyPresent - reservedByOtherProjects);
     const delivered = Math.min(required, availableToProject);
     const outstanding = Math.max(0, required - delivered);
@@ -270,13 +344,16 @@ export function analyzeFoundryProject(projectInput: FoundryProject, projectsInpu
     const coverage = required > 0 ? Math.min(1, delivered / required) : 1;
     return { physicallyPresent, reservedByOtherProjects, availableToProject, delivered, outstanding, surplus, coverage };
   };
-  const requirements = (project.requirements ?? []).map((line) => ({ ...line, ...analyzeLine(line.typeId, line.required) }));
+  const requirements = (project.requirements ?? []).map((line) => {
+    const targetId = currentDirectTargets.get(Number(line.typeId));
+    return { ...line, sourceTargetId: targetId ?? null, ...analyzeLine(line.typeId, line.required, targetId) };
+  });
   const totalRequiredUnits = requirements.reduce((sum, line) => sum + line.required, 0);
   const totalDeliveredUnits = requirements.reduce((sum, line) => sum + line.delivered, 0);
   const progress = totalRequiredUnits > 0 ? Math.min(1, totalDeliveredUnits / totalRequiredUnits) : 0;
   const buildTree = (project.buildTree ?? legacyBuildTree(project)).map((node) => node.depth === 0
     ? { ...node, physicallyPresent: 0, reservedByOtherProjects: 0, availableToProject: 0, delivered: 0, outstanding: 0, surplus: 0, coverage: progress }
-    : { ...node, ...analyzeLine(node.typeId, Math.max(0, Number(node.required ?? 0))) });
+    : { ...node, ...analyzeLine(node.typeId, Math.max(0, Number(node.required ?? 0)), node.id) });
   const nodeById = new Map<string, any>(buildTree.map((node: any) => [node.id, node]));
   const blockers = requirements.filter((line) => line.outstanding > 0).sort((a, b) => b.outstanding - a.outstanding || a.name.localeCompare(b.name));
   const finalAssembly = { ready: blockers.length === 0 && requirements.length > 0, coverage: progress, blockerCount: blockers.length, blockers: blockers.slice(0, 8).map((line) => ({ typeId: line.typeId, name: line.name, outstanding: line.outstanding })) };
@@ -367,6 +444,7 @@ export async function createFoundryProject(input: {
     productName: String(plan.productName),
     quantity: Number(plan.outputQuantity),
     outputPerRun: Math.max(1, Number(plan.productPerRun ?? 1)),
+    availableRuns: blueprintSource === "manual" ? undefined : (Number.isFinite(Number(input.availableRuns)) && Number(input.availableRuns) >= 0 ? Math.floor(Number(input.availableRuns)) : undefined),
     materialEfficiency: Number(plan.materialEfficiency ?? materialEfficiency),
     timeEfficiency: Number(plan.timeEfficiency ?? timeEfficiency),
     requirements: (plan.materials ?? []).map((material: any) => ({ typeId: Number(material.typeId), name: String(material.name), required: Math.max(0, Number(material.required ?? 0)) })),
@@ -375,6 +453,7 @@ export async function createFoundryProject(input: {
     groups: [],
     workPackages: [],
     linkedStores: [],
+    storeRoutes: [],
     industryJobIds: [],
     productionLots: [],
     producedQuantity: 0,
@@ -433,17 +512,88 @@ function sanitizeFoundryAssignments(project: FoundryProject, input: unknown, gro
   return output;
 }
 
-export function updateFoundryProject(input: { characterId: string; project: FoundryProject }) {
+function sanitizeStoreBindings(input: unknown): FoundryStoreBinding[] {
+  const seen = new Set<string>();
+  const rows = Array.isArray(input) ? input : [];
+  return rows.flatMap((raw: any) => {
+    const kind = raw?.kind === "container" || raw?.kind === "division" || raw?.kind === "personal" ? raw.kind as FoundryStoreBinding["kind"] : null;
+    const key = String(raw?.key ?? "").trim();
+    const name = String(raw?.name ?? "").trim();
+    if (!kind || !key || !name || seen.has(key)) return [];
+    if (kind === "container" && !(Number(raw?.itemId ?? 0) > 0)) return [];
+    if (kind === "division" && !String(raw?.locationFlag ?? "").trim()) return [];
+    seen.add(key);
+    return [{ kind, key, name, itemId: kind === "container" ? Number(raw.itemId) : undefined, locationFlag: kind === "division" ? String(raw.locationFlag) : undefined }];
+  });
+}
+
+function sanitizeStoreRoutes(project: FoundryProject, input: unknown): FoundryStoreRoute[] {
+  const validTargets = new Set((project.buildTree ?? []).filter((node) => Number(node.depth ?? 0) > 0).map((node) => node.id));
+  const seen = new Set<string>();
+  return (Array.isArray(input) ? input : []).flatMap((raw: any) => {
+    const targetId = String(raw?.targetId ?? "").trim();
+    if (!targetId || !validTargets.has(targetId) || seen.has(targetId)) return [];
+    const stores = sanitizeStoreBindings(raw?.stores);
+    if (!stores.length) return [];
+    seen.add(targetId);
+    return [{ targetId, stores }];
+  });
+}
+
+export async function updateFoundryProject(input: { characterId: string; project: FoundryProject }) {
   const snapshot = requireSnapshot(input.characterId);
   const corporationId = corporationIdOf(snapshot);
   const existingRaw = listProjectFoundryProjects(corporationId).find((project: any) => String(project.id) === String(input.project?.id)) as FoundryProject | undefined;
   if (!existingRaw) throw new Error("Project Foundry project not found for this corporation.");
   const existing = normalizeFoundryProject(existingRaw);
   const groups = sanitizeFoundryGroups(input.project.groups);
-  const assignments = sanitizeFoundryAssignments(existing, input.project.assignments, groups);
   const allowedStatuses = new Set<FoundryProjectStatus>(["planning", "active", "complete", "archived"]);
+  const requestedQuantity = Math.max(1, Math.floor(Number(input.project.quantity ?? existing.quantity ?? 1)));
+  const producedQuantity = Math.max(0, Number(existing.producedQuantity ?? 0), (existing.productionLots ?? []).reduce((sum, lot) => sum + Math.max(0, Number(lot.quantity ?? 0)), 0));
+  if (requestedQuantity < producedQuantity) throw new Error(`Build quantity cannot be lower than ${numberLabel(producedQuantity)} already-produced units.`);
+
+  let replanned = existing;
+  const quantityChanged = requestedQuantity !== Math.max(1, Math.floor(Number(existing.quantity ?? 1)));
+  if (quantityChanged) {
+    const plan = await getManufacturingPlanPrepared({
+      characterId: String(input.characterId),
+      blueprintTypeId: Number(existing.blueprintTypeId),
+      materialEfficiency: Number(existing.materialEfficiency ?? 0),
+      timeEfficiency: Number(existing.timeEfficiency ?? 0),
+      targetQuantity: requestedQuantity,
+      availableRuns: existing.blueprintSource === "manual" ? undefined : existing.availableRuns,
+      includeConnectedStock: false,
+      sharedCharacterIds: [],
+    });
+    const productionTree = await getIndustrialProductionTree({
+      blueprintTypeId: Number(plan.blueprintTypeId),
+      runs: Math.max(1, Number(plan.runs ?? 1)),
+      materialEfficiency: Number(plan.materialEfficiency ?? existing.materialEfficiency ?? 0),
+      maxDepth: 6,
+    });
+    const plannedQuantity = Math.max(1, Number(plan.outputQuantity ?? requestedQuantity));
+    replanned = normalizeFoundryProject({
+      ...existing,
+      quantity: plannedQuantity,
+      outputPerRun: Math.max(1, Number(plan.productPerRun ?? existing.outputPerRun ?? 1)),
+      requirements: (plan.materials ?? []).map((material: any) => ({ typeId: Number(material.typeId), name: String(material.name), required: Math.max(0, Number(material.required ?? 0)) })),
+      buildTree: productionTree.nodes as FoundryBuildNode[],
+      remainingQuantity: Math.max(0, plannedQuantity - producedQuantity),
+      estimatedMaterialCost: plan.market?.fullBomMarketCost == null ? null : Number(plan.market.fullBomMarketCost),
+      lifecycleStatus: plannedQuantity > producedQuantity ? (producedQuantity > 0 ? "producing" : "planning") : existing.lifecycleStatus,
+    });
+  }
+
+  const assignments = sanitizeFoundryAssignments(replanned, input.project.assignments, groups);
+  const requestedStatus = allowedStatuses.has(input.project.status) ? input.project.status : replanned.status;
+  const nextStatus: FoundryProjectStatus = quantityChanged && requestedStatus === "complete" && replanned.quantity > producedQuantity ? "active" : requestedStatus;
+  const requestedName = String(input.project.name ?? existing.name).trim() || existing.name;
+  const previousDefaultName = `Build ${numberLabel(existing.quantity)} ${existing.productName}`;
+  const nextName = quantityChanged && requestedName === previousDefaultName
+    ? `Build ${numberLabel(replanned.quantity)} ${existing.productName}`
+    : requestedName;
   const next: FoundryProject = {
-    ...existing,
+    ...replanned,
     id: existing.id,
     corporationId,
     corporationName: existing.corporationName,
@@ -454,26 +604,28 @@ export function updateFoundryProject(input: { characterId: string; project: Foun
     blueprintSource: existing.blueprintSource,
     productTypeId: existing.productTypeId,
     productName: existing.productName,
-    quantity: existing.quantity,
-    outputPerRun: existing.outputPerRun,
+    quantity: replanned.quantity,
+    outputPerRun: replanned.outputPerRun,
+    availableRuns: existing.availableRuns,
     materialEfficiency: existing.materialEfficiency,
     timeEfficiency: existing.timeEfficiency,
-    requirements: existing.requirements,
-    buildTree: existing.buildTree,
+    requirements: replanned.requirements,
+    buildTree: replanned.buildTree,
     industryJobIds: existing.industryJobIds,
     productionLots: existing.productionLots,
     producedQuantity: existing.producedQuantity,
     soldQuantity: existing.soldQuantity,
-    remainingQuantity: existing.remainingQuantity,
-    estimatedMaterialCost: existing.estimatedMaterialCost,
+    remainingQuantity: replanned.remainingQuantity,
+    estimatedMaterialCost: replanned.estimatedMaterialCost,
     attributedProductionCost: existing.attributedProductionCost,
     realisedRevenue: existing.realisedRevenue,
     realisedProfit: existing.realisedProfit,
-    lifecycleStatus: existing.lifecycleStatus,
-    name: String(input.project.name ?? existing.name).trim() || existing.name,
-    status: allowedStatuses.has(input.project.status) ? input.project.status : existing.status,
+    lifecycleStatus: replanned.lifecycleStatus,
+    name: nextName,
+    status: nextStatus,
     mode: input.project.mode === "solo" ? "solo" : "corporation",
-    linkedStores: Array.isArray(input.project.linkedStores) ? input.project.linkedStores.map((store) => ({ ...store })) : existing.linkedStores,
+    linkedStores: sanitizeStoreBindings(Array.isArray(input.project.linkedStores) ? input.project.linkedStores : existing.linkedStores),
+    storeRoutes: sanitizeStoreRoutes(replanned, Array.isArray(input.project.storeRoutes) ? input.project.storeRoutes : existing.storeRoutes),
     groups,
     assignments,
     workPackages: existing.workPackages ?? [],
@@ -483,7 +635,6 @@ export function updateFoundryProject(input: { characterId: string; project: Foun
   saveProjectFoundryProject(next);
   return getFoundryWorkspace(input.characterId, next.id);
 }
-
 export function removeFoundryProject(characterId: string, projectIdValue: string) {
   const snapshot = requireSnapshot(characterId);
   const corporationId = corporationIdOf(snapshot);
@@ -553,10 +704,10 @@ export async function getFoundryWorkspace(characterId: string, selectedProjectId
   const assets = corpAssets(snapshot);
   const projects = (listProjectFoundryProjects(corporationId) as FoundryProject[]).map(normalizeFoundryProject).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const analyzed = projects.map((project) => {
-    if (projectMode(project) !== "solo") return analyzeFoundryProject(project, projects, assets);
     const creatorSnapshot = snapshots.find((row) => String(row?.characterId ?? "") === String(project.createdByCharacterId));
     const personal = Array.isArray(creatorSnapshot?.extended?.assets) ? creatorSnapshot.extended.assets : [];
-    return analyzeFoundryProject(project, projects, personal);
+    const defaultAssets = projectMode(project) === "solo" ? personal : assets;
+    return analyzeFoundryProject(project, projects, defaultAssets, { personal, corporation: assets });
   });
   const stores = await discoverStores(snapshot);
   const selectedProject = analyzed.find((project) => project.id === selectedProjectId) ?? analyzed[0] ?? null;

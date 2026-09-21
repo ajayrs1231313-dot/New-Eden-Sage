@@ -3,6 +3,8 @@ import type { CharacterSnapshot } from "./types";
 import { CommandIntelligence } from "./CommandIntelligence";
 import { CapabilityCommandCenter } from "./CapabilityCommandCenter";
 import type { CharacterNavigateTarget } from "./character-navigation";
+import { PanelPager } from "./PanelPager";
+import { buildCommandSignals, type CorporationOperationSummary } from "./command-signals";
 import hulkCharacterBackground from "./hulk-character-background.png";
 import stationCharacterBackground from "./station-character-background.png";
 
@@ -186,14 +188,67 @@ function CharacterStatusStrip({ snapshot }: { snapshot: CharacterSnapshot }) {
   );
 }
 
-function GettingStarted({ onNavigate, snapshot }: { onNavigate(target: CharacterNavigateTarget): void; snapshot: CharacterSnapshot }) {
-  const rows: Array<{ icon: Parameters<typeof HudGlyph>[0]["kind"]; title: string; detail: string; action: CharacterNavigateTarget }> = [
-    { icon: "target", title: snapshot.queue.length ? "Review your training route" : "Set your training priorities", detail: snapshot.queue.length ? `${snapshot.queue.length} skills currently queued.` : "Your skill queue is currently empty.", action: "activity" },
-    { icon: "scan", title: "Explore your command center", detail: "Open Activity Command and see what is within reach.", action: "activity" },
-    { icon: "bell", title: "Review fitting readiness", detail: "Check ship fits and character compatibility.", action: "fittings" },
-    { icon: "intel", title: "Find your next opportunity", detail: "Use Sage intelligence to identify the next move.", action: "asset-market" },
-  ];
-  return <article className="character-start-panel character-console-panel"><h3>GETTING STARTED</h3><div>{rows.map((row) => <button key={row.title} onClick={() => onNavigate(row.action)}><span><HudGlyph kind={row.icon}/></span><div><strong>{row.title}</strong><small>{row.detail}</small></div><b>&gt;</b></button>)}</div></article>;
+function queueRemainingLabel(targetMs: number | null, nowMs: number) {
+  if (!targetMs || !Number.isFinite(targetMs)) return "No completion time";
+  const remaining = Math.max(0, targetMs - nowMs);
+  if (remaining <= 0) return "Queue complete";
+  const minutes = Math.ceil(remaining / 60000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+function SkillCommandPriority({
+  snapshot,
+  corporationOps,
+  onNavigate,
+}: {
+  snapshot: CharacterSnapshot;
+  corporationOps: CorporationOperationSummary[];
+  onNavigate(target: CharacterNavigateTarget): void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  const [page, setPage] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const items = buildCommandSignals(snapshot, corporationOps, now).watch;
+  const pageSize = 4;
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const visible = items.slice(safePage * pageSize, safePage * pageSize + pageSize);
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
+  return <article className="character-start-panel character-console-panel amber-priority-panel frontpage-card">
+    <div className="frontpage-card__header amber-watch-header">
+      <div className="skill-priority-heading">
+        <h3>COMMAND WATCH</h3>
+      </div>
+      <div className="skill-priority-subtitle">On the Horizon</div>
+    </div>
+    <div className="frontpage-card__body watch-card-body">
+      <div className="command-watch-list">
+        {visible.map((item) => <div className={`skill-priority-row watch-${item.severity}`} key={item.id}>
+          <span className="skill-priority-dot" aria-hidden="true" />
+          <div>
+            <strong>{item.title}</strong>
+            {item.detail && <small>{item.detail}</small>}
+          </div>
+          {item.action && item.target && <button type="button" onClick={() => onNavigate(item.target!)}>{item.action}</button>}
+        </div>)}
+      </div>
+    </div>
+    <PanelPager page={safePage} pageCount={pageCount} onPageChange={setPage} label="Command watch pages" />
+  </article>;
 }
 
 function QuickActions({ onNavigate }: { onNavigate(target: CharacterNavigateTarget): void }) {
@@ -212,7 +267,28 @@ export function CharacterOverviewHud({ snapshot, cloneState, onNavigate, allComm
   const shipName = snapshot.ship.ship_type_name || snapshot.ship.ship_name || "Active ship";
   const [heroBackground, setHeroBackground] = useState<HeroBackgroundState>(initialHeroBackgroundState);
   const [backgroundMenu, setBackgroundMenu] = useState<{ x: number; y: number } | null>(null);
+  const [corporationOps, setCorporationOps] = useState<CorporationOperationSummary[]>([]);
   const heroSwipeStartX = useRef<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCorporationOps() {
+      try {
+        const workspace = await window.sage.getCorporationOpsWorkspace(snapshot.characterId) as { workspace_id?: string };
+        if (!workspace?.workspace_id) {
+          if (!cancelled) setCorporationOps([]);
+          return;
+        }
+        const rows = await window.sage.listCorporationOperations({ workspaceId: workspace.workspace_id }) as CorporationOperationSummary[];
+        if (!cancelled) setCorporationOps(Array.isArray(rows) ? rows : []);
+      } catch {
+        if (!cancelled) setCorporationOps([]);
+      }
+    }
+    void loadCorporationOps();
+    const timer = window.setInterval(() => void loadCorporationOps(), 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [snapshot.characterId]);
 
   useEffect(() => {
     if (heroBackground.locked) return;
@@ -296,8 +372,8 @@ export function CharacterOverviewHud({ snapshot, cloneState, onNavigate, allComm
       <CharacterStatusStrip snapshot={snapshot}/>
 
       <div className="character-reference-grid">
-        <GettingStarted onNavigate={onNavigate} snapshot={snapshot}/>
-        <CommandIntelligence snapshot={snapshot} onNavigate={onNavigate}/>
+        <SkillCommandPriority snapshot={snapshot} corporationOps={corporationOps} onNavigate={onNavigate}/>
+        <CommandIntelligence snapshot={snapshot} corporationOps={corporationOps} onNavigate={onNavigate}/>
         <CapabilityCommandCenter snapshot={snapshot} cloneState={cloneState} onOpenProgression={() => onNavigate("activity")} compact/>
         <QuickActions onNavigate={onNavigate}/>
       </div>

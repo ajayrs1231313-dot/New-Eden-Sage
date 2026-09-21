@@ -479,6 +479,15 @@ export function damageSourceAsAttacker(unit: WargameUnit, source: WargameDamageS
 
 export function damageSourceApplication(unit: WargameUnit, source: WargameDamageSource, target: WargameUnit, rangeKm = wargameDistanceKm(unit, target)) {
   if (source.kind === "aoe") return rangeKm <= Math.max(0, source.radiusKm ?? source.maxRangeKm) ? 1 : 0;
+  if (source.kind === "fighter") {
+    if (source.fighterOnTargetId !== target.id || (source.fighterArrivalRemaining ?? 0) > 0) return 0;
+    const engagementRangeKm = Math.max(.001, source.fighterOrbitRangeKm ?? source.optimalKm ?? source.maxRangeKm);
+    const application = weaponApplication(damageSourceAsAttacker(unit, source), target, engagementRangeKm);
+    const targetSpeed = Math.max(0, target.effectiveSpeed ?? velocityMps(target));
+    const fighterSpeed = Math.max(0, source.fighterMaximumVelocityMps ?? 0);
+    const pursuit = targetSpeed <= 0 || fighterSpeed <= 0 || targetSpeed <= fighterSpeed ? 1 : Math.max(0, Math.min(1, fighterSpeed / targetSpeed));
+    return Math.max(0, Math.min(1, application * pursuit));
+  }
   if (source.kind !== "drone") return weaponApplication(damageSourceAsAttacker(unit, source), target, rangeKm);
   const signature = Math.max(1, (target.signature ?? 160) * (target.ewarSignatureMultiplier ?? 1));
   const sentry = Boolean(source.sentry);
@@ -510,12 +519,35 @@ export function damageSourceApplication(unit: WargameUnit, source: WargameDamage
   return Math.max(0, Math.min(1, weaponFactor * pursuitFactor * controlFactor));
 }
 
+function fighterSourceScale(source: WargameDamageSource) {
+  if (source.kind !== "fighter") return 1;
+  const initial = Math.max(0, source.fighterCountInitial ?? 0);
+  if (!(initial > 0)) return 1;
+  return Math.max(0, Math.min(1, (source.fighterCountRemaining ?? initial) / initial));
+}
+
 export function sourcePaperDps(unit: WargameUnit, source: WargameDamageSource) {
-  return Math.max(0, source.dpsPerShip) * liveShipCount(unit);
+  return Math.max(0, source.dpsPerShip) * fighterSourceScale(source) * liveShipCount(unit);
 }
 
 export function sourcePaperVolley(unit: WargameUnit, source: WargameDamageSource) {
-  return Math.max(0, source.volleyPerShip) * liveShipCount(unit);
+  return Math.max(0, source.volleyPerShip) * fighterSourceScale(source) * liveShipCount(unit);
+}
+
+export function applyWargameFighterLoss(unit: WargameUnit, fighterTypeId: number, losses = 1): WargameUnit {
+  const amount = Math.max(0, Math.floor(losses));
+  if (!amount) return unit;
+  const matchingCounts = [
+    ...(unit.damageSources ?? []).filter((source) => source.kind === "fighter" && source.typeId === fighterTypeId).map((source) => source.fighterCountRemaining ?? source.fighterCountInitial ?? 0),
+    ...(unit.supportSystems ?? []).filter((system) => system.sourceKind === "fighter" && system.typeId === fighterTypeId).map((system) => system.fighterCountRemaining ?? system.fighterCountInitial ?? system.fighterCount ?? 0),
+  ];
+  if (!matchingCounts.length) return unit;
+  const remaining = Math.max(0, Math.max(...matchingCounts) - amount);
+  return {
+    ...unit,
+    damageSources: cloneDamageSources(unit.damageSources).map((source) => source.kind === "fighter" && source.typeId === fighterTypeId ? { ...source, fighterCountRemaining: remaining } : source),
+    supportSystems: unit.supportSystems?.map((system) => system.sourceKind === "fighter" && system.typeId === fighterTypeId ? { ...system, fighterCountRemaining: remaining, independentFighterRolls: remaining } : { ...system }),
+  };
 }
 
 export function advanceWargameSimulation(units: WargameUnit[], options: WargameAdvanceOptions): WargameAdvanceResult {
@@ -764,10 +796,28 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
           const fallbackId=targetSide === "friendly" ? controller.repTargetId : controller.targetId;
           const target=findById(hasAssigned ? controller.supportTargetIds?.[key] : fallbackId);
           if (!target || target.simulationReady === false || (targetSide === "friendly" ? target.side !== controller.side : target.side === controller.side)) continue;
-          const rangeKm = wargameDistanceKm(controller, target);
+          let rangeKm = wargameDistanceKm(controller, target);
+          if (system.sourceKind === "fighter") {
+            const remaining = Math.max(0, system.fighterCountRemaining ?? system.fighterCountInitial ?? system.fighterCount ?? 0);
+            if (!(remaining > 0)) continue;
+            if (system.fighterOnTargetId !== target.id) {
+              system.fighterOnTargetId = target.id;
+              const travelDistanceM = Math.max(0, rangeKm * 1000 - Math.max(0, system.fighterOrbitRangeM ?? 0));
+              system.fighterArrivalRemaining = travelDistanceM / Math.max(1, system.fighterMaximumVelocityMps ?? 1000);
+              system.activeRemaining = 0;
+              system.activeTargetId = undefined;
+              if ((system.fighterArrivalRemaining ?? 0) > 1) events.push(controller.name + ": " + system.name + " support fighters transferring to " + target.name + " (" + Math.ceil(system.fighterArrivalRemaining ?? 0) + "s travel at base fighter speed).");
+            }
+            system.fighterArrivalRemaining = Math.max(0, (system.fighterArrivalRemaining ?? 0) - 1);
+            if ((system.fighterArrivalRemaining ?? 0) > 0) continue;
+            rangeKm = Math.max(.001, (system.fighterOrbitRangeM ?? 0) / 1000);
+          }
           const effectiveness = supportEffectiveness(system, rangeKm, controller);
           if (effectiveness <= .01) continue;
-          const copies = Math.max(1, Number(system.quantity) || 1) * Math.max(1, liveShipCount(controller));
+          const copies = system.sourceKind === "fighter"
+            ? Math.max(0, system.fighterCountRemaining ?? system.fighterCountInitial ?? system.fighterCount ?? 0) * Math.max(1, liveShipCount(controller))
+            : Math.max(1, Number(system.quantity) || 1) * Math.max(1, liveShipCount(controller));
+          if (!(copies > 0)) continue;
           const ewarStrength=controller.burstEwarStrengthMultiplier ?? 1;
           if (system.kind === "web") { const current=webMultiplier.get(target.id) ?? 1; const one=Math.max(.05,1-Math.max(0,Math.min(.95,Number(system.strength)||0))*effectiveness); webMultiplier.set(target.id, Math.max(.05,current*Math.pow(one,copies))); }
           else if (system.kind === "targetPainter") target.ewarSignatureMultiplier! *= stackedMultiplier(Math.max(0,Number(system.signatureBonus)||0)*ewarStrength,copies,effectiveness);
@@ -780,9 +830,11 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
             target.warpDisruptionStrength=(target.warpDisruptionStrength??0)+pointStrength;
             target.tackleSourceIds=[...new Set([...(target.tackleSourceIds??[]),controller.id])];
             if (system.mwdShutdown) target.scrammed = true;
+            const webStrength=Math.max(0,Math.min(.95,Number(system.strength)||0));
+            if(webStrength>0){const current=webMultiplier.get(target.id)??1;const one=Math.max(.05,1-webStrength*effectiveness);webMultiplier.set(target.id,Math.max(.05,current*Math.pow(one,copies)));}
           }
           else if (system.kind === "energyNeutralizer" && (controller.supportCooldowns?.[key] ?? 0) <= 0) {
-            const amount=Math.max(0,Number(system.amountPerCycle)||0)*effectiveness*Math.max(1,liveShipCount(controller));
+            const amount=Math.max(0,Number(system.amountPerCycle)||0)*effectiveness*(system.sourceKind === "fighter" ? copies : Math.max(1,liveShipCount(controller)));
             if ((target.capacitorCapacity ?? 0) > 0) { target.capacitorCurrent=Math.max(0,(target.capacitorCurrent ?? target.capacitorCapacity ?? 0)-amount); target.neutPressureGjPerSecond=(target.neutPressureGjPerSecond ?? 0)+(Number(system.perSecond)||0)*effectiveness; }
             controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
           } else if (system.kind === "energyNosferatu" && (controller.supportCooldowns?.[key] ?? 0) <= 0) {
@@ -1067,23 +1119,27 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
               source.lastTargetId = undefined;
               source.spoolCycles = 0; source.spoolTargetId = undefined;
               source.droneOnTargetId = source.kind === "drone" ? undefined : source.droneOnTargetId;
+              source.fighterOnTargetId = source.kind === "fighter" ? undefined : source.fighterOnTargetId;
+              source.fighterArrivalRemaining = source.kind === "fighter" ? 0 : source.fighterArrivalRemaining;
               continue;
             }
             const rangeKm = wargameDistanceKm(attacker, target);
             const effectiveTargetingRange = (attacker.targetingRange ?? Infinity) * Math.max(.05, attacker.ewarTargetingRangeMultiplier ?? 1);
             const droneAlreadyCommitted = source.kind === "drone" && source.droneOnTargetId === target.id;
+            const fighterAlreadyCommitted = source.kind === "fighter" && source.fighterOnTargetId === target.id;
             if (source.lastTargetId !== target.id) {
               source.lastTargetId = target.id;
               source.spoolCycles = 0; source.spoolTargetId = target.id;
               const scanMultiplier = Math.max(.05, attacker.ewarScanResolutionMultiplier ?? 1);
               source.lockRemaining = (attacker.targetSwitchDelay ?? defaultTargetSwitchDelay(attacker)) / scanMultiplier;
               if (source.kind === "drone") { source.droneOnTargetId = undefined; source.droneArrivalRemaining = 0; }
+              if (source.kind === "fighter") { source.fighterOnTargetId = undefined; source.fighterArrivalRemaining = 0; }
             } else {
               source.lockRemaining = Math.max(0, (source.lockRemaining ?? 0) - 1);
             }
             const jammedAway = (attacker.jamRemaining ?? 0) > 0 && attacker.jammedBy !== target.id;
             if (jammedAway) { source.spoolCycles = 0; continue; }
-            if (!droneAlreadyCommitted && rangeKm > effectiveTargetingRange) { source.spoolCycles = 0; continue; }
+            if (!droneAlreadyCommitted && !fighterAlreadyCommitted && rangeKm > effectiveTargetingRange) { source.spoolCycles = 0; continue; }
             if (source.kind === "drone" && !droneAlreadyCommitted && rangeKm > Math.max(.1, source.droneControlRangeKm ?? source.maxRangeKm)) continue;
             if ((source.lockRemaining ?? 0) > 0) continue;
 
@@ -1096,6 +1152,17 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
               }
               source.droneArrivalRemaining = Math.max(0, (source.droneArrivalRemaining ?? 0) - 1);
               if ((source.droneArrivalRemaining ?? 0) > 0) continue;
+            }
+            if (source.kind === "fighter") {
+              if ((source.fighterCountRemaining ?? source.fighterCountInitial ?? 1) <= 0) continue;
+              if (source.fighterOnTargetId !== target.id) {
+                source.fighterOnTargetId = target.id;
+                const travelDistanceM = Math.max(0, rangeKm * 1000 - Math.max(0, source.fighterOrbitRangeKm ?? 0) * 1000);
+                source.fighterArrivalRemaining = travelDistanceM / Math.max(1, source.fighterMaximumVelocityMps ?? 1000);
+                if ((source.fighterArrivalRemaining ?? 0) > 1) events.push(attacker.name + ": " + source.name + " squadron launched toward " + target.name + " (" + Math.ceil(source.fighterArrivalRemaining ?? 0) + "s travel at base fighter speed).");
+              }
+              source.fighterArrivalRemaining = Math.max(0, (source.fighterArrivalRemaining ?? 0) - 1);
+              if ((source.fighterArrivalRemaining ?? 0) > 0) continue;
             }
 
             const application = damageSourceApplication(attacker, source, target, rangeKm);

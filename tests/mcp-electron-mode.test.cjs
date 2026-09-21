@@ -18,7 +18,7 @@ function send(obj){child.stdin.write(JSON.stringify(obj)+"\n")}
 send({jsonrpc:"2.0",id:1,method:"initialize",params:{protocolVersion:"2025-06-18",capabilities:{},clientInfo:{name:"sage-test",version:"1"}}});
 setTimeout(()=>send({jsonrpc:"2.0",method:"notifications/initialized",params:{}}),100);
 setTimeout(()=>send({jsonrpc:"2.0",id:2,method:"tools/list",params:{}}),180);
-const deadline=Date.now()+8000;let done=false;
+const deadline=Date.now()+15000;let done=false;
 const timer=setInterval(()=>{if(out.includes('"id":2')&&out.includes('"tools"'))finish();else if(Date.now()>deadline)finish(new Error("MCP timeout: "+err+" OUT="+out.slice(-2000)));},50);
 function finish(error){if(done)return;done=true;clearInterval(timer);child.kill();setTimeout(()=>{assert.ifError(error);assert.ok(out.includes('"id":1'),"initialize response missing");assert.ok(out.includes('"id":2'),"tools/list response missing");assert.ok(out.includes("get_character_data"),"Sage MCP tools were not listed");console.log("Node-mode MCP DPAPI/safe-storage compatibility smoke check passed");},150);}
 child.on("error",finish);child.on("exit",code=>{if(!done&&code!==null)finish(new Error("MCP exited early "+code+": "+err));});

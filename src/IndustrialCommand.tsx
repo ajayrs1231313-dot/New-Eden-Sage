@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CharacterSnapshot } from "./types";
+import type { CharacterSnapshot, PlanetaryAlert } from "./types";
 import { IndustrialProjectFoundry } from "./IndustrialProjectFoundry";
+import { InventionIntelligence } from "./InventionIntelligence";
+import industrialBanner from "./fitter-assets/misty-teal-orbital-shipyard-hangar.webp";
+import "./invention-lab.css";
 import "./industrial-command.css";
 
-type IndustrialTab = "overview" | "foundry" | "opportunities" | "jobs" | "refinery" | "moon-goo" | "production";
+type IndustrialTab = "overview" | "foundry" | "opportunities" | "jobs" | "refinery" | "moon-goo" | "production" | "materials" | "blueprints" | "structures";
 type MoonGooTab = "materials" | "reactions";
 type FoundryTab = "projects" | "blueprints" | "materials" | "research";
 
@@ -40,12 +43,27 @@ type IndustryJobRecord = {
 type EnrichedAsset = {
   item_id?: number;
   type_id?: number;
+  category_id?: number;
   item?: string;
   quantity?: number;
+  location_id?: number;
+  location_type?: string;
+  root_location_id?: number;
+  container_item_id?: number | null;
   station?: string | null;
   system?: string | null;
   location_flag?: string;
   estimatedValue?: number;
+};
+
+type AssetNameRecord = { item_id?: number; name?: string };
+
+type MaterialTypeMetadata = {
+  categoryId: number;
+  categoryName: string;
+  groupId: number;
+  groupName: string;
+  marketGroupName: string;
 };
 
 const tabs: Array<{ id: IndustrialTab; label: string }> = [
@@ -55,14 +73,9 @@ const tabs: Array<{ id: IndustrialTab; label: string }> = [
   { id: "jobs", label: "Industry Jobs" },
   { id: "refinery", label: "Refinery" },
   { id: "moon-goo", label: "Moon Goo" },
-  { id: "production", label: "Production Planner" },
-];
-
-const foundryTabs: Array<{ id: FoundryTab; label: string }> = [
-  { id: "projects", label: "Projects" },
-  { id: "blueprints", label: "Blueprint Library" },
-  { id: "materials", label: "Materials" },
-  { id: "research", label: "Research & Invention" },
+  { id: "materials", label: "Materials & Stock" },
+  { id: "blueprints", label: "Blueprints" },
+  { id: "structures", label: "Structures" },
 ];
 
 const activityNames: Record<number, string> = {
@@ -95,6 +108,80 @@ function sourceUnavailable(value: unknown) {
 type AssetSharingPreferences = { enabled: boolean; characterIds: string[] };
 const ASSET_SHARING_STORAGE_KEY = "new-eden-sage-industrial-asset-sharing-v1";
 const LP_STORE_INDUSTRY_HANDOFF_KEY = "new-eden-sage-lp-industry-handoff-v1";
+const INDUSTRIAL_SELECTION_STORAGE_KEY = "new-eden-sage-industrial-selection-v1";
+
+function loadIndustrialSelection(fallback: string[]) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(INDUSTRIAL_SELECTION_STORAGE_KEY) ?? "null");
+    return Array.isArray(parsed) ? parsed.map(String) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function compactSkillPoints(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 1 : 2)}M SP`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K SP`;
+  return `${number(value)} SP`;
+}
+
+function compactIsk(value: number) {
+  const amount = Math.abs(value);
+  if (amount >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(2)}B ISK`;
+  if (amount >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M ISK`;
+  if (amount >= 1_000) return `${(value / 1_000).toFixed(0)}K ISK`;
+  return `${number(value)} ISK`;
+}
+
+function characterRole(snapshot: CharacterSnapshot) {
+  const byName = new Map(snapshot.skills.skills.map((skill) => [skill.name.toLowerCase(), skill]));
+  const level = (name: string) => Number(byName.get(name.toLowerCase())?.trained_skill_level ?? 0);
+  const lowerName = snapshot.character.name.toLowerCase();
+
+  // Prefer clear specialist signatures over raw SP totals. Mature characters often
+  // have substantial mining, hauling and combat cross-training, so summing every
+  // related skill tends to mislabel generalists.
+  if (lowerName.includes("hulk")) return "Mining";
+  if (
+    (level("Advanced Mass Production") >= 3 && level("Mass Production") >= 4) ||
+    (level("Advanced Industry") >= 4 && level("Industry") >= 5 && level("Laboratory Operation") >= 4)
+  ) return "Industrial / Trade";
+  if (level("Transport Ships") >= 3 && ["Amarr Hauler", "Caldari Hauler", "Gallente Hauler", "Minmatar Hauler"].some((skill) => level(skill) >= 5)) return "Logistics";
+  if (
+    level("Advanced Weapon Upgrades") >= 4 ||
+    level("Heavy Assault Cruisers") >= 3 ||
+    level("Strategic Cruiser") >= 3 ||
+    level("Drone Interfacing") >= 5
+  ) return "Combat / Exploration";
+  if (level("Exhumers") >= 3 || (level("Mining Barge") >= 4 && level("Astrogeology") >= 4)) return "Mining";
+
+  const scores = { mining: 0, logistics: 0, industry: 0, combat: 0 };
+  for (const skill of snapshot.skills.skills) {
+    const name = skill.name.toLowerCase();
+    const sp = Math.max(1, Number(skill.skillpoints_in_skill ?? 0));
+    const includes = (...terms: string[]) => terms.some((term) => name.includes(term));
+    if (includes("mining", "exhumer", "resource processing", "reprocessing", "astrogeology", "ice harvesting", "gas cloud harvesting", "deep core")) scores.mining += sp;
+    if (includes("transport ships", "hauler", "freighter", "jump freighter")) scores.logistics += sp * 2.2;
+    if (includes("trade", "production", "industry", "industrial ship construction", "mass production", "laboratory operation", "supply chain management", "accounting", "broker relations", "contracting", "invention")) scores.industry += sp * 1.6;
+    if (includes("gunnery", "missile", "drone", "armor", "shield", "targeting", "electronic warfare", "scanning", "astrometric", "assault cruiser", "strategic cruiser")) scores.combat += sp;
+  }
+  const ranked = (Object.entries(scores) as Array<[keyof typeof scores, number]>).sort((a, b) => b[1] - a[1]);
+  if (!ranked[0] || ranked[0][1] <= 0) return "Capsuleer";
+  if (ranked[0][0] === "mining") return "Mining";
+  if (ranked[0][0] === "logistics") return "Logistics";
+  if (ranked[0][0] === "industry") return "Industrial / Trade";
+  return "Combat / Exploration";
+}
+
+function relativeIndustrialTime(value?: string) {
+  if (!value) return "--";
+  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 60) return `${Math.max(1, minutes)}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
 
 function loadAssetSharingPreferences(): AssetSharingPreferences {
   try {
@@ -112,12 +199,16 @@ export function IndustrialCommand({
   snapshots,
   activeCharacterId,
   active: workspaceActive,
+  marketDataRevision = 0,
   onSelectCharacter,
+  onSelectionCountChange,
 }: {
   snapshots: CharacterSnapshot[];
   activeCharacterId?: string;
   active: boolean;
+  marketDataRevision?: number;
   onSelectCharacter(characterId: string): void;
+  onSelectionCountChange?(count: number): void;
 }) {
   const [tab, setTab] = useState<IndustrialTab>("overview");
   const [foundryTab, setFoundryTab] = useState<FoundryTab>("projects");
@@ -125,8 +216,19 @@ export function IndustrialCommand({
   const [blueprintFilter, setBlueprintFilter] = useState("");
   const [blueprintLibraryScope, setBlueprintLibraryScope] = useState<"personal" | "corporation">("personal");
   const [materialFilter, setMaterialFilter] = useState("");
+  const [materialCategoryFilter, setMaterialCategoryFilter] = useState("all");
+  const [jobScopeFilter, setJobScopeFilter] = useState<"all" | "solo" | "corporation">("all");
+  const [jobStatusFilter, setJobStatusFilter] = useState<"all" | "active" | "history">("all");
   const [assetSharing, setAssetSharing] = useState<AssetSharingPreferences>(loadAssetSharingPreferences);
+  const defaultSelection = [...new Set([activeCharacterId, ...snapshots.map((snapshot) => snapshot.characterId)].filter(Boolean) as string[])].slice(0, 3);
+  const [selectedCharacterIds, setSelectedCharacterIds] = useState<string[]>(() => loadIndustrialSelection(defaultSelection));
+  const [characterSearch, setCharacterSearch] = useState("");
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
   const [typeNames, setTypeNames] = useState<Record<number, string>>({});
+  const [typeMetadata, setTypeMetadata] = useState<Record<number, MaterialTypeMetadata>>({});
+  const [blueprintMaterialTypeIds, setBlueprintMaterialTypeIds] = useState<number[]>([]);
+  const [materialIconRevision, setMaterialIconRevision] = useState(0);
+  const [locationNames, setLocationNames] = useState<Record<number, string>>({});
   const [selectedBlueprintIndex, setSelectedBlueprintIndex] = useState(0);
   const [lpStoreBlueprintTarget, setLpStoreBlueprintTarget] = useState<BlueprintRecord | null>(null);
   const [targetQuantity, setTargetQuantity] = useState(1);
@@ -134,6 +236,12 @@ export function IndustrialCommand({
   const [manufacturingStatus, setManufacturingStatus] = useState("Choose a blueprint and output quantity.");
   const [blueprintActivities, setBlueprintActivities] = useState<any>(null);
   const [activityStatus, setActivityStatus] = useState("Choose an owned blueprint to inspect CCP activity data.");
+  const [inventionAnalysis, setInventionAnalysis] = useState<any>(null);
+  const [inventionBusy, setInventionBusy] = useState(false);
+  const [inventionStatus, setInventionStatus] = useState("Open Research & Invention to rank the complete invention catalogue.");
+  const [inventionDecryptor, setInventionDecryptor] = useState("");
+  const inventionBuildKeyRef = useRef<string | null>(null);
+  const inventionRequestSequence = useRef(0);
   const preparedCharacterRef = useRef<string | null>(null);
   const industrialBuildKeyRef = useRef<string | null>(null);
   const [systemCostIndex, setSystemCostIndex] = useState<any>(null);
@@ -165,7 +273,94 @@ export function IndustrialCommand({
   const [reactionBusy, setReactionBusy] = useState(false);
   const [reactionStatus, setReactionStatus] = useState("Choose a reaction formula and run count.");
   const [moonFoundryProjects, setMoonFoundryProjects] = useState<any[]>([]);
+  const [planetaryAttention, setPlanetaryAttention] = useState<PlanetaryAlert[]>([]);
+  const [planetaryAttentionReady, setPlanetaryAttentionReady] = useState(false);
+  const planetaryAttentionBuildKeyRef = useRef<string | null>(null);
   const active = snapshots.find((item) => item.characterId === activeCharacterId) ?? snapshots[0];
+
+  const blueprintMaterialTypeIdSet = useMemo(() => new Set(blueprintMaterialTypeIds), [blueprintMaterialTypeIds]);
+  const materialTypeIdsForCache = useMemo(() => [...new Set(snapshots.flatMap((snapshot) =>
+    (Array.isArray(snapshot.extended?.assets) ? snapshot.extended!.assets! : [])
+      .map((asset: any) => Number(asset?.type_id ?? 0))
+      .filter((typeId: number) => typeId > 0 && blueprintMaterialTypeIdSet.has(typeId)),
+  ))].sort((a, b) => a - b), [snapshots, blueprintMaterialTypeIdSet]);
+  const materialTypeCacheKey = materialTypeIdsForCache.join(",");
+
+  useEffect(() => {
+    if (!workspaceActive || !materialTypeIdsForCache.length) return;
+    let cancelled = false;
+    void window.sage.cacheTypeIcons({ typeIds: materialTypeIdsForCache, size: 64 }).then(() => {
+      if (!cancelled) setMaterialIconRevision((value) => value + 1);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [workspaceActive, materialTypeCacheKey]);
+
+  useEffect(() => {
+    const typeIds: number[] = [...new Set<number>((Array.isArray(refineryResult?.stacks) ? refineryResult.stacks : [])
+      .map((stack: any) => Number(stack?.typeId ?? 0))
+      .filter((typeId: number) => typeId > 0))];
+    if (!workspaceActive || !typeIds.length) return;
+    void window.sage.cacheTypeIcons({ typeIds, size: 64 }).catch(() => undefined);
+  }, [workspaceActive, refineryResult]);
+
+
+  useEffect(() => {
+    const handleIndustrialSection = (event: Event) => {
+      const detail = (event as CustomEvent<{ tab?: IndustrialTab; foundryTab?: FoundryTab }>).detail ?? {};
+      if (detail.tab) setTab(detail.tab);
+      if (detail.foundryTab) setFoundryTab(detail.foundryTab);
+    };
+    window.addEventListener("sage:industrial-section", handleIndustrialSection as EventListener);
+    return () => window.removeEventListener("sage:industrial-section", handleIndustrialSection as EventListener);
+  }, []);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("sage:industrial-section-changed", { detail: { tab, foundryTab: tab === "foundry" ? foundryTab : undefined } }));
+  }, [tab, foundryTab]);
+
+  useEffect(() => {
+    const validIds = new Set(snapshots.map((snapshot) => String(snapshot.characterId)));
+    setSelectedCharacterIds((current) => {
+      const valid = current.filter((id) => validIds.has(String(id)));
+      if (valid.length || !snapshots.length) return valid;
+      return [...new Set([activeCharacterId, ...snapshots.map((snapshot) => snapshot.characterId)].filter(Boolean) as string[])].slice(0, 3);
+    });
+  }, [snapshots, activeCharacterId]);
+  useEffect(() => {
+    if (!workspaceActive || !active?.characterId) return;
+    const hasPlanetaryData = snapshots.some((snapshot) => Array.isArray((snapshot.extended as any)?.planets) && (snapshot.extended as any).planets.length > 0);
+    if (!hasPlanetaryData) {
+      setPlanetaryAttention([]);
+      setPlanetaryAttentionReady(true);
+      return;
+    }
+    const buildKey = snapshots.map((snapshot) => `${snapshot.characterId}:${snapshot.updatedAt ?? ""}`).join("|");
+    if (planetaryAttentionBuildKeyRef.current === buildKey) return;
+    planetaryAttentionBuildKeyRef.current = buildKey;
+    let cancelled = false;
+    setPlanetaryAttentionReady(false);
+    void window.sage.getPlanetaryRevenue({ characterId: active.characterId }).then((analysis) => {
+      if (cancelled) return;
+      setPlanetaryAttention(Array.isArray(analysis?.empire?.alerts) ? analysis.empire.alerts : Array.isArray(analysis?.alerts) ? analysis.alerts : []);
+      setPlanetaryAttentionReady(true);
+    }).catch(() => {
+      if (cancelled) return;
+      planetaryAttentionBuildKeyRef.current = null;
+      setPlanetaryAttention([]);
+      setPlanetaryAttentionReady(true);
+    });
+    return () => { cancelled = true; };
+  }, [workspaceActive, active?.characterId, snapshots]);
+
+  useEffect(() => {
+    localStorage.setItem(INDUSTRIAL_SELECTION_STORAGE_KEY, JSON.stringify(selectedCharacterIds));
+    onSelectionCountChange?.(selectedCharacterIds.length);
+    setAssetSharing((current) => {
+      const nextIds = [...selectedCharacterIds];
+      if (current.characterIds.length === nextIds.length && current.characterIds.every((id, index) => id === nextIds[index])) return current;
+      return { ...current, characterIds: nextIds };
+    });
+  }, [selectedCharacterIds, onSelectionCountChange]);
 
   useEffect(() => {
     const validIds = new Set(snapshots.map((snapshot) => String(snapshot.characterId)));
@@ -232,6 +427,15 @@ export function IndustrialCommand({
       const corpJobs: IndustryJobRecord[] = isArray<IndustryJobRecord>(extended?.corporation?.industryJobs)
         ? extended.corporation.industryJobs
         : [];
+      const corpAssets: EnrichedAsset[] = isArray<EnrichedAsset>(extended?.corporation?.assets)
+        ? extended.corporation.assets
+        : [];
+      const corpAssetNames: AssetNameRecord[] = isArray<AssetNameRecord>(extended?.corporation?.assetNames)
+        ? extended.corporation.assetNames
+        : [];
+      const corpStructures: any[] = isArray<any>(extended?.corporation?.structures)
+        ? extended.corporation.structures
+        : [];
       const facilities: any[] = isArray<any>(extended?.corporation?.facilities)
         ? extended.corporation.facilities
         : [];
@@ -242,9 +446,14 @@ export function IndustrialCommand({
         assets,
         corpBlueprints,
         corpJobs,
+        corpAssets,
+        corpAssetNames,
+        corpStructures,
         facilities,
         blueprintUnavailable: sourceUnavailable(extended?.blueprints),
+        corpBlueprintUnavailable: sourceUnavailable(extended?.corporation?.blueprints),
         jobsUnavailable: sourceUnavailable(extended?.industryJobs),
+        corpJobsUnavailable: sourceUnavailable(extended?.corporation?.industryJobs),
       };
     });
     return characters;
@@ -269,6 +478,19 @@ export function IndustrialCommand({
   }, [industrial, typeNames]);
 
   useEffect(() => {
+    const stationIds = [...new Set(industrial.flatMap((item) => [
+      ...item.blueprints.map((blueprint) => blueprint.location_id),
+      ...item.corpBlueprints.map((blueprint) => blueprint.location_id),
+      ...item.assets.map((asset) => asset.root_location_id ?? asset.location_id),
+      ...item.corpAssets.map((asset) => asset.root_location_id ?? asset.location_id),
+    ]).map(Number).filter((id) => Number.isSafeInteger(id) && id >= 60_000_000 && id < 64_000_000 && !locationNames[id]))];
+    if (!stationIds.length) return;
+    window.sage.resolveTypeIds(stationIds).then((resolved) => {
+      setLocationNames((current) => ({ ...current, ...Object.fromEntries(resolved.map((item) => [item.id, item.name])) }));
+    }).catch(() => undefined);
+  }, [industrial, locationNames]);
+
+  useEffect(() => {
     let cancelled = false;
     if (!workspaceActive || !active?.characterId) return () => { cancelled = true; };
     const characterChanged = preparedCharacterRef.current !== active.characterId;
@@ -280,6 +502,10 @@ export function IndustrialCommand({
       setManufacturingStatus("Choose a blueprint and output quantity.");
       setBlueprintActivities(null);
       setActivityStatus("Choose an owned blueprint to inspect CCP activity data.");
+      setInventionAnalysis(null);
+      setInventionStatus("Open Research & Invention to rank the complete invention catalogue.");
+      inventionBuildKeyRef.current = null;
+      inventionRequestSequence.current += 1;
       setOpportunitySystem("");
       setOpportunityJumpRadius(null);
       setOpportunityPreparedFor("");
@@ -298,6 +524,8 @@ export function IndustrialCommand({
         setOpportunityStatus("No prepared Industrial Opportunities result is available yet. Building the current workspace from local character data and the installed market generation...");
       }
       if (prepared?.typeNames) setTypeNames((current) => ({ ...current, ...prepared.typeNames }));
+      if (prepared?.typeMetadata) setTypeMetadata((current) => ({ ...current, ...prepared.typeMetadata }));
+      if (Array.isArray(prepared?.blueprintMaterialTypeIds)) setBlueprintMaterialTypeIds(prepared.blueprintMaterialTypeIds.map(Number).filter((typeId: number) => typeId > 0));
       if (prepared?.systemCostIndex !== undefined) setSystemCostIndex(prepared.systemCostIndex ?? null);
       setSystemCostStatus(prepared?.systemCostIndex?.available
         ? (previous ? "Previous current-system industry indices are shown while the current revision prepares." : "Current-system industry indices are prepared.")
@@ -330,6 +558,15 @@ export function IndustrialCommand({
   }, [workspaceActive, active?.characterId, active?.updatedAt]);
 
   useEffect(() => {
+    if (!workspaceActive || tab !== "foundry" || foundryTab !== "research" || !active?.characterId) return;
+    const inventionBuildKey = `${active.characterId}|${active.updatedAt ?? ""}|${marketDataRevision}|${inventionDecryptor || "none"}`;
+    if (inventionAnalysis && inventionBuildKeyRef.current === inventionBuildKey) return;
+    if (inventionBuildKeyRef.current === inventionBuildKey && inventionBusy) return;
+    inventionBuildKeyRef.current = inventionBuildKey;
+    void loadInventionIntelligence(inventionDecryptor, inventionBuildKey);
+  }, [workspaceActive, tab, foundryTab, active?.characterId, active?.updatedAt, marketDataRevision, inventionDecryptor]);
+
+  useEffect(() => {
     if (!active?.characterId) return;
     const raw = sessionStorage.getItem(LP_STORE_INDUSTRY_HANDOFF_KEY);
     if (!raw) return;
@@ -344,7 +581,8 @@ export function IndustrialCommand({
       setTargetQuantity(Math.max(1, Math.floor(Number(pending.targetQuantity ?? 1) || 1)));
       setManufacturingPlan(null);
       setManufacturingStatus("LP Store BPC target loaded. If the redeemed copy is not in assets yet, Sage plans it at ME 0 / TE 0 without inventing copy-run metadata.");
-      setTab("production");
+      setFoundryTab("projects");
+      setTab("foundry");
       sessionStorage.removeItem(LP_STORE_INDUSTRY_HANDOFF_KEY);
     } catch {
       sessionStorage.removeItem(LP_STORE_INDUSTRY_HANDOFF_KEY);
@@ -362,30 +600,124 @@ export function IndustrialCommand({
   }
 
   const activeData = industrial.find((item) => item.snapshot.characterId === active.characterId)!;
-  const allCharacterBlueprints = industrial.reduce((total, item) => total + item.blueprints.length, 0);
-  const allCharacterJobs = industrial.reduce((total, item) => total + item.jobs.length, 0);
-  const activeJobs = industrial.flatMap((item) =>
-    item.jobs.filter((job) => !["delivered", "cancelled", "reverted"].includes(job.status ?? "")),
-  );
-  const totalJobCost = activeJobs.reduce((total, job) => total + (job.cost ?? 0), 0);
-  const ownedMaterialStacks = industrial.reduce(
-    (total, item) => total + item.assets.filter((asset) => (asset.quantity ?? 0) > 0).length,
-    0,
-  );
+  const corporationJobIds = new Set(activeData.corpJobs.map((job) => Number(job.job_id ?? 0)).filter((id) => id > 0));
+  const activeJobLedger = [
+    ...activeData.corpJobs.map((job) => ({ job, scope: "corporation" as const })),
+    ...activeData.jobs.filter((job) => !corporationJobIds.has(Number(job.job_id ?? 0))).map((job) => ({ job, scope: "solo" as const })),
+  ].sort((a, b) => {
+    const aTime = new Date(a.job.completed_date ?? a.job.end_date ?? a.job.start_date ?? 0).getTime();
+    const bTime = new Date(b.job.completed_date ?? b.job.end_date ?? b.job.start_date ?? 0).getTime();
+    return bTime - aTime;
+  });
+  const activeLedgerCount = activeJobLedger.filter(({ job }) => !["delivered", "cancelled", "reverted"].includes(String(job.status ?? "").toLowerCase())).length;
+  const soloLedgerCount = activeJobLedger.filter((entry) => entry.scope === "solo").length;
+  const corporationLedgerCount = activeJobLedger.filter((entry) => entry.scope === "corporation").length;
+  const filteredJobLedger = activeJobLedger.filter((entry) => {
+    if (jobScopeFilter !== "all" && entry.scope !== jobScopeFilter) return false;
+    const status = String(entry.job.status ?? "unknown").toLowerCase();
+    const isHistory = ["delivered", "cancelled", "reverted"].includes(status);
+    if (jobStatusFilter === "active" && isHistory) return false;
+    if (jobStatusFilter === "history" && !isHistory) return false;
+    return true;
+  });
+  const selectedCharacterIdSet = new Set(selectedCharacterIds.map(String));
+  const selectedIndustrial = industrial.filter((item) => selectedCharacterIdSet.has(String(item.snapshot.characterId)));
+  const selectedBlueprints = selectedIndustrial.flatMap((item) => item.blueprints);
+  const selectedJobs = selectedIndustrial.flatMap((item) => item.jobs.map((job) => ({ job, owner: item.snapshot })));
+  const selectedActiveJobs = selectedJobs.filter(({ job }) => !["delivered", "cancelled", "reverted"].includes(job.status ?? ""));
+  const now = Date.now();
+  const completedIndustryJobs = selectedJobs.filter(({ job }) => {
+    const status = String(job.status ?? "").toLowerCase();
+    const end = job.end_date ? new Date(job.end_date).getTime() : 0;
+    return status === "ready" || (status === "active" && end > 0 && end <= now);
+  });
+  const selectedPlanetaryAlerts = planetaryAttention
+    .filter((alert) => selectedCharacterIdSet.has(String(alert.characterId)))
+    .filter((alert) => ["critical", "warning"].includes(alert.severity))
+    .filter((alert) => alert.type !== "unused-colony-slot")
+    .sort((a, b) => {
+      const severity = (value: PlanetaryAlert["severity"]) => value === "critical" ? 0 : value === "warning" ? 1 : 2;
+      return severity(a.severity) - severity(b.severity) || Number(a.hoursUntil ?? Number.POSITIVE_INFINITY) - Number(b.hoursUntil ?? Number.POSITIVE_INFINITY);
+    });
+  const industrialNeedsActionTotal = completedIndustryJobs.length + selectedPlanetaryAlerts.length;
+  const industrialNeedsAction = [
+    ...(completedIndustryJobs.length ? [{
+      id: "industry-delivery",
+      tone: "critical" as const,
+      category: "INDUSTRY",
+      title: `${completedIndustryJobs.length} industry job${completedIndustryJobs.length === 1 ? "" : "s"} ready for delivery`,
+      detail: [...new Set(completedIndustryJobs.map(({ owner }) => owner.character.name))].join(" · "),
+      action: "jobs" as const,
+    }] : []),
+    ...selectedPlanetaryAlerts.slice(0, 4).map((alert) => ({
+      id: alert.id,
+      tone: alert.severity === "critical" ? "critical" as const : "warning" as const,
+      category: "PI",
+      title: alert.type === "storage-full"
+        ? "PI storage needs pickup"
+        : alert.type === "extractor-expired"
+          ? "Restart expired PI extractor"
+          : alert.type === "extractor-expiring"
+            ? "PI extractor expires soon"
+            : alert.type === "input-low"
+              ? "PI factory needs inputs"
+              : "PI colony needs attention",
+      detail: `${alert.characterName} · ${alert.planetLabel} · ${alert.message}`,
+      action: "pi" as const,
+    })),
+  ].slice(0, 4);
+  const selectedJobCost = selectedActiveJobs.reduce((total, { job }) => total + (job.cost ?? 0), 0);
+  const selectedAssetStacks = selectedIndustrial.reduce((total, item) => total + item.assets.filter((asset) => (asset.quantity ?? 0) > 0).length, 0);
+  const selectedBlueprintTypeCount = new Set(selectedBlueprints.map((blueprint) => blueprint.type_id).filter(Boolean)).size;
+  const selectedMaterialUnits = selectedIndustrial.reduce((total, item) => total + item.assets.reduce((sum, asset) => sum + Math.max(0, Number(asset.quantity ?? 0)), 0), 0);
+  const selectedLocations = (() => {
+    const locations = new Map<string, { location: string; items: number; estimatedValue: number }>();
+    for (const item of selectedIndustrial) {
+      for (const asset of item.assets) {
+        const location = String(asset.station ?? asset.system ?? asset.location_flag ?? "Unknown location");
+        const current = locations.get(location) ?? { location, items: 0, estimatedValue: 0 };
+        current.items += Math.max(0, Number(asset.quantity ?? 0));
+        current.estimatedValue += Math.max(0, Number(asset.estimatedValue ?? 0));
+        locations.set(location, current);
+      }
+    }
+    return [...locations.values()].sort((a, b) => b.estimatedValue - a.estimatedValue || b.items - a.items);
+  })();
+  const recentIndustryActivity = [...selectedJobs].sort((a, b) => {
+    const aTime = new Date(a.job.completed_date ?? a.job.start_date ?? a.job.end_date ?? 0).getTime();
+    const bTime = new Date(b.job.completed_date ?? b.job.start_date ?? b.job.end_date ?? 0).getTime();
+    return bTime - aTime;
+  }).slice(0, 5);
+  const visibleCharacterSnapshots = snapshots.filter((snapshot) => {
+    if (showOnlySelected && !selectedCharacterIdSet.has(String(snapshot.characterId))) return false;
+    const query = characterSearch.trim().toLowerCase();
+    if (!query) return true;
+    return [snapshot.character.name, snapshot.character.corporation_name, characterRole(snapshot)].some((value) => String(value ?? "").toLowerCase().includes(query));
+  });
+  const selectedFacilities = selectedIndustrial.flatMap((item) => item.facilities.map((facility) => ({ facility, owner: item.snapshot })));
 
   const sharedCharacterIdSet = new Set(assetSharing.characterIds);
   const materialOwners = assetSharing.enabled
-    ? industrial.filter((owner) => owner.snapshot.characterId === active.characterId || sharedCharacterIdSet.has(String(owner.snapshot.characterId)))
+    ? industrial.filter((owner) => sharedCharacterIdSet.has(String(owner.snapshot.characterId)))
     : [activeData];
-  const materialInventory = [...materialOwners.flatMap((owner) => owner.assets.map((asset, assetIndex) => ({
+  const materialInventoryAll = [...materialOwners.flatMap((owner) => owner.assets.map((asset, assetIndex) => ({
     asset,
     characterId: String(owner.snapshot.characterId),
     characterName: owner.snapshot.character.name,
     sourceAssetId: `${owner.snapshot.characterId}:${asset.item_id ?? `stack-${assetIndex}`}`,
-  }))).reduce((map, entry) => {
+  }))).filter((entry) => blueprintMaterialTypeIdSet.has(Number(entry.asset.type_id ?? 0))).reduce((map, entry) => {
     const typeId = Number(entry.asset.type_id ?? 0);
     const key = typeId > 0 ? `type-${typeId}` : `name-${entry.asset.item ?? "unknown"}`;
-    const current = map.get(key) ?? { typeId, name: entry.asset.item ?? (typeId > 0 ? `Type ${typeId}` : "Unknown item"), quantity: 0, estimatedValue: 0, owners: new Map<string, { characterName: string; quantity: number }>(), locations: new Set<string>(), sourceAssetIds: new Set<string>() };
+    const current = map.get(key) ?? {
+      typeId,
+      categoryId: Number(entry.asset.category_id ?? 0),
+      name: entry.asset.item ?? (typeId > 0 ? `Type ${typeId}` : "Unknown item"),
+      quantity: 0,
+      estimatedValue: 0,
+      owners: new Map<string, { characterName: string; quantity: number }>(),
+      locations: new Set<string>(),
+      sourceAssetIds: new Set<string>(),
+    };
     const quantity = Math.max(0, Number(entry.asset.quantity ?? 0));
     current.quantity += quantity;
     current.estimatedValue += Math.max(0, Number(entry.asset.estimatedValue ?? 0));
@@ -397,8 +729,54 @@ export function IndustrialCommand({
     if (location) current.locations.add(String(location));
     map.set(key, current);
     return map;
-  }, new Map<string, { typeId: number; name: string; quantity: number; estimatedValue: number; owners: Map<string, { characterName: string; quantity: number }>; locations: Set<string>; sourceAssetIds: Set<string> }>()).values()]
-    .filter((item) => item.quantity > 0 && item.name.toLowerCase().includes(materialFilter.trim().toLowerCase()))
+  }, new Map<string, { typeId: number; categoryId: number; name: string; quantity: number; estimatedValue: number; owners: Map<string, { characterName: string; quantity: number }>; locations: Set<string>; sourceAssetIds: Set<string> }>()).values()]
+    .filter((item) => item.quantity > 0)
+    .map((item) => {
+      const metadata = typeMetadata[item.typeId];
+      return {
+        ...item,
+        categoryName: metadata?.categoryName && metadata.categoryName !== "Unknown" ? metadata.categoryName : "Other",
+        groupName: metadata?.groupName && metadata.groupName !== "Unknown group" ? metadata.groupName : "Unclassified",
+        marketGroupName: metadata?.marketGroupName ?? "",
+      };
+    });
+
+  const materialCategories = [...materialInventoryAll.reduce((map, item) => {
+    map.set(item.categoryName, (map.get(item.categoryName) ?? 0) + 1);
+    return map;
+  }, new Map<string, number>()).entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const materialLocationSummary = (() => {
+    const locations = new Map<string, { location: string; items: number; estimatedValue: number }>();
+    for (const owner of materialOwners) {
+      for (const asset of owner.assets) {
+        const typeId = Number(asset.type_id ?? 0);
+        const quantity = Math.max(0, Number(asset.quantity ?? 0));
+        if (!blueprintMaterialTypeIdSet.has(typeId) || quantity <= 0) continue;
+        const location = String(asset.station ?? asset.system ?? asset.location_flag ?? "Unknown location");
+        const current = locations.get(location) ?? { location, items: 0, estimatedValue: 0 };
+        current.items += quantity;
+        current.estimatedValue += Math.max(0, Number(asset.estimatedValue ?? 0));
+        locations.set(location, current);
+      }
+    }
+    return [...locations.values()].sort((a, b) => b.estimatedValue - a.estimatedValue || b.items - a.items);
+  })();
+  const materialStackCount = materialInventoryAll.reduce((sum, item) => sum + item.sourceAssetIds.size, 0);
+
+  const normalizedMaterialFilter = materialFilter.trim().toLowerCase();
+  const materialInventory = materialInventoryAll
+    .filter((item) => materialCategoryFilter === "all" || item.categoryName === materialCategoryFilter)
+    .filter((item) => !normalizedMaterialFilter || [
+      item.name,
+      item.categoryName,
+      item.groupName,
+      item.marketGroupName,
+      ...[...item.owners.values()].map((owner) => owner.characterName),
+      ...item.locations,
+    ].some((value) => String(value ?? "").toLowerCase().includes(normalizedMaterialFilter)))
     .sort((a, b) => b.estimatedValue - a.estimatedValue || b.quantity - a.quantity || a.name.localeCompare(b.name));
 
   const personalPlanningBlueprints = lpStoreBlueprintTarget?.type_id
@@ -612,6 +990,34 @@ export function IndustrialCommand({
     }
   }
 
+  async function loadInventionIntelligence(decryptorValue = inventionDecryptor, requestedBuildKey?: string) {
+    if (!active?.characterId) {
+      setInventionAnalysis(null);
+      setInventionStatus("Connect and sync a character before ranking invention opportunities.");
+      return;
+    }
+    const requestId = ++inventionRequestSequence.current;
+    setInventionBusy(true);
+    setInventionStatus("Pricing the complete cached invention graph against retained market orders...");
+    try {
+      const result = await (window.sage as any).getInventionOpportunities({
+        characterId: active.characterId,
+        marketDataRevision,
+        decryptorTypeId: decryptorValue ? Number(decryptorValue) : null,
+      });
+      if (requestId !== inventionRequestSequence.current) return;
+      setInventionAnalysis(result);
+      if (requestedBuildKey) inventionBuildKeyRef.current = requestedBuildKey;
+      setInventionStatus(`${Number(result?.candidateCount ?? 0).toLocaleString()} invention outcomes ranked - ${Number(result?.ownedSourceCount ?? 0).toLocaleString()} use an owned source BPO.`);
+    } catch (error) {
+      if (requestId !== inventionRequestSequence.current) return;
+      inventionBuildKeyRef.current = null;
+      setInventionStatus(error instanceof Error ? error.message : "Invention intelligence failed.");
+    } finally {
+      if (requestId === inventionRequestSequence.current) setInventionBusy(false);
+    }
+  }
+
   async function loadBlueprintActivities() {
     if (!selectedBlueprint?.type_id) { setActivityStatus("Choose a blueprint first."); return; }
     setActivityStatus("Loading CCP research, copying and invention activities…");
@@ -660,132 +1066,259 @@ export function IndustrialCommand({
     }
   }
 
+  const libraryBlueprints = blueprintLibraryScope === "corporation" ? activeData.corpBlueprints : activeData.blueprints;
+  const libraryAssets = blueprintLibraryScope === "corporation" ? activeData.corpAssets : activeData.assets;
+
+  useEffect(() => {
+    const blueprintImages = [...new Map(industrial.flatMap((owner) => [
+      ...owner.blueprints,
+      ...owner.corpBlueprints,
+    ]).flatMap((blueprint) => {
+      const typeId = Number(blueprint.type_id ?? 0);
+      if (!Number.isInteger(typeId) || typeId <= 0) return [];
+      const kind = blueprint.quantity === -1 ? "bpo" : "bpc";
+      return [[`${typeId}:${kind}`, { typeId, kind }] as const];
+    })).values()];
+    if (!blueprintImages.length) return;
+
+    // Warm the real Tranquility blueprint artwork cache, not ordinary type icons.
+    const warmers = blueprintImages.map(({ typeId, kind }) => {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = `sage-asset://blueprint/${typeId}/${kind}`;
+      return image;
+    });
+    return () => {
+      for (const image of warmers) image.src = "";
+    };
+  }, [industrial]);
   const blueprintAssetByItemId = new Map<number, EnrichedAsset>(
-    activeData.assets
+    libraryAssets
       .filter((asset): asset is EnrichedAsset & { item_id: number } => typeof asset.item_id === "number")
       .map((asset) => [asset.item_id, asset]),
   );
-  function blueprintLocation(blueprint: BlueprintRecord) {
-    const asset = typeof blueprint.item_id === "number" ? blueprintAssetByItemId.get(blueprint.item_id) : undefined;
-    return asset?.station ?? asset?.system ?? blueprint.location_id ?? blueprint.location_flag ?? "—";
+  const personalRootLocations = new Map<number, { station?: string | null; system?: string | null }>();
+  for (const asset of activeData.assets) {
+    const locationId = Number(asset.root_location_id ?? asset.location_id ?? 0);
+    if (!(locationId > 0) || (!asset.station && !asset.system)) continue;
+    if (!personalRootLocations.has(locationId)) personalRootLocations.set(locationId, { station: asset.station, system: asset.system });
+  }
+  const corporationStructureById = new Map<number, any>(activeData.corpStructures.flatMap((structure: any) => {
+    const id = Number(structure?.structure_id ?? structure?.facility_id ?? 0);
+    return id > 0 ? [[id, structure] as const] : [];
+  }));
+  const corporationFacilityById = new Map<number, any>(activeData.facilities.flatMap((facility: any) => {
+    const id = Number(facility?.facility_id ?? facility?.structure_id ?? 0);
+    return id > 0 ? [[id, facility] as const] : [];
+  }));
+  const corporationAssetNameById = new Map<number, string>(activeData.corpAssetNames.flatMap((entry) => {
+    const id = Number(entry?.item_id ?? 0);
+    const name = String(entry?.name ?? "").trim();
+    return id > 0 && name ? [[id, name] as const] : [];
+  }));
+
+  function locationFlagLabel(flag?: string) {
+    if (!flag) return "";
+    const corpDivision = /^CorpSAG(\d+)$/i.exec(flag);
+    if (corpDivision) return `Corporation hangar division ${corpDivision[1]}`;
+    if (/^Hangar$/i.test(flag)) return "Item hangar";
+    if (/^AssetSafety$/i.test(flag)) return "Asset Safety";
+    return flag.replace(/([a-z])([A-Z])/g, "$1 $2");
   }
 
-  const libraryBlueprints = planningBlueprints;
-  const filteredBlueprints = libraryBlueprints.filter((blueprint) => {
+  function blueprintLocationDetails(blueprint: BlueprintRecord) {
+    const asset = typeof blueprint.item_id === "number" ? blueprintAssetByItemId.get(blueprint.item_id) : undefined;
+    // Corporation blueprint records can point at an office/container item even when the
+    // blueprint itself is not present in the corporation asset feed. Start from that
+    // containing asset as a fallback so we can follow its enriched root to the Upwell
+    // structure instead of treating the container item ID as a location.
+    const containingAsset = blueprint.location_id ? blueprintAssetByItemId.get(Number(blueprint.location_id)) : undefined;
+    let current = asset ?? containingAsset;
+    const visited = new Set<number>();
+    while (current && String(current.location_type ?? "").toLowerCase() === "item") {
+      const currentId = Number(current.item_id ?? 0);
+      if (!currentId || visited.has(currentId)) break;
+      visited.add(currentId);
+      const parent = blueprintAssetByItemId.get(Number(current.location_id ?? 0));
+      if (!parent) break;
+      current = parent;
+    }
+
+    const rootId = Number(current?.root_location_id ?? current?.location_id ?? asset?.root_location_id ?? blueprint.location_id ?? 0);
+    const currentItemId = Number(current?.item_id ?? 0);
+    // A corporation office in an Upwell structure is represented as an item chain:
+    // blueprint -> OfficeFolder -> structure item -> solar system. The enriched
+    // root_location_id on the structure item is the solar-system ID, so preserve
+    // the structure item's own ID when it matches the corporation structure/facility
+    // feeds instead of collapsing the location to the system.
+    const exactStructureId = currentItemId > 0 && (corporationStructureById.has(currentItemId) || corporationFacilityById.has(currentItemId))
+      ? currentItemId
+      : rootId;
+    const rootFromPersonalAssets = personalRootLocations.get(rootId);
+    const structure = corporationStructureById.get(exactStructureId);
+    const facility = corporationFacilityById.get(exactStructureId);
+    const containerId = asset && String(asset.location_type ?? "").toLowerCase() === "item"
+      ? Number(asset.location_id ?? 0)
+      : containingAsset
+        ? Number(containingAsset.item_id ?? 0)
+        : 0;
+    const containerName = containerId > 0 ? corporationAssetNameById.get(containerId) : undefined;
+    const flag = locationFlagLabel(asset?.location_flag ?? blueprint.location_flag);
+    const station = asset?.station ?? current?.station ?? rootFromPersonalAssets?.station ?? locationNames[rootId] ?? null;
+    const system = asset?.system ?? current?.system ?? rootFromPersonalAssets?.system ?? null;
+    const structureName = String(structure?.name ?? structure?.structure_name ?? facility?.name ?? facility?.facility_name ?? facility?.structure_name ?? "").trim();
+    const secondaryParts = [...new Set([containerName ? `Container: ${containerName}` : "", flag, system ?? ""].filter(Boolean))];
+    const titleParts = [exactStructureId !== rootId ? `ESI structure ${exactStructureId}` : "", rootId > 0 ? `ESI location ${rootId}` : "", blueprint.location_id && Number(blueprint.location_id) !== rootId ? `blueprint location ${blueprint.location_id}` : ""].filter(Boolean);
+
+    if (station) return { primary: station, secondary: secondaryParts.join(" · "), title: titleParts.join(" · "), resolved: true };
+    if (structureName) return { primary: structureName, secondary: secondaryParts.join(" · "), title: titleParts.join(" · "), resolved: true };
+    if (rootId === Number(active.location?.station_id ?? active.location?.structure_id ?? 0) && active.location?.place_name) {
+      return { primary: active.location.place_name, secondary: secondaryParts.join(" · "), title: titleParts.join(" · "), resolved: true };
+    }
+    if (system) {
+      const systemSecondaryParts = [...new Set([containerName ? `Container: ${containerName}` : "", flag].filter(Boolean))];
+      return { primary: system, secondary: systemSecondaryParts.join(" · "), title: titleParts.join(" · "), resolved: true };
+    }
+    if (rootId > 1_000_000_000_000) {
+      return { primary: "Unknown structure", secondary: secondaryParts.join(" · ") || "Location awaiting ESI resolution", title: titleParts.join(" · "), resolved: false };
+    }
+    return { primary: "Unresolved location", secondary: secondaryParts.join(" · ") || "Location awaiting ESI resolution", title: titleParts.join(" · "), resolved: false };
+  }
+
+  const blueprintLibraryRows = libraryBlueprints.map((blueprint, index) => {
     const typeName = blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint";
-    return typeName.toLowerCase().includes(blueprintFilter.toLowerCase());
+    const location = blueprintLocationDetails(blueprint);
+    const kind: "BPO" | "BPC" = blueprint.quantity === -1 ? "BPO" : "BPC";
+    return { blueprint, index, typeName, location, kind, scope: blueprintLibraryScope };
   });
+  const normalizedBlueprintFilter = blueprintFilter.trim().toLowerCase();
+  const filteredBlueprintRows = blueprintLibraryRows.filter((row) => {
+    if (!normalizedBlueprintFilter) return true;
+    return [row.typeName, row.kind, row.location.primary, row.location.secondary]
+      .some((value) => String(value ?? "").toLowerCase().includes(normalizedBlueprintFilter));
+  });
+  const blueprintSourceUnavailable = blueprintLibraryScope === "corporation" ? activeData.corpBlueprintUnavailable : activeData.blueprintUnavailable;
+
+  const toggleCharacterSelection = (characterId: string) => {
+    setSelectedCharacterIds((current) => current.includes(characterId) ? current.filter((id) => id !== characterId) : [...current, characterId]);
+  };
+
+  const industrialShellBar = (
+    <div className="industrial-shell-topbar industrial-shell-topbar-inpage">
+      <div className="industrial-shell-brand"><span>&#9671;</span><strong>NEW EDEN SAGE</strong></div>
+      <nav className="industrial-shell-nav" aria-label="Industrial workspace navigation">
+        <button type="button" className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}>Command Center</button>
+        <button type="button" className={tab === "foundry" && foundryTab === "projects" ? "active" : ""} onClick={() => { setTab("foundry"); setFoundryTab("projects"); }}>Project Foundry</button>
+        <button type="button" className={tab === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>Industrial Jobs</button>
+        <button type="button" className={tab === "foundry" && foundryTab === "blueprints" ? "active" : ""} onClick={() => { setTab("foundry"); setFoundryTab("blueprints"); }}>Blueprint Library</button>
+        <button type="button" className={tab === "foundry" && foundryTab === "materials" ? "active" : ""} onClick={() => { setTab("foundry"); setFoundryTab("materials"); }}>Materials</button>
+        <button type="button" className={tab === "foundry" && foundryTab === "research" ? "active" : ""} onClick={() => { setTab("foundry"); setFoundryTab("research"); }}>Research &amp; Invention</button>
+        <button type="button" className={tab === "refinery" ? "active" : ""} onClick={() => setTab("refinery")}>Refinery</button>
+        <button type="button" className={tab === "moon-goo" ? "active" : ""} onClick={() => setTab("moon-goo")}>Moon Materials</button>
+        <button type="button" className={tab === "structures" ? "active" : ""} onClick={() => setTab("structures")}>Structures</button>
+      </nav>
+    </div>
+  );
 
   return (
-    <section className="industrial-command">
-      <div className="industrial-hero">
-        <div>
-          <p className="eyebrow">CAPSULEER PRODUCTION CONTROL</p>
-          <h2>Industrial Command</h2>
-          <p>
-            Blueprint ownership, industry jobs and material holdings are live from synced ESI data.
-            Production-chain costing and invention intelligence will build on this foundation.
-          </p>
-        </div>
-        <div className="industrial-owner-card">
-          <span>ACTIVE INDUSTRIAL OWNER</span>
-          <strong>{active.character.name}</strong>
-          <small>{active.character.corporation_name ?? "Independent capsuleer"}</small>
-        </div>
-      </div>
+    <section className={`industrial-command industrial-command-reference ${tab === "refinery" ? "industrial-refinery-page" : ""}`}>
+      <div className="industrial-page-shell">
+        <aside className="industrial-character-sidebar" aria-label="Industrial character selection">
+          <div className="industrial-sidebar-heading"><span className="industrial-sidebar-glyph">◇</span><strong>CHARACTERS</strong><button type="button" aria-label="Add or manage characters" onClick={() => document.getElementById("industrial-character-search")?.focus()}>+</button></div>
+          <label className="industrial-character-search"><span>⌕</span><input id="industrial-character-search" value={characterSearch} onChange={(event) => setCharacterSearch(event.target.value)} placeholder="Search characters..." /></label>
+          <div className="industrial-character-list">
+            {visibleCharacterSnapshots.map((snapshot) => {
+              const selected = selectedCharacterIdSet.has(String(snapshot.characterId));
+              return <div className={`industrial-sidebar-character ${selected ? "selected" : ""} ${snapshot.characterId === active.characterId ? "active-owner" : ""}`} key={snapshot.characterId}>
+                <label className="industrial-character-check" title={selected ? "Remove from industrial overview" : "Add to industrial overview"}><input type="checkbox" checked={selected} onChange={() => toggleCharacterSelection(snapshot.characterId)} /><span /></label>
+                <button type="button" className="industrial-character-identity" onClick={() => onSelectCharacter(snapshot.characterId)}>
+                  <img src={`https://images.evetech.net/characters/${snapshot.characterId}/portrait?size=64`} alt="" />
+                  <span><strong>{snapshot.character.name}</strong><small>{characterRole(snapshot)}</small><b>{compactSkillPoints(snapshot.skills.total_sp)}</b></span>
+                </button>
+              </div>;
+            })}
+            {!visibleCharacterSnapshots.length && <div className="industrial-sidebar-empty">No characters match this filter.</div>}
+          </div>
+          <div className="industrial-selection-summary"><span><strong>{selectedCharacterIds.length}</strong> character{selectedCharacterIds.length === 1 ? "" : "s"} selected</span><button type="button" onClick={() => setSelectedCharacterIds([])} disabled={!selectedCharacterIds.length}>Clear</button></div>
+          <button type="button" className={`industrial-manage-selection ${showOnlySelected ? "active" : ""}`} onClick={() => { setShowOnlySelected((value) => !value); setCharacterSearch(""); }}>♙ <span>{showOnlySelected ? "Show All Characters" : "Show Selected Only"}</span></button>
+        </aside>
 
-      <div className="industrial-character-strip" aria-label="Industrial character ownership">
-        {industrial.map(({ snapshot, blueprints, jobs }) => (
-          <button
-            key={snapshot.characterId}
-            className={snapshot.characterId === active.characterId ? "active" : ""}
-            onClick={() => onSelectCharacter(snapshot.characterId)}
+        <div className="industrial-command-deck">
+          <div
+            className={`industrial-advertising-slot ${tab === "refinery" ? "industrial-refinery-hero" : ""}`}
+            data-ad-slot="industrial-command-leaderboard"
+            aria-label="Industrial Command advertising space"
+            style={{ backgroundImage: `linear-gradient(90deg, rgba(2,13,20,.14), rgba(2,13,20,.20)), url(${industrialBanner})` }}
           >
-            <strong>{snapshot.character.name}</strong>
-            <span>{blueprints.length} BP · {jobs.length} jobs</span>
-          </button>
-        ))}
-      </div>
+            {tab === "refinery" ? <div className="industrial-refinery-hero-copy" aria-hidden="true">
+              <span>MATERIALS</span>
+              <strong>FUEL CIVILISATION</strong>
+              <small>ORE / ICE / MOON-ORE PROCESSING</small>
+            </div> : null}
+          </div>
 
-      <AssetSharingControl
-        snapshots={snapshots}
-        activeCharacterId={String(active.characterId)}
-        enabled={assetSharing.enabled}
-        selectedIds={assetSharing.characterIds}
-        onToggle={(enabled) => setAssetSharing((current) => ({ ...current, enabled }))}
-        onSelect={(characterId, selected) => setAssetSharing((current) => ({
-          ...current,
-          characterIds: selected
-            ? [...new Set([...current.characterIds, characterId])]
-            : current.characterIds.filter((id) => id !== characterId),
-        }))}
-      />
+          {industrialShellBar}
 
-      <div className="skills-tabs industrial-tabs" role="tablist" aria-label="Industrial Command sections">
-        {tabs.map((item) => (
-          <button key={item.id} className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>
-            {item.label}
-          </button>
-        ))}
-      </div>
+          {tab === "overview" && <section className={`industrial-pooling-strip ${assetSharing.enabled ? "enabled" : ""}`}>
+            <label className="industrial-pooling-master"><input type="checkbox" checked={assetSharing.enabled} onChange={(event) => setAssetSharing((current) => ({ ...current, enabled: event.target.checked }))} /><span><strong>Cross-character asset sharing</strong><small>{assetSharing.enabled ? "Only checked characters contribute stocks to this industrial overview." : "Off — planning uses the active character's assets only."}</small></span></label>
+            <div className="industrial-pooling-stat"><i>◇</i><span><strong>Shared blueprints</strong><small>{number(selectedBlueprints.length)} total ({number(selectedBlueprintTypeCount)} unique)</small></span></div>
+            <div className="industrial-pooling-stat materials"><i>△</i><span><strong>Shared materials</strong><small>{number(selectedMaterialUnits)} total items</small></span></div>
+            <div className="industrial-pooling-stat jobs"><i>▥</i><span><strong>Active industry jobs</strong><small>{number(selectedActiveJobs.length)} across {number(new Set(selectedActiveJobs.map(({ owner }) => owner.characterId)).size)} characters</small></span></div>
+            <div className="industrial-pooling-stat pools"><i>◎</i><span><strong>Shared asset pools</strong><small>{number(selectedLocations.length)} locations combined</small></span></div>
+            <button type="button" className="industrial-pooling-options" onClick={() => { setTab("foundry"); setFoundryTab("materials"); }}>Pooling Options</button>
+          </section>}
 
-      {tab === "foundry" && (
-        <div className="industrial-foundry-subtabs" role="tablist" aria-label="Project Foundry sections">
-          {foundryTabs.map((item) => (
-            <button
-              type="button"
-              key={item.id}
-              className={foundryTab === item.id ? "active" : ""}
-              aria-selected={foundryTab === item.id}
-              onClick={() => setFoundryTab(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
 
       {tab === "overview" && (
         <>
-          <div className="industrial-metrics">
-            <IndustrialMetric label="Character blueprints" value={number(allCharacterBlueprints)} detail="Across connected characters · identities preserved" />
-            <IndustrialMetric label="Industry jobs" value={number(allCharacterJobs)} detail={`${activeJobs.length} currently active or pending`} />
-            <IndustrialMetric label="Committed job cost" value={isk(totalJobCost)} detail="Active/pending ESI job cost" />
-            <IndustrialMetric label="Asset stacks" value={number(ownedMaterialStacks)} detail="Available to future material analysis" />
+          <div className="industrial-metrics industrial-reference-metrics">
+            <IndustrialMetric icon="▣" label="Character blueprints" value={number(selectedBlueprints.length)} detail={`${number(selectedBlueprintTypeCount)} unique across ${selectedCharacterIds.length} selected character${selectedCharacterIds.length === 1 ? "" : "s"}`} />
+            <IndustrialMetric icon="⚙" label="Industry jobs" value={number(selectedJobs.length)} detail={`${selectedActiveJobs.length} active / pending`} />
+            <IndustrialMetric icon="▱" label="Committed job cost" value={isk(selectedJobCost)} detail="Across selected characters" />
+            <IndustrialMetric icon="◇" label="Asset stacks" value={number(selectedAssetStacks)} detail="Available for material analysis" />
           </div>
 
-          <div className="industrial-grid">
-            <article className="industrial-panel">
-              <div className="industrial-panel-head">
-                <div>
-                  <p className="eyebrow">CURRENT CHARACTER</p>
-                  <h3>{active.character.name}</h3>
-                </div>
-                <span className="industrial-status live">LIVE ESI</span>
+          <div className="industrial-overview-panels">
+            <article className="industrial-reference-panel industrial-needs-action-panel">
+              <div className="industrial-reference-panel-head">
+                <strong>NEEDS ACTION</strong>
+                <span className={industrialNeedsActionTotal ? "industrial-needs-action-count active" : "industrial-needs-action-count"}>{industrialNeedsActionTotal ? `${industrialNeedsActionTotal} OPEN` : "ALL CLEAR"}</span>
               </div>
-              <div className="industrial-stat-list">
-                <IndustrialStat label="Personal blueprints" value={activeData.blueprintUnavailable ? "Reconnect required" : number(activeData.blueprints.length)} />
-                <IndustrialStat label="Personal jobs" value={activeData.jobsUnavailable ? "Reconnect required" : number(activeData.jobs.length)} />
-                <IndustrialStat label="Asset stacks" value={number(activeData.assets.length)} />
-                <IndustrialStat label="Corporation blueprints visible" value={number(activeData.corpBlueprints.length)} />
-                <IndustrialStat label="Corporation jobs visible" value={number(activeData.corpJobs.length)} />
-                <IndustrialStat label="Corporation facilities visible" value={number(activeData.facilities.length)} />
+              <div className="industrial-needs-action-list">
+                {industrialNeedsAction.map((item) => (
+                  <div className={`industrial-needs-action-row ${item.tone}`} key={item.id}>
+                    <i aria-hidden="true" />
+                    <span className="industrial-needs-action-copy">
+                      <small>{item.category}</small>
+                      <strong>{item.title}</strong>
+                      <b>{item.detail}</b>
+                    </span>
+                    {item.action === "jobs" ? <button type="button" onClick={() => setTab("jobs")}>Review</button> : <em>PI</em>}
+                  </div>
+                ))}
+                {!industrialNeedsAction.length && <div className="industrial-needs-action-clear">
+                  <i aria-hidden="true" />
+                  <span><strong>{planetaryAttentionReady ? "No industrial actions need attention" : "Checking industrial attention queue"}</strong><small>{planetaryAttentionReady ? "No completed jobs or urgent PI alerts in the selected character scope." : "Reading synced PI and production state…"}</small></span>
+                </div>}
               </div>
             </article>
 
-            <article className="industrial-panel">
-              <div className="industrial-panel-head">
-                <div>
-                  <p className="eyebrow">ACTIVE PIPELINE</p>
-                  <h3>Jobs requiring attention</h3>
-                </div>
-                <span className="industrial-status">{activeData.jobs.length} tracked</span>
+            <article className="industrial-reference-panel recent-activity-panel">
+              <div className="industrial-reference-panel-head"><strong>RECENT INDUSTRY ACTIVITY</strong><button type="button" onClick={() => setTab("jobs")}>View All Activity →</button></div>
+              <div className="industrial-activity-table"><div className="heading"><span>TIME</span><span>CHARACTER</span><span>ACTIVITY</span><span>DETAILS</span></div>
+                {recentIndustryActivity.map(({ job, owner }, index) => <div className="row" key={job.job_id ?? `${owner.characterId}:${index}`}><span>{relativeIndustrialTime(job.completed_date ?? job.start_date ?? job.end_date)}</span><strong>{owner.character.name}</strong><span>{activityNames[job.activity_id ?? 0] ?? "Industry job"}</span><span>{job.product_type_id ? typeNames[job.product_type_id] ?? `Type ${job.product_type_id}` : job.blueprint_type_id ? typeNames[job.blueprint_type_id] ?? `Blueprint ${job.blueprint_type_id}` : `${job.runs ?? 1} run${job.runs === 1 ? "" : "s"}`}</span></div>)}
+                {!recentIndustryActivity.length && <div className="industrial-reference-empty">No synced industry activity for the selected characters.</div>}
               </div>
-              <JobList jobs={activeData.jobs.slice(0, 8)} typeNames={typeNames} />
+            </article>
+
+            <article className="industrial-reference-panel asset-location-panel">
+              <div className="industrial-reference-panel-head"><strong>ASSET LOCATION SUMMARY</strong><button type="button" onClick={() => setTab("materials")}>View All Asset Locations →</button></div>
+              <div className="industrial-location-table"><div className="heading"><span>LOCATION</span><span>ITEMS</span><span>EST. VALUE</span></div>
+                {selectedLocations.slice(0, 4).map((location) => <div className="row" key={location.location}><span><i>◎</i>{location.location}</span><strong>{number(location.items)}</strong><b>{location.estimatedValue > 0 ? compactIsk(location.estimatedValue) : "--"}</b></div>)}
+                {!selectedLocations.length && <div className="industrial-reference-empty">No asset locations in the selected character scope.</div>}
+              </div>
             </article>
           </div>
-
-
         </>
       )}
 
@@ -819,63 +1352,94 @@ export function IndustrialCommand({
       )}
 
       {tab === "foundry" && foundryTab === "blueprints" && (
-        <div className="industrial-panel industrial-full-panel">
-          <div className="industrial-panel-head blueprint-head">
-            <div>
-              <p className="eyebrow">{blueprintLibraryScope === "corporation" ? "CORPORATION BLUEPRINT LIBRARY" : "PERSONAL BLUEPRINT LIBRARY"}</p>
+        <div className="industrial-panel industrial-full-panel industrial-blueprint-library">
+          <div className="industrial-blueprint-library-head">
+            <div className="industrial-blueprint-library-title">
+              <p className="eyebrow">BLUEPRINT LIBRARY</p>
               <h3>{active.character.name}</h3>
-              <p>BPO/BPC identity, ME/TE and remaining runs from ESI.</p>
+              <p>Owned originals and copies with ESI ME, TE, runs and resolved storage locations.</p>
             </div>
-            <input value={blueprintFilter} onChange={(event) => setBlueprintFilter(event.target.value)} placeholder="Filter blueprints..." />
-          </div>
-          <div className="industrial-material-toolbar">
-            <div className="industrial-scope-toggle">
-              <button type="button" className={blueprintLibraryScope === "personal" ? "active" : ""} onClick={() => setBlueprintLibraryScope("personal")}>Personal</button>
-              <button type="button" disabled={!activeData.corpBlueprints.length} className={blueprintLibraryScope === "corporation" ? "active" : ""} onClick={() => setBlueprintLibraryScope("corporation")}>Corporation</button>
+            <div className="industrial-blueprint-library-actions">
+              <label className="industrial-blueprint-search">
+                <span aria-hidden="true">⌕</span>
+                <input value={blueprintFilter} onChange={(event) => setBlueprintFilter(event.target.value)} placeholder="Search blueprints..." aria-label="Search blueprints" />
+              </label>
+              <span className="industrial-blueprint-count"><strong>{number(filteredBlueprintRows.length)}</strong> VISIBLE <b>/</b> {number(libraryBlueprints.length)} TOTAL</span>
             </div>
-            <span>{number(filteredBlueprints.length)} visible · {number(libraryBlueprints.length)} total</span>
           </div>
-          {activeData.blueprintUnavailable ? (
+          <div className="industrial-blueprint-toolbar">
+            <div className="industrial-blueprint-scope" aria-label="Blueprint ownership scope">
+              <button type="button" className={blueprintLibraryScope === "personal" ? "active" : ""} onClick={() => setBlueprintLibraryScope("personal")}><span>PERSONAL</span><small>{number(activeData.blueprints.length)}</small></button>
+              <button type="button" disabled={!activeData.corpBlueprints.length} className={blueprintLibraryScope === "corporation" ? "active" : ""} onClick={() => setBlueprintLibraryScope("corporation")}><span>CORPORATION</span><small>{number(activeData.corpBlueprints.length)}</small></button>
+            </div>
+            {activeData.corpBlueprints.length > 0 && <div className="industrial-blueprint-corp-access"><span aria-hidden="true">◇</span><div><strong>CORPORATION BLUEPRINT ACCESS</strong><small>{number(activeData.corpBlueprints.length)} corporation blueprint{activeData.corpBlueprints.length === 1 ? "" : "s"} synced</small></div></div>}
+          </div>
+          {blueprintSourceUnavailable ? (
             <div className="industrial-notice">Blueprint scope is unavailable for this stored login. Reconnect the character to grant the current Sage ESI scopes.</div>
-          ) : filteredBlueprints.length ? (
-            <div className="industrial-table">
-              <div className="industrial-table-row heading">
-                <span>Blueprint type</span><span>Kind</span><span>ME</span><span>TE</span><span>Runs</span><span>Location</span>
+          ) : filteredBlueprintRows.length ? (
+            <div className="industrial-blueprint-table" role="table" aria-label={`${blueprintLibraryScope} blueprint library`}>
+              <div className="industrial-blueprint-row heading" role="row">
+                <span>Blueprint</span><span>Scope</span><span>Kind</span><span>ME</span><span>TE</span><span>Runs</span><span>Location</span>
               </div>
-              {filteredBlueprints.map((blueprint, index) => (
-                <div className="industrial-table-row" key={blueprint.item_id ?? `${blueprint.type_id}-${index}`}>
-                  <strong>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"}</strong>
-                  <span>{blueprint.quantity === -1 ? "BPO" : "BPC"}</span>
-                  <span>{blueprint.material_efficiency ?? 0}%</span>
-                  <span>{blueprint.time_efficiency ?? 0}%</span>
-                  <span>{blueprint.quantity === -1 ? "∞" : blueprint.runs ?? 0}</span>
-                  <span>{blueprintLocation(blueprint)}</span>
+              {filteredBlueprintRows.map(({ blueprint, index, typeName, location, kind, scope }) => (
+                <div className={`industrial-blueprint-row ${location.resolved ? "" : "unresolved"}`} role="row" key={blueprint.item_id ?? `${blueprint.type_id}-${index}`}>
+                  <span className="industrial-blueprint-identity">
+                    <BlueprintThumbnail typeId={blueprint.type_id} kind={kind} />
+                    <span><strong>{typeName}</strong><small>{scope === "corporation" ? "Corporation blueprint" : "Personal blueprint"} · ESI synced</small></span>
+                  </span>
+                  <span><b className={`industrial-blueprint-scope-badge ${scope}`}>{scope === "corporation" ? "CORP" : "PERSONAL"}</b></span>
+                  <span><b className={`industrial-blueprint-kind ${kind.toLowerCase()}`}>{kind}</b></span>
+                  <span className="industrial-blueprint-number">{blueprint.material_efficiency ?? 0}%</span>
+                  <span className="industrial-blueprint-number">{blueprint.time_efficiency ?? 0}%</span>
+                  <span className="industrial-blueprint-number">{kind === "BPO" ? "∞" : number(blueprint.runs ?? 0)}</span>
+                  <span className="industrial-blueprint-location" title={location.title || undefined}><strong>{location.primary}</strong>{location.secondary ? <small>{location.secondary}</small> : null}</span>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="industrial-notice">No blueprints are present in the selected library scope.</div>
-          )}
-          {activeData.corpBlueprints.length > 0 && (
-            <div className="industrial-corp-note">Corporation access detected: {number(activeData.corpBlueprints.length)} corporation blueprints are available for the corporation-management/industrial crossover pass.</div>
+            <div className="industrial-notice">{normalizedBlueprintFilter ? "No blueprints match this search in the selected scope." : "No blueprints are present in the selected library scope."}</div>
           )}
         </div>
       )}
 
       {tab === "jobs" && (
-        <div className="industrial-panel industrial-full-panel">
-          <div className="industrial-panel-head">
-            <div>
+        <div className="industrial-panel industrial-full-panel industrial-job-ledger">
+          <div className="industrial-job-ledger-head">
+            <div className="industrial-job-ledger-title">
               <p className="eyebrow">INDUSTRY JOB LEDGER</p>
               <h3>{active.character.name}</h3>
-              <p>Current and completed character jobs retained from ESI.</p>
+              <p>Personal and corporation manufacturing activity from the latest synced ESI state.</p>
             </div>
-            <span className="industrial-status live">{activeData.jobs.length} records</span>
+            <div className="industrial-job-ledger-summary">
+              <span><small>Total</small><strong>{number(activeJobLedger.length)}</strong></span>
+              <span><small>Current</small><strong>{number(activeLedgerCount)}</strong></span>
+              <span className="solo"><small>Solo</small><strong>{number(soloLedgerCount)}</strong></span>
+              <span className="corp"><small>Corp</small><strong>{number(corporationLedgerCount)}</strong></span>
+            </div>
           </div>
-          {activeData.jobsUnavailable ? (
-            <div className="industrial-notice">Industry-job scope is unavailable for this stored login. Reconnect the character to refresh authorization.</div>
+          <div className="industrial-job-ledger-toolbar">
+            <div className="industrial-job-filter-group" aria-label="Job ownership filter">
+              <span>OWNERSHIP</span>
+              <div>
+                <button type="button" className={jobScopeFilter === "all" ? "active" : ""} onClick={() => setJobScopeFilter("all")}>All</button>
+                <button type="button" className={jobScopeFilter === "solo" ? "active" : ""} onClick={() => setJobScopeFilter("solo")}>Solo</button>
+                <button type="button" className={jobScopeFilter === "corporation" ? "active" : ""} onClick={() => setJobScopeFilter("corporation")}>Corp</button>
+              </div>
+            </div>
+            <div className="industrial-job-filter-group" aria-label="Job status filter">
+              <span>STATE</span>
+              <div>
+                <button type="button" className={jobStatusFilter === "all" ? "active" : ""} onClick={() => setJobStatusFilter("all")}>All</button>
+                <button type="button" className={jobStatusFilter === "active" ? "active" : ""} onClick={() => setJobStatusFilter("active")}>Current</button>
+                <button type="button" className={jobStatusFilter === "history" ? "active" : ""} onClick={() => setJobStatusFilter("history")}>History</button>
+              </div>
+            </div>
+            <span className="industrial-job-ledger-visible">{number(filteredJobLedger.length)} SHOWN</span>
+          </div>
+          {activeData.jobsUnavailable && activeData.corpJobsUnavailable ? (
+            <div className="industrial-notice">Industry-job scopes are unavailable for this stored login. Reconnect the character to refresh authorization.</div>
           ) : (
-            <JobList jobs={activeData.jobs} expanded typeNames={typeNames} />
+            <JobList jobs={filteredJobLedger} typeNames={typeNames} />
           )}
         </div>
       )}
@@ -884,14 +1448,28 @@ export function IndustrialCommand({
         <div className="industrial-production-workspace">
           <article className="industrial-panel industrial-full-panel">
             <div className="industrial-panel-head blueprint-head">
-              <div><p className="eyebrow">MATERIAL INVENTORY</p><h3>{assetSharing.enabled ? "Selected shared stock pool" : active.character.name}</h3><p>Asset stacks are pooled only for analysis; every source remains keyed to its owning character and ESI item ID.</p></div>
+              <div><p className="eyebrow">MATERIAL INVENTORY</p><h3>{assetSharing.enabled ? "Selected shared stock pool" : active.character.name}</h3><p>Only owned items that appear in an actual CCP blueprint material list are shown here. Source character and ESI item identity remain preserved.</p></div>
               <input value={materialFilter} onChange={(event) => setMaterialFilter(event.target.value)} placeholder="Filter materials..." />
             </div>
             <div className="industrial-material-toolbar">
-              <div className="industrial-stock-pool-label"><strong>{assetSharing.enabled ? "SHARED POOL ON" : "SHARING OFF"}</strong><small>{number(materialOwners.length)} contributing character{materialOwners.length === 1 ? "" : "s"} µ source identities preserved</small></div>
-              <span>{number(materialInventory.length)} material type(s) - {number(materialInventory.reduce((sum, item) => sum + item.quantity, 0))} units</span>
+              <div className="industrial-stock-pool-label"><strong>{assetSharing.enabled ? "SHARED POOL ON" : "SHARING OFF"}</strong><small>{number(materialOwners.length)} contributing character{materialOwners.length === 1 ? "" : "s"} · source identities preserved</small></div>
+              <span>{number(materialInventory.length)} shown / {number(materialInventoryAll.length)} type(s) · {number(materialInventory.reduce((sum, item) => sum + item.quantity, 0))} units</span>
             </div>
-            {materialInventory.length ? <div className="industrial-table industrial-inventory-table"><div className="industrial-table-row heading"><span>Material</span><span>Quantity</span><span>Owners</span><span>Locations</span><span>Est. value</span></div>{materialInventory.map((item) => <div className="industrial-table-row" key={`${item.typeId}-${item.name}`}><strong>{item.name}</strong><span>{number(item.quantity)}</span><span className="industrial-owner-breakdown" title={[...item.sourceAssetIds].join(" · ")}>{[...item.owners.values()].map((owner) => `${owner.characterName}: ${number(owner.quantity)}`).join(" - ")}</span><span>{[...item.locations].slice(0, 3).join(" - ") || "--"}{item.locations.size > 3 ? ` +${item.locations.size - 3}` : ""}</span><span>{item.estimatedValue > 0 ? isk(item.estimatedValue) : "--"}</span></div>)}</div> : <div className="industrial-notice">No material stacks match this filter in the selected stock pool.</div>}
+            <div className="industrial-material-categories" aria-label="Material category filter">
+              <button type="button" className={materialCategoryFilter === "all" ? "active" : ""} onClick={() => setMaterialCategoryFilter("all")}><span>All</span><small>{number(materialInventoryAll.length)}</small></button>
+              {materialCategories.map((category) => <button type="button" key={category.name} className={materialCategoryFilter === category.name ? "active" : ""} onClick={() => setMaterialCategoryFilter(category.name)}><span>{category.name}</span><small>{number(category.count)}</small></button>)}
+            </div>
+            {materialInventory.length ? <div className="industrial-table industrial-inventory-table"><div className="industrial-table-row heading"><span>Material</span><span>Category</span><span>Quantity</span><span>Owners</span><span>Locations</span><span>Est. value</span></div>{materialInventory.map((item) => <div className="industrial-table-row" key={`${item.typeId}-${item.name}`}>
+              <span className="industrial-material-identity">
+                {item.typeId > 0 && <img src={`sage-asset://type/${item.typeId}/icon?size=64&cache=only&v=${materialIconRevision}`} alt="" loading="lazy" />}
+                <span><strong>{item.name}</strong><small>{item.groupName}{item.marketGroupName && item.marketGroupName !== item.groupName ? ` · ${item.marketGroupName}` : ""}</small></span>
+              </span>
+              <span><b className="industrial-material-category">{item.categoryName}</b></span>
+              <span>{number(item.quantity)}</span>
+              <span className="industrial-owner-breakdown" title={[...item.sourceAssetIds].join(" · ")}>{[...item.owners.values()].map((owner) => `${owner.characterName}: ${number(owner.quantity)}`).join(" · ")}</span>
+              <span>{[...item.locations].slice(0, 3).join(" · ") || "--"}{item.locations.size > 3 ? ` +${item.locations.size - 3}` : ""}</span>
+              <span>{item.estimatedValue > 0 ? isk(item.estimatedValue) : "--"}</span>
+            </div>)}</div> : <div className="industrial-notice">No blueprint-usable material stacks match this search/category filter in the selected stock pool.</div>}
           </article>
           <div className="industrial-grid">
             <article className="industrial-panel"><p className="eyebrow">PRODUCTION LINK</p><h3>Owned stock feeds production automatically</h3><p>Production Planner subtracts these holdings before calculating shortages. Connected-stock mode preserves which character contributes each material stack.</p><div className="industrial-production-steps"><span>1 - Pick blueprint</span><span>2 - Pool chosen stock</span><span>3 - Consume owned inputs</span><span>4 - Build owned subcomponents</span><span>5 - Price market leaves</span><span>6 - Compare build vs buy</span></div></article>
@@ -912,7 +1490,7 @@ export function IndustrialCommand({
         />
       )}
       {tab === "refinery" && (
-        <div className="industrial-production-workspace">
+        <div className="industrial-production-workspace industrial-refinery-workspace">
           <article className="industrial-panel industrial-production-control industrial-refinery-control industrial-workbench-card">
             <div className="industrial-panel-head">
               <div><p className="eyebrow">REFINERY</p><h3>Ore, ice & moon-ore reprocessing</h3><p>Analyse synced holdings or override them with any ore quantity you want to model. Sage keeps the active character's real processing skills and exact CCP SDE outputs either way.</p></div>
@@ -1005,6 +1583,31 @@ export function IndustrialCommand({
             </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
           {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : null}
+          <article className="industrial-panel industrial-full-panel industrial-invention-intro">
+            <div className="industrial-panel-head">
+              <div>
+                <p className="eyebrow">INVENTION INTELLIGENCE</p>
+                <h3>Catalogue-wide invention opportunities</h3>
+                <p>The same invention engine used by ISK Command, presented here as an Industrial Command workbench. Market prices, character skills, owned source BPOs and decryptor effects stay on the shared calculation path.</p>
+              </div>
+              <button type="button" className="industrial-invention-refresh" onClick={() => { inventionBuildKeyRef.current = null; void loadInventionIntelligence(inventionDecryptor); }} disabled={inventionBusy}>
+                {inventionBusy ? "Analysing..." : "Refresh invention intelligence"}
+              </button>
+            </div>
+            <div className="industrial-notice">{inventionStatus}</div>
+          </article>
+          {inventionAnalysis ? (
+            <InventionIntelligence
+              analysis={inventionAnalysis}
+              busy={inventionBusy}
+              decryptor={inventionDecryptor}
+              onDecryptorChange={setInventionDecryptor}
+              onRefresh={() => { inventionBuildKeyRef.current = null; void loadInventionIntelligence(inventionDecryptor); }}
+              variant="industrial"
+            />
+          ) : inventionBusy ? (
+            <div className="industrial-notice industrial-invention-loading">Building and pricing the complete invention catalogue...</div>
+          ) : null}
         </div>
       )}
       {tab === "production" && (
@@ -1031,8 +1634,43 @@ export function IndustrialCommand({
           {manufacturingPlan ? <ManufacturingPlanView plan={manufacturingPlan} /> : null}
         </div>
       )}
+
+      {tab === "materials" && (
+        <div className="industrial-reference-workspace">
+          <article className="industrial-panel industrial-full-panel">
+            <div className="industrial-panel-head"><div><p className="eyebrow">MATERIALS & STOCK</p><h3>Blueprint-usable material pool</h3><p>Only owned item types referenced by a CCP blueprint material list are included; ships, modules, finished goods and unrelated assets are excluded.</p></div><span className="industrial-status live">{materialStackCount} STACKS</span></div>
+            <div className="industrial-reference-location-summary">{materialLocationSummary.slice(0, 8).map((location) => <span key={location.location}><strong>{location.location}</strong><small>{number(location.items)} material units · {location.estimatedValue > 0 ? compactIsk(location.estimatedValue) : "value unavailable"}</small></span>)}</div>
+            <div className="industrial-material-list">{materialInventory.slice(0, 80).map((item) => <div key={`${item.typeId}:${item.name}`}><span><strong>{item.name}</strong><small>{[...item.owners.values()].map((owner) => owner.characterName).join(" · ")}</small></span><span><strong>{number(item.quantity)}</strong><small>{item.estimatedValue > 0 ? compactIsk(item.estimatedValue) : "--"}</small></span></div>)}</div>
+          </article>
+        </div>
+      )}
+
+      {tab === "blueprints" && (
+        <article className="industrial-panel industrial-full-panel">
+          <div className="industrial-panel-head"><div><p className="eyebrow">BLUEPRINTS</p><h3>Selected character blueprint library</h3><p>{selectedBlueprints.length} blueprint records across {selectedCharacterIds.length} selected characters.</p></div><button type="button" onClick={() => { setFoundryTab("blueprints"); setTab("foundry"); }}>Open Project Foundry</button></div>
+          <div className="industrial-table"><div className="industrial-table-row heading"><span>Blueprint</span><span>ME</span><span>TE</span><span>Runs</span><span>Type</span><span>Owner</span></div>
+            {selectedIndustrial.flatMap(({ snapshot, blueprints }) => blueprints.map((blueprint, index) => <div className="industrial-table-row" key={`${snapshot.characterId}:${blueprint.item_id ?? index}`}><strong>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint"}</strong><span>{blueprint.material_efficiency ?? 0}%</span><span>{blueprint.time_efficiency ?? 0}%</span><span>{blueprint.runs == null || blueprint.runs < 0 ? "Original" : number(blueprint.runs)}</span><span>{blueprint.quantity === -2 ? "BPC" : "BPO"}</span><span>{snapshot.character.name}</span></div>)).slice(0, 100)}
+          </div>
+        </article>
+      )}
+
+      {tab === "structures" && (
+        <article className="industrial-panel industrial-full-panel">
+          <div className="industrial-panel-head"><div><p className="eyebrow">STRUCTURES</p><h3>Visible industrial facilities</h3><p>Corporation facilities visible to the selected characters from the latest private-data snapshot.</p></div><span className="industrial-status">{number(selectedFacilities.length)} VISIBLE</span></div>
+          {selectedFacilities.length ? <div className="industrial-structure-grid">{selectedFacilities.map(({ facility, owner }, index) => <div key={String(facility?.facility_id ?? facility?.structure_id ?? `${owner.characterId}:${index}`)}><span className="industrial-structure-icon">⌂</span><span><strong>{facility?.name ?? facility?.facility_name ?? facility?.structure_name ?? `Facility ${facility?.facility_id ?? facility?.structure_id ?? index + 1}`}</strong><small>{facility?.solar_system_name ?? facility?.system_name ?? owner.location.solar_system_name} · visible via {owner.character.name}</small></span></div>)}</div> : <div className="industrial-notice">No corporation industrial facilities are visible in the current selected-character scope.</div>}
+        </article>
+      )}
+        </div>
+      </div>
     </section>
   );
+}
+
+function BlueprintThumbnail({ typeId, kind }: { typeId?: number; kind: "BPO" | "BPC" }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [typeId, kind]);
+  if (!typeId || failed) return <span className="industrial-blueprint-thumb fallback" aria-hidden="true">BP</span>;
+  return <span className={`industrial-blueprint-thumb ${kind.toLowerCase()}`}><img src={`sage-asset://blueprint/${typeId}/${kind.toLowerCase()}`} alt="" decoding="async" onError={() => setFailed(true)} /></span>;
 }
 
 function RefineryView({ data, filter, onFilter }: { data: any; filter: string; onFilter(value: string): void }) {
@@ -1048,10 +1686,10 @@ function RefineryView({ data, filter, onFilter }: { data: any; filter: string; o
     : `${Number(totals.minYieldPercent ?? 0).toFixed(2)}-${Number(totals.maxYieldPercent ?? 0).toFixed(2)}%`;
   return <div className="industrial-production-results industrial-refinery-results">
     <div className="industrial-metrics">
-      <IndustrialMetric label="Refinable stock" value={number(totals.stackCount ?? 0)} detail={`${Number(totals.inputVolumeM3 ?? 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} m³ across ${data.stockSources?.length ?? 0} character(s)`} />
-      <IndustrialMetric label="Effective yield" value={yieldLabel} detail={`Reprocessing ${data.skills?.reprocessing?.trainedLevel ?? 0} · Efficiency ${data.skills?.efficiency?.trainedLevel ?? 0} · ore skill varies by row`} />
-      <IndustrialMetric label="Sell raw now" value={totals.rawValue == null ? "PRICE GAPS" : isk(totals.rawValue)} detail="Best retained all-region public buy orders" />
-      <IndustrialMetric label="Refine then sell" value={totals.refinedStrategyValue == null ? "PRICE GAPS" : isk(totals.refinedStrategyValue)} detail="Refined outputs plus any unprocessable leftovers" />
+      <IndustrialMetric icon="▣" label="Refinable stock" value={number(totals.stackCount ?? 0)} detail={`${Number(totals.inputVolumeM3 ?? 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} m³ across ${data.stockSources?.length ?? 0} character(s)`} />
+      <IndustrialMetric icon="%" label="Effective yield" value={yieldLabel} detail={`Reprocessing ${data.skills?.reprocessing?.trainedLevel ?? 0} · Efficiency ${data.skills?.efficiency?.trainedLevel ?? 0} · ore skill varies by row`} />
+      <IndustrialMetric icon="ISK" label="Sell raw now" value={totals.rawValue == null ? "PRICE GAPS" : isk(totals.rawValue)} detail="Best retained all-region public buy orders" />
+      <IndustrialMetric icon="⇆" label="Refine then sell" value={totals.refinedStrategyValue == null ? "PRICE GAPS" : isk(totals.refinedStrategyValue)} detail="Refined outputs plus any unprocessable leftovers" />
     </div>
     <article className="industrial-build-buy-strip industrial-refinery-value-strip">
       <span><small>Refining advantage</small><strong className={Number(totals.valueDelta ?? 0) > 0 ? "positive" : ""}>{totals.valueDelta == null ? "--" : `${totals.valueDelta > 0 ? "+" : ""}${isk(totals.valueDelta)}`}</strong></span>
@@ -1063,7 +1701,7 @@ function RefineryView({ data, filter, onFilter }: { data: any; filter: string; o
       {stacks.length ? <div className="industrial-table industrial-refinery-table">
         <div className="industrial-table-row heading"><span>Resource</span><span>Stock / batches</span><span>Yield / skill</span><span>Refined output</span><span>Sell raw</span><span>Refine value</span><span>Delta</span><span>Decision</span></div>
         {stacks.map((stack: any) => <div className="industrial-table-row" key={stack.typeId}>
-          <span className="industrial-refinery-resource"><strong>{stack.name}</strong><small>{stack.groupName} · {(stack.owners ?? []).map((owner: any) => owner.characterName).join(" · ") || "Unknown owner"}</small></span>
+          <span className="industrial-refinery-resource"><img src={`sage-asset://type/${stack.typeId}/icon?size=64`} alt="" loading="lazy" /><span><strong>{stack.name}</strong><small>{stack.groupName} · {(stack.owners ?? []).map((owner: any) => owner.characterName).join(" · ") || "Unknown owner"}</small></span></span>
           <span><strong>{number(stack.quantity)}</strong><small>{number(stack.fullBatches)} × {number(stack.portionSize)}{stack.leftoverUnits ? ` · ${number(stack.leftoverUnits)} left` : ""}</small></span>
           <span><strong>{Number(stack.yieldPercent ?? 0).toFixed(2)}%</strong><small>{stack.processingSkill ? `${stack.processingSkill.name} ${stack.processingSkill.trainedLevel}` : "No specific skill"}</small></span>
           <span className="industrial-refinery-output-list">{(stack.outputs ?? []).map((output: any) => <small key={output.typeId}><span>{output.name}</span><b>{number(output.refinedUnits)}</b></small>)}</span>
@@ -1135,30 +1773,52 @@ function AssetSharingControl({ snapshots, activeCharacterId, enabled, selectedId
   </section>;
 }
 
-function IndustrialMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
-  return <article className="industrial-metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>;
+function IndustrialMetric({ label, value, detail, icon }: { label: string; value: string; detail: string; icon?: string }) {
+  return <article className="industrial-metric">{icon ? <i className="industrial-metric-icon">{icon}</i> : null}<span>{label}</span><strong>{value}</strong><small>{detail}</small></article>;
 }
 
 function IndustrialStat({ label, value }: { label: string; value: string }) {
   return <div className="industrial-stat"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function JobList({ jobs, expanded = false, typeNames }: { jobs: IndustryJobRecord[]; expanded?: boolean; typeNames: Record<number, string> }) {
-  if (!jobs.length) return <div className="industrial-notice">No industry jobs in the latest synced snapshot.</div>;
+function JobList({ jobs, typeNames }: { jobs: Array<{ job: IndustryJobRecord; scope: "solo" | "corporation" }>; typeNames: Record<number, string> }) {
+  if (!jobs.length) return <div className="industrial-notice">No industry jobs match the current ledger filters.</div>;
+  const now = Date.now();
   return (
-    <div className={`industrial-job-list ${expanded ? "expanded" : ""}`}>
-      {jobs.map((job, index) => (
-        <div className="industrial-job" key={job.job_id ?? index}>
-          <div>
-            <strong>{activityNames[job.activity_id ?? 0] ?? `Activity ${job.activity_id ?? "—"}`}</strong>
-            <small>{job.blueprint_type_id ? typeNames[job.blueprint_type_id] ?? `Blueprint ${job.blueprint_type_id}` : "Unknown blueprint"}{job.product_type_id ? ` · ${typeNames[job.product_type_id] ?? `Product ${job.product_type_id}`}` : ""}</small>
+    <div className="industrial-job-ledger-list">
+      {jobs.map(({ job, scope }, index) => {
+        const activity = activityNames[job.activity_id ?? 0] ?? `Activity ${job.activity_id ?? "-"}`;
+        const blueprintName = job.blueprint_type_id ? typeNames[job.blueprint_type_id] ?? `Blueprint ${job.blueprint_type_id}` : "Unknown blueprint";
+        const productName = job.product_type_id ? typeNames[job.product_type_id] ?? `Product ${job.product_type_id}` : blueprintName.replace(/ Blueprint$/i, "");
+        const status = String(job.status ?? "unknown").toLowerCase();
+        const start = job.start_date ? new Date(job.start_date).getTime() : 0;
+        const end = job.end_date ? new Date(job.end_date).getTime() : 0;
+        const completed = ["delivered", "cancelled", "reverted"].includes(status);
+        const progress = completed ? 1 : start > 0 && end > start ? Math.max(0, Math.min(1, (now - start) / (end - start))) : 0;
+        return <article className={`industrial-job-card ${scope} ${completed ? "history" : "current"}`} key={`${scope}-${job.job_id ?? index}`}>
+          <div className="industrial-job-card-main">
+            <div className="industrial-job-activity-mark" aria-hidden="true">{job.activity_id === 1 ? "M" : job.activity_id === 8 ? "I" : job.activity_id === 5 ? "C" : "R"}</div>
+            <div className="industrial-job-identity">
+              <span className="industrial-job-activity">{activity}</span>
+              <strong>{productName}</strong>
+              <small>{blueprintName}</small>
+            </div>
+            <div className="industrial-job-badges">
+              <span className={`industrial-job-scope ${scope}`} title={scope === "corporation" ? "Corporation job from the corporation ESI industry feed" : "Solo job from the character ESI industry feed"}>{scope === "corporation" ? "CORP" : "SOLO"}</span>
+              <span className={`industrial-job-state state-${status.replace(/[^a-z0-9]+/g, "-")}`}>{status.toUpperCase()}</span>
+            </div>
           </div>
-          <span><small>Status</small><strong>{job.status ?? "unknown"}</strong></span>
-          <span><small>Runs</small><strong>{job.runs ?? "—"}</strong></span>
-          <span><small>Cost</small><strong>{job.cost == null ? "—" : isk(job.cost)}</strong></span>
-          <span><small>Ends</small><strong>{job.end_date ? new Date(job.end_date).toLocaleString() : "—"}</strong></span>
-        </div>
-      ))}
+          <div className="industrial-job-card-facts">
+            <span><small>RUNS</small><strong>{job.runs ?? "-"}</strong></span>
+            <span><small>COST</small><strong>{job.cost == null ? "-" : isk(job.cost)}</strong></span>
+            <span><small>ENDS</small><strong>{job.end_date ? new Date(job.end_date).toLocaleString() : "-"}</strong></span>
+            <span><small>JOB ID</small><strong>{job.job_id ?? "-"}</strong></span>
+          </div>
+          <div className="industrial-job-progress" title={`${Math.round(progress * 100)}% elapsed`}>
+            <span style={{ width: `${Math.round(progress * 100)}%` }} />
+          </div>
+        </article>;
+      })}
     </div>
   );
 }

@@ -243,7 +243,7 @@ const analyze = (hullTypeId, items, snap=blankSnapshot, extra={}) => dogma.analy
       }
       assert.ok(represented,`fighter ${fighter.name} has neither damage nor support combat output`);
     }
-    assert.equal(damageCount+supportCount,fighters.length,'every fighter must map to exactly one current primary combat channel');
+    assert.ok(damageCount+supportCount>=fighters.length,'every fighter must map to at least one current combat/support channel; ability fighters may legitimately expose both');
     const thanatos=await analyze(m.get('Thanatos'),[{typeId:m.get('Templar I'),rack:'fighter-active',quantity:4,state:'active'}],blankSnapshot);
     assert.ok(thanatos.issues.some(issue=>issue.code==='fighter-light-limit'),'Thanatos fighter light-slot legality regressed');
     const templar=await analyze(m.get('Thanatos'),[{typeId:m.get('Templar I'),rack:'fighter-active',quantity:1,state:'active'}],blankSnapshot);

@@ -1,6 +1,6 @@
-﻿const assert = require('node:assert/strict');
+const assert = require('node:assert/strict');
 const path = require('node:path');
-const model = require(path.join(__dirname, '.tmp-doctrine-model', 'doctrine-model.js'));
+const model = require(path.join(__dirname, '..', 'src', 'doctrine-model.ts'));
 
 const old = Array.from({ length: 5 }, (_, index) => ({ id: `legacy-${index + 1}`, slot: index + 1, name: `Doctrine ${index + 1}`, notes: '', fits: [], assignments: {}, updatedAt: null }));
 old[0].fits = Array.from({ length: 12 }, (_, index) => ({ id: `fit-${index}`, fitName: `Fit ${index}`, hullName: 'Ship', hullTypeId: 1, fit: {}, addedAt: 'x' }));

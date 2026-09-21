@@ -175,6 +175,9 @@ function quote(orders, quantity, side = "buy", typeId = 21) {
   assert.match(worker, /dataset: 'market-hub-depth'/);
   assert.match(worker, /location_id\) === 60003760/);
   assert.match(corp, /quoteMarketDepth\s*\(/);
+  assert.match(corp, /fresh:\s*true/, "Corp resource buyback must always bypass shared/raw market snapshots and contact ESI.");
+  assert.match(corp, /T2 Salvage/);
+  assert.match(corp, /searchOreMarketTypes\(query, 12, resourceKind\)/);
   assert.match(policy, /quote_market_depth or calculate_corp_ore_buyback/);
 }
 
