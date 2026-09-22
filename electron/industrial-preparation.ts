@@ -286,7 +286,7 @@ async function industrialOpportunityKey(input: IndustrialOpportunityInput) {
   const snapshots = scopedSnapshots(normalized);
   const manifest = await loadCurrentMarketRevision();
   return {
-    schema: 2,
+    schema: 3,
     input: normalized,
     marketSnapshotId: manifest?.id ?? "none",
     snapshots: snapshots.map((item) => [String(item.characterId), String(item.updatedAt ?? "")]),
@@ -453,6 +453,8 @@ export async function getIndustrialOpportunitiesPrepared(
           score,
           materialEfficiency: blueprint.material_efficiency ?? 0,
           timeEfficiency: blueprint.time_efficiency ?? 0,
+          blueprintKind: Number(blueprint.quantity) === -1 ? "BPO" : "BPC",
+          blueprintRuns: Number.isFinite(Number(blueprint.runs)) && Number(blueprint.runs) >= 0 ? Math.floor(Number(blueprint.runs)) : null,
         });
       }
     } catch {

@@ -22,6 +22,31 @@ const tataraT2Null = refinery.refineryYieldFraction({
 assert(tataraT2Null >= tataraT2High, 'null/wormhole rig security modifier should not reduce structure yield');
 assert(tataraT2Null <= 1, 'yield must remain clamped');
 
+const highBelt = refinery.oreAccessProfile('Veldspar IV-Grade', 'Veldspar');
+assert.equal(highBelt.reach, 'high');
+assert.equal(highBelt.sourceKind, 'belt');
+
+const highSite = refinery.oreAccessProfile('Omber IV-Grade', 'Omber');
+assert.equal(highSite.reach, 'high');
+assert.equal(highSite.sourceKind, 'site');
+assert.match(highSite.label, /High-sec mining site/);
+
+const highBorder = refinery.oreAccessProfile('Crokite IV-Grade', 'Crokite');
+assert.equal(highBorder.reach, 'high');
+assert.equal(highBorder.sourceKind, 'border-site');
+assert.equal(refinery.oreAccessProfile('Crokite III-Grade', 'Crokite').reach, 'low');
+assert.equal(refinery.oreAccessProfile('Ducinium IV-Grade', 'Ducinium').reach, 'high');
+
+const lowOre = refinery.oreAccessProfile('Hedbergite IV-Grade', 'Hedbergite');
+assert.equal(lowOre.reach, 'low');
+
+const nullOre = refinery.oreAccessProfile('Mercoxit', 'Mercoxit');
+assert.equal(nullOre.reach, 'null');
+assert.match(nullOre.accessDetail, /Deep Core Mining/);
+
+const specialOre = refinery.oreAccessProfile('Spodumain IV-Grade', 'Spodumain');
+assert.equal(specialOre.reach, 'special');
+
 const veldspar = refinery.refineryBatchOutput({ quantity: 250, portionSize: 100, baseOutputQuantity: 400, yieldFraction: 0.75 });
 assert.deepEqual(veldspar, { fullBatches: 2, leftoverUnits: 50, refinedUnits: 600 });
 

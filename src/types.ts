@@ -1368,6 +1368,7 @@ declare global {
       listShips(): Promise<Array<{ typeId: number; name: string; groupId: number; groupName: string; metaGroupId?: number; metaGroupName?: string; factionId?: number; factionName?: string }>>;
       getManufacturingPlan(input: any): Promise<any>;
       getFoundryWorkspace(input: any): Promise<any>;
+      getFoundryMaterialPlan(input: any): Promise<any>;
       getFoundryProjects(input: any): Promise<any[]>;
       searchFoundryBlueprints(input: any): Promise<any[]>;
       createFoundryProject(input: any): Promise<any>;

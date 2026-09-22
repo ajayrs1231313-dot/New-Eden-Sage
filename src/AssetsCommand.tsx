@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { CharacterSnapshot } from "./types";
+import { blueprintRunLabel } from "./blueprint-display";
 import "./assets-command.css";
 
 type AssetRow={
@@ -115,7 +116,7 @@ export function AssetsCommand({snapshots}:{snapshots:CharacterSnapshot[]}){
     <div className="assets-table">
       <div className="assets-table-head"><span>Asset</span><span>Character</span><span>Location</span><span>Qty</span><span>Est. value</span></div>
       <div className="assets-table-body">{visible.map(row=><article key={row.key}>
-        <div className="assets-item">{row.typeId>0&&<img src={icon(row.typeId)} alt="" loading="lazy"/>}<span><strong>{row.item}</strong><small>{row.blueprintKind?`${row.blueprintKind} · ME ${row.blueprintME??0}% · TE ${row.blueprintTE??0}%${row.blueprintKind==="BPC"?` · ${row.blueprintRuns??0} runs`:""}`:`${row.locationFlag||"Asset"} · Type ${row.typeId}`}</small></span></div>
+        <div className="assets-item">{row.typeId>0&&<img src={icon(row.typeId)} alt="" loading="lazy"/>}<span><strong>{row.item}</strong><small>{row.blueprintKind?`${blueprintRunLabel({ blueprintKind: row.blueprintKind, blueprintRuns: row.blueprintRuns })} · ME ${row.blueprintME??0}% · TE ${row.blueprintTE??0}%`:`${row.locationFlag||"Asset"} · Type ${row.typeId}`}</small></span></div>
         <div className="assets-owner"><strong>{row.owners.length===1?row.owners[0]:`${row.owners.length} characters`}</strong><small>{row.owners.length>1?row.owners.join(", "):merge?"Merged view":"Individual stack"}</small></div>
         <div className="assets-location"><strong>{row.station||row.system||`Location ${row.locationId}`}</strong><small>{row.station&&row.system?row.system:row.locationFlag||"Unknown location"}</small></div>
         <div className="assets-number"><strong>{row.quantity.toLocaleString()}</strong><small>{compact(row.totalVolume)} m³</small></div>

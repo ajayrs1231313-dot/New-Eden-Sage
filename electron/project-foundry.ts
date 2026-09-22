@@ -357,6 +357,57 @@ export function analyzeFoundryProject(projectInput: FoundryProject, projectsInpu
   const nodeById = new Map<string, any>(buildTree.map((node: any) => [node.id, node]));
   const blockers = requirements.filter((line) => line.outstanding > 0).sort((a, b) => b.outstanding - a.outstanding || a.name.localeCompare(b.name));
   const finalAssembly = { ready: blockers.length === 0 && requirements.length > 0, coverage: progress, blockerCount: blockers.length, blockers: blockers.slice(0, 8).map((line) => ({ typeId: line.typeId, name: line.name, outstanding: line.outstanding })) };
+
+  const childNodeIds = new Set(buildTree.map((node: any) => String(node.parentId ?? "")).filter(Boolean));
+  const aggregateStoreRows = (nodes: any[]) => {
+    const grouped = new Map<number, { typeId:number; name:string; required:number; depth:number }>();
+    for (const node of nodes) {
+      const typeId = Number(node.typeId ?? 0);
+      const required = Math.max(0, Number(node.required ?? 0));
+      if (!(typeId > 0) || required <= 0) continue;
+      const current = grouped.get(typeId) ?? { typeId, name: String(node.name ?? `Type ${typeId}`), required: 0, depth: Number(node.depth ?? 0) };
+      current.required += required;
+      current.depth = Math.min(current.depth, Number(node.depth ?? current.depth));
+      grouped.set(typeId, current);
+    }
+    return [...grouped.values()].map((row) => {
+      const physicallyPresent = Math.max(0, Number(defaultStock.get(row.typeId) ?? 0));
+      const reservedByOtherProjects = Math.min(physicallyPresent, reservationFor(row.typeId));
+      const available = Math.max(0, physicallyPresent - reservedByOtherProjects);
+      const ready = Math.min(row.required, available);
+      return {
+        ...row,
+        physicallyPresent,
+        reservedByOtherProjects,
+        available,
+        ready,
+        missing: Math.max(0, row.required - ready),
+        coverage: row.required > 0 ? Math.min(1, ready / row.required) : 1,
+      };
+    }).sort((a, b) => b.missing - a.missing || b.required - a.required || a.name.localeCompare(b.name));
+  };
+  const storePartRows = aggregateStoreRows(buildTree.filter((node: any) => Number(node.depth ?? 0) > 0 && node.kind === "component"));
+  const storeMaterialRows = aggregateStoreRows(buildTree.filter((node: any) => Number(node.depth ?? 0) > 0 && node.kind === "material" && !childNodeIds.has(String(node.id))));
+  const selectedStoreNames = (project.linkedStores ?? []).map((binding) => binding.name);
+  const projectStoreSummary = {
+    configured: selectedStoreNames.length > 0 || mode === "solo",
+    selectedStores: selectedStoreNames,
+    selectedStoreLabel: selectedStoreNames.length === 1
+      ? selectedStoreNames[0]
+      : selectedStoreNames.length > 1
+        ? `${selectedStoreNames.length} project stores`
+        : mode === "solo" ? "Owner personal assets" : "No project store selected",
+    parts: storePartRows,
+    materials: storeMaterialRows,
+    partTypesReady: storePartRows.filter((row) => row.missing <= 0).length,
+    partTypesTotal: storePartRows.length,
+    partUnitsReady: storePartRows.reduce((sum, row) => sum + row.ready, 0),
+    partUnitsRequired: storePartRows.reduce((sum, row) => sum + row.required, 0),
+    materialTypesReady: storeMaterialRows.filter((row) => row.missing <= 0).length,
+    materialTypesTotal: storeMaterialRows.length,
+    materialUnitsReady: storeMaterialRows.reduce((sum, row) => sum + row.ready, 0),
+    materialUnitsRequired: storeMaterialRows.reduce((sum, row) => sum + row.required, 0),
+  };
   const groups = project.groups ?? [];
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const assignments = (project.assignments ?? []).map((assignment) => {
@@ -392,6 +443,7 @@ export function analyzeFoundryProject(projectInput: FoundryProject, projectsInpu
     totalDeliveredUnits,
     missingUnits: requirements.reduce((sum, line) => sum + line.outstanding, 0),
     finalAssembly,
+    projectStoreSummary,
     storeConflicts: competing.map((other) => ({ id: other.id, name: other.name })),
   };
 }

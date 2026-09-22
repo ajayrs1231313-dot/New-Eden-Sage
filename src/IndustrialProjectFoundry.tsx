@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
+import { blueprintRunLabel } from "./blueprint-display";
 
-type Blueprint = { item_id?: number; type_id?: number; material_efficiency?: number; time_efficiency?: number; runs?: number; scope: "personal" | "corporation" };
+type Blueprint = { item_id?: number; type_id?: number; quantity?: number; material_efficiency?: number; time_efficiency?: number; runs?: number; scope: "personal" | "corporation" };
 type ManualBlueprint = { blueprintTypeId: number; blueprintName: string; productTypeId: number; productName: string; productPerRun: number };
 type OwnerType = "member" | "division" | "project";
-type FoundryWorkbenchTab = "requirements" | "assignments" | "stores" | "dependencies" | "production";
+type FoundryWorkbenchTab = "requirements" | "materials" | "assignments" | "stores" | "dependencies" | "production" | "groups" | "allocation";
 const memberNameCache = new Map<number, string>();
 
 const n = (value: number) => new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Number(value ?? 0));
 const pc = (value: number) => `${Math.round(Math.max(0, Math.min(1, Number(value ?? 0))) * 100)}%`;
+const isk = (value: unknown) => { const amount = Number(value); return Number.isFinite(amount) && amount >= 0 ? new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(amount) + " ISK" : "PRICE UNAVAILABLE"; };
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, blueprints, typeNames }: { characterId: string; corporationName: string; snapshotUpdatedAt?: string; blueprints: Blueprint[]; typeNames: Record<number, string> }) {
@@ -40,6 +42,28 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
   const [storeTargetId, setStoreTargetId] = useState("__default__");
   const [storeKey, setStoreKey] = useState("personal:owner");
   const [blueprintMenuOpen, setBlueprintMenuOpen] = useState(false);
+  const [expandedBuildLines, setExpandedBuildLines] = useState<Set<string>>(new Set());
+  const [materialPlanTab, setMaterialPlanTab] = useState<string>("totals");
+  const [materialPlan, setMaterialPlan] = useState<any>(null);
+  const [materialPlanBusy, setMaterialPlanBusy] = useState(false);
+  const [projectStoreIconRevision, setProjectStoreIconRevision] = useState(0);
+  const [refineryCharacterId, setRefineryCharacterId] = useState("");
+  const [refineryStationKey, setRefineryStationKey] = useState("");
+  const [foundryRefineryRig, setFoundryRefineryRig] = useState<"none" | "t1" | "t2">("none");
+  const [foundryRefinerySecurity, setFoundryRefinerySecurity] = useState<"high" | "low" | "null">("high");
+  const [foundryMiningReach, setFoundryMiningReach] = useState<"high" | "low" | "null">("high");
+  const [foundryManualRefinery, setFoundryManualRefinery] = useState({
+    enabled: false,
+    reprocessingLevel: 5,
+    efficiencyLevel: 5,
+    processingLevel: 5,
+    processingLevels: {} as Record<string, number>,
+    baseYieldPercent: 50,
+    structureBonusPercent: 2,
+    rigBonusPercent: 0,
+    securityMultiplierPercent: 100,
+    implantBonusPercent: 0,
+  });
 
   const owned = useMemo(() => blueprints.filter((row) => Number(row.type_id ?? 0) > 0), [blueprints]);
   const selectedOwned = owned[ownedIndex] ?? owned[0];
@@ -65,7 +89,36 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     }
   }
 
+  async function loadMaterialPlan(options?: { refineryCharacterId?: string; stationKey?: string; rig?: "none" | "t1" | "t2"; security?: "high" | "low" | "null"; miningReach?: "high" | "low" | "null"; yieldOverride?: any }) {
+    if (!project) return;
+    setMaterialPlanBusy(true);
+    try {
+      const result = await window.sage.getFoundryMaterialPlan({
+        characterId,
+        projectId: project.id,
+        refineryCharacterId: options?.refineryCharacterId ?? (refineryCharacterId || characterId),
+        stationKey: options?.stationKey ?? refineryStationKey,
+        rig: options?.rig ?? foundryRefineryRig,
+        security: options?.security ?? foundryRefinerySecurity,
+        miningReach: options?.miningReach ?? foundryMiningReach,
+        yieldOverride: options?.yieldOverride ?? (foundryManualRefinery.enabled ? foundryManualRefinery : undefined),
+      });
+      setMaterialPlan(result);
+      if (!refineryCharacterId || options?.refineryCharacterId) setRefineryCharacterId(String(result?.selectedCharacterId ?? options?.refineryCharacterId ?? characterId));
+      if (!refineryStationKey || options?.stationKey) setRefineryStationKey(String(result?.selectedStationKey ?? options?.stationKey ?? ""));
+    } catch (error) {
+      setMaterialPlan(null);
+      setMessage(error instanceof Error ? error.message : "Project material plan could not be calculated.");
+    } finally {
+      setMaterialPlanBusy(false);
+    }
+  }
+
   useEffect(() => { void load(); }, [characterId, snapshotUpdatedAt]);
+  useEffect(() => {
+    if (workbenchTab !== "materials" || !project?.id) return;
+    void loadMaterialPlan();
+  }, [workbenchTab, project?.id, refineryCharacterId, refineryStationKey, foundryRefineryRig, foundryRefinerySecurity, foundryMiningReach]);
   useEffect(() => {
     if (!project) return;
     setProjectQuantity(Math.max(minimumProjectQuantity, Math.floor(Number(project.quantity ?? 1))));
@@ -149,7 +202,35 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
   }, [project?.assignments]);
   const tree = (project?.buildTree ?? []).filter((row: any) => Number(row.depth ?? 0) > 0);
   const visibleTree = fullTree ? tree : tree.filter((row: any) => Number(row.depth ?? 0) <= 2);
-  useEffect(() => { setStoreTargetId("__default__"); }, [project?.id]);
+  const coreBuildLines = tree.filter((row: any) => Number(row.depth ?? 0) === 1);
+  const buildChildrenByParent = new Map<string, any[]>();
+  for (const row of tree) {
+    const parentId = String(row.parentId ?? "");
+    if (!parentId) continue;
+    const list = buildChildrenByParent.get(parentId) ?? [];
+    list.push(row);
+    buildChildrenByParent.set(parentId, list);
+  }
+  const buildLineDescendants = (parentId: string) => {
+    const rows: any[] = [];
+    const visit = (id: string) => {
+      for (const child of buildChildrenByParent.get(id) ?? []) {
+        rows.push(child);
+        visit(String(child.id));
+      }
+    };
+    visit(parentId);
+    return rows;
+  };
+  const toggleBuildLine = (id: string) => setExpandedBuildLines((current) => {
+    const next = new Set(current);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+  useEffect(() => {
+    setStoreTargetId("__default__");
+    setExpandedBuildLines(new Set());
+  }, [project?.id]);
   const limit = (target: string) => target === "final-assembly" ? Number(project?.quantity ?? 0) : Number((project?.buildTree ?? []).find((row: any) => row.id === target)?.required ?? 0);
   const assigned = (target: string) => (assignmentsByTarget.get(target) ?? []).reduce((sum: number, row: any) => sum + Number(row.quantity ?? 0), 0);
   const remaining = (target: string) => Math.max(0, limit(target) - assigned(target));
@@ -229,6 +310,21 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
   const componentRows = tree.filter((row: any) => row.kind === "component");
   const componentUnits = componentRows.reduce((sum: number, row: any) => sum + Math.max(0, Number(row.required ?? 0)), 0);
   const componentCoveredUnits = componentRows.reduce((sum: number, row: any) => sum + Math.max(0, Math.min(Number(row.required ?? 0), Number(row.availableToProject ?? 0))), 0);
+  const projectStoreSummary = project?.projectStoreSummary ?? null;
+  const projectStoreLabel = String(projectStoreSummary?.selectedStoreLabel ?? (project?.mode === "solo" ? "Owner personal assets" : "No project store selected"));
+  const projectStoreIconTypeIds = useMemo(() => [...new Set<number>([
+    ...(projectStoreSummary?.parts ?? []).map((row: any) => Number(row?.typeId ?? 0)),
+    ...(projectStoreSummary?.materials ?? []).map((row: any) => Number(row?.typeId ?? 0)),
+  ].filter((typeId: number) => typeId > 0))].sort((a, b) => a - b), [projectStoreSummary]);
+  const projectStoreIconCacheKey = projectStoreIconTypeIds.join(",");
+  useEffect(() => {
+    if (!projectStoreIconTypeIds.length) return;
+    let cancelled = false;
+    void window.sage.cacheTypeIcons({ typeIds: projectStoreIconTypeIds, size: 64 }).then(() => {
+      if (!cancelled) setProjectStoreIconRevision((value) => value + 1);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectStoreIconCacheKey]);
   const manufacturingProgress = componentUnits > 0 ? Math.max(0, Math.min(1, componentCoveredUnits / componentUnits)) : materialProgress;
   const finalReady = Boolean(project?.finalAssembly?.ready);
   const deliveryComplete = String(project?.status ?? "").toLowerCase() === "complete";
@@ -292,13 +388,12 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
       </label>
       {project && <div className="foundry-project-quantity" aria-label="Project build quantity">
         <span>BUILD QTY</span>
-        <div>
-          <button type="button" aria-label="Decrease build quantity" disabled={busy || projectQuantity <= minimumProjectQuantity} onClick={() => setProjectQuantity((value) => Math.max(minimumProjectQuantity, Math.floor(Number(value) || 1) - 1))}>−</button>
+        <div className="foundry-project-quantity-controls">
+          <button type="button" className="step" aria-label="Decrease build quantity" disabled={busy || projectQuantity <= minimumProjectQuantity} onClick={() => setProjectQuantity((value) => Math.max(minimumProjectQuantity, Math.floor(Number(value) || 1) - 1))}>−</button>
           <input type="number" min={minimumProjectQuantity} step="1" value={projectQuantity} onChange={(event) => setProjectQuantity(Math.max(minimumProjectQuantity, Math.floor(Number(event.target.value) || 1)))} />
-          <button type="button" aria-label="Increase build quantity" disabled={busy} onClick={() => setProjectQuantity((value) => Math.max(minimumProjectQuantity, Math.floor(Number(value) || 1) + 1))}>+</button>
+          <button type="button" className="step" aria-label="Increase build quantity" disabled={busy} onClick={() => setProjectQuantity((value) => Math.max(minimumProjectQuantity, Math.floor(Number(value) || 1) + 1))}>+</button>
           <button type="button" className="apply" disabled={busy || projectQuantity === Math.floor(Number(project.quantity ?? 1))} onClick={() => void applyProjectQuantity()}>Apply</button>
         </div>
-        <small>{n(project.quantity)} finished unit{Number(project.quantity) === 1 ? "" : "s"} planned</small>
       </div>}
       <div className="foundry-command-actions">
         <button type="button" className="primary" onClick={() => setShowCreate((value) => !value)}>{showCreate ? "Close Creator" : "+ New Project"}</button>
@@ -314,7 +409,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
         <div className="foundry-mode-switch"><button className={mode === "solo" ? "active" : ""} onClick={() => setMode("solo")}><strong>Solo project</strong><small>No assignment overhead</small></button><button className={mode === "corporation" ? "active" : ""} onClick={() => setMode("corporation")}><strong>Corporation project</strong><small>Split exact build stages</small></button></div>
         <label className="foundry-manual-toggle"><input type="checkbox" checked={manual} onChange={(event) => { setManual(event.target.checked); setBlueprintMenuOpen(false); setManualBlueprint(null); if (event.target.checked) { setMe(0); setTe(0); } }} /><span><strong>Manual blueprint override</strong><small>Plan any SDE blueprint even when you do not own it.</small></span></label>
         <div className="foundry-create-grid">
-          {!manual ? <div className="foundry-blueprint-field wide"><span>Synced blueprint</span><div className={`foundry-blueprint-picker ${blueprintMenuOpen ? "open" : ""}`}><button type="button" className="foundry-blueprint-trigger" aria-haspopup="listbox" aria-expanded={blueprintMenuOpen} onClick={() => setBlueprintMenuOpen((value) => !value)} disabled={!owned.length}><span><strong>{selectedOwned ? `${selectedOwned.scope === "corporation" ? "CORP" : "PERSONAL"} · ${typeNames[Number(selectedOwned.type_id)] ?? `Type ${selectedOwned.type_id}`}` : "No synced blueprints available"}</strong>{selectedOwned && <small>ME {selectedOwned.material_efficiency ?? 0} / TE {selectedOwned.time_efficiency ?? 0}</small>}</span><i aria-hidden="true" /></button>{blueprintMenuOpen && owned.length > 0 && <div className="foundry-blueprint-menu" role="listbox" aria-label="Synced blueprint">{owned.map((row, index) => <button type="button" role="option" aria-selected={index === ownedIndex} className={index === ownedIndex ? "active" : ""} key={`${row.scope}-${row.item_id ?? index}`} onClick={() => { setOwnedIndex(index); setBlueprintMenuOpen(false); }}><span><strong>{typeNames[Number(row.type_id)] ?? `Type ${row.type_id}`}</strong><small>{row.scope === "corporation" ? "CORPORATION" : "PERSONAL"} · ME {row.material_efficiency ?? 0} / TE {row.time_efficiency ?? 0}</small></span>{index === ownedIndex && <b>SELECTED</b>}</button>)}</div>}</div></div> : <div className="foundry-manual-search wide"><label><span>CCP SDE blueprint search</span><input value={manualQuery} onChange={(e) => setManualQuery(e.target.value)} placeholder="Search Orca, capital component..." /></label>{manualQuery.trim().length >= 2 && <div className="foundry-search-results">{manualResults.slice(0, 8).map((row) => <button key={row.blueprintTypeId} className={manualBlueprint?.blueprintTypeId === row.blueprintTypeId ? "active" : ""} onClick={() => setManualBlueprint(row)}><span><strong>{row.productName}</strong><small>{row.blueprintName}</small></span><b>{row.productPerRun}/run</b></button>)}</div>}{manualBlueprint && <small className="foundry-picked">MANUAL · {manualBlueprint.productName} · {manualBlueprint.blueprintName}</small>}</div>}
+          {!manual ? <div className="foundry-blueprint-field wide"><span>Synced blueprint</span><div className={`foundry-blueprint-picker ${blueprintMenuOpen ? "open" : ""}`}><button type="button" className="foundry-blueprint-trigger" aria-haspopup="listbox" aria-expanded={blueprintMenuOpen} onClick={() => setBlueprintMenuOpen((value) => !value)} disabled={!owned.length}><span><strong>{selectedOwned ? `${selectedOwned.scope === "corporation" ? "CORP" : "PERSONAL"} · ${typeNames[Number(selectedOwned.type_id)] ?? `Type ${selectedOwned.type_id}`}` : "No synced blueprints available"}</strong>{selectedOwned && <small>ME {selectedOwned.material_efficiency ?? 0} / TE {selectedOwned.time_efficiency ?? 0} · {blueprintRunLabel(selectedOwned)}</small>}</span><i aria-hidden="true" /></button>{blueprintMenuOpen && owned.length > 0 && <div className="foundry-blueprint-menu" role="listbox" aria-label="Synced blueprint">{owned.map((row, index) => <button type="button" role="option" aria-selected={index === ownedIndex} className={index === ownedIndex ? "active" : ""} key={`${row.scope}-${row.item_id ?? index}`} onClick={() => { setOwnedIndex(index); setBlueprintMenuOpen(false); }}><span><strong>{typeNames[Number(row.type_id)] ?? `Type ${row.type_id}`}</strong><small>{row.scope === "corporation" ? "CORPORATION" : "PERSONAL"} · ME {row.material_efficiency ?? 0} / TE {row.time_efficiency ?? 0} · {blueprintRunLabel(row)}</small></span>{index === ownedIndex && <b>SELECTED</b>}</button>)}</div>}</div></div> : <div className="foundry-manual-search wide"><label><span>CCP SDE blueprint search</span><input value={manualQuery} onChange={(e) => setManualQuery(e.target.value)} placeholder="Search Orca, capital component..." /></label>{manualQuery.trim().length >= 2 && <div className="foundry-search-results">{manualResults.slice(0, 8).map((row) => <button key={row.blueprintTypeId} className={manualBlueprint?.blueprintTypeId === row.blueprintTypeId ? "active" : ""} onClick={() => setManualBlueprint(row)}><span><strong>{row.productName}</strong><small>{row.blueprintName}</small></span><b>{row.productPerRun}/run</b></button>)}</div>}{manualBlueprint && <small className="foundry-picked">MANUAL · {manualBlueprint.productName} · {manualBlueprint.blueprintName}</small>}</div>}
           <label><span>Quantity</span><input type="number" min="1" value={quantity} onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))} /></label><label><span>ME</span><input type="number" min="0" max="10" value={me} onChange={(e) => setMe(Math.max(0, Math.min(10, Number(e.target.value) || 0)))} /></label><label><span>TE</span><input type="number" min="0" max="20" value={te} onChange={(e) => setTe(Math.max(0, Math.min(20, Number(e.target.value) || 0)))} /></label><label className="wide"><span>Project name</span><input value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Optional" /></label><button className="foundry-primary" disabled={busy || (manual ? !manualBlueprint : !owned.length)} onClick={() => void createProject()}>{busy ? "Working..." : "Create project"}</button>
         </div>
       </div>
@@ -334,92 +429,424 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
       <div className="foundry-dashboard-grid">
         <div className="foundry-dashboard-main">
           <article className="industrial-panel foundry-pipeline-panel">
-            <div className="foundry-section-head"><div><small>BUILD PIPELINE</small><strong>Project stages and dependencies</strong></div><button type="button" onClick={() => openWorkbench("dependencies")}>View Dependencies</button></div>
-            <div className="foundry-pipeline">
-              {pipelineStages.map((stage, index) => <button type="button" key={stage.label} className={`${stage.state} ${stage.current ? "current" : ""}`} onClick={() => openWorkbench(stage.target)}>
-                <span className="stage-number">{index + 1}</span><span className="stage-copy"><strong>{stage.label}</strong><small>{stage.detail}</small></span><span className="stage-meter"><i style={{ width: `${Math.round(stage.progress * 100)}%` }} /></span><b>{stage.badge}</b>
-              </button>)}
+            <div className="foundry-section-head">
+              <div><small>BUILD PIPELINE</small><strong>Project stages and dependencies</strong></div>
+              <button type="button" className="foundry-quiet-action" onClick={() => openWorkbench("dependencies")}>View dependencies</button>
             </div>
-            <div className="foundry-product-focus">
-              {productTypeId > 0 ? <img src={`https://images.evetech.net/types/${productTypeId}/render?size=128`} alt="" /> : <div className="foundry-product-placeholder">PF</div>}
-              <div className="foundry-product-copy"><small>PROJECT OUTPUT</small><h3>{project.productName}</h3><p>{project.blueprintName}</p><div><span><b>{n(project.quantity)}</b><small>target units</small></span><span><b>{n(project.totalDeliveredUnits)}</b><small>dependency units ready</small></span><span><b>{n(project.missingUnits)}</b><small>units missing</small></span></div></div>
-              <div className="foundry-product-status"><span className={project.finalAssembly?.ready ? "ready" : "blocked"}>{project.finalAssembly?.ready ? "ASSEMBLY READY" : "UPSTREAM BLOCKED"}</span><small>{project.finalAssembly?.ready ? "All direct inputs are physically available to this project." : blockers.slice(0, 3).map((row: any) => `${row.name} ${n(row.outstanding)}`).join(" · ")}</small></div>
+            <div className="foundry-pipeline">
+              {pipelineStages.map((stage, index) => {
+                return <button type="button" key={stage.label} className={`${stage.state} ${stage.current ? "current" : ""}`} onClick={() => openWorkbench(stage.target)}>
+                  <span className="foundry-stage-top">
+                    <span className="stage-number">{index + 1}</span>
+                    <span className="stage-copy"><strong>{stage.label}</strong><small>{stage.detail}</small></span>
+                    <b className="stage-status">{stage.badge}</b>
+                  </span>
+                  <span className="stage-meter"><i style={{ width: `${Math.round(stage.progress * 100)}%` }} /></span>
+                </button>;
+              })}
+            </div>
+            <div className="foundry-pipeline-summary">
+              <div className="foundry-output-summary">
+                <div className="foundry-summary-heading"><small>PROJECT OUTPUT</small><strong>Final product and build targets</strong></div>
+                <div className="foundry-output-product">
+                  {productTypeId > 0 ? <img src={`https://images.evetech.net/types/${productTypeId}/render?size=128`} alt="" /> : <div className="foundry-product-placeholder">PF</div>}
+                  <span><strong>{project.productName}</strong><small>{project.blueprintName}</small></span>
+                </div>
+                <div className="foundry-output-stats">
+                  <span><small>TARGET UNITS</small><b>{n(project.quantity)}</b></span>
+                  <span><small>DEPENDENCY UNITS READY</small><b>{n(project.totalDeliveredUnits)}</b></span>
+                  <span><small>UNITS MISSING</small><b className={Number(project.missingUnits ?? 0) > 0 ? "warn" : ""}>{n(project.missingUnits)}</b></span>
+                </div>
+              </div>
+              <div className="foundry-dependency-summary">
+                <div className="foundry-summary-heading"><small>DEPENDENCY STATE</small><strong>Blocking items and requirements</strong></div>
+                <span className={`foundry-final-build-state ${finalReady ? "ready" : "blocked"}`}>{finalReady ? "READY" : "FINAL BUILD BLOCKED"}</span>
+                <div className="foundry-blocker-copy">
+                  <strong>{finalReady ? "All dependencies satisfied" : `${n(project.finalAssembly?.blockerCount ?? blockers.length)} blocking requirement${Number(project.finalAssembly?.blockerCount ?? blockers.length) === 1 ? "" : "s"}`}</strong>
+                  <small>{finalReady ? "Final assembly can begin." : "Required materials and components must be available before final assembly can start."}</small>
+                </div>
+                {!finalReady && <div className="foundry-blocker-list">
+                  {blockers.slice(0, 2).map((row: any, index: number) => <span key={row.typeId ?? row.id ?? `${row.name}-${index}`}>
+                    <strong title={row.name}>{row.name}</strong><em>{n(row.outstanding)} missing</em>
+                  </span>)}
+                  {blockers.length > 2 && <span className="more"><strong>+{n(blockers.length - 2)} more blockers</strong></span>}
+                </div>}
+                <button type="button" className="foundry-quiet-action foundry-dependency-action" onClick={() => openWorkbench("dependencies")}>View dependencies</button>
+              </div>
             </div>
           </article>
 
-          <article className="industrial-panel foundry-stage-focus">
-            <div className="foundry-section-head"><div><small>ACTIVE BUILD LINES</small><strong>{project.productName} production hierarchy</strong></div><button type="button" onClick={() => openWorkbench("dependencies", { fullTree: true })}>Full Chain</button></div>
-            <div className="foundry-compact-tree">
-              <div className="heading"><span>Stage / requirement</span><span>Required</span><span>Available</span><span>Missing</span><span>Responsibility</span><span>State</span></div>
-              {tree.slice(0, 7).map((row: any) => { const rows = assignmentsByTarget.get(row.id) ?? []; const open = remaining(row.id); const state = row.coverage >= .999999 ? "DELIVERED" : rows.some((x: any) => x.status === "in-progress") ? "IN PRODUCTION" : rows.length ? "ASSIGNED" : "UNASSIGNED"; return <div className={`row ${row.outstanding <= 0 ? "covered" : ""} ${selected.has(row.id) ? "selected" : ""}`} key={row.id}><span className="tree-name">{project.mode === "corporation" && <input type="checkbox" checked={selected.has(row.id)} disabled={open <= 0} onChange={() => toggleTarget(row.id)} />}<span><strong>{row.name}</strong><small>{row.kind === "component" ? `COMPONENT · ${row.runs ?? "?"} runs` : row.direct ? "DIRECT INPUT" : "MATERIAL INPUT"}</small></span></span><span>{n(row.required)}</span><span>{n(row.availableToProject)}</span><span className="missing">{n(row.outstanding)}</span><span className="who">{rows.length ? rows.map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") : project.mode === "solo" ? project.createdByCharacterName : "Unassigned"}</span><span><b className={`state ${state.toLowerCase().replace(/\s/g, "-")}`}>{state}</b></span></div>; })}
-              {!tree.length && <div className="foundry-empty-row">No expanded dependency rows are available for this project.</div>}
+          <article className="industrial-panel foundry-stage-focus foundry-build-lines-panel">
+            <div className="foundry-section-head">
+              <div><small>ACTIVE BUILD LINES</small><strong>{project.productName} core production tree</strong></div>
+              <div className="foundry-build-lines-actions">
+                <button type="button" onClick={() => setExpandedBuildLines(new Set(coreBuildLines.map((row: any) => String(row.id))))}>Expand all</button>
+                <button type="button" onClick={() => openWorkbench("dependencies", { fullTree: true })}>Full Chain</button>
+              </div>
+            </div>
+            <div className="foundry-core-build-lines">
+              <div className="foundry-build-line-columns"><span>Build line</span><span>Required</span><span>Available</span><span>Missing</span><span>Responsibility</span><span>State</span></div>
+              {coreBuildLines.map((row: any) => {
+                const rows = assignmentsByTarget.get(row.id) ?? [];
+                const open = remaining(row.id);
+                const state = row.coverage >= .999999 ? "DELIVERED" : rows.some((x: any) => x.status === "in-progress") ? "IN PRODUCTION" : rows.length ? "ASSIGNED" : "UNASSIGNED";
+                const children = buildLineDescendants(String(row.id));
+                const expanded = expandedBuildLines.has(String(row.id));
+                return <section className={"foundry-build-line " + (row.outstanding <= 0 ? "covered " : "") + (selected.has(row.id) ? "selected" : "")} key={row.id}>
+                  <div className="foundry-build-line-row">
+                    <span className="foundry-build-line-name">
+                      {children.length > 0 ? <button type="button" className={"foundry-build-line-toggle " + (expanded ? "open" : "")} aria-label={(expanded ? "Collapse " : "Expand ") + row.name} onClick={() => toggleBuildLine(String(row.id))}><i /></button> : <span className="foundry-build-line-toggle spacer" />}
+                      {project.mode === "corporation" && <input type="checkbox" checked={selected.has(row.id)} disabled={open <= 0} onChange={() => toggleTarget(row.id)} />}
+                      <span><strong>{row.name}</strong><small>{row.kind === "component" ? <>COMPONENT · {row.runs ?? "?"} runs{children.length > 0 ? <> · {children.length} input{children.length === 1 ? "" : "s"}</> : null}</> : "DIRECT MATERIAL"}</small></span>
+                    </span>
+                    <span>{n(row.required)}</span>
+                    <span>{n(row.availableToProject)}</span>
+                    <span className="missing">{n(row.outstanding)}</span>
+                    <span className="who">{rows.length ? rows.map((x: any) => x.ownerName + ": " + n(x.quantity)).join(" · ") : project.mode === "solo" ? project.createdByCharacterName : "Unassigned"}</span>
+                    <span><b className={"state " + state.toLowerCase().replace(/\s/g, "-")}>{state}</b></span>
+                  </div>
+                  {expanded && children.length > 0 && <div className="foundry-build-line-materials">
+                    <div className="foundry-build-line-material-head"><span>Materials required for {row.name}</span><span>Required</span><span>Available</span><span>Missing</span></div>
+                    {children.map((child: any) => <div className={"foundry-build-material-row depth-" + Math.max(1, Number(child.depth ?? 2) - 1) + (child.outstanding <= 0 ? " covered" : "")} key={child.id}>
+                      <span className="foundry-build-material-name" style={{ paddingLeft: (Math.max(0, Number(child.depth ?? 2) - 2) * 14) + "px" }}>
+                        <strong>{child.name}</strong>
+                        <small>{child.kind === "component" ? <>SUBCOMPONENT · {child.runs ?? "?"} runs</> : "MATERIAL INPUT"}</small>
+                      </span>
+                      <span>{n(child.required)}</span>
+                      <span>{n(child.availableToProject)}</span>
+                      <span className="missing">{n(child.outstanding)}</span>
+                    </div>)}
+                  </div>}
+                </section>;
+              })}
+              {!coreBuildLines.length && <div className="foundry-empty-row">No core build lines are available for this project.</div>}
             </div>
           </article>
+          <section id="foundry-workbench" className="foundry-workbench">
+            <nav className="foundry-workbench-tabs" aria-label="Project Foundry workbench">
+              <button type="button" className={workbenchTab === "requirements" ? "active" : ""} onClick={() => setWorkbenchTab("requirements")}>Requirements</button>
+              <button type="button" className={workbenchTab === "materials" ? "active" : ""} onClick={() => setWorkbenchTab("materials")}>Base Materials <span>{materialPlan?.totals?.mineableMaterialTypes ?? 0}</span></button>
+              {project.mode === "corporation" && <button type="button" className={workbenchTab === "assignments" ? "active" : ""} onClick={() => setWorkbenchTab("assignments")}>Assignments <span>{project.assignments?.length ?? 0}</span></button>}
+              <button type="button" className={workbenchTab === "stores" ? "active" : ""} onClick={() => setWorkbenchTab("stores")}>Project Stores</button>
+              <button type="button" className={workbenchTab === "dependencies" ? "active" : ""} onClick={() => setWorkbenchTab("dependencies")}>Dependencies <span>{tree.length}</span></button>
+              <button type="button" className={workbenchTab === "production" ? "active" : ""} onClick={() => setWorkbenchTab("production")}>Production Lots <span>{project.productionLots?.length ?? 0}</span></button>
+              {project.mode === "corporation" && <button type="button" className={workbenchTab === "groups" ? "active" : ""} onClick={() => setWorkbenchTab("groups")}>Work Groups <span>{project.groups?.length ?? 0}</span></button>}
+              <button type="button" className={workbenchTab === "allocation" ? "active" : ""} onClick={() => setWorkbenchTab("allocation")}>Work Allocation <span>{project.mode === "solo" ? 1 : allocationOwners.length}</span></button>
+            </nav>
+
+            {workbenchTab === "requirements" && <article className="industrial-panel foundry-ledger foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">MATERIAL REQUIREMENTS</p><h3>Required vs available</h3><p>Direct inputs that determine whether final assembly can start.</p></div><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter materials..." /></div><div className="ledger"><div className="ledger-row heading"><span>Requirement</span><span>Required</span><span>Available</span><span>Reserved</span><span>Missing</span><span>Coverage</span></div>{(project.requirements ?? []).filter((row: any) => !filter.trim() || row.name.toLowerCase().includes(filter.toLowerCase())).map((row: any) => <div className={`ledger-row ${row.outstanding <= 0 ? "covered" : ""}`} key={row.typeId}><strong>{row.name}</strong><span>{n(row.required)}</span><span>{n(row.availableToProject)}</span><span>{n(row.reservedByOtherProjects)}</span><span className="missing">{n(row.outstanding)}</span><span><b>{pc(row.coverage)}</b></span></div>)}</div><small className="industrial-plan-scope">{workspace?.source}. Snapshot {workspace?.snapshotUpdatedAt ? new Date(workspace.snapshotUpdatedAt).toLocaleString() : "unavailable"}.</small></article>}
+
+            {workbenchTab === "materials" && <article className="industrial-panel foundry-base-materials-panel foundry-workbench-panel">
+              <div className="industrial-panel-head foundry-materials-head">
+                <div><p className="eyebrow">PROJECT BASE MATERIALS</p><h3>Total refined inputs for the complete build</h3><p>Flattens every core build line and subcomponent to the leaf materials actually required by the full project.</p></div>
+                <span className="industrial-status live">{materialPlan?.totals?.baseMaterialTypes ?? 0} MATERIAL TYPES</span>
+              </div>
+              <div className="foundry-material-subtabs">
+                <button type="button" className={materialPlanTab === "totals" ? "active" : ""} onClick={() => setMaterialPlanTab("totals")}>Refined material total</button>
+                <button type="button" className={materialPlanTab === "ore" ? "active" : ""} onClick={() => setMaterialPlanTab("ore")}>Lowest-resistance ore plan</button>
+                {(materialPlan?.acquisitionGroups ?? []).map((group: any) => <button type="button" key={group.key} className={materialPlanTab === group.key ? "active" : ""} onClick={() => setMaterialPlanTab(group.key)}>{group.label} <span>{group.rows?.length ?? 0}</span></button>)}
+              </div>
+              <div className="foundry-refinery-planner-controls">
+                <label><span>Refining character</span><select value={refineryCharacterId || materialPlan?.selectedCharacterId || characterId} onChange={(event) => { setRefineryCharacterId(event.target.value); setRefineryStationKey(""); }} disabled={materialPlanBusy}>{(materialPlan?.characters ?? [{ id: characterId, name: workspace?.characterName ?? characterId }]).map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
+                <label className="wide"><span>Station / refinery</span><select value={refineryStationKey || materialPlan?.selectedStationKey || ""} onChange={(event) => setRefineryStationKey(event.target.value)} disabled={materialPlanBusy}>{(materialPlan?.stations ?? []).map((row: any) => <option key={row.key} value={row.key}>{row.name}{row.systemName ? " · " + row.systemName : ""}{row.typeName ? " · " + row.typeName : ""}</option>)}</select></label>
+                <label><span>Reprocessing rig</span><select value={materialPlan?.station?.facility === "npc" ? "none" : foundryRefineryRig} disabled={materialPlanBusy || materialPlan?.station?.facility === "npc"} onChange={(event) => setFoundryRefineryRig(event.target.value as typeof foundryRefineryRig)}><option value="none">No rig / unknown</option><option value="t1">T1 reprocessing rig</option><option value="t2">T2 reprocessing rig</option></select></label>
+                <label><span>Refinery security</span><select value={foundryRefinerySecurity} disabled={materialPlanBusy || materialPlan?.station?.facility === "npc"} onChange={(event) => setFoundryRefinerySecurity(event.target.value as typeof foundryRefinerySecurity)}><option value="high">High-sec</option><option value="low">Low-sec</option><option value="null">Null / wormhole</option></select></label>
+                <button type="button" className="foundry-primary" disabled={materialPlanBusy} onClick={() => void loadMaterialPlan()}>{materialPlanBusy ? "Calculating..." : "Recalculate"}</button>
+              </div>
+              <div className="foundry-refinery-manual-switch">
+                <label>
+                  <input type="checkbox" checked={foundryManualRefinery.enabled} onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setFoundryManualRefinery((current) => ({
+                      ...current,
+                      enabled,
+                      reprocessingLevel: enabled ? Number(materialPlan?.skills?.reprocessing?.trainedLevel ?? current.reprocessingLevel) : current.reprocessingLevel,
+                      efficiencyLevel: enabled ? Number(materialPlan?.skills?.efficiency?.trainedLevel ?? current.efficiencyLevel) : current.efficiencyLevel,
+                      processingLevels: enabled ? Object.fromEntries((materialPlan?.orePlan ?? []).flatMap((row: any) => row.processingSkill?.typeId ? [[String(row.processingSkill.typeId), Number(row.processingSkill.trainedLevel ?? current.processingLevel)]] : [])) : current.processingLevels,
+                      structureBonusPercent: enabled ? (materialPlan?.station?.facility === "tatara" ? 5.5 : materialPlan?.station?.facility === "athanor" ? 2 : 0) : current.structureBonusPercent,
+                      rigBonusPercent: enabled ? (foundryRefineryRig === "t2" ? 3 : foundryRefineryRig === "t1" ? 1 : 0) : current.rigBonusPercent,
+                      securityMultiplierPercent: enabled ? (foundryRefinerySecurity === "null" ? 112 : foundryRefinerySecurity === "low" ? 106 : 100) : current.securityMultiplierPercent,
+                      implantBonusPercent: enabled ? (materialPlan?.detectedImplant === "rx804" ? 4 : materialPlan?.detectedImplant === "rx802" ? 2 : materialPlan?.detectedImplant === "rx801" ? 1 : 0) : current.implantBonusPercent,
+                    }));
+                  }} />
+                  <span><strong>Manual yield override</strong><small>Enter skill, implant, station and structure values directly instead of using the synced profile.</small></span>
+                </label>
+                {foundryManualRefinery.enabled && <button type="button" className="foundry-small" disabled={materialPlanBusy} onClick={() => void loadMaterialPlan({ yieldOverride: foundryManualRefinery })}>Apply manual profile</button>}
+              </div>
+              {foundryManualRefinery.enabled && <div className="foundry-refinery-manual-grid">
+                <label><span>Reprocessing skill</span><input type="number" min="0" max="5" step="1" value={foundryManualRefinery.reprocessingLevel} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, reprocessingLevel: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))} /></label>
+                <label><span>Efficiency skill</span><input type="number" min="0" max="5" step="1" value={foundryManualRefinery.efficiencyLevel} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, efficiencyLevel: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))} /></label>
+                <label><span>Default resource skill</span><input type="number" min="0" max="5" step="1" value={foundryManualRefinery.processingLevel} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, processingLevel: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))} /></label>
+                <label><span>Base yield %</span><input type="number" min="0" max="100" step="0.1" value={foundryManualRefinery.baseYieldPercent} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, baseYieldPercent: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))} /></label>
+                <label><span>Structure bonus %</span><input type="number" min="0" max="100" step="0.1" value={foundryManualRefinery.structureBonusPercent} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, structureBonusPercent: Math.max(0, Number(e.target.value) || 0) }))} /></label>
+                <label><span>Rig bonus %</span><input type="number" min="0" max="100" step="0.1" value={foundryManualRefinery.rigBonusPercent} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, rigBonusPercent: Math.max(0, Number(e.target.value) || 0) }))} /></label>
+                <label><span>Security multiplier %</span><input type="number" min="0" max="200" step="0.1" value={foundryManualRefinery.securityMultiplierPercent} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, securityMultiplierPercent: Math.max(0, Number(e.target.value) || 0) }))} /></label>
+                <label><span>Implant bonus %</span><input type="number" min="0" max="100" step="0.1" value={foundryManualRefinery.implantBonusPercent} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, implantBonusPercent: Math.max(0, Number(e.target.value) || 0) }))} /></label>
+              </div>}
+              {foundryManualRefinery.enabled && [...new Map((materialPlan?.orePlan ?? []).flatMap((row: any) => row.processingSkill?.typeId ? [[String(row.processingSkill.typeId), row.processingSkill]] : [])).entries()].length > 0 && <div className="foundry-refinery-resource-skills">
+                <span><strong>RESOURCE PROCESSING SKILLS</strong><small>Override each ore-family processing skill independently.</small></span>
+                <div>
+                  {[...new Map((materialPlan?.orePlan ?? []).flatMap((row: any) => row.processingSkill?.typeId ? [[String(row.processingSkill.typeId), row.processingSkill]] : [])).entries()].map(([skillId, skill]: any) => <label key={skillId}><span>{skill.name}</span><input type="number" min="0" max="5" step="1" value={foundryManualRefinery.processingLevels?.[String(skillId)] ?? foundryManualRefinery.processingLevel} onChange={(e) => setFoundryManualRefinery((v) => ({ ...v, processingLevels: { ...v.processingLevels, [String(skillId)]: Math.max(0, Math.min(5, Number(e.target.value) || 0)) } }))} /></label>)}
+                </div>
+              </div>}
+              {materialPlan && <div className="foundry-refinery-profile-strip">
+                <span><small>REFINER</small><strong>{(materialPlan.characters ?? []).find((row: any) => String(row.id) === String(materialPlan.selectedCharacterId))?.name ?? materialPlan.selectedCharacterId}</strong></span>
+                <span><small>REPROCESSING</small><strong>V{foundryManualRefinery.enabled ? foundryManualRefinery.reprocessingLevel : materialPlan.skills?.reprocessing?.trainedLevel ?? 0}</strong></span>
+                <span><small>EFFICIENCY</small><strong>V{foundryManualRefinery.enabled ? foundryManualRefinery.efficiencyLevel : materialPlan.skills?.efficiency?.trainedLevel ?? 0}</strong></span>
+                <span><small>ACTIVE AUGMENT</small><strong>{foundryManualRefinery.enabled ? `+${foundryManualRefinery.implantBonusPercent}% manual` : materialPlan.detectedImplant === "none" ? "None" : String(materialPlan.detectedImplant).toUpperCase()}</strong></span>
+                <span><small>REFINERY PROFILE</small><strong>{foundryManualRefinery.enabled ? `Manual · ${foundryManualRefinery.baseYieldPercent}% base` : `${materialPlan.facility?.label ?? materialPlan.station?.facility ?? "Unknown"} · ${String(materialPlan.facility?.rig ?? "none").toUpperCase()}`}</strong></span>
+              </div>}
+
+              {materialPlanTab === "totals" && <div className="foundry-base-material-table">
+                <div className="foundry-base-material-row heading"><span>Base material</span><span>Required</span><span>Acquisition</span><span>Planned output</span><span>Surplus</span></div>
+                {(materialPlan?.materials ?? []).map((row: any) => <div className="foundry-base-material-row" key={row.typeId}>
+                  <span className="material-name"><img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" /><strong>{row.name}</strong></span>
+                  <span><strong>{n(row.required)}</strong></span>
+                  <span><b className={row.mineableFromOre ? "mineable" : "external"}>{row.mineableFromOre ? "MINE / REFINE" : String(row.acquisition?.categoryLabel ?? "Other input").toUpperCase()}</b></span>
+                  <span>{row.mineableFromOre ? n(row.plannedOutput) : "—"}</span>
+                  <span className={Number(row.plannedShortfall ?? 0) > 0 ? "missing" : ""}>{row.mineableFromOre ? (row.plannedShortfall > 0 ? n(row.plannedShortfall) + " short" : "+" + n(row.plannedSurplus)) : "—"}</span>
+                </div>)}
+                {!materialPlan?.materials?.length && <div className="foundry-workbench-empty"><strong>No base-material rows available.</strong><span>The production tree may still be preparing or this project has no expanded leaf materials.</span></div>}
+              </div>}
+
+              {materialPlanTab === "ore" && <div className="foundry-ore-plan">
+                <div className="foundry-mining-reach">
+                  <span>
+                    <small>MINING REACH</small>
+                    <strong>{foundryMiningReach === "high" ? "High-sec mining plan" : foundryMiningReach === "low" ? "High-sec first, low-sec only when required" : "High-sec → low-sec → null-sec"}</strong>
+                    <em>{foundryMiningReach === "high"
+                      ? "Mine every ore listed below in high-sec. Together they refine into the mineral totals shown below. Anything high-sec cannot supply is moved to BUY."
+                      : foundryMiningReach === "low"
+                        ? "Mine everything possible in high-sec first. Only add low-sec ores for mineral deficits high-sec cannot cover; buy anything still unavailable."
+                        : "Mine high-sec first, then low-sec, then null-sec only for the remaining deficits. The list is one complete mining plan, not alternatives."}</em>
+                  </span>
+                  <div role="group" aria-label="Mining security reach">
+                    {(["high", "low", "null"] as const).map((reach) => <button
+                      type="button"
+                      key={reach}
+                      className={foundryMiningReach === reach ? "active" : ""}
+                      disabled={materialPlanBusy}
+                      onClick={() => setFoundryMiningReach(reach)}
+                    >{reach === "high" ? "HIGH" : reach === "low" ? "LOW" : "NULL"}</button>)}
+                  </div>
+                </div>
+
+                <div className="foundry-ore-plan-summary">
+                  <span><small>ORE TYPES TO MINE</small><strong>{n(materialPlan?.totals?.oreTypes ?? 0)}</strong></span>
+                  <span><small>TOTAL ORE</small><strong>{n(materialPlan?.totals?.oreUnits ?? 0)} units</strong></span>
+                  <span><small>MINING VOLUME</small><strong>{Number(materialPlan?.totals?.oreVolumeM3 ?? 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} m³</strong></span>
+                  <span><small>BUY TYPES</small><strong>{n(materialPlan?.totals?.buyMaterialTypes ?? 0)}</strong></span>
+                  <span><small>BUY COST</small><strong>{isk(materialPlan?.totals?.buyCost)}</strong></span>
+                </div>
+
+                <div className="foundry-source-plan-banner mine">
+                  <span>
+                    <small>{foundryMiningReach === "high" ? "HIGH-SEC" : foundryMiningReach === "low" ? "HIGH + LOW" : "HIGH + LOW + NULL"}</small>
+                    <strong>{foundryMiningReach === "high"
+                      ? "MINE ALL OF THESE ORES IN HIGH-SEC"
+                      : foundryMiningReach === "low"
+                        ? "MINE THESE ORES — HIGH-SEC FIRST, THEN LOW-SEC"
+                        : "MINE THESE ORES — HIGH FIRST, THEN LOW, THEN NULL"}</strong>
+                  </span>
+                  <em>Every row below is additive. Mine the stated quantity of every listed ore.</em>
+                </div>
+
+                {(materialPlan?.orePlan ?? []).length > 0 && <div className="foundry-ore-plan-table">
+                  <div className="foundry-ore-plan-row heading"><span>Ore to mine</span><span>Where / how</span><span>Mine</span><span>Volume</span><span>Yield</span><span>Refined output from this ore</span></div>
+                  {(materialPlan?.orePlan ?? []).map((row: any) => <div className="foundry-ore-plan-row" key={row.typeId}>
+                    <span className="ore-name"><img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" /><span><strong>{row.name}</strong><small>{row.groupName} · {n(row.batches)} batch{row.batches === 1 ? "" : "es"}</small></span></span>
+                    <span className="ore-access"><b className={"ease tier-" + row.easeTier}>{row.easeLabel}</b><small>{row.accessDetail}</small></span>
+                    <span><strong>{n(row.oreUnits)}</strong><small>ore units</small></span>
+                    <span><strong>{Number(row.volumeM3 ?? 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}</strong><small>m³</small></span>
+                    <span><strong>{Number(row.yieldPercent ?? 0).toFixed(2)}%</strong><small>{row.processingSkill ? row.processingSkill.name + " V" + row.processingSkill.trainedLevel : "No ore skill"}</small></span>
+                    <span className="ore-output-list">{(row.outputs ?? []).map((output: any) => <small key={output.typeId}><span>{output.name}</span><b>{n(output.refinedUnits)}</b></small>)}</span>
+                  </div>)}
+                </div>}
+
+                <div className="foundry-refined-output">
+                  <div className="foundry-refined-output-head">
+                    <span><small>AFTER REPROCESSING THE MINING PLAN</small><strong>THIS IS WHAT THE ORE GIVES YOU</strong></span>
+                    <em>Totals use the selected refiner, station, rig, security and manual overrides above.</em>
+                  </div>
+                  <div className="foundry-refined-output-grid">
+                    {(materialPlan?.materials ?? []).filter((row: any) => row.mineableFromOre && Number(row.plannedOutput ?? 0) > 0).map((row: any) => <span key={row.typeId}>
+                      <img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" />
+                      <span><small>{row.name}</small><strong>{n(row.plannedOutput)}</strong><em>{row.plannedShortfall > 0 ? n(row.plannedShortfall) + " still short" : row.plannedSurplus > 0 ? "+" + n(row.plannedSurplus) + " surplus" : "requirement covered"}</em></span>
+                    </span>)}
+                  </div>
+                </div>
+
+                {(materialPlan?.buyMaterials ?? []).length > 0 ? <div className="foundry-buy-plan">
+                  <div className="foundry-buy-plan-head">
+                    <span><small>OUTSIDE SELECTED REACH</small><strong>{foundryMiningReach === "high" ? "NOT AVAILABLE IN HIGH-SEC — BUY THESE" : foundryMiningReach === "low" ? "NOT AVAILABLE IN HIGH / LOW-SEC — BUY THESE" : "NOT COVERED BY THE MINING ROUTE — BUY THESE"}</strong></span>
+                    <em>Total estimated purchase cost: <b>{isk(materialPlan?.totals?.buyCost)}</b></em>
+                  </div>
+                  <div className="foundry-buy-plan-table">
+                    <div className="foundry-buy-plan-row heading"><span>Material</span><span>Quantity</span><span>Unit price</span><span>Estimated cost</span></div>
+                    {(materialPlan.buyMaterials ?? []).map((row: any) => <div className="foundry-buy-plan-row" key={row.typeId}>
+                      <span className="buy-material"><img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" /><span><strong>{row.name}</strong><small>{row.reason}</small></span></span>
+                      <span><small>BUY</small><strong>{n(row.buyQuantity)}</strong></span>
+                      <span><small>{row.buyPriceSource}</small><strong>{isk(row.buyUnitPrice)}</strong></span>
+                      <span><small>{row.buyLocation ? (row.buyLocation + (row.buyRegion ? " · " + row.buyRegion : "")) : "Retained market/reference price"}</small><strong>{isk(row.buyCost)}</strong></span>
+                    </div>)}
+                  </div>
+                </div> : <div className="foundry-source-plan-banner covered">
+                  <span><small>BUY LIST</small><strong>NOTHING TO BUY</strong></span>
+                  <em>The selected mining reach covers every ore-derived mineral requirement.</em>
+                </div>}
+
+                {(materialPlan?.nonOreMaterials ?? []).length > 0 && <div className="foundry-non-ore-note"><strong>{n(materialPlan.nonOreMaterials.length)} non-ore base input type(s) use the dedicated tabs above.</strong><span>PI, reactions, T2 components and other production chains are kept separate from the ore plan.</span></div>}
+              </div>}
+
+              {materialPlanTab !== "totals" && materialPlanTab !== "ore" && (() => {
+                const group = (materialPlan?.acquisitionGroups ?? []).find((row: any) => row.key === materialPlanTab);
+                if (!group) return <div className="foundry-workbench-empty"><strong>No acquisition rows in this category.</strong><span>Sage only creates sourcing tabs when the current blueprint actually needs them.</span></div>;
+                const isT2 = group.key === "t2-components";
+                return <div className={"foundry-acquisition-plan " + (isT2 ? "t2-components" : "")}>
+                  {isT2 && <div className="foundry-mining-reach t2-reach">
+                    <span>
+                      <small>T2 COMPONENT SOURCING REACH</small>
+                      <strong>Path of least resistance</strong>
+                      <em>{foundryMiningReach === "high"
+                        ? "Build the T2 components in high-sec. Reaction inputs that cannot be produced in high-sec are marked BUY with their current estimated cost."
+                        : foundryMiningReach === "low"
+                          ? "Build the components in high-sec. Source normal inputs in high-sec, then produce reaction inputs in low-sec before buying anything."
+                          : "Build the components in high-sec. Source high-sec first, use low-sec reactions next, and only use null-sec when no lower-resistance route can supply an input."}</em>
+                    </span>
+                    <div role="group" aria-label="T2 component security reach">
+                      {(["high", "low", "null"] as const).map((reach) => <button type="button" key={reach} className={foundryMiningReach === reach ? "active" : ""} disabled={materialPlanBusy} onClick={() => setFoundryMiningReach(reach)}>{reach === "high" ? "HIGH" : reach === "low" ? "LOW" : "NULL"}</button>)}
+                    </div>
+                  </div>}
+                  <div className="foundry-acquisition-plan-head"><span><small>{String(group.label).toUpperCase()}</small><strong>{group.rows.length} required input type{group.rows.length === 1 ? "" : "s"}</strong></span><em>{isT2 ? "High-sec component build; lower security only for inputs that require it" : "Production route plus current buy alternative"}</em></div>
+                  <div className="foundry-acquisition-table">
+                    <div className="foundry-acquisition-row heading"><span>Material</span><span>Required</span><span>Path of least resistance</span><span>Recipe / source</span><span>Buy complete item</span></div>
+                    {(group.rows ?? []).map((row: any) => <div className="foundry-acquisition-row" key={row.typeId}>
+                      <span className="material-name"><img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" /><span><strong>{row.name}</strong><small>{row.badge} · {row.detail}</small></span></span>
+                      <span><strong>{n(row.required)}</strong></span>
+                      <div className="acquisition-way">
+                        <details className="foundry-acquisition-instruction">
+                          <summary><span>{row.bestWay}</span><i aria-hidden="true">⌄</i></summary>
+                          <div className="foundry-acquisition-instruction-body">
+                            {(row.instructions?.length ? row.instructions : [row.bestWay]).map((instruction: string, index: number) => <p key={index}>{instruction}</p>)}
+                          </div>
+                        </details>
+                        {row.facility && <small>{row.facility}</small>}
+                        {row.security && <small className="security-rule">{row.category === "reactions" ? "LOW-SEC · NULL-SEC · WORMHOLE · NO HIGH-SEC" : row.security}</small>}
+                      </div>
+                      <span className="acquisition-recipe">
+                        {row.runsRequired ? <small className="recipe-total-note"><span>Calculated job total</span><b>{n(row.runsRequired)} run{row.runsRequired === 1 ? "" : "s"}</b></small> : null}
+                        {isT2 && row.inputPlans?.length ? row.inputPlans.map((part: any) => <small className={"t2-input-plan " + part.action} key={part.typeId}>
+                          <span><b>{part.label}</b>{part.name}</span>
+                          <strong>{n(part.quantity)}×</strong>
+                          <em>{part.action === "buy" ? isk(part.buyCost) : part.reach === "low" ? "SOURCE IN LOW-SEC" : "SOURCE IN HIGH-SEC"}</em>
+                        </small>) : row.recipe?.length ? row.recipe.map((part: any) => <small key={part.typeId}><span>{part.name}</span><b>{n(part.quantity)}×</b><em>{part.buyCost != null ? isk(part.buyCost) : ""}</em></small>) : <small><span>{row.sourceLabel}</span></small>}
+                        {!isT2 && row.recipeBuyCost != null && row.recipe?.length ? <small className="recipe-cost-total"><span>Buy all recipe inputs</span><b>{isk(row.recipeBuyCost)}</b></small> : null}
+                        {isT2 && row.inputBuyCost != null && row.inputBuyCost > 0 ? <small className="recipe-cost-total"><span>Inputs you must buy at this reach</span><b>{isk(row.inputBuyCost)}</b></small> : null}
+                      </span>
+                      <span className="acquisition-buy-cost">
+                        <small>BUY {isT2 ? "COMPONENT" : "MATERIAL"}</small>
+                        <strong>{isk(row.buyCost)}</strong>
+                        <em>{row.buyUnitPrice != null ? n(row.required) + " × " + isk(row.buyUnitPrice) : row.buyPriceSource}</em>
+                        {row.buyLocation && <i>{row.buyLocation}{row.buyRegion ? " · " + row.buyRegion : ""}</i>}
+                      </span>
+                    </div>)}
+                  </div>
+                </div>;
+              })()}
+            </article>}
+
+            {workbenchTab === "assignments" && project.mode === "corporation" && <article className="industrial-panel foundry-assign foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">ASSIGN SELECTED WORK</p><h3>Who is doing what?</h3><p>Tick rows in Active Build Lines or Dependencies, choose a real owner, then assign.</p></div><span className="industrial-status">{selected.size} SELECTED</span></div><div className={`foundry-selection-summary ${selected.size ? "has-selection" : ""}`}><span><small>WORK SELECTED</small><strong>{selected.size ? `${selected.size} build ${selected.size === 1 ? "stage" : "stages"}` : "Choose stages in the build tree"}</strong></span><em>{selected.size === 1 ? `${n(remaining([...selected][0]))} units still open` : selected.size > 1 ? "Each stage assigns its remaining quantity" : "Checkboxes appear beside every assignable stage"}</em></div><div className="foundry-assign-controls"><div className="foundry-owner-type"><span>ASSIGN TO</span><div><button type="button" className={ownerType === "member" ? "active" : ""} onClick={() => setOwnerType("member")}><b>Member</b><small>Named pilot</small></button><button type="button" className={ownerType === "division" ? "active" : ""} onClick={() => setOwnerType("division")}><b>Division</b><small>Whole corp team</small></button><button type="button" className={ownerType === "project" ? "active" : ""} onClick={() => setOwnerType("project")}><b>Owner</b><small>Project creator</small></button></div></div>{ownerType === "member" && <label><span>Member</span><select value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>{members.map((row: any) => <option key={row.id} value={row.id}>{row.displayName}</option>)}</select></label>}{ownerType === "division" && <label><span>Division</span><select value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>{divisions.map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>}{ownerType === "project" && <div className="owner-fixed"><span>PROJECT OWNER</span><strong>{project.createdByCharacterName}</strong></div>}<label><span>Group</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">No group</option>{(project.groups ?? []).map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>{selected.size === 1 && <label><span>Quantity</span><input type="number" min="1" max={Math.max(1, remaining([...selected][0]))} value={splitQuantity} onChange={(e) => setSplitQuantity(Math.max(1, Number(e.target.value) || 1))} /></label>}<button className="foundry-primary" disabled={!selected.size || busy || (ownerType !== "project" && !ownerId)} onClick={() => void assignSelected()}>Assign selected</button></div>{ownerType === "member" && !members.length && <div className="industrial-notice">No member roster is available in this snapshot.</div>}{ownerType === "division" && !divisions.length && <div className="industrial-notice">No configured corporation divisions are available yet.</div>}<div className="foundry-assignment-list">{(project.assignments ?? []).map((row: any) => <div className="assignment-row" key={row.id}><span><strong>{row.ownerName}</strong><small>{row.ownerType}{row.groupName ? ` · ${row.groupName}` : ""}</small></span><span><strong>{row.targetName}</strong><small>{n(row.quantity)} assigned · {n(row.deliveredQuantity)} delivered</small></span><b className={`state ${row.dataState}`}>{String(row.dataState).replace("-", " ").toUpperCase()}</b>{row.dataState !== "delivered" && <button className="foundry-small" onClick={() => void save({ ...project, assignments: project.assignments.map((x: any) => x.id === row.id ? { ...x, status: x.status === "in-progress" ? "open" : "in-progress" } : x) }, "Work state updated; completion remains stock-driven.")}>{row.status === "in-progress" ? "Started ✓" : "Start"}</button>}<button className="remove" onClick={() => void save({ ...project, assignments: project.assignments.filter((x: any) => x.id !== row.id) }, "Assignment removed.")}>×</button></div>)}</div></article>}
+
+            {workbenchTab === "groups" && project.mode === "corporation" && <article className="industrial-panel foundry-workgroups-panel foundry-workbench-panel">
+              <div className="industrial-panel-head"><div><p className="eyebrow">WORK GROUPS</p><h3>Organise labour</h3><p>Create optional teams and attach them to assignment splits.</p></div><span className="industrial-status">{project.groups?.length ?? 0} GROUP{(project.groups?.length ?? 0) === 1 ? "" : "S"}</span></div>
+              <div className="foundry-workgroups-tools"><input value={newGroup} onChange={(e) => setNewGroup(e.target.value)} placeholder="New work group" onKeyDown={(e) => { if (e.key === "Enter") void addGroup(); }} /><button type="button" className="foundry-primary" onClick={() => void addGroup()}>Add group</button></div>
+              <div className="foundry-workgroups-list">
+                {(project.groups ?? []).map((row: any) => <div className={groupId === row.id ? "active" : ""} key={row.id}>
+                  <button type="button" className="foundry-group-select" onClick={() => setGroupId(row.id)}><strong>{row.name}</strong><small>{row.ownerName ?? "Owner set on assignment"}</small></button>
+                  <button type="button" className="remove" aria-label={`Remove ${row.name}`} onClick={() => void save({ ...project, groups: project.groups.filter((x: any) => x.id !== row.id), assignments: project.assignments.map((x: any) => x.groupId === row.id ? { ...x, groupId: undefined } : x) }, "Work group removed; assignments kept.")}>×</button>
+                </div>)}
+                {!(project.groups ?? []).length && <div className="foundry-workbench-empty"><strong>No work groups yet.</strong><span>Groups are optional. Add them when the build needs teams.</span></div>}
+              </div>
+            </article>}
+
+            {workbenchTab === "allocation" && <article className="industrial-panel foundry-allocation-panel foundry-workbench-panel">
+              <div className="industrial-panel-head"><div><p className="eyebrow">WORK ALLOCATION</p><h3>{project.mode === "solo" ? "Project owner" : "Assigned work"}</h3><p>{project.mode === "solo" ? "The project owner carries the complete build." : "Current assignment ownership across this project."}</p></div>{project.mode === "corporation" && <button type="button" className="foundry-small" onClick={() => setWorkbenchTab("assignments")}>Manage assignments</button>}</div>
+              <div className="foundry-work-allocation-grid">
+                {project.mode === "solo" ? <div className="allocation-person"><span className="avatar-fallback">{project.createdByCharacterName?.slice(0, 1) ?? "?"}</span><span><strong>{project.createdByCharacterName}</strong><small>Owner · entire build</small></span><b>{pc(project.progress)}</b></div> : allocationOwners.map((row) => <div className="allocation-person" key={row.key}><span className="avatar-fallback">{row.name.slice(0, 1)}</span><span><strong>{row.name}</strong><small>{row.count} task{row.count === 1 ? "" : "s"}</small></span><b>{n(row.quantity)}</b></div>)}
+                {project.mode === "corporation" && !allocationOwners.length && <div className="foundry-workbench-empty"><strong>No work assigned yet.</strong><span>Use Assignments to allocate exact build stages to members, divisions or the project owner.</span></div>}
+              </div>
+            </article>}
+
+            {workbenchTab === "stores" && <article className="industrial-panel foundry-stores foundry-workbench-panel">
+              <div className="industrial-panel-head"><div><p className="eyebrow">PROJECT STORES</p><h3>Source routing</h3><p>Tell Sage exactly where each part of the build should come from. A build-line route overrides the project default source.</p></div><span className="industrial-status live">{storeRoutes.length} OVERRIDE{storeRoutes.length === 1 ? "" : "S"}</span></div>
+              <div className="foundry-store-router">
+                <label><span>Build part</span><select value={storeTargetId} onChange={(e) => setStoreTargetId(e.target.value)}><option value="__default__">Project default / all unassigned parts</option>{routableTargets.map((row: any) => <option key={row.id} value={row.id}>{`${"—".repeat(Math.max(0, Number(row.depth ?? 1) - 1))} ${row.name} · ${n(row.required)} required`}</option>)}</select></label>
+                <label><span>Look for it in</span><select value={storeKey} onChange={(e) => setStoreKey(e.target.value)}>{stores.map((row: any) => <option key={row.key} value={row.key}>{row.name}{row.kind === "container" ? ` · ${row.division ?? "Corp assets"}` : row.kind === "division" ? " · Corp hangar" : ""}</option>)}</select></label>
+                <button type="button" className="foundry-primary" disabled={busy || !storeKey || activeStoreKeys.has(storeKey)} onClick={() => void addStoreBinding()}>{activeStoreKeys.has(storeKey) ? "Already routed" : "Add source"}</button>
+              </div>
+              <div className="foundry-store-route-summary">
+                <span><small>EDITING</small><strong>{storeTargetId === "__default__" ? "Project default source" : selectedStoreTarget?.name ?? "Build line"}</strong></span>
+                <em>{storeTargetId === "__default__" ? (project.mode === "solo" && !(project.linkedStores ?? []).length ? "Fallback: project owner personal assets" : "Used by every build line without its own override") : activeStoreBindings.length ? "This build line uses only the sources listed below" : "No override yet — Sage falls back to the project default"}</em>
+              </div>
+              <div className="foundry-store-route-list">
+                <div className="foundry-store-route-heading"><span>Build part</span><span>Source</span><span>Scope</span><span></span></div>
+                {(project.linkedStores ?? []).map((binding: any) => <div className="foundry-store-route-row" key={`default:${binding.key}`}><span><strong>Project default</strong><small>Fallback for unrouted build lines</small></span><span><strong>{binding.name}</strong><small>{binding.kind === "personal" ? "Owner personal assets" : binding.kind === "division" ? binding.locationFlag : "Named container + nested stock"}</small></span><b>DEFAULT</b><button type="button" className="remove" onClick={() => void removeStoreBinding("__default__", binding.key)}>×</button></div>)}
+                {storeRoutes.flatMap((route: any) => { const target = routableTargets.find((row: any) => row.id === route.targetId); return (route.stores ?? []).map((binding: any) => <div className="foundry-store-route-row routed" key={`${route.targetId}:${binding.key}`}><span><strong>{target?.name ?? "Unknown build line"}</strong><small>{target ? `${target.kind === "component" ? "Component" : "Material"} · ${n(target.required)} required` : route.targetId}</small></span><span><strong>{binding.name}</strong><small>{binding.kind === "personal" ? "Owner personal assets" : binding.kind === "division" ? binding.locationFlag : "Named container + nested stock"}</small></span><b>OVERRIDE</b><button type="button" className="remove" onClick={() => void removeStoreBinding(route.targetId, binding.key)}>×</button></div>); })}
+                {!(project.linkedStores ?? []).length && !storeRoutes.length && <div className="foundry-store-empty"><strong>No custom routes yet.</strong><span>{project.mode === "solo" ? "Sage currently checks all synced personal assets. Add a project default or a build-part override to narrow or redirect the source." : "Choose a build part and a corporation hangar/container above. Until a source is configured, corporation stock does not count toward the project."}</span></div>}
+              </div>
+              <div className="industrial-notice">Example: route <b>Capital Construction Parts</b> to <b>Corp Hangar A</b>, minerals to a named mineral container, and leave everything else on the project default. Sage evaluates each dependency against its routed source independently.</div>
+            </article>}
+
+            {workbenchTab === "dependencies" && <article className="industrial-panel foundry-tree-panel foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">PRODUCTION HIERARCHY</p><h3>{project.productName} build tree</h3><p>Actual SDE build stages. Assign the work itself, not a generic database bucket.</p></div><button className="foundry-small" onClick={() => setFullTree((v) => !v)}>{fullTree ? "Core stages" : "Full chain"}</button></div><div className="foundry-root"><span><b>FINAL PRODUCT</b><strong>{project.quantity} × {project.productName}</strong><small>{project.blueprintName}</small></span><em className={project.finalAssembly?.ready ? "ready" : ""}>{project.finalAssembly?.ready ? "ASSEMBLY READY" : "FINAL BUILD BLOCKED"}</em></div><div className="foundry-tree"><div className="foundry-tree-row heading"><span>Stage / requirement</span><span>Required</span><span>Available</span><span>Missing</span><span>Responsibility</span><span>State</span></div>{visibleTree.map((row: any) => { const rows = assignmentsByTarget.get(row.id) ?? []; const open = remaining(row.id); const state = row.coverage >= .999999 ? "DELIVERED" : rows.some((x: any) => x.status === "in-progress") ? "IN PRODUCTION" : rows.length ? "ASSIGNED" : "UNASSIGNED"; return <div className={`foundry-tree-row depth-${Math.min(4, Number(row.depth ?? 0))} kind-${row.kind} ${row.outstanding <= 0 ? "covered" : ""} ${selected.has(row.id) ? "selected" : ""}`} key={row.id}><span className="tree-name" style={{ paddingLeft: `${Math.max(0, row.depth - 1) * 15}px` }}>{project.mode === "corporation" && <input type="checkbox" checked={selected.has(row.id)} disabled={open <= 0} onChange={() => toggleTarget(row.id)} />}<span><strong>{row.name}</strong><small>{row.kind === "component" ? `COMPONENT · ${row.runs ?? "?"} runs` : row.direct ? "DIRECT INPUT" : "MATERIAL INPUT"}</small></span></span><span>{n(row.required)}</span><span>{n(row.availableToProject)}</span><span className="missing">{n(row.outstanding)}</span><span className="who">{rows.length ? rows.map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") : project.mode === "solo" ? project.createdByCharacterName : "Unassigned"}{rows.length && open > 0 ? ` · ${n(open)} open` : ""}</span><span><b className={`state ${state.toLowerCase().replace(/\s/g, "-")}`}>{state}</b></span></div>; })}</div><div className={`foundry-final ${project.finalAssembly?.ready ? "ready" : ""}`}><span className="tree-name">{project.mode === "corporation" && <input type="checkbox" checked={selected.has("final-assembly")} disabled={remaining("final-assembly") <= 0} onChange={() => toggleTarget("final-assembly")} />}<span><strong>Final Assembly</strong><small>{project.finalAssembly?.ready ? "Dependencies satisfied" : `${project.finalAssembly?.blockerCount} blockers`}</small></span></span><b>{project.finalAssembly?.ready ? "READY TO BUILD" : "BLOCKED"}</b><span>{(assignmentsByTarget.get("final-assembly") ?? []).map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") || (project.mode === "solo" ? project.createdByCharacterName : "Unassigned")}</span></div></article>}
+
+            {workbenchTab === "production" && <article className="industrial-panel foundry-production-lots foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">PRODUCTION LOTS</p><h3>Traceable output</h3><p>Every completed manufacturing run keeps a stable Sage identifier through Foundry and Wallet Ledger reconciliation.</p></div><span className="industrial-status live">{(project.productionLots ?? []).length} LOT{(project.productionLots ?? []).length === 1 ? "" : "S"}</span></div>{(project.productionLots ?? []).length ? <div className="foundry-lot-list"><div className="foundry-lot-row heading"><span>Production ID</span><span>Produced</span><span>Output</span><span>Sold</span><span>Remaining</span><span>Ledger</span></div>{(project.productionLots ?? []).map((lot: any) => <div className="foundry-lot-row" key={lot.id}><span className="foundry-lot-id"><strong>{lot.id}</strong><small>EVE job {lot.industryJobId}</small></span><span>{new Date(lot.producedAt).toLocaleString()}</span><span>{n(lot.quantity)}</span><span>{n(lot.soldQuantity)}</span><span>{n(lot.remainingQuantity)}</span><b className={`state ${lot.reconciliationStatus}`}>{String(lot.reconciliationStatus).toUpperCase()}</b></div>)}</div> : <div className="industrial-notice">No production lots have been recorded for this project yet.</div>}</article>}
+          </section>
         </div>
 
         <aside className="foundry-dashboard-rail">
-          <article className="industrial-panel foundry-rail-panel">
-            <div className="foundry-section-head"><div><small>WORK ALLOCATION</small><strong>{project.mode === "solo" ? "Project owner" : "Assigned work"}</strong></div>{project.mode === "corporation" && <button type="button" onClick={() => setWorkbenchTab("assignments")}>Manage</button>}</div>
-            <div className="foundry-allocation-summary">
-              {project.mode === "solo" ? <div className="allocation-person"><span className="avatar-fallback">{project.createdByCharacterName?.slice(0, 1) ?? "?"}</span><span><strong>{project.createdByCharacterName}</strong><small>Owner · entire build</small></span><b>{pc(project.progress)}</b></div> : allocationOwners.slice(0, 4).map((row) => <div className="allocation-person" key={row.key}><span className="avatar-fallback">{row.name.slice(0, 1)}</span><span><strong>{row.name}</strong><small>{row.count} task{row.count === 1 ? "" : "s"}</small></span><b>{n(row.quantity)}</b></div>)}
-              {project.mode === "corporation" && !allocationOwners.length && <div className="foundry-rail-empty">No work has been assigned yet.</div>}
-            </div>
-          </article>
-
-          <article className="industrial-panel foundry-rail-panel foundry-groups-rail">
-            <div className="foundry-section-head"><div><small>WORK GROUPS</small><strong>Organise labour</strong></div><span>{(project.groups ?? []).length}</span></div>
-            {project.mode === "corporation" ? <>
-              <div className="group-create compact"><input value={newGroup} onChange={(e) => setNewGroup(e.target.value)} placeholder="New work group" onKeyDown={(e) => { if (e.key === "Enter") void addGroup(); }} /><button onClick={() => void addGroup()}>+</button></div>
-              <div className="foundry-rail-group-list">{(project.groups ?? []).slice(0, 5).map((row: any) => <div className={groupId === row.id ? "active" : ""} key={row.id}><button type="button" onClick={() => setGroupId(row.id)}><strong>{row.name}</strong><small>{row.ownerName ?? "Owner set on assignment"}</small></button><button type="button" className="remove" onClick={() => void save({ ...project, groups: project.groups.filter((x: any) => x.id !== row.id), assignments: project.assignments.map((x: any) => x.groupId === row.id ? { ...x, groupId: undefined } : x) }, "Work group removed; assignments kept.")}>×</button></div>)}</div>
-              {!(project.groups ?? []).length && <div className="foundry-rail-empty">Groups are optional. Add them when the build needs teams.</div>}
-            </> : <div className="foundry-rail-empty">Solo projects do not need work groups.</div>}
-          </article>
-
           <article className="industrial-panel foundry-rail-panel foundry-project-info">
             <div className="foundry-section-head"><div><small>PROJECT INFORMATION</small><strong>Live project metadata</strong></div></div>
             <dl><div><dt>Project Name</dt><dd>{project.name}</dd></div><div><dt>Product</dt><dd>{project.productName}</dd></div><div><dt>Quantity</dt><dd>{n(project.quantity)}</dd></div><div><dt>Blueprint</dt><dd>{project.blueprintName}</dd></div><div><dt>Mode</dt><dd>{project.mode === "solo" ? "Solo" : "Corporation"}</dd></div><div><dt>Status</dt><dd><select value={project.status} onChange={(e) => void save({ ...project, status: e.target.value }, `Status changed to ${e.target.value}.`)}><option value="planning">Planning</option><option value="active">Active</option><option value="complete">Complete</option><option value="archived">Archived</option></select></dd></div><div><dt>Owner</dt><dd>{project.createdByCharacterName}</dd></div><div><dt>Source</dt><dd>{project.blueprintSource === "manual" ? "Manual SDE" : "Synced blueprint"}</dd></div></dl>
             <div className="foundry-mode-inline"><b>MODE</b><button className={project.mode === "solo" ? "active" : ""} onClick={() => void save({ ...project, mode: "solo" }, "Switched to solo planning.")}>Solo</button><button className={project.mode === "corporation" ? "active" : ""} onClick={() => void save({ ...project, mode: "corporation" }, "Switched to corporation planning.")}>Corporation</button></div>
           </article>
+
+          <article className="industrial-panel foundry-rail-panel foundry-project-stores-summary">
+            <div className="foundry-section-head"><div><small>PROJECT STORES</small><strong>Completed parts and gathered materials</strong></div></div>
+            <dl className="foundry-store-summary-list">
+              <div><dt>Selected hangar</dt><dd title={projectStoreLabel}>{projectStoreLabel}</dd></div>
+            </dl>
+            <div className="foundry-store-inventory-section">
+              <div className="foundry-store-inventory-head"><span><strong>PARTS REQUIRED</strong><small>Actual component build tree</small></span><b>{n(projectStoreSummary?.partTypesReady ?? 0)}/{n(projectStoreSummary?.partTypesTotal ?? 0)} ready</b></div>
+              <div className="foundry-store-inventory-list">
+                {(projectStoreSummary?.parts ?? []).map((row: any) => <div key={row.typeId}>
+                  <span className="foundry-store-item">
+                    {Number(row.typeId) > 0 && <img src={"sage-asset://type/" + row.typeId + "/icon?size=64&cache=only&v=" + projectStoreIconRevision} alt="" loading="lazy" />}
+                    <span><strong title={row.name}>{row.name}</strong><small>{row.missing > 0 ? n(row.missing) + " missing" : "Ready"}</small></span>
+                  </span>
+                  <b className={row.missing > 0 ? "missing" : "ready"}>{n(row.available)} / {n(row.required)}</b>
+                </div>)}
+                {!(projectStoreSummary?.parts ?? []).length && <small className="empty">No component parts in this blueprint tree.</small>}
+              </div>
+            </div>
+            <div className="foundry-store-inventory-section materials">
+              <div className="foundry-store-inventory-head"><span><strong>BASE MATERIALS</strong><small>Leaf materials across every component</small></span><b>{n(projectStoreSummary?.materialTypesReady ?? 0)}/{n(projectStoreSummary?.materialTypesTotal ?? 0)} ready</b></div>
+              <div className="foundry-store-inventory-list">
+                {(projectStoreSummary?.materials ?? []).map((row: any) => <div key={row.typeId}>
+                  <span className="foundry-store-item">
+                    {Number(row.typeId) > 0 && <img src={"sage-asset://type/" + row.typeId + "/icon?size=64&cache=only&v=" + projectStoreIconRevision} alt="" loading="lazy" />}
+                    <span><strong title={row.name}>{row.name}</strong><small>{row.missing > 0 ? n(row.missing) + " missing" : "Ready"}</small></span>
+                  </span>
+                  <b className={row.missing > 0 ? "missing" : "ready"}>{n(row.available)} / {n(row.required)}</b>
+                </div>)}
+                {!(projectStoreSummary?.materials ?? []).length && <small className="empty">No base-material rows are available yet.</small>}
+              </div>
+            </div>
+            <p className="foundry-store-summary-note">Counts use the configured default Project Store and subtract stock reserved by competing projects.</p>
+          </article>
         </aside>
       </div>
 
-      <section id="foundry-workbench" className="foundry-workbench">
-        <nav className="foundry-workbench-tabs" aria-label="Project Foundry workbench">
-          <button type="button" className={workbenchTab === "requirements" ? "active" : ""} onClick={() => setWorkbenchTab("requirements")}>Requirements</button>
-          {project.mode === "corporation" && <button type="button" className={workbenchTab === "assignments" ? "active" : ""} onClick={() => setWorkbenchTab("assignments")}>Assignments <span>{project.assignments?.length ?? 0}</span></button>}
-          <button type="button" className={workbenchTab === "stores" ? "active" : ""} onClick={() => setWorkbenchTab("stores")}>Project Stores</button>
-          <button type="button" className={workbenchTab === "dependencies" ? "active" : ""} onClick={() => setWorkbenchTab("dependencies")}>Dependencies <span>{tree.length}</span></button>
-          <button type="button" className={workbenchTab === "production" ? "active" : ""} onClick={() => setWorkbenchTab("production")}>Production Lots <span>{project.productionLots?.length ?? 0}</span></button>
-        </nav>
 
-        {workbenchTab === "requirements" && <article className="industrial-panel foundry-ledger foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">MATERIAL REQUIREMENTS</p><h3>Required vs available</h3><p>Direct inputs that determine whether final assembly can start.</p></div><input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter materials..." /></div><div className="ledger"><div className="ledger-row heading"><span>Requirement</span><span>Required</span><span>Available</span><span>Reserved</span><span>Missing</span><span>Coverage</span></div>{(project.requirements ?? []).filter((row: any) => !filter.trim() || row.name.toLowerCase().includes(filter.toLowerCase())).map((row: any) => <div className={`ledger-row ${row.outstanding <= 0 ? "covered" : ""}`} key={row.typeId}><strong>{row.name}</strong><span>{n(row.required)}</span><span>{n(row.availableToProject)}</span><span>{n(row.reservedByOtherProjects)}</span><span className="missing">{n(row.outstanding)}</span><span><b>{pc(row.coverage)}</b></span></div>)}</div><small className="industrial-plan-scope">{workspace?.source}. Snapshot {workspace?.snapshotUpdatedAt ? new Date(workspace.snapshotUpdatedAt).toLocaleString() : "unavailable"}.</small></article>}
-
-        {workbenchTab === "assignments" && project.mode === "corporation" && <article className="industrial-panel foundry-assign foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">ASSIGN SELECTED WORK</p><h3>Who is doing what?</h3><p>Tick rows in Active Build Lines or Dependencies, choose a real owner, then assign.</p></div><span className="industrial-status">{selected.size} SELECTED</span></div><div className={`foundry-selection-summary ${selected.size ? "has-selection" : ""}`}><span><small>WORK SELECTED</small><strong>{selected.size ? `${selected.size} build ${selected.size === 1 ? "stage" : "stages"}` : "Choose stages in the build tree"}</strong></span><em>{selected.size === 1 ? `${n(remaining([...selected][0]))} units still open` : selected.size > 1 ? "Each stage assigns its remaining quantity" : "Checkboxes appear beside every assignable stage"}</em></div><div className="foundry-assign-controls"><div className="foundry-owner-type"><span>ASSIGN TO</span><div><button type="button" className={ownerType === "member" ? "active" : ""} onClick={() => setOwnerType("member")}><b>Member</b><small>Named pilot</small></button><button type="button" className={ownerType === "division" ? "active" : ""} onClick={() => setOwnerType("division")}><b>Division</b><small>Whole corp team</small></button><button type="button" className={ownerType === "project" ? "active" : ""} onClick={() => setOwnerType("project")}><b>Owner</b><small>Project creator</small></button></div></div>{ownerType === "member" && <label><span>Member</span><select value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>{members.map((row: any) => <option key={row.id} value={row.id}>{row.displayName}</option>)}</select></label>}{ownerType === "division" && <label><span>Division</span><select value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>{divisions.map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>}{ownerType === "project" && <div className="owner-fixed"><span>PROJECT OWNER</span><strong>{project.createdByCharacterName}</strong></div>}<label><span>Group</span><select value={groupId} onChange={(e) => setGroupId(e.target.value)}><option value="">No group</option>{(project.groups ?? []).map((row: any) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>{selected.size === 1 && <label><span>Quantity</span><input type="number" min="1" max={Math.max(1, remaining([...selected][0]))} value={splitQuantity} onChange={(e) => setSplitQuantity(Math.max(1, Number(e.target.value) || 1))} /></label>}<button className="foundry-primary" disabled={!selected.size || busy || (ownerType !== "project" && !ownerId)} onClick={() => void assignSelected()}>Assign selected</button></div>{ownerType === "member" && !members.length && <div className="industrial-notice">No member roster is available in this snapshot.</div>}{ownerType === "division" && !divisions.length && <div className="industrial-notice">No configured corporation divisions are available yet.</div>}<div className="foundry-assignment-list">{(project.assignments ?? []).map((row: any) => <div className="assignment-row" key={row.id}><span><strong>{row.ownerName}</strong><small>{row.ownerType}{row.groupName ? ` · ${row.groupName}` : ""}</small></span><span><strong>{row.targetName}</strong><small>{n(row.quantity)} assigned · {n(row.deliveredQuantity)} delivered</small></span><b className={`state ${row.dataState}`}>{String(row.dataState).replace("-", " ").toUpperCase()}</b>{row.dataState !== "delivered" && <button className="foundry-small" onClick={() => void save({ ...project, assignments: project.assignments.map((x: any) => x.id === row.id ? { ...x, status: x.status === "in-progress" ? "open" : "in-progress" } : x) }, "Work state updated; completion remains stock-driven.")}>{row.status === "in-progress" ? "Started ✓" : "Start"}</button>}<button className="remove" onClick={() => void save({ ...project, assignments: project.assignments.filter((x: any) => x.id !== row.id) }, "Assignment removed.")}>×</button></div>)}</div></article>}
-
-        {workbenchTab === "stores" && <article className="industrial-panel foundry-stores foundry-workbench-panel">
-          <div className="industrial-panel-head"><div><p className="eyebrow">PROJECT STORES</p><h3>Source routing</h3><p>Tell Sage exactly where each part of the build should come from. A build-line route overrides the project default source.</p></div><span className="industrial-status live">{storeRoutes.length} OVERRIDE{storeRoutes.length === 1 ? "" : "S"}</span></div>
-          <div className="foundry-store-router">
-            <label><span>Build part</span><select value={storeTargetId} onChange={(e) => setStoreTargetId(e.target.value)}><option value="__default__">Project default / all unassigned parts</option>{routableTargets.map((row: any) => <option key={row.id} value={row.id}>{`${"—".repeat(Math.max(0, Number(row.depth ?? 1) - 1))} ${row.name} · ${n(row.required)} required`}</option>)}</select></label>
-            <label><span>Look for it in</span><select value={storeKey} onChange={(e) => setStoreKey(e.target.value)}>{stores.map((row: any) => <option key={row.key} value={row.key}>{row.name}{row.kind === "container" ? ` · ${row.division ?? "Corp assets"}` : row.kind === "division" ? " · Corp hangar" : ""}</option>)}</select></label>
-            <button type="button" className="foundry-primary" disabled={busy || !storeKey || activeStoreKeys.has(storeKey)} onClick={() => void addStoreBinding()}>{activeStoreKeys.has(storeKey) ? "Already routed" : "Add source"}</button>
-          </div>
-          <div className="foundry-store-route-summary">
-            <span><small>EDITING</small><strong>{storeTargetId === "__default__" ? "Project default source" : selectedStoreTarget?.name ?? "Build line"}</strong></span>
-            <em>{storeTargetId === "__default__" ? (project.mode === "solo" && !(project.linkedStores ?? []).length ? "Fallback: project owner personal assets" : "Used by every build line without its own override") : activeStoreBindings.length ? "This build line uses only the sources listed below" : "No override yet — Sage falls back to the project default"}</em>
-          </div>
-          <div className="foundry-store-route-list">
-            <div className="foundry-store-route-heading"><span>Build part</span><span>Source</span><span>Scope</span><span></span></div>
-            {(project.linkedStores ?? []).map((binding: any) => <div className="foundry-store-route-row" key={`default:${binding.key}`}><span><strong>Project default</strong><small>Fallback for unrouted build lines</small></span><span><strong>{binding.name}</strong><small>{binding.kind === "personal" ? "Owner personal assets" : binding.kind === "division" ? binding.locationFlag : "Named container + nested stock"}</small></span><b>DEFAULT</b><button type="button" className="remove" onClick={() => void removeStoreBinding("__default__", binding.key)}>×</button></div>)}
-            {storeRoutes.flatMap((route: any) => { const target = routableTargets.find((row: any) => row.id === route.targetId); return (route.stores ?? []).map((binding: any) => <div className="foundry-store-route-row routed" key={`${route.targetId}:${binding.key}`}><span><strong>{target?.name ?? "Unknown build line"}</strong><small>{target ? `${target.kind === "component" ? "Component" : "Material"} · ${n(target.required)} required` : route.targetId}</small></span><span><strong>{binding.name}</strong><small>{binding.kind === "personal" ? "Owner personal assets" : binding.kind === "division" ? binding.locationFlag : "Named container + nested stock"}</small></span><b>OVERRIDE</b><button type="button" className="remove" onClick={() => void removeStoreBinding(route.targetId, binding.key)}>×</button></div>); })}
-            {!(project.linkedStores ?? []).length && !storeRoutes.length && <div className="foundry-store-empty"><strong>No custom routes yet.</strong><span>{project.mode === "solo" ? "Sage currently checks all synced personal assets. Add a project default or a build-part override to narrow or redirect the source." : "Choose a build part and a corporation hangar/container above. Until a source is configured, corporation stock does not count toward the project."}</span></div>}
-          </div>
-          <div className="industrial-notice">Example: route <b>Capital Construction Parts</b> to <b>Corp Hangar A</b>, minerals to a named mineral container, and leave everything else on the project default. Sage evaluates each dependency against its routed source independently.</div>
-        </article>}
-
-        {workbenchTab === "dependencies" && <article className="industrial-panel foundry-tree-panel foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">PRODUCTION HIERARCHY</p><h3>{project.productName} build tree</h3><p>Actual SDE build stages. Assign the work itself, not a generic database bucket.</p></div><button className="foundry-small" onClick={() => setFullTree((v) => !v)}>{fullTree ? "Core stages" : "Full chain"}</button></div><div className="foundry-root"><span><b>FINAL PRODUCT</b><strong>{project.quantity} × {project.productName}</strong><small>{project.blueprintName}</small></span><em className={project.finalAssembly?.ready ? "ready" : ""}>{project.finalAssembly?.ready ? "ASSEMBLY READY" : "UPSTREAM BLOCKED"}</em></div><div className="foundry-tree"><div className="foundry-tree-row heading"><span>Stage / requirement</span><span>Required</span><span>Available</span><span>Missing</span><span>Responsibility</span><span>State</span></div>{visibleTree.map((row: any) => { const rows = assignmentsByTarget.get(row.id) ?? []; const open = remaining(row.id); const state = row.coverage >= .999999 ? "DELIVERED" : rows.some((x: any) => x.status === "in-progress") ? "IN PRODUCTION" : rows.length ? "ASSIGNED" : "UNASSIGNED"; return <div className={`foundry-tree-row depth-${Math.min(4, Number(row.depth ?? 0))} kind-${row.kind} ${row.outstanding <= 0 ? "covered" : ""} ${selected.has(row.id) ? "selected" : ""}`} key={row.id}><span className="tree-name" style={{ paddingLeft: `${Math.max(0, row.depth - 1) * 15}px` }}>{project.mode === "corporation" && <input type="checkbox" checked={selected.has(row.id)} disabled={open <= 0} onChange={() => toggleTarget(row.id)} />}<span><strong>{row.name}</strong><small>{row.kind === "component" ? `COMPONENT · ${row.runs ?? "?"} runs` : row.direct ? "DIRECT INPUT" : "MATERIAL INPUT"}</small></span></span><span>{n(row.required)}</span><span>{n(row.availableToProject)}</span><span className="missing">{n(row.outstanding)}</span><span className="who">{rows.length ? rows.map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") : project.mode === "solo" ? project.createdByCharacterName : "Unassigned"}{rows.length && open > 0 ? ` · ${n(open)} open` : ""}</span><span><b className={`state ${state.toLowerCase().replace(/\s/g, "-")}`}>{state}</b></span></div>; })}</div><div className={`foundry-final ${project.finalAssembly?.ready ? "ready" : ""}`}><span className="tree-name">{project.mode === "corporation" && <input type="checkbox" checked={selected.has("final-assembly")} disabled={remaining("final-assembly") <= 0} onChange={() => toggleTarget("final-assembly")} />}<span><strong>Final Assembly</strong><small>{project.finalAssembly?.ready ? "Dependencies satisfied" : `${project.finalAssembly?.blockerCount} blockers`}</small></span></span><b>{project.finalAssembly?.ready ? "READY TO BUILD" : "BLOCKED"}</b><span>{(assignmentsByTarget.get("final-assembly") ?? []).map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") || (project.mode === "solo" ? project.createdByCharacterName : "Unassigned")}</span></div></article>}
-
-        {workbenchTab === "production" && <article className="industrial-panel foundry-production-lots foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">PRODUCTION LOTS</p><h3>Traceable output</h3><p>Every completed manufacturing run keeps a stable Sage identifier through Foundry and Wallet Ledger reconciliation.</p></div><span className="industrial-status live">{(project.productionLots ?? []).length} LOT{(project.productionLots ?? []).length === 1 ? "" : "S"}</span></div>{(project.productionLots ?? []).length ? <div className="foundry-lot-list"><div className="foundry-lot-row heading"><span>Production ID</span><span>Produced</span><span>Output</span><span>Sold</span><span>Remaining</span><span>Ledger</span></div>{(project.productionLots ?? []).map((lot: any) => <div className="foundry-lot-row" key={lot.id}><span className="foundry-lot-id"><strong>{lot.id}</strong><small>EVE job {lot.industryJobId}</small></span><span>{new Date(lot.producedAt).toLocaleString()}</span><span>{n(lot.quantity)}</span><span>{n(lot.soldQuantity)}</span><span>{n(lot.remainingQuantity)}</span><b className={`state ${lot.reconciliationStatus}`}>{String(lot.reconciliationStatus).toUpperCase()}</b></div>)}</div> : <div className="industrial-notice">No production lots have been recorded for this project yet.</div>}</article>}
-      </section>
 
       <div className="foundry-status-line">{message}</div>
     </>}
@@ -442,7 +869,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
             <span>
               <small>{draftSourceLabel}</small>
               <strong>{draftProductName || draftBlueprintName}</strong>
-              <em>{draftBlueprintName} · {n(quantity)} unit{quantity === 1 ? "" : "s"} · ME {me} / TE {te}</em>
+              <em>{draftBlueprintName} · {n(quantity)} unit{quantity === 1 ? "" : "s"} · ME {me} / TE {te}{!manual && selectedOwned ? ` · ${blueprintRunLabel(selectedOwned)}` : ""}</em>
             </span>
           </div>
           <div className="foundry-empty-draft-meta">

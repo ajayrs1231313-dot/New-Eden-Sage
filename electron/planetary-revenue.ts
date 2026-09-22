@@ -269,6 +269,79 @@ async function piIndex():Promise<PiIndex> {
   }));
 }
 
+export type PlanetaryAcquisitionGuide = {
+  typeId:number;
+  name:string;
+  tier:PlanetaryTier;
+  method:"extraction"|"processing";
+  schematicId:number|null;
+  schematicName:string|null;
+  cycleTimeSeconds:number|null;
+  outputQuantity:number;
+  inputs:Array<{typeId:number;name:string;quantity:number;tier:PlanetaryTier}>;
+  planetTypes:string[];
+  facility:string;
+  bestWay:string;
+  sourceLabel:string;
+};
+
+export async function getPlanetaryAcquisitionGuide(typeId:number):Promise<PlanetaryAcquisitionGuide|null> {
+  const index=await piIndex();
+  const id=Number(typeId);
+  if (!(id>0) || !index.productTypeIds.has(id)) return null;
+  const name=index.names.get(id) ?? `Type ${id}`;
+  const tier=index.tiers.get(id) ?? "unknown";
+  const schematic=index.schematicByOutput.get(id);
+  if (!schematic) {
+    const planetTypes=[...index.resourcesByPlanetType.entries()]
+      .filter(([,resources])=>resources.has(id))
+      .map(([planetTypeId])=>(index.names.get(planetTypeId) ?? `Type ${planetTypeId}`).replace(/\s+Planet$/i,""))
+      .sort();
+    return {
+      typeId:id,
+      name,
+      tier,
+      method:"extraction",
+      schematicId:null,
+      schematicName:null,
+      cycleTimeSeconds:null,
+      outputQuantity:1,
+      inputs:[],
+      planetTypes,
+      facility:"Extractor Control Unit",
+      bestWay:planetTypes.length
+        ? `Extract ${name} with an ECU on ${planetTypes.join(", ")} planets, then route it to storage or the next PI processor.`
+        : `Extract ${name} with Planetary Industry and route it into the required processor chain.`,
+      sourceLabel:"CCP EVE Static Data — planetSchematics.jsonl / planet resource matrix",
+    };
+  }
+  const output=(schematic.types ?? []).find((line)=>!line.isInput && Number(line._key)===id)
+    ?? (schematic.types ?? []).find((line)=>!line.isInput);
+  const inputs=(schematic.types ?? []).filter((line)=>line.isInput).map((line)=>({
+    typeId:Number(line._key),
+    name:index.names.get(Number(line._key)) ?? `Type ${line._key}`,
+    quantity:Math.max(0,Number(line.quantity ?? 0)),
+    tier:index.tiers.get(Number(line._key)) ?? "unknown",
+  }));
+  const facility=tier==="P1" ? "Basic Industry Facility" : tier==="P4" ? "High-Tech Production Plant" : "Advanced Industry Facility";
+  const recipe=inputs.map((line)=>`${line.quantity}× ${line.name}`).join(", ");
+  return {
+    typeId:id,
+    name,
+    tier,
+    method:"processing",
+    schematicId:Number(schematic._key),
+    schematicName:schematic.name?.en ?? name,
+    cycleTimeSeconds:Math.max(0,Number(schematic.cycleTime ?? 0)) || null,
+    outputQuantity:Math.max(1,Number(output?.quantity ?? 1)),
+    inputs,
+    planetTypes:[],
+    facility,
+    bestWay:`Run the ${name} PI schematic in a ${facility}${recipe ? ` using ${recipe}` : ""}; build upstream PI inputs on-planet where practical to cut hauling.`,
+    sourceLabel:"CCP EVE Static Data — planetSchematics.jsonl",
+  };
+}
+
 function isoOrNull(value:unknown) {
   if (typeof value !== "string" || !value.trim()) return null;
   const time = Date.parse(value);

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CharacterSnapshot, PlanetaryAlert } from "./types";
 import { IndustrialProjectFoundry } from "./IndustrialProjectFoundry";
 import { InventionIntelligence } from "./InventionIntelligence";
+import { blueprintKind, blueprintRunCount, blueprintRunLabel } from "./blueprint-display";
 import industrialBanner from "./fitter-assets/misty-teal-orbital-shipyard-hangar.webp";
 import "./invention-lab.css";
 import "./industrial-command.css";
@@ -1188,7 +1189,7 @@ export function IndustrialCommand({
   const blueprintLibraryRows = libraryBlueprints.map((blueprint, index) => {
     const typeName = blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint";
     const location = blueprintLocationDetails(blueprint);
-    const kind: "BPO" | "BPC" = blueprint.quantity === -1 ? "BPO" : "BPC";
+    const kind: "BPO" | "BPC" = blueprintKind(blueprint) === "BPO" ? "BPO" : "BPC";
     return { blueprint, index, typeName, location, kind, scope: blueprintLibraryScope };
   });
   const normalizedBlueprintFilter = blueprintFilter.trim().toLowerCase();
@@ -1346,7 +1347,7 @@ export function IndustrialCommand({
             <h3>{item.productName}</h3><p>{item.system}{item.jumps != null ? <> · <strong>{item.jumps} jump{item.jumps === 1 ? '' : 's'}</strong> from {item.originSystem}</> : null} · {item.security === 'high' ? 'High sec' : item.security === 'low' ? 'Low sec' : 'Null sec'}</p>
             <div className="industrial-opportunity-numbers"><span><small>Recommended batch</small><strong>{number(item.batch)}</strong></span><span><small>Build / unit</small><strong>{item.buildUnitCost > 0 ? isk(item.buildUnitCost) : '—'}</strong></span><span><small>Immediate buyer</small><strong>{item.bestBuy == null ? '—' : isk(item.bestBuy)}</strong></span><span><small>Est. batch profit</small><strong className={item.batchProfit != null && item.batchProfit > 0 ? 'positive' : ''}>{item.batchProfit == null ? '—' : isk(item.batchProfit)}</strong></span></div>
             <div className="industrial-opportunity-signals"><span>{number(item.buyOrders ?? 0)} buy orders · {number(item.buyVolume ?? 0)} wanted</span><span>{number(item.sellOrders ?? 0)} sell orders · {number(item.sellVolume ?? 0)} supplied</span>{item.supplyGap && <b>Supply gap</b>}{item.thinSupply && <b>Thin supply</b>}{item.buyPressure && <b>Buy pressure</b>}</div>
-            <div className="industrial-opportunity-blueprint"><span>{item.blueprintName}</span><small>ME {item.materialEfficiency}% · TE {item.timeEfficiency}%</small></div>
+            <div className="industrial-opportunity-blueprint"><span>{item.blueprintName}</span><small>ME {item.materialEfficiency}% · TE {item.timeEfficiency}% · {blueprintRunLabel({ blueprintKind: item.blueprintKind, blueprintRuns: item.blueprintRuns })}</small></div>
           </article>)}</div> : <article className="industrial-panel industrial-planned"><p className="eyebrow">INDUSTRIAL OPPORTUNITY ENGINE</p><h3>{opportunityBusy ? 'Building actionable demand intelligence…' : 'No ranked opportunities yet'}</h3><p>{opportunityBusy ? 'Sage is resolving owned blueprints, checking their products against retained regional market intelligence and calculating manufacture-vs-demand economics in the background.' : 'Refresh the opportunity scan after market data or blueprint ownership changes.'}</p></article>}
         </div>
       )}
@@ -1579,7 +1580,7 @@ export function IndustrialCommand({
           <article className="industrial-panel industrial-production-control industrial-research-control industrial-workbench-card">
             <div className="industrial-panel-head"><div><p className="eyebrow">RESEARCH & INVENTION</p><h3>Blueprint activity intelligence</h3><p>Inspect copying, ME/TE research, invention inputs, output options and skill requirements directly from CCP's local SDE.</p></div><span className="industrial-status live">OFFLINE SDE</span></div>
             {planningBlueprints.length ? <><div className="industrial-production-controls research-controls"><label><span>Research blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setBlueprintActivities(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label><label><span>Owned blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setBlueprintActivities(null); }}>
-              {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.lpStoreTarget ? "LP Store target - " : ""}{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} - ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{blueprint.lpStoreTarget ? " - copy runs unknown" : (blueprint.runs ?? -1) >= 0 ? ` - ${blueprint.runs} runs` : " - BPO"}</option>)}
+              {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.lpStoreTarget ? "LP Store target - " : ""}{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} - ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0} - {blueprintRunLabel(blueprint)}</option>)}
             </select></label><button type="button" onClick={loadBlueprintActivities}>Analyse activities</button></div><div className="industrial-notice">{activityStatus}</div></> : <div className="industrial-notice">No blueprints are available in the selected personal/corporation scope.</div>}
           </article>
           {blueprintActivities ? <BlueprintActivityView data={blueprintActivities} /> : null}
@@ -1621,7 +1622,7 @@ export function IndustrialCommand({
               <div className="industrial-production-controls">
                 <label><span>Production blueprint scope</span><select value={blueprintLibraryScope} onChange={(event) => { setBlueprintLibraryScope(event.target.value as "personal" | "corporation"); setSelectedBlueprintIndex(0); setManufacturingPlan(null); }}><option value="personal">Personal blueprints</option><option value="corporation" disabled={!activeData.corpBlueprints.length}>Corporation blueprints</option></select></label>
                   <label><span>Blueprint</span><select value={Math.min(selectedBlueprintIndex, Math.max(0, planningBlueprints.length - 1))} onChange={(event) => { setSelectedBlueprintIndex(Number(event.target.value)); setManufacturingPlan(null); }}>
-                  {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.lpStoreTarget ? "LP Store target - " : ""}{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} - ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0}{blueprint.lpStoreTarget ? " - copy runs unknown" : (blueprint.runs ?? -1) >= 0 ? ` - ${blueprint.runs} runs` : " - BPO"}</option>)}
+                  {planningBlueprints.map((blueprint, index) => <option key={blueprint.item_id ?? index} value={index}>{blueprint.lpStoreTarget ? "LP Store target - " : ""}{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Unknown blueprint"} - ME {blueprint.material_efficiency ?? 0} / TE {blueprint.time_efficiency ?? 0} - {blueprintRunLabel(blueprint)}</option>)}
                 </select></label>
                 <label><span>Target output</span><input type="number" min="1" step="1" value={targetQuantity} onChange={(event) => setTargetQuantity(Math.max(1, Number(event.target.value) || 1))} /></label>
                 <label className="industrial-stock-toggle"><input type="checkbox" checked={assetSharing.enabled} onChange={(event) => setAssetSharing((current) => ({ ...current, enabled: event.target.checked }))} /><span>Use selected shared asset pool ({materialOwners.length} character{materialOwners.length === 1 ? "" : "s"})</span></label>
@@ -1649,7 +1650,7 @@ export function IndustrialCommand({
         <article className="industrial-panel industrial-full-panel">
           <div className="industrial-panel-head"><div><p className="eyebrow">BLUEPRINTS</p><h3>Selected character blueprint library</h3><p>{selectedBlueprints.length} blueprint records across {selectedCharacterIds.length} selected characters.</p></div><button type="button" onClick={() => { setFoundryTab("blueprints"); setTab("foundry"); }}>Open Project Foundry</button></div>
           <div className="industrial-table"><div className="industrial-table-row heading"><span>Blueprint</span><span>ME</span><span>TE</span><span>Runs</span><span>Type</span><span>Owner</span></div>
-            {selectedIndustrial.flatMap(({ snapshot, blueprints }) => blueprints.map((blueprint, index) => <div className="industrial-table-row" key={`${snapshot.characterId}:${blueprint.item_id ?? index}`}><strong>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint"}</strong><span>{blueprint.material_efficiency ?? 0}%</span><span>{blueprint.time_efficiency ?? 0}%</span><span>{blueprint.runs == null || blueprint.runs < 0 ? "Original" : number(blueprint.runs)}</span><span>{blueprint.quantity === -2 ? "BPC" : "BPO"}</span><span>{snapshot.character.name}</span></div>)).slice(0, 100)}
+            {selectedIndustrial.flatMap(({ snapshot, blueprints }) => blueprints.map((blueprint, index) => <div className="industrial-table-row" key={`${snapshot.characterId}:${blueprint.item_id ?? index}`}><strong>{blueprint.type_id ? typeNames[blueprint.type_id] ?? `Type ${blueprint.type_id}` : "Blueprint"}</strong><span>{blueprint.material_efficiency ?? 0}%</span><span>{blueprint.time_efficiency ?? 0}%</span><span>{blueprintKind(blueprint) === "BPO" ? "∞" : blueprintRunCount(blueprint) == null ? "Unknown" : number(blueprintRunCount(blueprint)!)}</span><span>{blueprintKind(blueprint)}</span><span>{snapshot.character.name}</span></div>)).slice(0, 100)}
           </div>
         </article>
       )}

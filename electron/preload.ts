@@ -224,6 +224,7 @@ contextBridge.exposeInMainWorld("sage", {
   prepareLootDataLocal: () => ipcRenderer.invoke("loot:prepare"),
   getManufacturingPlan: (input: unknown) => ipcRenderer.invoke("industrial:manufacturing-plan", input),
   getFoundryWorkspace: (input: unknown) => ipcRenderer.invoke("industrial:foundry-workspace", input),
+  getFoundryMaterialPlan: (input: unknown) => ipcRenderer.invoke("industrial:foundry-material-plan", input),
   getFoundryProjects: (input: unknown) => ipcRenderer.invoke("industrial:foundry-projects", input),
   searchFoundryBlueprints: (input: unknown) => ipcRenderer.invoke("industrial:foundry-blueprint-search", input),
   createFoundryProject: (input: unknown) => ipcRenderer.invoke("industrial:foundry-create", input),

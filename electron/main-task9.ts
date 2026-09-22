@@ -49,9 +49,10 @@ import { buildFitShoppingRoute, findRadiusTrades } from "./trade";
 import { getEveNews } from "./news";
 import { runFittingWorker, disposeFittingWorker } from "./fitting-worker-manager";
 import { getFittingTypeInfoLocal } from "./fitting-dogma";
-import { analyzeBlueprintActivities, analyzeManufacturingPlan, analyzeReactionPlan, getIndustrySystemCostIndices, getReactionCatalogue } from "./industrial-engine";
+import { analyzeBlueprintActivities, analyzeManufacturingPlan, analyzeReactionPlan, getIndustrialTypeNames, getIndustrySystemCostIndices, getReactionCatalogue } from "./industrial-engine";
 import { analyzeRefinery, getRefineryCatalogue } from "./refinery-engine";
 import { createFoundryProject, getFoundryProjects, getFoundryWorkspace, removeFoundryProject, searchFoundryBlueprintCatalogue, synchronizeFoundryLifecycle, updateFoundryProject } from "./project-foundry";
+import { disposeFoundryMaterialPlanProcesses, getFoundryMaterialPlanCached } from "./foundry-material-plan-manager";
 import { getLootAcquisition, prepareLootDataLocal, searchLootItems } from "./loot-engine";
 import { analyzeHullAccessPreviews, analyzeShipReadiness } from "./readiness";
 import { analyzeActivityReadiness } from "./activity-readiness";
@@ -504,6 +505,7 @@ async function ensureSyncMemoryHeadroom(context: string) {
     await Promise.all([
       disposeFittingWorker(),
       disposeLpStoreWorker(),
+      disposeFoundryMaterialPlanProcesses(),
       releaseIdleMarketAnalysisWorker(),
       releaseIdleAnalysisWorkers(),
     ]);
@@ -1725,6 +1727,131 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("industrial:foundry-update", async (_event, input: any) => updateFoundryProject(input));
   ipcMain.handle("industrial:foundry-delete", async (_event, input: any) =>
     removeFoundryProject(String(input?.characterId ?? ""), String(input?.projectId ?? "")));
+
+  ipcMain.handle("industrial:foundry-material-plan", async (_event, input: any) => {
+    const contextCharacterId = String(input?.characterId ?? "");
+    const projectId = String(input?.projectId ?? "");
+    const contextSnapshot = getSnapshot(contextCharacterId) as any;
+    if (!contextSnapshot) throw new Error("Select and sync a connected character.");
+    const projects = await getFoundryProjects(contextCharacterId);
+    const project = projects.find((row: any) => String(row.id) === projectId) ?? projects[0];
+    if (!project) throw new Error("No Project Foundry project is available.");
+
+    const children = new Set((project.buildTree ?? []).map((row: any) => String(row.parentId ?? "")).filter(Boolean));
+    const baseByType = new Map<number, { typeId: number; name: string; required: number }>();
+    const componentByType = new Map<number, { typeId: number; name: string; required: number }>();
+    for (const row of project.buildTree ?? []) {
+      if (Number(row.depth ?? 0) > 0 && row.kind === "component") {
+        const componentTypeId = Number(row.typeId ?? 0);
+        const componentRequired = Math.max(0, Math.ceil(Number(row.required ?? 0)));
+        if (componentTypeId > 0 && componentRequired > 0) {
+          const currentComponent = componentByType.get(componentTypeId) ?? { typeId: componentTypeId, name: String(row.name ?? ("Type " + componentTypeId)), required: 0 };
+          currentComponent.required += componentRequired;
+          componentByType.set(componentTypeId, currentComponent);
+        }
+      }
+      if (Number(row.depth ?? 0) <= 0 || row.kind !== "material" || children.has(String(row.id))) continue;
+      const typeId = Number(row.typeId ?? 0);
+      const required = Math.max(0, Math.ceil(Number(row.required ?? 0)));
+      if (!(typeId > 0) || required <= 0) continue;
+      const current = baseByType.get(typeId) ?? { typeId, name: String(row.name ?? ("Type " + typeId)), required: 0 };
+      current.required += required;
+      baseByType.set(typeId, current);
+    }
+
+    const snapshots = listSnapshots() as any[];
+    const characters = snapshots.map((row) => ({
+      id: String(row.characterId),
+      name: String(row?.character?.name ?? row.characterId),
+      corporationId: String(row?.character?.corporation_id ?? ""),
+      updatedAt: row.updatedAt ?? null,
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    const requestedRefinerId = String(input?.refineryCharacterId ?? contextCharacterId);
+    const refinerSnapshot = snapshots.find((row) => String(row.characterId) === requestedRefinerId) ?? contextSnapshot;
+    const refineryCharacterId = String(refinerSnapshot.characterId ?? contextCharacterId);
+
+    const structures = Array.isArray(refinerSnapshot?.extended?.corporation?.structures) ? refinerSnapshot.extended.corporation.structures : [];
+    const facilities = Array.isArray(refinerSnapshot?.extended?.corporation?.facilities) ? refinerSnapshot.extended.corporation.facilities : [];
+    const typeIds = [...new Set([...structures, ...facilities].map((row: any) => Number(row?.type_id ?? row?.typeId ?? 0)).filter((id: number) => id > 0))];
+    const typeNames = await getIndustrialTypeNames(typeIds);
+    const facilityById = new Map<number, any>();
+    for (const row of facilities) {
+      const id = Number(row?.facility_id ?? row?.structure_id ?? 0);
+      if (id > 0) facilityById.set(id, row);
+    }
+    const structureById = new Map<number, any>();
+    for (const row of structures) {
+      const id = Number(row?.structure_id ?? row?.facility_id ?? 0);
+      if (id > 0) structureById.set(id, row);
+    }
+    const stationRows = new Map<string, any>();
+    const addStation = (key: string, name: string, id: number, typeId: number, systemName: string, forceNpc = false) => {
+      if (!key || !name || stationRows.has(key)) return;
+      const typeName = String((typeNames as any)[typeId] ?? "");
+      const lower = typeName.toLowerCase();
+      const facility = forceNpc ? "npc" : lower.includes("tatara") ? "tatara" : lower.includes("athanor") ? "athanor" : "npc";
+      stationRows.set(key, { key, id, name, typeId: typeId || null, typeName: typeName || null, systemName: systemName || null, facility });
+    };
+    for (const row of structures) {
+      const id = Number(row?.structure_id ?? 0);
+      const linked = facilityById.get(id);
+      const typeId = Number(row?.type_id ?? linked?.type_id ?? 0);
+      const typeName = String((typeNames as any)[typeId] ?? "");
+      if (!/athanor|tatara/i.test(typeName)) continue;
+      addStation("structure:" + id, String(row?.name ?? row?.structure_name ?? typeName ?? ("Structure " + id)), id, typeId, String(row?.solar_system_name ?? row?.system_name ?? linked?.solar_system_name ?? linked?.system_name ?? ""));
+    }
+    for (const row of facilities) {
+      const id = Number(row?.facility_id ?? row?.structure_id ?? 0);
+      const typeId = Number(row?.type_id ?? structureById.get(id)?.type_id ?? 0);
+      const typeName = String((typeNames as any)[typeId] ?? "");
+      if (!/athanor|tatara/i.test(typeName)) continue;
+      const structure = structureById.get(id);
+      addStation("structure:" + id, String(structure?.name ?? row?.name ?? row?.facility_name ?? typeName ?? ("Facility " + id)), id, typeId, String(row?.solar_system_name ?? row?.system_name ?? structure?.solar_system_name ?? structure?.system_name ?? ""));
+    }
+
+    const currentStationId = Number(refinerSnapshot?.location?.station_id ?? 0);
+    if (currentStationId > 0) addStation("station:" + currentStationId, String(refinerSnapshot?.location?.place_name ?? ("NPC station " + currentStationId)), currentStationId, 0, String(refinerSnapshot?.location?.solar_system_name ?? ""), true);
+    const assets = Array.isArray(refinerSnapshot?.extended?.assets) ? refinerSnapshot.extended.assets : [];
+    for (const asset of assets) {
+      const station = String(asset?.station ?? "").trim();
+      if (!station) continue;
+      const id = Number(asset?.root_location_id ?? asset?.location_id ?? 0);
+      addStation("station:" + (id || station), station, id, 0, String(asset?.system ?? ""), true);
+    }
+    if (!stationRows.size) addStation("profile:npc", "NPC station profile", 0, 0, String(refinerSnapshot?.location?.solar_system_name ?? ""), true);
+    const stations = [...stationRows.values()].sort((a, b) => (a.facility === "npc" ? 1 : 0) - (b.facility === "npc" ? 1 : 0) || a.name.localeCompare(b.name));
+    const requestedStationKey = String(input?.stationKey ?? "");
+    const selectedStation = stations.find((row) => row.key === requestedStationKey) ?? stations[0];
+    const rig = selectedStation.facility === "npc" ? "none" : input?.rig === "t1" || input?.rig === "t2" ? input.rig : "none";
+    const security = input?.security === "low" || input?.security === "null" ? input.security : "high";
+    const miningReach = input?.miningReach === "low" || input?.miningReach === "null" ? input.miningReach : "high";
+
+    const materialCalculation = await getFoundryMaterialPlanCached({
+      snapshot: refinerSnapshot,
+      requiredMaterials: [...baseByType.values()],
+      componentMaterials: [...componentByType.values()],
+      facility: selectedStation.facility,
+      rig,
+      security,
+      miningReach,
+      yieldOverride: input?.yieldOverride,
+    });
+    const plan = materialCalculation.result;
+
+    return {
+      ...plan,
+      calculation: {
+        cacheSource: materialCalculation.cacheSource,
+        workerBudget: materialCalculation.workerBudget,
+      },
+      project: { id: project.id, name: project.name, productName: project.productName, quantity: project.quantity },
+      characters,
+      stations,
+      selectedCharacterId: refineryCharacterId,
+      selectedStationKey: selectedStation.key,
+      station: selectedStation,
+    };
+  });
   ipcMain.handle("industrial:refinery-catalogue", async () => getRefineryCatalogue());
   ipcMain.handle("industrial:refinery-analysis", async (_event, input: any) => {
     const characterId = String(input?.characterId ?? "");
@@ -1750,6 +1877,7 @@ if (!hasSingleInstanceLock) {
       rig: input?.rig,
       security: input?.security,
       implant: input?.implant,
+      yieldOverride: input?.yieldOverride,
     });
   });
   ipcMain.handle("industrial:reaction-catalogue", async () => getReactionCatalogue());
@@ -3264,6 +3392,7 @@ app.on("before-quit", () => {
   disposePublicDataRefreshProcess();
   disposeContractIntelligenceProcess();
   void disposeLpStoreWorker();
+  void disposeFoundryMaterialPlanProcesses();
 });
 
 app.on("window-all-closed", () => {
@@ -3276,6 +3405,7 @@ app.on("window-all-closed", () => {
   void disposeAnalysisWorker();
   void disposeFittingWorker();
   void disposeLpStoreWorker();
+  void disposeFoundryMaterialPlanProcesses();
   void stopMcpWriteBridge();
   if (process.platform !== "darwin") app.quit();
 });
