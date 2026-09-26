@@ -1,6 +1,6 @@
 {
   "name": "new-eden-sage",
-  "version": "1.1.27",
+  "version": "1.1.28",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "author": "New Eden Sage contributors",
@@ -19,6 +19,8 @@
     "dist:linux": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --linux AppImage deb --publish never",
     "verify:release-resources": "node scripts/verify-release-resources.cjs",
     "fitting:refresh-bundle": "tsc -p tsconfig.electron.json && node scripts/build-fitting-bundle.cjs",
+    "eve:patch-intake": "node scripts/eve-patch-intake.mjs",
+    "eve:inspect-patch": "node scripts/eve-patch-inspect.mjs",
     "test:navigation": "tsc -p tsconfig.electron.json && node tests/navigation/run-all.cjs",
     "dev:stack": "concurrently -k \"vite --port 42814 --strictPort\" \"npm:dev:electron\" \"npm:dev:app\"",
     "test:system-news": "node --experimental-strip-types tests/system-news/killmail-windows.test.mjs",

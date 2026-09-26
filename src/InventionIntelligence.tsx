@@ -233,7 +233,7 @@ export function InventionIntelligence({ analysis, busy, decryptor, onDecryptorCh
               const roi = expectedRoi(item);
               const selectedRow = selected && rowKey(selected) === rowKey(item);
               return <button type="button" className={`ii-result-row${selectedRow ? " selected" : ""}`} key={rowKey(item)} onClick={() => { setSelectedKey(rowKey(item)); setShowBreakdown(false); }}>
-                <span className="ii-product-cell"><img src={`sage-asset://type/${item.productTypeId}/icon?size=64`} alt="" /><span><strong>{item.inventedBlueprintName}</strong><small>{item.productName} · {item.productGroupName ?? categoryLabel(String(item.productCategory))}</small>{item.ownsSourceOriginal && <em>OWNED BPO</em>}</span></span>
+                <span className="ii-product-cell"><img src={Number(item.inventedBlueprintTypeId) > 0 ? `sage-asset://blueprint/${item.inventedBlueprintTypeId}/bpc` : `sage-asset://type/${item.productTypeId}/icon?size=64`} alt="" /><span><strong>{item.inventedBlueprintName}</strong><small>{item.productName} · {item.productGroupName ?? categoryLabel(String(item.productCategory))}</small>{item.ownsSourceOriginal && <em>OWNED BPO</em>}</span></span>
                 <span className="ii-chance"><strong>{probability(item.probability)}</strong><i style={{ "--chance": `${Math.max(0, Math.min(100, Number(item.probability ?? 0) * 100))}%` } as React.CSSProperties} /></span>
                 <span>{item.manufacturingCostPerRun == null ? "Unpriced" : isk(item.manufacturingCostPerRun)}</span>
                 <span>{item.attemptCost == null ? "Unpriced" : isk(item.attemptCost)}</span>

@@ -1,6 +1,6 @@
 import { getSnapshot } from "./database";
 import { analyzeInventionOpportunities, prepareIndustrialDataLocal } from "./industrial-engine";
-import { prepareIndustrialCommand } from "./industrial-preparation";
+import { getIndustrialOpportunitiesPrepared, prepareIndustrialCommand } from "./industrial-preparation";
 import { savePersistedResult } from "./persistent-result-cache";
 import { prepareRefineryStaticDataLocal } from "./refinery-engine";
 import { analyzeShipReadiness } from "./readiness";
@@ -10,6 +10,7 @@ type FeaturePrepInput = (
   | { task: "industry" }
   | { task: "refinery" }
   | { task: "industrial-command"; characterId: string }
+  | { task: "industrial-opportunities"; input: any; force?: boolean }
   | { task: "invention"; characterId: string; decryptorTypeId?: number | null; cacheKey: unknown }
   | { task: "ship-readiness"; characterId: string; hullTypeId: number; cloneState: "alpha" | "omega"; masteryLevel: number; cacheKey: unknown }
 ) & { privateDataKey?: string };
@@ -50,6 +51,15 @@ async function main(input: FeaturePrepInput) {
   if (input.task === "industrial-command") {
     const result = await prepareIndustrialCommand(input.characterId, (percent, message) => {
       send({ type: "progress", percent, message });
+    });
+    sendAndExit({ type: "complete", result });
+    return;
+  }
+
+  if (input.task === "industrial-opportunities") {
+    const result = await getIndustrialOpportunitiesPrepared(input.input, {
+      force: Boolean(input.force),
+      onProgress: (percent, message) => send({ type: "progress", percent, message }),
     });
     sendAndExit({ type: "complete", result });
     return;

@@ -70,7 +70,7 @@ function CapabilityHudDial({ snapshot, percent }: { snapshot: CharacterSnapshot;
           return <line className="capability-hud-tick" key={index} x1={x1} y1={y1} x2={x2} y2={y2} />;
         })}
       </svg>
-      <div className="capability-hud-ship"><img src={`https://images.evetech.net/types/${snapshot.ship.ship_type_id}/render?size=128`} alt="" /></div>
+      <div className="capability-hud-ship"><img src={`sage-asset://type/${snapshot.ship.ship_type_id}/render?size=128`} alt="" /></div>
       <strong>{safePercent}%</strong>
     </div>
   );

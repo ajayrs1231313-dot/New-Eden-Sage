@@ -9,6 +9,8 @@ import {
 } from "./doctrine-model";
 
 export type DoctrineCorporation = {
+  characterId: string;
+  characterName: string;
   corporationId: number;
   name: string;
   data?: any;
@@ -192,9 +194,43 @@ export function CorporationDoctrines({ corporation, snapshots }: { corporation: 
     updateDoctrine(doctrineId, { fits: doctrine.fits.filter((item) => item.id !== fitId) });
   }
 
-  function publishDraft(doctrine: DoctrineRecord) {
+  async function publishDraft(doctrine: DoctrineRecord) {
     if (!doctrine.fits.length) return;
-    setMessage(`${doctrine.name} is ready to publish. The verified Sage Online corporation workspace is the next connection before this button transmits anything.`);
+    const doctrineName = doctrine.name.trim() || `Doctrine ${doctrine.slot}`;
+    const fitLines = doctrine.fits.map((fit) => `• ${fit.hullName} — ${fit.fitName}`).join("\n");
+    const notes = doctrine.notes.trim();
+    setMessage(`Publishing ${doctrineName} to Sage Mail…`);
+    try {
+      const result = await window.sage.sendSageDoctrineMail({
+        characterId: corporation.characterId,
+        subject: `Doctrine published · ${doctrineName}`,
+        body: [
+          `${corporation.name} has published ${doctrineName}.`,
+          "",
+          fitLines,
+          notes ? "" : null,
+          notes ? "FC instructions:" : null,
+          notes || null,
+        ].filter((value): value is string => value != null).join("\n"),
+        dedupKey: `doctrine:${corporation.corporationId}:${doctrine.id}:${doctrine.updatedAt ?? "initial"}`,
+        metadata: {
+          corporationId: corporation.corporationId,
+          corporationName: corporation.name,
+          doctrineId: doctrine.id,
+          doctrineName,
+          doctrineSlot: doctrine.slot,
+          fitCount: doctrine.fits.length,
+          updatedAt: doctrine.updatedAt,
+        },
+      });
+      setMessage(
+        `${doctrineName} published to ${result.delivered} Sage mailbox${result.delivered === 1 ? "" : "es"}`
+        + (result.skippedFull ? ` · ${result.skippedFull} full mailbox${result.skippedFull === 1 ? "" : "es"} skipped` : "")
+        + (result.duplicates ? ` · ${result.duplicates} already delivered` : ""),
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : `Could not publish ${doctrineName} through Sage Mail.`);
+    }
   }
 
   return (
@@ -261,7 +297,7 @@ export function CorporationDoctrines({ corporation, snapshots }: { corporation: 
             </div>
             <div className="doctrine-slot-actions">
               <button className="doctrine-tactical-button" onClick={() => setTacticalDoctrineId(selected.id)} disabled={!selected.fits.length}>Tactical Map</button>
-              <button onClick={() => publishDraft(selected)} disabled={!selected.fits.length}>Publish to Members</button>
+              <button onClick={() => void publishDraft(selected)} disabled={!selected.fits.length}>Publish to Members</button>
               <button className="danger" onClick={() => deleteDoctrine(selected)}>Delete Doctrine</button>
             </div>
           </div>

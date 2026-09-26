@@ -842,7 +842,7 @@ export function advanceWargameSimulation(units: WargameUnit[], options: WargameA
             if (aPct < tPct && aCap && tCap) { const amount=Math.min(Math.max(0,Number(system.amountPerCycle)||0)*effectiveness,target.capacitorCurrent??0); target.capacitorCurrent=Math.max(0,(target.capacitorCurrent??0)-amount); controller.capacitorCurrent=Math.min(aCap,(controller.capacitorCurrent??0)+amount); }
             controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
           } else if (system.kind === "remoteCapacitor" && (controller.supportCooldowns?.[key] ?? 0) <= 0 && (target.capacitorCapacity ?? 0) > 0) {
-            const amount=Math.max(0,Number(system.amountPerCycle)||0)*effectiveness; target.capacitorCurrent=Math.min(target.capacitorCapacity!, (target.capacitorCurrent??0)+amount); controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
+            const receiveMultiplier=Math.max(0,Math.min(1,Number(target.remoteCapacitorReceiveMultiplier ?? 1))); const amount=Math.max(0,Number(system.amountPerCycle)||0)*effectiveness*receiveMultiplier; target.capacitorCurrent=Math.min(target.capacitorCapacity!, (target.capacitorCurrent??0)+amount); controller.supportCooldowns![key]=Math.max(1,Number(system.cycleSeconds)||1);
           } else if (system.kind === "ecm" && (controller.supportCooldowns?.[key] ?? 0) <= 0) {
             const sensor=Math.max(.1,(target.sensorStrength??1)*(target.burstSensorStrengthMultiplier??1)); const single=Math.max(0,Math.min(1,(Number(system.strength)||0)*ewarStrength*effectiveness/sensor)); const chance=1-Math.pow(1-single,copies);
             const seed=Math.abs(Math.sin((elapsed+second+1)*12.9898 + controller.id.length*78.233 + target.id.length*37.719))*43758.5453;

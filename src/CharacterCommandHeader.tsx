@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import type { CharacterSnapshot, PublicDataStatus } from "./types";
 import { SystemClock } from "./SystemClock";
+import { SageMailButton } from "./SageMail";
 import "./character-command-header.css";
 
 type Props = {
@@ -266,10 +267,11 @@ export function CharacterCommandHeader({ title = "Character Command", subtitle =
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
             <span>Add character</span>
           </button>
-          <button type="button" className="cc-header-action cc-reserved-action" disabled title="Reserved for a future Sage action">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z" /><path d="M9 12h6" /></svg>
-            <span>Reserved</span>
-          </button>
+          <SageMailButton
+            characterId={snapshot?.characterId}
+            characterName={snapshot?.character.name}
+            onReconnect={onAddCharacter}
+          />
           <AppUpdateAction />
         </div>
       </div>

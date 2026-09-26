@@ -684,7 +684,7 @@ export const activityDefinitions: ActivityDefinition[] = [
   {
     id: "faction-warfare",
     label: "Faction Warfare",
-    description: "Small-ship PvP, frontline complexes and loyalty-point progression.",
+    description: "Small-ship PvP, frontline complexes, pirate Insurgencies and loyalty-point progression.",
     subcategories: [
       {
         id: "complexes",
@@ -694,7 +694,7 @@ export const activityDefinitions: ActivityDefinition[] = [
           {
             id: "fw-scout-small",
             label: "Scout / small complexes",
-            description: "Scout and small FW complexes with NVY/ADV gate rules, frequent engagements and low replacement cost.",
+            description: "Scout and small FW complexes with NVY/ADV gate rules. Cradle of War adds Small AF-1: Assault Frigates only, 25,000 LP base / 37,500 LP frontline, 150 VP, with warp-disrupting NPCs.",
             difficulty: "Intermediate",
             experience: "Basic solo PvP skills and willingness to learn matchups through repeated fights.",
             ships: ["Tristan", "Kestrel", "Republic Fleet Firetail", "Caldari Navy Hookbill", "Federation Navy Comet", "Thrasher"],
@@ -709,16 +709,31 @@ export const activityDefinitions: ActivityDefinition[] = [
           {
             id: "fw-medium-large",
             label: "Medium / moderate / large complexes",
-            description: "Cruiser, battlecruiser and battleship FW with NVY/ADV gate rules, where fleet composition, projection and tackle become more important.",
+            description: "Cruiser, battlecruiser and battleship FW/Insurgency complexes. Moderate ADV-3 is static from stage 2, pays 52,500 LP, creates 1.5% corruption/suppression and grants +20% per Battlecruiser hull-skill level; the 2026-09-24.1 hotfix explicitly corrected this for the Drekavac.",
             difficulty: "Advanced",
             experience: "Comfortable with small-gang communication, target calling and disengagement.",
-            ships: ["Caracal", "Omen Navy Issue", "Stabber Fleet Issue", "Hurricane", "Ferox Navy Issue", "Prophecy Navy Issue", "Tempest"],
+            ships: ["Caracal", "Omen Navy Issue", "Stabber Fleet Issue", "Hurricane", "Drekavac", "Ferox Navy Issue", "Prophecy Navy Issue", "Tempest"],
             coreSkills: [...core.fitting, ...core.navigation],
             supportSkills: [{ skill: "Advanced Weapon Upgrades", level: 4 }, { skill: "Thermodynamics", level: 4 }, { skill: "Propulsion Jamming", level: 4 }],
             incomeHooks: ["Faction Warfare loyalty points", "Kill loot", "Objective rewards"],
             selectors: [
               { id: "engagement", label: "Engagement", options: ["Solo", "Small gang", "Fleet"] },
               { id: "style", label: "Style", options: ["Brawl", "Kite", "Projection"] },
+            ],
+          },
+          {
+            id: "fw-insurgency",
+            label: "Pirate Insurgencies",
+            description: "Cradle of War rules: 7-day maximum duration, 48-hour forecasting, ambition cap 5, spread at corruption level 3, and a 1,500,000 LP maximum personal win contribution at 45% corruption/suppression. Win/loss contribution multipliers are 1.0x / 0.4x. Ice Heist pays 150,000 LP with a 4-hour respawn; Mining Ambush is now ADV-5.",
+            difficulty: "Advanced",
+            experience: "Comfortable with low-sec PvP, corruption/suppression mechanics, contested objectives and rapid changes in the active warzone.",
+            ships: ["Hurricane", "Ferox Navy Issue", "Prophecy Navy Issue", "Drake Navy Issue", "Omen Navy Issue", "Stabber Fleet Issue"],
+            coreSkills: [...core.fitting, ...core.navigation],
+            supportSkills: [{ skill: "Advanced Weapon Upgrades", level: 4 }, { skill: "Thermodynamics", level: 4 }, { skill: "Propulsion Jamming", level: 4 }],
+            incomeHooks: ["Insurgency contribution LP", "Complex LP", "Kill loot", "Ice Heist rewards"],
+            selectors: [
+              { id: "side", label: "Side", options: ["Pirate insurgents", "Empire militia"] },
+              { id: "objective", label: "Objective", options: ["Moderate ADV-3", "Ice Heist", "Mining Ambush ADV-5", "Small / Medium / Large ADV"] },
             ],
           },
           {
@@ -819,7 +834,7 @@ export const activityDefinitions: ActivityDefinition[] = [
           {
             id: "wh-rampant-drone-fabricator",
             label: "Rampant Drone Fabricator",
-            description: "Escalating Rogue Drone site found in C1-C6 wormholes. Rampancy scales the threat; large Severe and Critical waves can now field an Infested Drone Naglfar with a Capital Energy Neutralizer and concentrated high EHP/DPS pressure.",
+            description: "Escalating Rogue Drone site found in C1-C6 wormholes. Cradle of War cuts Hybrid Drone drops by 50%, raises Fabricator Data by 33% in C1-C3 / 25% in C4 / 20% in C5-C6, uses updated engagement/warp distances, makes site NPCs warp-disruption immune, gives Interdictors 20% NPC damage taken, and uses 18/15/12/6-second Low/Moderate/Severe/Critical wave delays (always 6 seconds before wave 5).",
             difficulty: "Expert",
             experience: "Experienced wormhole fleet with strong capacitor discipline, target calling, logistics awareness and an exit/refit plan between waves.",
             ships: ["Paladin", "Vargur", "Nestor", "Leshak", "Loki"],
@@ -827,7 +842,8 @@ export const activityDefinitions: ActivityDefinition[] = [
             supportSkills: [{ skill: "Thermodynamics", level: 4 }, { skill: "Astrometrics", level: 4 }, { skill: "Cloaking", level: 4 }],
             incomeHooks: ["Fabricator Data", "Rogue Drone loot", "Escalating wormhole PvE rewards"],
             selectors: [
-              { id: "threat", label: "Threat target", options: ["Lower threat", "Severe", "Critical"] },
+              { id: "threat", label: "Threat target", options: ["Low", "Moderate", "Severe", "Critical"] },
+              { id: "wormhole-class", label: "Wormhole class", options: ["C1-C3 (+33% Fabricator Data)", "C4 (+25%)", "C5-C6 (+20%)"] },
             ],
           },
 

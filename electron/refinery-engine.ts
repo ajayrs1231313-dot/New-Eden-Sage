@@ -10,6 +10,9 @@ const ARCHIVE = path.join(STATIC_DATA_ROOT, "eve-static-data-jsonl.zip");
 const REPROCESSING_SKILL_ID = 3385;
 const REPROCESSING_EFFICIENCY_SKILL_ID = 3389;
 const PROCESSING_SKILL_ATTRIBUTE_ID = 790;
+// EVE allows both asteroid resources and assembled ships to be reprocessed.
+// Ship material rows matter for patch-sensitive hulls such as Babaroga.
+const REPROCESSABLE_CATEGORY_IDS = new Set([25, 6]);
 
 export type RefineryFacility = "npc" | "athanor" | "tatara";
 export type RefineryRig = "none" | "t1" | "t2";
@@ -54,8 +57,8 @@ export type RefineryStockSource = {
 };
 
 let refineryIndexPromise: Promise<RefineryIndex | undefined> | undefined;
-const REFINERY_CACHE_SCHEMA = 2;
-const REFINERY_CACHE_KIND = "refinery-static-v2";
+const REFINERY_CACHE_SCHEMA = 3;
+const REFINERY_CACHE_KIND = "refinery-static-v3";
 
 function parseJsonl<T>(entry: AdmZip.IZipEntry | null): T[] {
   if (!entry) return [];
@@ -87,7 +90,7 @@ async function buildRefineryIndex(): Promise<RefineryIndex> {
   for (const row of types) {
     if (row.published === false) continue;
     const group = groups.get(Number(row.groupID ?? 0));
-    if (Number(group?.categoryID ?? 0) !== 25) continue;
+    if (!REPROCESSABLE_CATEGORY_IDS.has(Number(group?.categoryID ?? 0))) continue;
     const materials = materialRows.get(row._key)?.materials ?? [];
     if (!materials.length) continue;
     const portionSize = Math.max(1, Math.floor(Number(row.portionSize ?? 1)));

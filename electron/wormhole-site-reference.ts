@@ -78,6 +78,7 @@ export type WormholePveSite = {
   source: "PhobiaCide's Versioned Rykki Guide";
   sourceSheet: string;
   sourceUpdatedAt?: string;
+  ccpMechanics?: { patch: "2026-09-22.1"; source: "CCP patch notes"; notes: string[] };
 };
 
 export type WormholePveReferenceSnapshot = {
@@ -170,6 +171,20 @@ function isSiteStart(rows: string[][], index: number) {
   const name = String(rows[index]?.[1] ?? "").trim();
   const category = String(rows[index + 1]?.[1] ?? "").trim();
   return Boolean(name && SITE_CATEGORIES.has(category));
+}
+
+export function applyCradleOfWarWormholeMechanics(site: WormholePveSite): WormholePveSite {
+  if (!["C1", "C2", "C3"].includes(site.classLabel)) return site;
+  const notes = [
+    "NPC damage and EWAR now split targeting between capsuleers instead of concentrating on one pilot.",
+    "NPCs no longer attack drones.",
+    "NPCs no longer attack Capsules or Zephyrs (2026-09-24.1 hotfix).",
+    "NPCs make better use of microwarpdrives and use improved orbit/warp behavior.",
+  ];
+  if (/unsecured frontier receiver/i.test(site.name)) {
+    notes.push("Wave 4 now requires the Sleepless Defender to be destroyed; merely attacking it no longer triggers the wave.");
+  }
+  return { ...site, ccpMechanics: { patch: "2026-09-22.1", source: "CCP patch notes", notes } };
 }
 
 function buildCombatSite(rows: string[][], start: number, end: number, classLabel: WormholePveSite["classLabel"], updatedAt?: string): WormholePveSite {

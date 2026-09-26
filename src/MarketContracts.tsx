@@ -147,8 +147,8 @@ export function MarketContracts({snapshot,marketDataRevision}:{snapshot?:Charact
   }
 
   async function refresh(){
-    contractRefreshActive=true;setBusy(true);setFindStatus("");setStatus("Preparing server data…");
-    try{await window.sage.checkPublicData();await load();}
+    contractRefreshActive=true;setBusy(true);setFindStatus("");setStatus("Pulling latest contracts from Sage server…");
+    try{await window.sage.refreshServerContracts();await load();}
     catch(error){setStatus(error instanceof Error?error.message:"Contract refresh failed.");}
     finally{contractRefreshActive=false;setBusy(false);}
   }

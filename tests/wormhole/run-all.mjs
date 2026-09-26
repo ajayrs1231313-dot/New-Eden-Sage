@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { parseProbeScanner } from "../../src/wormhole-scanner.ts";
 import { calculateRollingState, directionalRollingRisk, rollingPassWindow, rollingRiskForMass } from "../../src/wormhole-rolling-math.ts";
 import { reconcileWormholeScan } from "../../electron/wormhole-scan-reconcile.ts";
+import { applyCradleOfWarWormholeMechanics } from "../../electron/wormhole-site-reference.ts";
 import { reconstructWormholeHistory } from "../../src/wormhole-history.ts";
 
 function scannerTests() {
@@ -61,6 +62,22 @@ function rollingTests() {
   return { remainingLow: state.remainingLow, remainingHigh: state.remainingHigh };
 }
 
+function cradleOfWarSiteMechanicsTests() {
+  const base = {
+    key:"c2:unsecured-frontier-receiver", classLabel:"C2", name:"Unsecured Frontier Receiver", category:"Relic",
+    blueLootIsk:null, resourceValueIsk:null, peakDps:0, peakAlpha:0, peakNeutGjPerSec:0, maxScrams:0, maxWebs:0, totalEhp:0,
+    waves:[], resources:[], source:"PhobiaCide's Versioned Rykki Guide", sourceSheet:"C2"
+  };
+  const patched = applyCradleOfWarWormholeMechanics(base);
+  assert.equal(patched.ccpMechanics?.patch, "2026-09-22.1");
+  assert(patched.ccpMechanics.notes.some((note)=>/no longer attack drones/i.test(note)));
+  assert(patched.ccpMechanics.notes.some((note)=>/Capsules or Zephyrs/i.test(note)));
+  assert(patched.ccpMechanics.notes.some((note)=>/Sleepless Defender.*destroyed/i.test(note)));
+  const c4 = applyCradleOfWarWormholeMechanics({...base,key:"c4:test",classLabel:"C4",name:"Test"});
+  assert.equal(c4.ccpMechanics, undefined, "C4 guide rows must not inherit the C1-C3 AI overlay");
+  return { notes:patched.ccpMechanics.notes.length, receiverDestroyTrigger:true };
+}
+
 function historyTests() {
   const store = {
     schemaVersion:1, createdAt:'2026-08-20T10:00:00.000Z', updatedAt:'2026-08-20T13:00:00.000Z',
@@ -89,9 +106,10 @@ const require = createRequire(import.meta.url);
 const staticCachePerformance = require("./static-cache-performance.test.cjs");
 
 const started = Date.now();
-const results = { scanner: scannerTests(), rolling: rollingTests(), history: historyTests(), staticCache: await staticCachePerformance() };
+const results = { scanner: scannerTests(), rolling: rollingTests(), cradleOfWar: cradleOfWarSiteMechanicsTests(), history: historyTests(), staticCache: await staticCachePerformance() };
 console.log("PASS wormhole scanner/reconciliation");
 console.log("PASS wormhole rolling math");
+console.log("PASS Cradle of War C1-C3 mechanics overlay");
 console.log("PASS wormhole historical reconstruction");
 console.log("PASS wormhole static cache off-main-thread performance");
 console.log(JSON.stringify({ ...results, durationMs: Date.now() - started }, null, 2));

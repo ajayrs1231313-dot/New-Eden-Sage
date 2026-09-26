@@ -10,7 +10,12 @@ const mcp=fs.readFileSync("electron/mcp-server.ts","utf8");
 const launch=fs.readFileSync("electron/mcp-launch.ts","utf8");
 assert.ok(config.includes("reauthorizationRequiredCharacterIds"));
 assert.ok(main.includes("CURRENT_ESI_SCOPE_SCHEMA_VERSION"));
-assert.ok(scopeManifest.includes("CURRENT_ESI_SCOPE_SCHEMA_VERSION = 2"), "this release must advance the ESI grant schema so every installation reauthorizes once even when intermediate releases were skipped");
+assert.ok(scopeManifest.includes("CURRENT_ESI_SCOPE_SCHEMA_VERSION = 3"), "this release must advance the ESI grant schema so every installation reauthorizes once even when intermediate releases were skipped");
+assert.ok(scopeManifest.includes("ALL_CURRENT_ESI_SCOPES"), "scope manifest must retain the full-current-scope policy");
+for (const requiredScope of ["esi-mail.send_mail.v1","esi-mail.organize_mail.v1","esi-fleets.write_fleet.v1","esi-characters.write_contacts.v1","esi-calendar.respond_calendar_events.v1","esi.activity.char:read","esi.cosmetic.char:read"]) {
+  assert.ok(scopeManifest.includes('"' + requiredScope + '"'), "full current ESI scope set is missing " + requiredScope);
+}
+
 assert.ok(main.includes("config.encryptedRefreshTokens = {}"), "migration invalidates old grants");
 const migration=main.slice(main.indexOf("async function ensureEsiScopeSchemaMigration"),main.indexOf("async function planetaryCorporationContext"));
 assert.ok(migration.includes("config.esiScopeSchemaVersion >= CURRENT_ESI_SCOPE_SCHEMA_VERSION"), "scope reset must be one-shot per schema version");

@@ -6,7 +6,6 @@ import {
   type MarketOpportunityFilters,
 } from "./market-opportunity-filter";
 import { IskGlyph } from "./IskIcons";
-import eveSkinIcon from "./eve-skin-icon.png";
 
 const money = (value: number) =>
   new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(value);
@@ -28,12 +27,8 @@ function confidenceLabel(score: number) {
   return "Watch fill";
 }
 
-function isSkinMarketItem(item: string, category: string) {
-  return /skin/i.test(category) || /\bskin\b/i.test(item);
-}
-
-function marketItemIcon(typeId: number, item: string, category: string) {
-  return isSkinMarketItem(item, category) ? eveSkinIcon : `sage-asset://type/${typeId}/icon?size=64`;
+function marketItemIcon(typeId: number, _item: string, _category: string) {
+  return typeId > 0 ? `sage-asset://type/${typeId}/icon?size=64` : "";
 }
 
 export function MarketOpportunityScanner({

@@ -4,6 +4,7 @@ import type { EventEnvelope, Principal, SageEnv } from "./types";
 import { deleteDiscordChannelMessage, discordBotRequest, discordGuildInviteUrl, discordInstallationState, findDiscordOperationAnnouncement, readDiscordGuildStructure, sendDiscordChannelMessage, sendDiscordDmToCharacter } from "./discord/service";
 import { cleanupDiscordSecurity, consumeDiscordActionTicket, issueDiscordActionTicket, registerDiscordDevice } from "./discord/security";
 import { handleHrApplicantApi, handleHrWorkspaceApi } from "./hr";
+import { handleMailApi } from "./mail";
 
 export { WorkspaceHub };
 
@@ -1290,6 +1291,13 @@ export default {
 
     if (url.pathname === "/v1/identity" && request.method === "GET") {
       return getSageIdentity(request, env);
+    }
+
+    if (url.pathname.startsWith("/v1/mail")) {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      const mailResponse = await handleMailApi(request, env, url, principal);
+      if (mailResponse) return mailResponse;
     }
 
     if (url.pathname.startsWith("/v1/hr/applications/")) {

@@ -3,7 +3,7 @@ import type { CharacterSnapshot } from "./types";
 import { GlobalMarketSearch } from "./GlobalMarketSearch";
 import { appendShoppingList, loadShoppingList, OPEN_SHOPPING_LIST_EVENT, OPEN_SHOPPING_LIST_PENDING_KEY, saveShoppingList, serializeShoppingListForEveMultiBuy, SHOPPING_LIST_UPDATED_EVENT, type ShoppingItem, type ShoppingListAdd } from "./shopping-list";
 
-const itemIcon = (typeId:number) => `https://images.evetech.net/types/${typeId}/icon?size=64`;
+const itemIcon = (typeId:number) => `sage-asset://type/${typeId}/icon?size=64`;
 const MULTIBUY_HELP = "Copy this shopping list, then in EVE Online open the Market > MultiBuy window, choose Import Shopping List, paste the list, review the prices and quantities, then buy the items.";
 
 export function MarketWorkspaceV2({snapshot}:{snapshot?:CharacterSnapshot}){

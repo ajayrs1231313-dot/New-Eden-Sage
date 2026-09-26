@@ -27,7 +27,7 @@ const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const REGION_CONCURRENCY = 6;
 const PAGE_CONCURRENCY = 4;
 const CONTRACT_REGION_CONCURRENCY = Math.max(1, Number(process.env.NEW_EDEN_SAGE_CONTRACT_REGION_CONCURRENCY || 4));
-const CONTRACT_DETAIL_CONCURRENCY = Math.max(1, Number(process.env.NEW_EDEN_SAGE_CONTRACT_DETAIL_CONCURRENCY || 12));
+const CONTRACT_DETAIL_CONCURRENCY = Math.max(1, Number(process.env.NEW_EDEN_SAGE_CONTRACT_DETAIL_CONCURRENCY || 20));
 const CONTRACT_DETAIL_BUDGET = Math.max(0, Number(process.env.NEW_EDEN_SAGE_CONTRACT_DETAIL_BUDGET || 1200));
 const HEADERS = {
   Accept: 'application/json',
@@ -36,6 +36,7 @@ const HEADERS = {
 };
 const NOTIFICATION_INPUT_FILE = String(process.env.NEW_EDEN_SAGE_NOTIFICATION_INPUT_FILE || '').trim();
 const NOTIFICATION_RESULT_FILE = String(process.env.NEW_EDEN_SAGE_NOTIFICATION_RESULT_FILE || '').trim();
+const PIPELINE_MODE = String(process.env.NEW_EDEN_SAGE_PUBLIC_PIPELINE_MODE || 'market').trim().toLowerCase();
 
 const PUBLIC_SOURCES = [
   { key: 'markets-prices', url: '/markets/prices/', history: true },
@@ -53,7 +54,7 @@ const telemetry = {
   evaluatedAt: new Date().toISOString(), eligible: 0, skipped: 0, requests: 0, retries: 0,
   status200: 0, status304: 0, changedSources: 0, historyWrites: 0, historyFailures: 0,
   historyPruned: 0, historyPartitionsPruned: 0, historyBytesWritten: 0, historyBytesRemoved: 0,
-  sourceBytes: 0, marketRegionsChanged: 0, marketRegionsUnchanged: 0,
+  sourceBytes: 0, marketRegionsChanged: 0, marketRegionsUnchanged: 0, marketRegionsRecovered: 0,
   contractRegionsChanged: 0, contractRegionsUnchanged: 0, contractDetailsFetched: 0, contractDetailsPending: 0,
 };
 
@@ -403,10 +404,42 @@ async function prunePublishedStorage(activeGeneration, keepRawSnapshotId) {
   return { raw, generations };
 }
 function marketStateKey(regionId) { return `market-orders-${regionId}`; }
+async function retainedMarketEntryExists(entry) {
+  if (!entry?.file) return false;
+  try {
+    await fs.access(path.join(RAW_ROOT, entry.file));
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function assertRawSnapshotIntegrity(snapshot, expectedRegionCount) {
+  if (snapshot.regions.length !== expectedRegionCount) {
+    throw new Error(`Raw market snapshot integrity failure: expected ${expectedRegionCount} regions, built ${snapshot.regions.length}.`);
+  }
+  const missing = [];
+  await mapLimited(snapshot.regions, 16, async entry => {
+    try {
+      const stat = await fs.stat(path.join(RAW_ROOT, entry.file));
+      if (!stat.isFile() || stat.size <= 0) missing.push(entry.file);
+    } catch {
+      missing.push(entry.file);
+    }
+  });
+  if (missing.length) {
+    throw new Error(`Raw market snapshot integrity failure: ${missing.length} retained region payload(s) are missing or empty; first=${missing[0]}.`);
+  }
+}
 async function fetchMarketRegion(region, previousEntry, previousManifest) {
   const key = marketStateKey(region.regionId);
   const state = await readJson(statePath(key), {});
-  if (!isEligible(state)) {
+  const retainedEntryAvailable = await retainedMarketEntryExists(previousEntry);
+  if (previousEntry && !retainedEntryAvailable) telemetry.marketRegionsRecovered++;
+  if (!retainedEntryAvailable) previousEntry = null;
+  // A manifest without its immutable region payload is not a usable cache hit.
+  // Clear validators so ESI cannot return 304 for a payload that no longer exists.
+  const requestState = previousEntry ? state : { ...state, etag: null, lastModified: null, nextEligibleAt: null };
+  if (!isEligible(requestState)) {
     telemetry.skipped++;
     if (!previousEntry) throw new Error(`${key} is ineligible but no retained region exists.`);
     telemetry.marketRegionsUnchanged++;
@@ -415,7 +448,7 @@ async function fetchMarketRegion(region, previousEntry, previousManifest) {
   telemetry.eligible++;
   const base = `${ESI}/markets/${region.regionId}/orders/?order_type=all`;
   let response;
-  try { response = await fetchWithBackoff(`${base}&page=1`, state); }
+  try { response = await fetchWithBackoff(`${base}&page=1`, requestState); }
   catch (error) {
     if (previousEntry) { telemetry.marketRegionsUnchanged++; return { region, changed: false, entry: previousEntry, state, error: String(error) }; }
     throw error;
@@ -522,6 +555,7 @@ async function refreshMarketOrders(regions) {
     snapshot.regions.push({ regionId: item.region.regionId, regionName: item.region.name, orderCount, file: relative, savedAt: new Date().toISOString() });
   }
   snapshot.regions.sort((a, b) => a.regionName.localeCompare(b.regionName));
+  await assertRawSnapshotIntegrity(snapshot, regions.length);
   snapshot.regionCount = snapshot.regions.length;
   snapshot.orderCount = snapshot.regions.reduce((sum, item) => sum + item.orderCount, 0);
   snapshot.complete = true;
@@ -750,7 +784,8 @@ async function writeContractHistory(previous, snapshot) {
   state.lastHistoryWriteAt = snapshot.createdAt;
   await writeJsonAtomic(stateFile, state);
 }
-async function refreshPublicContracts(regions) {
+async function refreshPublicContracts(regions, options = {}) {
+  const writeHistoryEnabled = options.writeHistory !== false;
   const started = performance.now();
   await Promise.all([fs.mkdir(CONTRACT_REGION_ROOT, { recursive: true }), fs.mkdir(CONTRACT_ITEM_ROOT, { recursive: true })]);
   const previous = await readGzipJson(CONTRACT_SNAPSHOT_FILE, null);
@@ -794,8 +829,8 @@ async function refreshPublicContracts(regions) {
   const digest = sha256(Buffer.from(JSON.stringify(payloadRegions)));
   const enrichmentChanged = previous?.digest !== digest;
   telemetry.contractDetailsPending = pendingDetailCount;
-  if (!sourceChanged && previous) {
-    return { changed: false, snapshot: previous, pendingDetailCount, enrichmentChanged, durationMs: Math.round(performance.now() - started) };
+  if (!sourceChanged && previous && !enrichmentChanged) {
+    return { changed: false, snapshot: previous, pendingDetailCount, enrichmentChanged: false, durationMs: Math.round(performance.now() - started) };
   }
   const createdAt = new Date().toISOString();
   const snapshot = {
@@ -803,9 +838,29 @@ async function refreshPublicContracts(regions) {
     regionCount: payloadRegions.length, contractCount: payloadRegions.reduce((sum, region) => sum + region.publicContracts.length, 0), pendingDetailCount, regions: payloadRegions,
   };
   await gzipJsonAtomic(CONTRACT_SNAPSHOT_FILE, snapshot);
-  await writeContractHistory(previous, snapshot);
+  if (writeHistoryEnabled) await writeContractHistory(previous, snapshot);
   return { changed: true, snapshot, pendingDetailCount, enrichmentChanged, durationMs: Math.round(performance.now() - started) };
 }
+async function loadPublishedContractSnapshot(manifest) {
+  const artifact = manifest?.files?.['public-contracts'];
+  if (!artifact?.path) return null;
+  return readGzipJson(path.join(PUBLISH_ROOT, artifact.path), null);
+}
+
+async function loadCurrentContractState(previousManifest) {
+  let snapshot = await readGzipJson(CONTRACT_SNAPSHOT_FILE, null);
+  if (!snapshot) snapshot = await loadPublishedContractSnapshot(previousManifest);
+  const publishedVersion = String(previousManifest?.files?.['public-contracts']?.version || '');
+  const currentVersion = String(snapshot?.snapshotId || '');
+  return {
+    changed: Boolean(currentVersion && currentVersion !== publishedVersion),
+    snapshot,
+    pendingDetailCount: Number(snapshot?.pendingDetailCount || 0),
+    enrichmentChanged: false,
+    durationMs: 0,
+  };
+}
+
 async function contractBundle(contracts, previousManifest, generationRoot) {
   if (!contracts.changed && previousManifest?.files?.['public-contracts']) return { changed: false, files: await copyPreviousArtifacts(previousManifest, generationRoot, ['public-contracts']) };
   const target = path.join(generationRoot, 'public-contracts-v1.json.gz');
@@ -1077,7 +1132,32 @@ async function historyStats() {
   return { files, bytes, partitions: partitions.length, retentionDays: RETENTION_DAYS, oldestRetainedAt: oldest, newestRetainedAt: newest };
 }
 
-async function main() {
+async function runContractSourceRefresh() {
+  const overallStarted = performance.now();
+  await Promise.all([
+    fs.mkdir(CURRENT_ROOT, { recursive: true }),
+    fs.mkdir(STATE_ROOT, { recursive: true }),
+    fs.mkdir(CONTRACT_REGION_ROOT, { recursive: true }),
+    fs.mkdir(CONTRACT_ITEM_ROOT, { recursive: true }),
+  ]);
+  const regions = await discoverRegions();
+  const contracts = await refreshPublicContracts(regions, { writeHistory: false });
+  const result = {
+    pipelineMode: 'contracts',
+    published: false,
+    sourceUpdated: Boolean(contracts.changed),
+    contractSourceId: contracts.snapshot?.snapshotId || null,
+    contractCount: contracts.snapshot?.contractCount || 0,
+    contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0,
+    contractComputeMs: contracts.durationMs,
+    scheduler: telemetry,
+    totalMs: Math.round(performance.now() - overallStarted),
+  };
+  await writeJsonAtomic(path.join(STATE_ROOT, 'contract-scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
+  console.log(JSON.stringify(result));
+}
+
+async function runMarketPublicRefresh() {
   const overallStarted = performance.now();
   await Promise.all([fs.mkdir(CURRENT_ROOT, { recursive: true }), fs.mkdir(STATE_ROOT, { recursive: true }), fs.mkdir(HISTORY_ROOT, { recursive: true }), fs.mkdir(HISTORY_PARTITION_INDEX_ROOT, { recursive: true })]);
   const previousManifest = await readJson(path.join(PUBLISH_ROOT, 'manifest.json'), null);
@@ -1087,18 +1167,21 @@ async function main() {
   const publicResults = await mapLimited(PUBLIC_SOURCES, 4, refreshJsonSource);
   const regions = await discoverRegions();
   const market = await refreshMarketOrders(regions);
-  const contracts = await refreshPublicContracts(regions);
+  const contracts = await loadCurrentContractState(previousManifest);
+  if (contracts.changed && contracts.snapshot) {
+    await writeContractHistory(await loadPublishedContractSnapshot(previousManifest), contracts.snapshot);
+  }
   const notifications = await evaluateNotificationPass(market.snapshot, market.changedRegionIds);
   const notificationStatus = notificationSummary(notifications);
   const publicChanged = publicResults.some(item => item.changed);
   const marketSchemaUpgradeRequired = Number(previousManifest?.files?.['market-global']?.schemaVersion || 0) < 2;
   const marketDepthUpgradeRequired = !previousManifest?.files?.['market-hub-depth'];
-  const materialChanged = market.changed || contracts.changed || publicChanged || marketSchemaUpgradeRequired || marketDepthUpgradeRequired || !previousManifest || !previousManifest.files?.['public-contracts'];
+  const materialChanged = market.changed || contracts.changed || publicChanged || marketSchemaUpgradeRequired || marketDepthUpgradeRequired || !previousManifest;
   const pruning = await pruneHistory();
 
   if (!materialChanged) {
     const history = await historyStats();
-    const result = { published: false, generation: previousManifest?.generation || null, marketChanged: false, contractsChanged: false, publicChanged: false, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, contractComputeMs: contracts.durationMs, notifications: notificationStatus, scheduler: telemetry, history, pruning, publishedPruning: publishedPruningBeforeRefresh, totalMs: Math.round(performance.now() - overallStarted) };
+    const result = { pipelineMode: 'market', published: false, generation: previousManifest?.generation || null, marketChanged: false, contractsChanged: false, publicChanged: false, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, contractComputeMs: 0, notifications: notificationStatus, scheduler: telemetry, history, pruning, publishedPruning: publishedPruningBeforeRefresh, totalMs: Math.round(performance.now() - overallStarted) };
     await writeJsonAtomic(path.join(STATE_ROOT, 'scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
     console.log(JSON.stringify(result));
     return;
@@ -1114,7 +1197,7 @@ async function main() {
     marketPrepared = { files, index: null, regional: null, trades: null, shortages: null, computeMs: 0 };
   }
   const shared = await publicBundle(publicResults, previousManifest, generationRoot, !previousManifest);
-  const contractPrepared = await contractBundle(contracts, previousManifest, generationRoot);
+  const contractPrepared = contracts.snapshot ? await contractBundle(contracts, previousManifest, generationRoot) : { changed: false, files: {} };
   const files = { ...marketPrepared.files, ...shared.files, ...contractPrepared.files };
   const base = previousManifest || {};
   const manifest = {
@@ -1143,9 +1226,14 @@ async function main() {
 
   const publishedPruningAfterRefresh = await prunePublishedStorage(generation, market.snapshot?.id || null);
   const history = await historyStats();
-  const result = { published: true, generation, marketChanged: market.changed, contractsChanged: contracts.changed, publicChanged, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, computeMs: marketPrepared.computeMs, contractComputeMs: contracts.durationMs, notifications: notificationStatus, scheduler: telemetry, history, pruning, publishedPruning: { before: publishedPruningBeforeRefresh, after: publishedPruningAfterRefresh }, totalMs: Math.round(performance.now() - overallStarted) };
+  const result = { pipelineMode: 'market', published: true, generation, marketChanged: market.changed, contractsChanged: contracts.changed, publicChanged, marketSourceId: market.snapshot?.id || null, contractSourceId: contracts.snapshot?.snapshotId || null, contractPendingDetailCount: contracts.pendingDetailCount ?? contracts.snapshot?.pendingDetailCount ?? 0, computeMs: marketPrepared.computeMs, contractComputeMs: 0, notifications: notificationStatus, scheduler: telemetry, history, pruning, publishedPruning: { before: publishedPruningBeforeRefresh, after: publishedPruningAfterRefresh }, totalMs: Math.round(performance.now() - overallStarted) };
   await writeJsonAtomic(path.join(STATE_ROOT, 'scheduler-status.json'), { ...result, completedAt: new Date().toISOString() });
   console.log(JSON.stringify(result));
 }
 
+async function main() {
+  if (PIPELINE_MODE === 'contracts') return runContractSourceRefresh();
+  if (PIPELINE_MODE !== 'market') throw new Error(`Unsupported public pipeline mode: ${PIPELINE_MODE}`);
+  return runMarketPublicRefresh();
+}
 await main();

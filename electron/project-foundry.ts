@@ -17,6 +17,9 @@ export type FoundryStoreBinding = {
   key: string;
   itemId?: number;
   locationFlag?: string;
+  rootLocationId?: number;
+  station?: string;
+  system?: string;
   name: string;
 };
 export type FoundryStoreRoute = {
@@ -95,6 +98,10 @@ export type FoundryProject = {
   realisedRevenue?: number;
   realisedProfit?: number;
   lifecycleStatus?: "planning" | "producing" | "produced" | "partially-sold" | "sold";
+  completedAt?: string;
+  completionSource?: "built" | "already-built";
+  completedByCharacterId?: string;
+  completedByCharacterName?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -107,6 +114,9 @@ type CorpAsset = {
   location_flag?: string;
   location_type?: string;
   is_singleton?: boolean;
+  root_location_id?: number;
+  station?: string | null;
+  system?: string | null;
 };
 type AssetName = { item_id?: number; name?: string };
 
@@ -188,7 +198,8 @@ export function collectBoundAssets(bindings: FoundryStoreBinding[], assets: Corp
     const rows = binding.kind === "container" && Number(binding.itemId ?? 0) > 0
       ? descendants(Number(binding.itemId), assets)
       : binding.kind === "division" && binding.locationFlag
-        ? assets.filter((asset) => rootDivisionFlag(asset, byId) === binding.locationFlag)
+        ? assets.filter((asset) => rootDivisionFlag(asset, byId) === binding.locationFlag
+          && (!(Number(binding.rootLocationId ?? 0) > 0) || Number(asset.root_location_id ?? 0) === Number(binding.rootLocationId)))
         : [];
     for (const asset of rows) {
       const id = Number(asset.item_id ?? 0) || synthetic--;
@@ -389,24 +400,38 @@ export function analyzeFoundryProject(projectInput: FoundryProject, projectsInpu
   const storePartRows = aggregateStoreRows(buildTree.filter((node: any) => Number(node.depth ?? 0) > 0 && node.kind === "component"));
   const storeMaterialRows = aggregateStoreRows(buildTree.filter((node: any) => Number(node.depth ?? 0) > 0 && node.kind === "material" && !childNodeIds.has(String(node.id))));
   const selectedStoreNames = (project.linkedStores ?? []).map((binding) => binding.name);
+  const partUnitsReady = storePartRows.reduce((sum, row) => sum + row.ready, 0);
+  const partUnitsRequired = storePartRows.reduce((sum, row) => sum + row.required, 0);
+  const materialUnitsReady = storeMaterialRows.reduce((sum, row) => sum + row.ready, 0);
+  const materialUnitsRequired = storeMaterialRows.reduce((sum, row) => sum + row.required, 0);
+  const partCoverage = partUnitsRequired > 0 ? Math.min(1, partUnitsReady / partUnitsRequired) : 0;
+  const materialCoverage = materialUnitsRequired > 0 ? Math.min(1, materialUnitsReady / materialUnitsRequired) : 0;
+  // Raw materials and completed components are alternative forms of the same build progress.
+  // Use whichever layer in the selected Project Store is further along instead of double-counting both.
+  const storeProgress = Math.max(partCoverage, materialCoverage);
+  const progressSource = partCoverage > materialCoverage ? "parts" : materialCoverage > partCoverage ? "materials" : "equal";
   const projectStoreSummary = {
     configured: selectedStoreNames.length > 0 || mode === "solo",
     selectedStores: selectedStoreNames,
     selectedStoreLabel: selectedStoreNames.length === 1
       ? selectedStoreNames[0]
       : selectedStoreNames.length > 1
-        ? `${selectedStoreNames.length} project stores`
+        ? selectedStoreNames.length + " project stores"
         : mode === "solo" ? "Owner personal assets" : "No project store selected",
     parts: storePartRows,
     materials: storeMaterialRows,
     partTypesReady: storePartRows.filter((row) => row.missing <= 0).length,
     partTypesTotal: storePartRows.length,
-    partUnitsReady: storePartRows.reduce((sum, row) => sum + row.ready, 0),
-    partUnitsRequired: storePartRows.reduce((sum, row) => sum + row.required, 0),
+    partUnitsReady,
+    partUnitsRequired,
+    partCoverage,
     materialTypesReady: storeMaterialRows.filter((row) => row.missing <= 0).length,
     materialTypesTotal: storeMaterialRows.length,
-    materialUnitsReady: storeMaterialRows.reduce((sum, row) => sum + row.ready, 0),
-    materialUnitsRequired: storeMaterialRows.reduce((sum, row) => sum + row.required, 0),
+    materialUnitsReady,
+    materialUnitsRequired,
+    materialCoverage,
+    progress: storeProgress,
+    progressSource,
   };
   const groups = project.groups ?? [];
   const groupById = new Map(groups.map((group) => [group.id, group]));
@@ -575,7 +600,7 @@ function sanitizeStoreBindings(input: unknown): FoundryStoreBinding[] {
     if (kind === "container" && !(Number(raw?.itemId ?? 0) > 0)) return [];
     if (kind === "division" && !String(raw?.locationFlag ?? "").trim()) return [];
     seen.add(key);
-    return [{ kind, key, name, itemId: kind === "container" ? Number(raw.itemId) : undefined, locationFlag: kind === "division" ? String(raw.locationFlag) : undefined }];
+    return [{ kind, key, name, itemId: kind === "container" ? Number(raw.itemId) : undefined, locationFlag: kind === "division" ? String(raw.locationFlag) : undefined, rootLocationId: Number(raw?.rootLocationId ?? 0) > 0 ? Number(raw.rootLocationId) : undefined, station: String(raw?.station ?? "").trim() || undefined, system: String(raw?.system ?? "").trim() || undefined }];
   });
 }
 
@@ -673,6 +698,18 @@ export async function updateFoundryProject(input: { characterId: string; project
     realisedRevenue: existing.realisedRevenue,
     realisedProfit: existing.realisedProfit,
     lifecycleStatus: replanned.lifecycleStatus,
+    completedAt: nextStatus === "complete"
+      ? (String(input.project.completedAt ?? existing.completedAt ?? "").trim() || new Date().toISOString())
+      : existing.completedAt,
+    completionSource: nextStatus === "complete"
+      ? (input.project.completionSource === "already-built" ? "already-built" : input.project.completionSource === "built" ? "built" : existing.completionSource)
+      : existing.completionSource,
+    completedByCharacterId: nextStatus === "complete"
+      ? String(input.project.completedByCharacterId ?? existing.completedByCharacterId ?? input.characterId)
+      : existing.completedByCharacterId,
+    completedByCharacterName: nextStatus === "complete"
+      ? String(input.project.completedByCharacterName ?? existing.completedByCharacterName ?? snapshot.character?.name ?? input.characterId)
+      : existing.completedByCharacterName,
     name: nextName,
     status: nextStatus,
     mode: input.project.mode === "solo" ? "solo" : "corporation",
@@ -701,8 +738,11 @@ function configuredHangars(snapshot: any) {
   return rows.map((row: any) => ({ division: Number(row?.division ?? 0), name: String(row?.name ?? "").trim() })).filter((row: any) => row.division > 0 && row.division <= 7).sort((a: any, b: any) => a.division - b.division);
 }
 
-async function discoverStores(snapshot: any) {
+export async function discoverStores(snapshot: any) {
   const assets = corpAssets(snapshot);
+  const personalAssets = Array.isArray(snapshot?.extended?.assets) ? snapshot.extended.assets : [];
+  const corporationStructures = Array.isArray(snapshot?.extended?.corporation?.structures) ? snapshot.extended.corporation.structures : [];
+  const currentLocation = snapshot?.location ?? null;
   const byId = assetMap(assets);
   const names = new Map(corpAssetNames(snapshot).flatMap((row) => Number(row.item_id ?? 0) > 0 && row.name ? [[Number(row.item_id), String(row.name)] as const] : []));
   const childCounts = new Map<number, number>();
@@ -715,12 +755,73 @@ async function discoverStores(snapshot: any) {
   const typeNames = await getIndustrialTypeNames(typeIds);
   const configured = configuredHangars(snapshot);
   const configuredByFlag = new Map<string, { division: number; name: string }>(configured.map((row: any) => [`CorpSAG${row.division}`, row]));
-  const divisionFlags = [...new Set([...assets.map((asset) => rootDivisionFlag(asset, byId)).filter((flag) => /^CorpSAG\d+$/i.test(flag)), ...configured.map((row: any) => `CorpSAG${row.division}`)])].sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")));
-  const divisions = divisionFlags.map((flag) => {
-    const division = Number(flag.replace(/\D/g, ""));
-    const configuredRow = configuredByFlag.get(flag);
-    return { kind: "division" as const, key: `division:${flag}`, division, locationFlag: flag, name: configuredRow?.name || `Corporation Hangar ${division || flag}`, configuredName: configuredRow?.name || null, itemCount: collectBoundAssets([{ kind: "division", key: `division:${flag}`, locationFlag: flag, name: flag }], assets).length };
+
+  const stationByRoot = new Map<number, { key: string; rootLocationId: number; name: string; system: string | null; source?: string }>();
+  const addLocation = (rootLocationIdValue: unknown, nameValue: unknown, systemValue: unknown, source: string) => {
+    const rootLocationId = Number(rootLocationIdValue ?? 0);
+    if (!(rootLocationId > 0)) return;
+    const name = String(nameValue ?? "").trim();
+    const system = String(systemValue ?? "").trim();
+    const fallback = system ? `${system} - location ${rootLocationId}` : `Location ${rootLocationId}`;
+    const existing = stationByRoot.get(rootLocationId);
+    if (!existing || (!existing.name || /^Location \d+$/i.test(existing.name))) {
+      stationByRoot.set(rootLocationId, {
+        key: `location:${rootLocationId}`,
+        rootLocationId,
+        name: name || fallback,
+        system: system || existing?.system || null,
+        source,
+      });
+    }
+  };
+
+  // Corporation asset locations the selected character is authorised to see.
+  for (const asset of assets) {
+    addLocation(asset.root_location_id, asset.station, asset.system, "corporation-assets");
+  }
+
+  // Any location where the connected character personally has assets.
+  for (const asset of personalAssets) {
+    addLocation(asset.root_location_id, asset.station, asset.system, "personal-assets");
+  }
+
+  // Every corporation structure returned by ESI when the character's roles/scopes allow it.
+  for (const structure of corporationStructures) {
+    addLocation(
+      structure?.structure_id,
+      structure?.name,
+      structure?.solar_system_name,
+      "corporation-structure",
+    );
+  }
+
+  // Always include the station or structure the selected character is currently docked in.
+  const currentRootLocationId = Number(currentLocation?.station_id ?? currentLocation?.structure_id ?? 0);
+  if (currentRootLocationId > 0) {
+    addLocation(
+      currentRootLocationId,
+      currentLocation?.place_name,
+      currentLocation?.solar_system_name,
+      "current-location",
+    );
+  }
+
+  const stations = [...stationByRoot.values()].sort((a, b) => a.name.localeCompare(b.name));
+
+  const divisions = stations.flatMap((station) => {
+    const stationAssets = assets.filter((asset) => Number(asset.root_location_id ?? 0) === station.rootLocationId);
+    const stationFlags = [...new Set([
+      ...stationAssets.map((asset) => rootDivisionFlag(asset, byId)).filter((flag) => /^CorpSAG\d+$/i.test(flag)),
+      ...configured.map((row: any) => `CorpSAG${row.division}`),
+    ])].sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")));
+    return stationFlags.map((flag) => {
+      const division = Number(flag.replace(/\D/g, ""));
+      const configuredRow = configuredByFlag.get(flag);
+      const binding = { kind: "division" as const, key: `division:${station.rootLocationId}:${flag}`, rootLocationId: station.rootLocationId, station: station.name, system: station.system ?? undefined, locationFlag: flag, name: configuredRow?.name || `Corporation Hangar ${division || flag}` };
+      return { ...binding, division, configuredName: configuredRow?.name || null, itemCount: collectBoundAssets([binding], assets).length };
+    });
   });
+
   const containers = [...names.entries()].flatMap(([itemId, name]) => {
     const asset = byId.get(itemId);
     if (!asset) return [];
@@ -729,9 +830,12 @@ async function discoverStores(snapshot: any) {
     if (!childCount && !/(container|storage|vault|hangar)/i.test(typeName)) return [];
     const flag = rootDivisionFlag(asset, byId);
     const configuredDivision = configuredByFlag.get(flag);
-    return [{ kind: "container" as const, key: `container:${itemId}`, itemId, name, typeName, division: configuredDivision?.name || (/^CorpSAG\d+$/i.test(flag) ? `Hangar ${flag.replace(/\D/g, "")}` : flag || "Corporation assets"), itemCount: descendants(itemId, assets).length }];
+    const rootLocationId = Number(asset.root_location_id ?? 0);
+    const station = String(asset.station ?? "").trim() || stationByRoot.get(rootLocationId)?.name || (rootLocationId > 0 ? `Location ${rootLocationId}` : "Unknown location");
+    const system = String(asset.system ?? "").trim() || stationByRoot.get(rootLocationId)?.system || undefined;
+    return [{ kind: "container" as const, key: `container:${itemId}`, itemId, rootLocationId: rootLocationId || undefined, station, system, name, typeName, division: configuredDivision?.name || (/^CorpSAG\d+$/i.test(flag) ? `Hangar ${flag.replace(/\D/g, "")}` : flag || "Corporation assets"), itemCount: descendants(itemId, assets).length }];
   }).sort((a, b) => a.name.localeCompare(b.name));
-  return { divisions, containers, assetNameCount: names.size, configuredDivisionCount: configured.length };
+  return { stations, divisions, containers, assetNameCount: names.size, configuredDivisionCount: configured.length };
 }
 
 function memberDirectory(snapshot: any, corporationId: string, snapshots: any[]) {

@@ -143,6 +143,31 @@ const FITTING_PREPARED_SCHEMA = 1;
 const FITTING_PREPARED_NAME = "fitting-dogma-prepared-v1.json.gz";
 const FITTING_CATALOGUE_SCHEMA = 1;
 const FITTING_CATALOGUE_NAME = "fitting-catalogue-prepared-v1.json.gz";
+const CRADLE_OF_WAR_HAWK_TYPE_ID = 11379;
+const ASSAULT_FRIGATES_SKILL_ID = 12095;
+const HAWK_ALL_MISSILE_DAMAGE_BONUS_ATTRIBUTE_ID = 463;
+
+function applyAuthoritativeBalanceOverrides(
+  hullTypeId: number,
+  rawHull: Dogma,
+  trained: Map<number, number>,
+  shipAttributes: Map<number, number>,
+) {
+  // Cradle of War 2026-09-22.1 final CCP notes moved Hawk's 7.5% all-damage
+  // Light Missile/Rocket bonus to Assault Frigates. The post-patch public SDE
+  // still wires effect 13025 through shipBonusCF (463), which is scaled by
+  // Caldari Frigate. Final deployed notes are the higher-priority source under
+  // Sage's patch doctrine, so correct that single source attribute here.
+  if (hullTypeId === CRADLE_OF_WAR_HAWK_TYPE_ID) {
+    const perLevel = rawHull.attributes.get(HAWK_ALL_MISSILE_DAMAGE_BONUS_ATTRIBUTE_ID) ?? 0;
+    const assaultFrigatesLevel = Math.max(0, Math.min(5, trained.get(ASSAULT_FRIGATES_SKILL_ID) ?? 0));
+    shipAttributes.set(
+      HAWK_ALL_MISSILE_DAMAGE_BONUS_ATTRIBUTE_ID,
+      perLevel * assaultFrigatesLevel,
+    );
+  }
+}
+
 
 type SerializedFittingDogmaIndex = {
   schema: number;
@@ -292,7 +317,7 @@ function index() {
     await prepareStaticDataForProcess();
     // Fitting data is shipped with Sage and changes only with an app release.
     // Never rebuild it merely because CCP static data refreshed in the background.
-    const prepared = await loadPreparedFittingIndex(true);
+    const prepared = await loadPreparedFittingIndex(process.env.NEW_EDEN_SAGE_FORCE_FITTING_REBUILD !== "1");
     if (prepared) {
       dogmaPreparationProgress.report(100, "Prepared fitting rules ready");
       return prepared;
@@ -601,7 +626,7 @@ export type FittingPreparationProgress = { percent:number; stage:string; message
 export async function getFittingCatalogueLocal() {
   return (fittingCatalogueCache ??= Promise.resolve().then(async () => {
     await prepareStaticDataForProcess();
-    const prepared = await loadPreparedFittingCatalogue(true);
+    const prepared = await loadPreparedFittingCatalogue(process.env.NEW_EDEN_SAGE_FORCE_FITTING_REBUILD !== "1");
     if (prepared) return prepared;
     await ensureStaticDataArchive();
     const zip = new AdmZip(ARCHIVE);
@@ -1947,6 +1972,7 @@ export async function analyzeFittingDogma(input: {
     const current = shipAttributesBeforePending.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
     shipAttributes.set(attributeId, applyOrderedChanges(current, changes, penalized.has(attributeId), penalties));
   }
+  applyAuthoritativeBalanceOverrides(input.hullTypeId, hull, trained, shipAttributes);
 
   const shipAttr = (attributeId: number) =>
     shipAttributes.get(attributeId) ?? attributeDefaults.get(attributeId) ?? 0;
@@ -3860,6 +3886,7 @@ export async function analyzeFittingDogma(input: {
       rechargeSeconds,
       demandGjPerSecond,
       injectedGjPerSecond,
+      remoteCapacitorReceiveMultiplier: Math.max(0, Math.min(1, shipAttr(6463))),
       netDemandGjPerSecond,
       capacitorInjectors,
       peakRechargeGjPerSecond,

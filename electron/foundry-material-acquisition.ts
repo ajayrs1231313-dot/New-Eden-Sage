@@ -9,21 +9,55 @@ export async function buildFoundryPlanetaryGuide(material: FoundryBaseMaterial) 
   const typeId = Number(material.typeId ?? 0);
   const piGuide = await getPlanetaryAcquisitionGuide(typeId).catch(() => null);
   if (!piGuide) return null;
+
+  const required = Math.max(0, Number(material.required ?? 0));
+  const outputPerRun = Math.max(1, Number(piGuide.outputQuantity ?? 1));
+  const runsRequired = piGuide.method === "processing"
+    ? Math.max(1, Math.ceil(required / outputPerRun))
+    : 1;
+  const recipePerRun = (piGuide.inputs ?? []).map((row: any) => ({
+    ...row,
+    quantity: Math.max(0, Number(row.quantity ?? 0)),
+  }));
+  const recipe = piGuide.method === "processing"
+    ? recipePerRun.map((row: any) => ({
+        ...row,
+        perRun: row.quantity,
+        quantity: row.quantity * runsRequired,
+      }))
+    : recipePerRun;
+  const bestWay = piGuide.method === "processing"
+    ? `Run ${runsRequired.toLocaleString()} x ${material.name} PI cycle${runsRequired === 1 ? "" : "s"} in a ${piGuide.facility}.`
+    : piGuide.bestWay;
+  const instructions = piGuide.method === "processing"
+    ? [
+        `Output target: ${required.toLocaleString()} x ${material.name}. Each cycle produces ${outputPerRun.toLocaleString()}, so Sage has calculated ${runsRequired.toLocaleString()} cycle${runsRequired === 1 ? "" : "s"}.`,
+        recipe.length
+          ? `Total inputs for those cycles: ${recipe.map((row: any) => `${Number(row.quantity).toLocaleString()} x ${row.name}`).join(", ")}.`
+          : "Run the required PI schematic for the calculated cycle count.",
+        `Facility: ${piGuide.facility}.`,
+      ]
+    : [piGuide.bestWay];
+
   return {
     typeId,
     name: material.name,
-    required: material.required,
+    required,
     category: "pi",
     categoryLabel: "Planetary Industry",
     badge: piGuide.tier === "unknown" ? "PI" : piGuide.tier,
-    bestWay: piGuide.bestWay,
+    bestWay,
+    instructions,
     sourceLabel: piGuide.sourceLabel,
-    recipe: piGuide.inputs,
+    recipe,
+    recipePerRun,
     facility: piGuide.facility,
     schematicId: piGuide.schematicId,
+    runsRequired,
+    outputPerRun,
     detail: piGuide.method === "extraction"
       ? (piGuide.planetTypes.length ? `Extract on ${piGuide.planetTypes.join(", ")} planets` : "Extract with an ECU")
-      : `${piGuide.facility} · ${piGuide.outputQuantity} output per cycle`,
+      : `${piGuide.facility} - ${outputPerRun.toLocaleString()} output per cycle`,
   };
 }
 
@@ -64,12 +98,13 @@ export async function buildFoundryLootGuide(material: FoundryBaseMaterial) {
     name: String(row.name),
     quantity: Number(row.quantity),
   }));
-  const reactionProduct = route.kind === "reaction"
+  const scalableProduction = route.kind === "reaction" || route.kind === "manufacturing";
+  const productionProduct = scalableProduction
     ? (route.details?.products ?? []).find((row: any) => Number(row.typeId) === typeId) ?? (route.details?.products ?? [])[0]
     : null;
-  const outputPerRun = route.kind === "reaction" ? Math.max(1, Number(reactionProduct?.quantity ?? 1)) : 1;
-  const runsRequired = route.kind === "reaction" ? Math.max(1, Math.ceil(Number(material.required ?? 0) / outputPerRun)) : 1;
-  const recipe = route.kind === "reaction"
+  const outputPerRun = scalableProduction ? Math.max(1, Number(productionProduct?.quantity ?? 1)) : 1;
+  const runsRequired = scalableProduction ? Math.max(1, Math.ceil(Number(material.required ?? 0) / outputPerRun)) : 1;
+  const recipe = scalableProduction
     ? baseRecipe.map((row: any) => ({ ...row, perRun: row.quantity, quantity: row.quantity * runsRequired }))
     : baseRecipe;
   const reactionGroup = String(acquisition?.item?.group ?? "");
@@ -153,12 +188,19 @@ export function attachFoundryAcquisitionGuides(plan: any, acquisitionGuides: any
 
 export type FoundryAcquisitionReach = "high" | "low" | "null";
 
+type FoundrySellOrder = {
+  price: number;
+  volumeRemain: number;
+  regionName?: string | null;
+  locationName?: string | null;
+  systemName?: string | null;
+};
+
 type FoundryPurchaseQuote = {
   typeId: number;
-  unitPrice: number | null;
-  priceSource: string;
-  region: string | null;
-  location: string | null;
+  sellOrders: FoundrySellOrder[];
+  referenceUnitPrice: number | null;
+  referenceSource: string | null;
   marketCreatedAt: string | null;
 };
 
@@ -187,14 +229,21 @@ async function foundryPurchaseQuotes(typeIds: number[]) {
   const cacheValues = purchaseQuoteCache?.values ?? new Map<number, FoundryPurchaseQuote>();
   for (const typeId of wanted) {
     const item = market?.items.get(typeId);
-    const sell = item?.sells?.[0];
     const reference = references.get(typeId);
     cacheValues.set(typeId, {
       typeId,
-      unitPrice: sell?.price ?? reference?.value ?? null,
-      priceSource: sell?.price != null ? "Lowest retained public sell order" : reference?.source ?? "No retained market price",
-      region: sell?.regionName ?? null,
-      location: sell?.locationName ?? sell?.systemName ?? null,
+      sellOrders: (item?.sells ?? [])
+        .map((sell: any) => ({
+          price: Number(sell.price),
+          volumeRemain: Math.max(0, Number(sell.volumeRemain ?? 0)),
+          regionName: sell.regionName ?? null,
+          locationName: sell.locationName ?? null,
+          systemName: sell.systemName ?? null,
+        }))
+        .filter((sell: FoundrySellOrder) => Number.isFinite(sell.price) && sell.price > 0 && sell.volumeRemain > 0)
+        .sort((a: FoundrySellOrder, b: FoundrySellOrder) => a.price - b.price),
+      referenceUnitPrice: reference?.value ?? null,
+      referenceSource: reference?.source ?? null,
       marketCreatedAt: market?.createdAt ?? null,
     });
   }
@@ -202,15 +251,65 @@ async function foundryPurchaseQuotes(typeIds: number[]) {
   return new Map(wanted.map((id) => [id, cacheValues.get(id)!]));
 }
 
+export function priceFoundrySellDepth(orders: FoundrySellOrder[], quantity: number) {
+  const required = Math.max(0, Number(quantity) || 0);
+  if (required === 0) return { filled: true, totalCost: 0, averageUnitPrice: 0, region: null, location: null, orderCount: 0 };
+  let remaining = required;
+  let totalCost = 0;
+  const used: FoundrySellOrder[] = [];
+
+  for (const order of orders.slice().sort((a, b) => a.price - b.price)) {
+    if (remaining <= 0) break;
+    const available = Math.max(0, Number(order.volumeRemain) || 0);
+    const price = Number(order.price);
+    if (!available || !Number.isFinite(price) || price <= 0) continue;
+    const take = Math.min(remaining, available);
+    totalCost += take * price;
+    remaining -= take;
+    used.push(order);
+  }
+
+  if (remaining > 0) return { filled: false, totalCost: null, averageUnitPrice: null, region: null, location: null, orderCount: used.length };
+
+  const regions = [...new Set(used.map((order) => order.regionName).filter(Boolean))];
+  const locations = [...new Set(used.map((order) => order.locationName ?? order.systemName).filter(Boolean))];
+  return {
+    filled: true,
+    totalCost,
+    averageUnitPrice: totalCost / required,
+    region: regions.length === 1 ? String(regions[0]) : regions.length > 1 ? "Multiple regions" : null,
+    location: locations.length === 1 ? String(locations[0]) : locations.length > 1 ? "Multiple locations" : null,
+    orderCount: used.length,
+  };
+}
+
 function withPurchaseCost(row: any, quote: FoundryPurchaseQuote | undefined, quantity: number) {
-  const unitPrice = quote?.unitPrice ?? null;
+  const required = Math.max(0, Number(quantity) || 0);
+  const depth = priceFoundrySellDepth(quote?.sellOrders ?? [], required);
+  const useDepth = Boolean(depth.filled && depth.averageUnitPrice != null);
+  const referenceUnitPrice = quote?.referenceUnitPrice ?? null;
+  const unitPrice = useDepth ? depth.averageUnitPrice : referenceUnitPrice;
+  const buyCost = useDepth
+    ? depth.totalCost
+    : unitPrice == null
+      ? null
+      : required * unitPrice;
+  const priceSource = useDepth
+    ? depth.orderCount === 1
+      ? "Executable retained public sell order"
+      : `Executable retained public sell depth (${depth.orderCount} orders)`
+    : referenceUnitPrice != null
+      ? `${quote?.referenceSource ?? "ESI reference price"} - retained sell depth insufficient for quantity`
+      : "No retained market price with enough volume";
+
   return {
     ...row,
     buyUnitPrice: unitPrice,
-    buyCost: unitPrice == null ? null : Math.max(0, Number(quantity) || 0) * unitPrice,
-    buyPriceSource: quote?.priceSource ?? "No retained market price",
-    buyRegion: quote?.region ?? null,
-    buyLocation: quote?.location ?? null,
+    buyCost,
+    buyPriceSource: priceSource,
+    buyRegion: useDepth ? depth.region : null,
+    buyLocation: useDepth ? depth.location : null,
+    buyDepthOrders: useDepth ? depth.orderCount : 0,
     marketCreatedAt: quote?.marketCreatedAt ?? null,
   };
 }
@@ -366,16 +465,41 @@ export async function attachFoundryPurchaseCosts(plan: any) {
         withPurchaseCost(part, quotes.get(Number(part.typeId)), Number(part.quantity ?? 0)));
       const priced = withPurchaseCost(row, quotes.get(Number(row.typeId)), Number(row.required ?? 0));
       const buyOnlyInputs = pricedInputPlans.filter((part: any) => part.action === "buy");
+      const recipeBuyCost = pricedRecipe.length && pricedRecipe.every((part: any) => part.buyCost != null)
+        ? pricedRecipe.reduce((sum: number, part: any) => sum + Number(part.buyCost ?? 0), 0)
+        : null;
+      const inputBuyCost = buyOnlyInputs.length && buyOnlyInputs.every((part: any) => part.buyCost != null)
+        ? buyOnlyInputs.reduce((sum: number, part: any) => sum + Number(part.buyCost ?? 0), 0)
+        : buyOnlyInputs.length ? null : 0;
+
+      const finishedBuyCost = priced.buyCost == null ? null : Number(priced.buyCost);
+      const costComparisonAvailable = group.key !== "t2-components"
+        && recipeBuyCost != null
+        && finishedBuyCost != null
+        && Number.isFinite(recipeBuyCost)
+        && Number.isFinite(finishedBuyCost);
+      const recommendationAction = costComparisonAvailable
+        ? (finishedBuyCost <= Number(recipeBuyCost) ? "buy" : "make")
+        : row.recipe?.length ? "unknown" : "source";
+      const recommendationSavings = costComparisonAvailable
+        ? Math.abs(finishedBuyCost - Number(recipeBuyCost))
+        : null;
+
       return {
         ...priced,
         recipe: pricedRecipe,
         inputPlans: pricedInputPlans,
-        recipeBuyCost: pricedRecipe.length && pricedRecipe.every((part: any) => part.buyCost != null)
-          ? pricedRecipe.reduce((sum: number, part: any) => sum + Number(part.buyCost ?? 0), 0)
-          : null,
-        inputBuyCost: buyOnlyInputs.length && buyOnlyInputs.every((part: any) => part.buyCost != null)
-          ? buyOnlyInputs.reduce((sum: number, part: any) => sum + Number(part.buyCost ?? 0), 0)
-          : buyOnlyInputs.length ? null : 0,
+        recipeBuyCost,
+        makeCost: recipeBuyCost,
+        inputBuyCost,
+        recommendationAction,
+        recommendationSavings,
+        recommendationCost: recommendationAction === "buy"
+          ? finishedBuyCost
+          : recommendationAction === "make"
+            ? recipeBuyCost
+            : null,
+        costComparisonAvailable,
       };
     }),
   }));

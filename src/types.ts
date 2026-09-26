@@ -689,7 +689,7 @@ export interface NavigationRouteProfile {
   minSecurity: number | null;
   avoids: { systemIds: number[]; constellationIds: number[]; regionIds: number[] };
   dynamicHazards: { providerIds: string[]; excludedSystemIds: number[]; snapshotAt?: string };
-  specialConnections: { enabledTypes: NavigationEdgeType[]; disabledNetworkIds: string[]; wormholePolicy: { avoidEol:boolean; avoidCritical:boolean; avoidFrigateOnly:boolean; shipMassKg:number|null; shipName?:string } };
+  specialConnections: { enabledTypes: NavigationEdgeType[]; disabledNetworkIds: string[]; wormholePolicy: { avoidEol:boolean; avoidCritical:boolean; avoidFrigateOnly:boolean; shipMassKg:number|null; shipName?:string }; ansiblexPolicy?:{ shipTypeId:number|null; shipName?:string; travellerAllianceId:number|null; shipGroupId?:number|null; shipGroupName?:string; baseActivationCostTj?:number|null; capitalRestricted?:boolean; capitalException?:boolean } };
 }
 
 export interface NavigationRouteSegment {
@@ -743,7 +743,7 @@ export interface NavigationCustomConnection {
 export interface WormholePveSleeper { qty:number; name:string; hullClass:string; trigger:boolean; scram:number; web:number; neutGjPerSec:number; remoteRepHpPerSec:number; effectRange?:string; signatureRadius?:string; chaseSpeed?:string; orbitDistance?:string; orbitVelocity?:string; dps:number; alpha:number; range?:string; ehp:number }
 export interface WormholePveWave { label:string; number:number; scram:number; web:number; neutGjPerSec:number; remoteRepHpPerSec:number; effectRange?:string; dps:number; alpha:number; range?:string; ehp:number; sleepers:WormholePveSleeper[] }
 export interface WormholePveResource { name:string; quantity:number; volumeM3:number|null; cycles:number|null; iskPerM3:number|null; totalIsk:number|null }
-export interface WormholePveSite { key:string; classLabel:"C1"|"C2"|"C3"|"C4"|"C5"|"C6"|"Gas"|"Ore"; name:string; category:string; blueLootIsk:number|null; resourceValueIsk:number|null; bestPossibleTime?:string; miningTime?:string; peakDps:number; peakAlpha:number; peakNeutGjPerSec:number; maxScrams:number; maxWebs:number; totalEhp:number; waves:WormholePveWave[]; resources:WormholePveResource[]; source:"PhobiaCide's Versioned Rykki Guide"; sourceSheet:string; sourceUpdatedAt?:string }
+export interface WormholePveSite { key:string; classLabel:"C1"|"C2"|"C3"|"C4"|"C5"|"C6"|"Gas"|"Ore"; name:string; category:string; blueLootIsk:number|null; resourceValueIsk:number|null; bestPossibleTime?:string; miningTime?:string; peakDps:number; peakAlpha:number; peakNeutGjPerSec:number; maxScrams:number; maxWebs:number; totalEhp:number; waves:WormholePveWave[]; resources:WormholePveResource[]; source:"PhobiaCide's Versioned Rykki Guide"; sourceSheet:string; sourceUpdatedAt?:string; ccpMechanics?:{patch:"2026-09-22.1";source:"CCP patch notes";notes:string[]} }
 export interface WormholePveReferenceSnapshot { source:"PhobiaCide's Versioned Rykki Guide"; sourceUrl:string; fetchedAt:string; stale:boolean; sites:WormholePveSite[]; sheetUpdatedAt:Record<string,string|undefined>; errors:string[] }
 
 export interface NavigationPublicWormholeSnapshot { source:"EVE-Scout v2 public signatures"; sourceUrl:string; fetchedAt:string; stale:boolean; connections:NavigationCustomConnection[]; rawCount:number; rejectedCount:number; error?:string }
@@ -1238,6 +1238,86 @@ export interface SageNotificationEvent {
 }
 export interface SageNotificationInbox { events:SageNotificationEvent[]; unread:number; }
 
+export type SageMailKind = "normal" | "doctrine" | "production" | "system";
+export type SageMailFolder = "inbox" | "sent";
+export interface SageMailContact {
+  characterId:number;
+  characterName:string;
+  corporationId:number|null;
+  allianceId:number|null;
+  relationships:Array<"account"|"corporation"|"contact">;
+}
+export interface SageMailDirectory {
+  characterId:number;
+  characterName:string;
+  contacts:SageMailContact[];
+  contactsSource:{corporationId:number|null;eveContactsAvailable:boolean;warning:string|null};
+}
+export interface SageMailEntry {
+  entryId:number;
+  messageId:string;
+  folder:SageMailFolder;
+  kind:SageMailKind;
+  senderCharacterId:number|null;
+  senderCharacterName:string;
+  recipientCharacterId:number;
+  recipientCharacterName:string;
+  subject:string;
+  body:string;
+  metadata:Record<string,unknown>;
+  createdAt:string;
+  readAt:string|null;
+}
+export interface SageMailQuota {
+  used:number;
+  limit:number|null;
+  remaining:number|null;
+  premium:boolean;
+  full:boolean;
+}
+export interface SageMailbox {
+  characterId:number;
+  characterName:string;
+  folder:SageMailFolder;
+  messages:SageMailEntry[];
+  unread:number;
+  quota:SageMailQuota;
+}
+
+
+export interface EveMailRecipient {
+  recipientId:number;
+  recipientType:"character"|"corporation"|"alliance"|"mailing_list";
+  name:string;
+}
+export interface EveMailHeader {
+  mailId:number;
+  from:number|null;
+  fromName:string;
+  isRead:boolean;
+  labels:number[];
+  recipients:EveMailRecipient[];
+  subject:string;
+  timestamp:string;
+  direction:"sent"|"received";
+}
+export interface EveMailLabel {
+  labelId:number;
+  name:string;
+  color:string|null;
+  unreadCount:number;
+}
+export interface EveMailMailbox {
+  characterId:number;
+  headers:EveMailHeader[];
+  labels:EveMailLabel[];
+  mailingLists:Array<{mailingListId:number;name:string}>;
+  unread:number;
+  capabilities:{read:boolean;send:boolean;organize:boolean};
+}
+export interface EveMailMessage extends EveMailHeader {
+  body:string;
+}
 
 declare global {
   interface Window {
@@ -1281,6 +1361,17 @@ declare global {
       deleteNotificationRule(requestId:string): Promise<{deleted:boolean;requestId:string}>;
       getNotificationInbox(input?:{limit?:number;includeAcknowledged?:boolean}): Promise<SageNotificationInbox>;
       acknowledgeNotification(eventId:string): Promise<{acknowledged:boolean;eventId:string;acknowledgedAt:string}>;
+      getSageMailbox(input:{characterId:string;folder?:SageMailFolder}): Promise<SageMailbox>;
+      getSageMailDirectory(characterId:string): Promise<SageMailDirectory>;
+      sendSageMail(input:{senderCharacterId:string;recipientCharacterId:number;subject:string;body:string}): Promise<{sent:boolean;messageId:string;senderCharacterId:number;recipientCharacterId:number;relationships:string[];senderQuota:SageMailQuota}>;
+      markSageMailRead(input:{characterId:string;entryId:number}): Promise<{read:boolean;entryId:number;quota:SageMailQuota}>;
+      deleteSageMail(input:{characterId:string;entryId:number}): Promise<{deleted:boolean;entryId:number;quota:SageMailQuota}>;
+      sendSageDoctrineMail(input:{characterId:string;subject:string;body:string;dedupKey:string;metadata?:Record<string,unknown>}): Promise<{sent:boolean;corporationId:number;eligibleRecipients:number;delivered:number;duplicates:number;skippedFull:number}>;
+      getEveMailbox(input:{characterId:string;limit?:number}): Promise<EveMailMailbox>;
+      getEveMailMessage(input:{characterId:string;mailId:number}): Promise<EveMailMessage>;
+      sendEveMail(input:{characterId:string;recipients:string[];subject:string;body:string}): Promise<{sent:boolean;mailId:number;recipients:Array<{recipient_id:number;recipient_type:"character"|"corporation"|"alliance"|"mailing_list";name:string}>}>;
+      markEveMailRead(input:{characterId:string;mailId:number;labels?:number[]}): Promise<{read:boolean;mailId:number}>;
+      deleteEveMail(input:{characterId:string;mailId:number}): Promise<{deleted:boolean;mailId:number}>;
       onNotificationsUpdated(callback:(value:SageNotificationInbox)=>void): () => void;
       getGlobalMarketQuotes(typeIds:number[]): Promise<{createdAt:string|null;quotes:Array<{typeId:number;typeName:string;bestBuy:number|null;bestSell:number|null;bestBuySystem:string|null;bestSellSystem:string|null}>}>;
       getLpCorporations(corporationIds:number[]): Promise<Array<{corporationId:number;corporationName:string}>>;
@@ -1608,6 +1699,7 @@ declare global {
       getPublicDataStatus(): Promise<PublicDataStatus>;
       checkPublicDataAvailability(): Promise<PublicDataStatus>;
       checkPublicData(): Promise<PublicDataStatus & { changed: boolean; changedArtifacts: string[] }>;
+      refreshServerContracts(): Promise<{ changed: boolean; snapshotId: string; createdAt: string; contractCount: number; pendingDetailCount: number }>;
       onPublicDataStatus(callback: (value: PublicDataStatus) => void): () => void;
       onPublicDataProgress(callback: (value: { running: boolean; percent: number; message: string; completed?: number; total?: number; error?: string }) => void): () => void;
       getMarketStorage(): Promise<{

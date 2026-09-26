@@ -1,5 +1,5 @@
 import { createDiscordActionProof, createDiscordDeviceRegistrationProof } from "./sage-discord-device";
-const SAGE_ONLINE_URL = "https://new-eden-sage-online.ajayrs2512.workers.dev";
+export const SAGE_ONLINE_URL = "https://new-eden-sage-online.ajayrs2512.workers.dev";
 const PACKET_SCHEMA = "new-eden-sage.packet.v1" as const;
 
 type SagePacket<T extends Record<string, unknown>> = {

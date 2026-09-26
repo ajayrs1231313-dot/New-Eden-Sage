@@ -44,7 +44,7 @@ export type IndustrialOpportunityInput = {
 };
 
 const INDUSTRIAL_PAGE_MODULE = "industrial.command";
-const INDUSTRIAL_PAGE_MODEL_VERSION = 3;
+const INDUSTRIAL_PAGE_MODEL_VERSION = 4;
 
 function defaultIndustrialOpportunityInput(characterId: string): IndustrialOpportunityInput {
   return {
@@ -286,7 +286,7 @@ async function industrialOpportunityKey(input: IndustrialOpportunityInput) {
   const snapshots = scopedSnapshots(normalized);
   const manifest = await loadCurrentMarketRevision();
   return {
-    schema: 3,
+    schema: 4,
     input: normalized,
     marketSnapshotId: manifest?.id ?? "none",
     snapshots: snapshots.map((item) => [String(item.characterId), String(item.updatedAt ?? "")]),
@@ -320,8 +320,7 @@ export async function getIndustrialOpportunitiesPrepared(
   const corporation = Array.isArray(extended?.corporation?.blueprints) ? extended.corporation.blueprints : [];
   const ownedBlueprints = [...personal, ...corporation]
     .filter((blueprint: any, index: number, all: any[]) =>
-      blueprint.type_id && all.findIndex((item) => item.type_id === blueprint.type_id) === index)
-    .slice(0, 40);
+      blueprint.type_id && all.findIndex((item) => item.type_id === blueprint.type_id) === index);
 
   if (!ownedBlueprints.length) {
     const empty = {
@@ -467,18 +466,22 @@ export async function getIndustrialOpportunitiesPrepared(
       .sort((a, b) => b.score - a.score)
       .map((item) => [`${item.productTypeId}:${item.region}:${item.system}`, item]),
   ).values()].slice(0, 40);
-  const status = opportunities.length
+  const rankingStatus = opportunities.length
     ? proximityEnabled
       ? `Ranked ${opportunities.length} profitable opportunities within ${normalized.maxJumps} jumps of ${opportunities[0]?.originSystem ?? normalized.systemQuery}.`
       : `Ranked ${opportunities.length} profitable opportunities across the selected security space.`
     : proximityEnabled
       ? "No profitable retained-market opportunities matched those security and jump filters."
       : "No profitable retained-market opportunities matched the selected security filters.";
+  const status = "Scanned " + ownedBlueprints.length.toLocaleString()
+    + " owned blueprint type" + (ownedBlueprints.length === 1 ? "" : "s")
+    + " across the complete eligible library. " + rankingStatus;
   const result = {
     generatedAt: new Date().toISOString(),
     opportunities,
     status,
     scope: normalized,
+    scannedBlueprintCount: ownedBlueprints.length,
   };
   await savePersistedResult("industrial-opportunities", key, result);
   if (isDefaultIndustrialOpportunityInput(normalized)) await saveIndustrialLastKnownGood(normalized.characterId);

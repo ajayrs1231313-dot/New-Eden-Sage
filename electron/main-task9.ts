@@ -62,8 +62,10 @@ import { searchRawMarketOrders } from "./raw-market-search";
 import { searchMarketTypes } from "./market-static-index";
 import { searchMcpMarketOrders } from "./mcp-market-search";
 import { quoteMarketDepth } from "./market-depth";
-import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
+import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, ensureCurrentSharedPublicContractsData, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
 import { acknowledgeSageNotification, createSageNotificationRule, deleteSageNotificationRule, getSageNotificationInbox, listSageNotificationRules, updateSageNotificationRule } from "./sage-notifications";
+import { deleteSageMail, getSageMailDirectory, getSageMailMailbox, markSageMailRead, sendSageDoctrineMail, sendSageMail, sendSageProductionMail } from "./sage-mail";
+import { deleteEveMail, getEveMailMailbox, getEveMailMessage, markEveMailRead, sendEveMail } from "./eve-mail";
 import { disposePublicDataRefreshProcess, runPublicDataRefresh } from "./public-data-refresh-manager";
 import { disposeContractIntelligenceProcess, getContractMarketWorkspace, searchContractMarketWorkspace } from "./contract-intelligence-manager";
 import { loadSharedMarketBrowserDataset, loadSharedMarketBrowserRegion, loadSharedMarketBrowserRegions, loadSharedMarketBrowserSummaries } from "./shared-market-browser";
@@ -85,7 +87,6 @@ import {
 } from "./analysis-job-manager";
 import {
   getBlueprintActivitiesPrepared,
-  getIndustrialOpportunitiesPrepared,
   getManufacturingPlanPrepared,
   getSystemCostIndexPrepared,
   loadIndustrialPreparedState,
@@ -565,6 +566,25 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
   let lastProgress: any = null;
   masterUpdateActive = true;
   const tracks = newPrepTracks();
+  const productionTargets = (options.characterIds?.length
+    ? [...new Set(options.characterIds.map(String))]
+    : (listSnapshots() as any[]).map((snapshot) => String(snapshot.characterId)))
+    .filter(Boolean);
+  const productionLotsBefore = new Map<string, Set<string>>();
+  const productionSinceByCharacter = new Map<string, number>();
+  for (const characterId of productionTargets) {
+    const previousSnapshot = getSnapshot(characterId) as any;
+    const previousUpdatedAt = Date.parse(String(previousSnapshot?.updatedAt ?? ""));
+    productionSinceByCharacter.set(characterId, Number.isFinite(previousUpdatedAt) ? previousUpdatedAt : 0);
+    try {
+      const lotIds = getFoundryProjects(characterId).flatMap((project: any) =>
+        (Array.isArray(project.productionLots) ? project.productionLots : []).map((lot: any) => String(lot.id)),
+      );
+      productionLotsBefore.set(characterId, new Set(lotIds));
+    } catch {
+      productionLotsBefore.set(characterId, new Set());
+    }
+  }
 
   const publish = (message: string, extra: Record<string, unknown> = {}, running = true) => {
     refreshIskLabTrack(tracks);
@@ -597,6 +617,66 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
     }, options.characterIds);
 
     const coreFailures = Array.isArray(coreResult?.failures) ? coreResult.failures : [];
+
+    // Reconcile Project Foundry only after the fresh industry-job snapshot is committed.
+    // Any newly observed production lots become character-specific Sage Mail notifications.
+    for (const characterId of productionTargets) {
+      try {
+        synchronizeFoundryLifecycle(characterId);
+        const before = productionLotsBefore.get(characterId) ?? new Set<string>();
+        const notifyAfter = productionSinceByCharacter.get(characterId) ?? 0;
+        const projects = getFoundryProjects(characterId) as any[];
+        const newLots = projects.flatMap((project: any) =>
+          (Array.isArray(project.productionLots) ? project.productionLots : [])
+            .filter((lot: any) => {
+              if (before.has(String(lot.id))) return false;
+              const producedAt = Date.parse(String(lot.producedAt ?? ""));
+              return !notifyAfter || (Number.isFinite(producedAt) && producedAt > notifyAfter);
+            })
+            .map((lot: any) => ({ project, lot })),
+        );
+        if (!newLots.length) continue;
+
+        try {
+          const auth = await sageMailCharacterAuth(characterId);
+          for (const { project, lot } of newLots) {
+            const quantity = Math.max(0, Number(lot.quantity ?? 0));
+            const productName = String(project.productName ?? "Production job");
+            const projectName = String(project.name ?? productName);
+            const producedAt = String(lot.producedAt ?? "");
+            const when = producedAt ? " on " + new Date(producedAt).toLocaleString("en-GB") : "";
+            await sendSageProductionMail(auth.sageSessionToken, auth.eveAccessToken, {
+              characterId: auth.characterId,
+              subject: "Production complete · " + productName,
+              body: quantity.toLocaleString() + " × " + productName + " completed for " + projectName + when + ".",
+              dedupKey: "production:" + String(project.id) + ":" + String(lot.id),
+              metadata: {
+                projectId: String(project.id),
+                projectName,
+                productionLotId: String(lot.id),
+                industryJobId: Number(lot.industryJobId ?? 0),
+                productTypeId: Number(project.productTypeId ?? 0),
+                productName,
+                quantity,
+                producedAt,
+              },
+            });
+          }
+        } catch (error) {
+          await logEvent("warn", "sage-mail.production_delivery_failed", {
+            characterId,
+            count: newLots.length,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } catch (error) {
+        await logEvent("warn", "sage-mail.production_reconcile_failed", {
+          characterId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     setTrack("core", {
       percent: 100,
       status: coreFailures.length ? "error" : "done",
@@ -917,8 +997,8 @@ async function ensureEsiScopeSchemaMigration() {
       ...tokenCharacterIds,
       ...authorizationCharacterIds,
     ]);
+    const sageSessionPreserved = Boolean(config.encryptedSageSessionToken);
     config.encryptedRefreshTokens = {};
-    config.encryptedSageSessionToken = undefined;
     config.esiScopeSchemaVersion = CURRENT_ESI_SCOPE_SCHEMA_VERSION;
     config.esiScopeMigratedAt = new Date().toISOString();
     await writeConfig(config);
@@ -926,6 +1006,7 @@ async function ensureEsiScopeSchemaMigration() {
       scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
       affectedCharacters: config.reauthorizationRequiredCharacterIds.length,
       snapshotsPreserved: snapshotCharacterIds.length,
+      sageSessionPreserved,
     });
   } finally {
     await lockHandle.close().catch(() => undefined);
@@ -977,6 +1058,36 @@ async function sageOnlineSessionTokenOnly() {
   if(!config.encryptedSageSessionToken) throw new Error("Sage Online is not connected. Reconnect your primary Sage character first.");
   return decrypt(config.encryptedSageSessionToken);
 }
+
+async function eveMailCharacterAuth(characterId: string) {
+  const config = await readConfig();
+  const requested = String(characterId ?? "").trim();
+  if (!requested) throw new Error("Select a connected EVE character before using EVE Mail.");
+  const stored = config.encryptedRefreshTokens[requested];
+  if (!stored) throw new Error("This character is not connected. Reconnect it before using EVE Mail.");
+  const refreshed = await refreshEveToken(config.eveClientId, decrypt(stored));
+  if (refreshed.refresh_token) {
+    config.encryptedRefreshTokens[requested] = encrypt(refreshed.refresh_token);
+    await writeConfig(config);
+  }
+  return {
+    eveAccessToken: refreshed.access_token,
+    characterId: Number(requested),
+  };
+}
+
+async function sageMailCharacterAuth(characterId: string) {
+  const config = await readConfig();
+  if (!config.encryptedSageSessionToken) {
+    throw new Error("Sage Online is not connected. Reconnect your primary Sage character first.");
+  }
+  const eve = await eveMailCharacterAuth(characterId);
+  return {
+    sageSessionToken: decrypt(config.encryptedSageSessionToken),
+    eveAccessToken: eve.eveAccessToken,
+    characterId: eve.characterId,
+  };
+}
 async function loadPlanetaryCorporationLibrary(characterId:string) {
   const {sessionToken,workspace}=await planetaryCorporationContext(characterId);
   const [surveySummaries,templateSummaries]=await Promise.all([listSagePiObjects(sessionToken,workspace.workspace_id,"sage.pi-survey"),listSagePiObjects(sessionToken,workspace.workspace_id,"sage.pi-template")]);
@@ -992,7 +1103,7 @@ let displayFitEnabled = DISPLAY_FIT_DEFAULT_ENABLED;
 const DEV_ZOOM_STEP = 0.1;
 const DEV_ZOOM_MIN = 0.4;
 const DEV_ZOOM_MAX = 1.5;
-let devZoomOverride: number | null = null;
+let devVisualScale = 1;
 
 function isDevelopmentRun() {
   return !app.isPackaged && process.argv.includes("--dev");
@@ -1000,6 +1111,33 @@ function isDevelopmentRun() {
 
 function clampDevZoom(value: number) {
   return Math.max(DEV_ZOOM_MIN, Math.min(DEV_ZOOM_MAX, Math.round(value * 100) / 100));
+}
+
+async function applyDevVisualScale(target: BrowserWindow) {
+  if (!isDevelopmentRun() || target.isDestroyed() || target.webContents.isDestroyed()) return;
+  const scale = clampDevZoom(devVisualScale);
+  try {
+    await target.webContents.executeJavaScript(`(() => {
+      const STYLE_ID = "sage-dev-birdseye-scale";
+      let style = document.getElementById(STYLE_ID);
+      if (!style) {
+        style = document.createElement("style");
+        style.id = STYLE_ID;
+        style.textContent = [
+          "#root {",
+          "  transform-origin: 50% 0 !important;",
+          "  transform: scale(var(--sage-dev-visual-scale, 1)) !important;",
+          "  will-change: transform;",
+          "}",
+        ].join("\\n");
+        document.head.appendChild(style);
+      }
+      document.documentElement.style.setProperty("--sage-dev-visual-scale", ${JSON.stringify(String(scale))});
+      document.documentElement.dataset.sageDevVisualScale = ${JSON.stringify(String(scale))};
+    })()`, true);
+  } catch {
+    // The renderer can briefly disappear during Vite reloads; did-finish-load reapplies the scale.
+  }
 }
 
 type DisplayFitMetrics = {
@@ -1039,12 +1177,6 @@ async function readDisplayFitMetrics(target: BrowserWindow): Promise<DisplayFitM
 
 async function applyResponsiveDisplayScale(target: BrowserWindow) {
   if (target.isDestroyed() || target.webContents.isDestroyed()) return;
-  if (isDevelopmentRun() && devZoomOverride != null) {
-    if (Math.abs(target.webContents.getZoomFactor() - devZoomOverride) >= 0.004) {
-      target.webContents.setZoomFactor(devZoomOverride);
-    }
-    return;
-  }
   const [contentWidth, contentHeight] = target.getContentSize();
   const baseZoom = responsiveDisplayZoom(contentWidth, contentHeight);
   const currentZoom = target.webContents.getZoomFactor();
@@ -1135,12 +1267,12 @@ function createWindow() {
       if (zoomOut || zoomIn || zoomReset) {
         event.preventDefault();
         if (zoomReset) {
-          devZoomOverride = null;
+          devVisualScale = 1;
+          void applyDevVisualScale(createdWindow);
           scheduleResponsiveDisplayScale(createdWindow, 0);
         } else {
-          const current = devZoomOverride ?? createdWindow.webContents.getZoomFactor();
-          devZoomOverride = clampDevZoom(current + (zoomIn ? DEV_ZOOM_STEP : -DEV_ZOOM_STEP));
-          createdWindow.webContents.setZoomFactor(devZoomOverride);
+          devVisualScale = clampDevZoom(devVisualScale + (zoomIn ? DEV_ZOOM_STEP : -DEV_ZOOM_STEP));
+          void applyDevVisualScale(createdWindow);
         }
         return;
       }
@@ -1169,7 +1301,10 @@ function createWindow() {
   createdWindow.on("unmaximize", () => scheduleResponsiveDisplayScale(createdWindow));
   createdWindow.on("enter-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
   createdWindow.on("leave-full-screen", () => scheduleResponsiveDisplayScale(createdWindow));
-  createdWindow.webContents.on("did-finish-load", () => void applyResponsiveDisplayScale(createdWindow));
+  createdWindow.webContents.on("did-finish-load", () => {
+    void applyResponsiveDisplayScale(createdWindow);
+    if (isDevelopmentRun()) void applyDevVisualScale(createdWindow);
+  });
 
   if (process.argv.includes("--dev")) {
     const devSession = createdWindow.webContents.session;
@@ -1893,8 +2028,14 @@ if (!hasSingleInstanceLock) {
       .map((candidate) => ({ characterId: String(candidate.characterId), characterName: String(candidate.character?.name ?? candidate.characterId), assets: Array.isArray(candidate.extended?.assets) ? candidate.extended.assets : [] }));
     return analyzeReactionPlan({ blueprintTypeId: Number(input?.blueprintTypeId ?? 0), runs: Number(input?.runs ?? 1), snapshot, stockSources });
   });
-  ipcMain.handle("industrial:opportunities", async (_event, input: any) =>
-    getIndustrialOpportunitiesPrepared(input, { force: Boolean(input?.force) }));
+  ipcMain.handle("industrial:opportunities", async (_event, input: any) => {
+    const { force, ...opportunityInput } = input ?? {};
+    return runFeaturePrepProcess({
+      task: "industrial-opportunities",
+      input: opportunityInput,
+      force: Boolean(force),
+    });
+  });
   ipcMain.handle("industrial:prepared-state", async (_event, input: { characterId: string }) =>
     loadIndustrialPreparedState(String(input.characterId)));
   ipcMain.handle("industrial:prepare-command", async (_event, input: { characterId: string }) => {
@@ -2196,8 +2337,8 @@ if (!hasSingleInstanceLock) {
       config.identitySchemaVersion = CURRENT_IDENTITY_SCHEMA_VERSION;
     }
 
-    const onlineIdentitySynced = false;
-    const onlineIdentityError = login.characterId !== config.primaryCharacterId && !config.encryptedSageSessionToken
+    let onlineIdentitySynced = false;
+    let onlineIdentityError = login.characterId !== config.primaryCharacterId && !config.encryptedSageSessionToken
       ? "Reconnect the primary Sage character to restore the online session before linking additional characters."
       : undefined;
     await writeConfig(config);
@@ -2225,32 +2366,32 @@ if (!hasSingleInstanceLock) {
     const snapshot = getSnapshot(login.characterId) ?? bootstrap;
 
     if (!onlineIdentityError) {
-      void (async () => {
-        try {
-          if (login.characterId === config.primaryCharacterId) {
-            const claimed = await claimSageIdentity(login.accessToken);
-            if (claimed.account_id !== config.sageAccountId || String(claimed.primary_character_id) !== config.primaryCharacterId) {
-              throw new Error("Sage Online returned an identity that did not match the selected primary character.");
-            }
-            const latest = await readConfig();
-            if (latest.primaryCharacterId === login.characterId) {
-              latest.encryptedSageSessionToken = encrypt(claimed.session_token);
-              await writeConfig(latest);
-            }
-          } else {
-            const latest = await readConfig();
-            if (latest.encryptedSageSessionToken) {
-              await linkSageCharacter(decrypt(latest.encryptedSageSessionToken), login.accessToken);
-            }
+      try {
+        if (login.characterId === config.primaryCharacterId) {
+          const claimed = await claimSageIdentity(login.accessToken);
+          if (claimed.account_id !== config.sageAccountId || String(claimed.primary_character_id) !== config.primaryCharacterId) {
+            throw new Error("Sage Online returned an identity that did not match the selected primary character.");
           }
-          await logEvent("info", "sage-online.identity-linked", { characterId: login.characterId });
-        } catch (error) {
-          await logEvent("warn", "sage-online.identity-link-deferred-failed", {
-            characterId: login.characterId,
-            message: error instanceof Error ? error.message : String(error),
-          });
+          const latest = await readConfig();
+          if (latest.primaryCharacterId === login.characterId) {
+            latest.encryptedSageSessionToken = encrypt(claimed.session_token);
+            await writeConfig(latest);
+          }
+        } else {
+          const latest = await readConfig();
+          if (latest.encryptedSageSessionToken) {
+            await linkSageCharacter(decrypt(latest.encryptedSageSessionToken), login.accessToken);
+          }
         }
-      })();
+        onlineIdentitySynced = true;
+        await logEvent("info", "sage-online.identity-linked", { characterId: login.characterId });
+      } catch (error) {
+        onlineIdentityError = error instanceof Error ? error.message : String(error);
+        await logEvent("warn", "sage-online.identity-link-failed", {
+          characterId: login.characterId,
+          message: onlineIdentityError,
+        });
+      }
     }
 
     const mailCoverage = (snapshot as any)?.extended?.mail?.coverage;
@@ -2707,23 +2848,102 @@ if (!hasSingleInstanceLock) {
     return result;
   });
 
+  ipcMain.handle("sage-mail:mailbox", async (_event, input: { characterId?: string; folder?: "inbox" | "sent" }) => {
+    const characterId = Number(String(input?.characterId ?? "").trim());
+    if (!Number.isSafeInteger(characterId) || characterId <= 0) throw new Error("Select a character before opening Sage Mail.");
+    return getSageMailMailbox(await sageOnlineSessionTokenOnly(), characterId, input?.folder === "sent" ? "sent" : "inbox");
+  });
+  ipcMain.handle("sage-mail:directory", async (_event, characterId: string) => {
+    const auth = await sageMailCharacterAuth(characterId);
+    return getSageMailDirectory(auth.sageSessionToken, auth.eveAccessToken, auth.characterId);
+  });
+  ipcMain.handle("sage-mail:send", async (_event, input: { senderCharacterId?: string; recipientCharacterId?: number; subject?: string; body?: string }) => {
+    const auth = await sageMailCharacterAuth(String(input?.senderCharacterId ?? ""));
+    return sendSageMail(auth.sageSessionToken, auth.eveAccessToken, {
+      senderCharacterId: auth.characterId,
+      recipientCharacterId: Number(input?.recipientCharacterId ?? 0),
+      subject: String(input?.subject ?? ""),
+      body: String(input?.body ?? ""),
+    });
+  });
+  ipcMain.handle("sage-mail:read", async (_event, input: { characterId?: string; entryId?: number }) => {
+    const characterId = Number(String(input?.characterId ?? "").trim());
+    const entryId = Number(input?.entryId ?? 0);
+    if (!Number.isSafeInteger(characterId) || characterId <= 0 || !Number.isSafeInteger(entryId) || entryId <= 0) throw new Error("Invalid Sage Mail entry.");
+    return markSageMailRead(await sageOnlineSessionTokenOnly(), characterId, entryId);
+  });
+  ipcMain.handle("sage-mail:delete", async (_event, input: { characterId?: string; entryId?: number }) => {
+    const characterId = Number(String(input?.characterId ?? "").trim());
+    const entryId = Number(input?.entryId ?? 0);
+    if (!Number.isSafeInteger(characterId) || characterId <= 0 || !Number.isSafeInteger(entryId) || entryId <= 0) throw new Error("Invalid Sage Mail entry.");
+    return deleteSageMail(await sageOnlineSessionTokenOnly(), characterId, entryId);
+  });
+  ipcMain.handle("sage-mail:doctrine", async (_event, input: { characterId?: string; subject?: string; body?: string; dedupKey?: string; metadata?: Record<string, unknown> }) => {
+    const auth = await sageMailCharacterAuth(String(input?.characterId ?? ""));
+    return sendSageDoctrineMail(auth.sageSessionToken, auth.eveAccessToken, {
+      characterId: auth.characterId,
+      subject: String(input?.subject ?? ""),
+      body: String(input?.body ?? ""),
+      dedupKey: String(input?.dedupKey ?? ""),
+      metadata: input?.metadata ?? {},
+    });
+  });
+
+  ipcMain.handle("eve-mail:mailbox", async (_event, input: { characterId?: string; limit?: number }) => {
+    const auth = await eveMailCharacterAuth(String(input?.characterId ?? ""));
+    return getEveMailMailbox(auth.characterId, auth.eveAccessToken, Number(input?.limit ?? 250));
+  });
+  ipcMain.handle("eve-mail:message", async (_event, input: { characterId?: string; mailId?: number }) => {
+    const auth = await eveMailCharacterAuth(String(input?.characterId ?? ""));
+    const mailId = Number(input?.mailId ?? 0);
+    if (!Number.isSafeInteger(mailId) || mailId <= 0) throw new Error("Invalid EVE Mail message.");
+    return getEveMailMessage(auth.characterId, auth.eveAccessToken, mailId);
+  });
+  ipcMain.handle("eve-mail:send", async (_event, input: { characterId?: string; recipients?: string[]; subject?: string; body?: string }) => {
+    const auth = await eveMailCharacterAuth(String(input?.characterId ?? ""));
+    return sendEveMail(auth.characterId, auth.eveAccessToken, {
+      recipients: Array.isArray(input?.recipients) ? input.recipients.map(String) : [],
+      subject: String(input?.subject ?? ""),
+      body: String(input?.body ?? ""),
+    });
+  });
+  ipcMain.handle("eve-mail:read", async (_event, input: { characterId?: string; mailId?: number; labels?: number[] }) => {
+    const auth = await eveMailCharacterAuth(String(input?.characterId ?? ""));
+    const mailId = Number(input?.mailId ?? 0);
+    if (!Number.isSafeInteger(mailId) || mailId <= 0) throw new Error("Invalid EVE Mail message.");
+    return markEveMailRead(auth.characterId, auth.eveAccessToken, mailId, Array.isArray(input?.labels) ? input.labels.map(Number) : undefined);
+  });
+  ipcMain.handle("eve-mail:delete", async (_event, input: { characterId?: string; mailId?: number }) => {
+    const auth = await eveMailCharacterAuth(String(input?.characterId ?? ""));
+    const mailId = Number(input?.mailId ?? 0);
+    if (!Number.isSafeInteger(mailId) || mailId <= 0) throw new Error("Invalid EVE Mail message.");
+    return deleteEveMail(auth.characterId, auth.eveAccessToken, mailId);
+  });
+
   ipcMain.handle("public-data:status", () => loadPublicDataStatus());
   ipcMain.handle("public-data:check-availability", () => refreshPublicDataAvailability());
   ipcMain.handle("public-data:check", () => installSharedPublicData());
+  ipcMain.handle("contracts:refresh-server", async () => {
+    window?.webContents.send("market:progress", { mode: "contracts", regionName: "Pulling latest contracts from Sage server", pagesDone: 0, pagesTotal: 1, regionsDone: 0, regionsTotal: 1 });
+    const result = await ensureCurrentSharedPublicContractsData();
+    disposeContractIntelligenceProcess();
+    window?.webContents.send("market:progress", { mode: "contracts", regionName: result.changed ? "Installed latest Sage server contracts" : "Sage server contracts already current", pagesDone: 1, pagesTotal: 1, regionsDone: 1, regionsTotal: 1 });
+    return result;
+  });
   ipcMain.handle("market:storage", async () => {
     const manifest = await loadCurrentSharedMarketManifest();
     return { path: SHARED_MARKET_ROOT, retainedDatasets: manifest ? 1 : 0, raw: null, generation: manifest?.generation ?? null };
   });
   ipcMain.handle("market:pull", async (_event, input?: { mode?: string; regionId?: number }) => {
     if (input?.mode !== "contracts" && input?.mode !== "single") throw new Error("Public market data is server-managed. Use Data Control to install a newer generation.");
-    const manifest = await loadCurrentSharedMarketManifest();
-    if (!manifest) throw new Error("No public data is installed. Use Data Control > Check for new data, then install the available update.");
     if (input.mode === "contracts") {
       const contracts = await loadSharedPublicContractsDataset();
-      if (!contracts) throw new Error("The installed public generation does not contain public contracts. Check Data Control for an update.");
-      window?.webContents.send("market:progress", { mode: "contracts", regionName: "Installed server-prepared public contracts", pagesDone: 1, pagesTotal: 1, regionsDone: 1, regionsTotal: 1 });
-      return { summaries: contracts.regions, storage: { path: `Shared public generation ${manifest.generation}`, retained: 1 }, generation: manifest.generation, contractCount: contracts.contractCount, pendingDetailCount: contracts.pendingDetailCount };
+      if (!contracts) throw new Error("No Sage server contract snapshot is installed yet. Refresh Contracts to pull the latest server snapshot.");
+      window?.webContents.send("market:progress", { mode: "contracts", regionName: "Installed Sage server public contracts", pagesDone: 1, pagesTotal: 1, regionsDone: 1, regionsTotal: 1 });
+      return { summaries: contracts.regions, storage: { path: `Sage server contract snapshot ${contracts.snapshotId}`, retained: 1 }, generation: contracts.snapshotId, contractCount: contracts.contractCount, pendingDetailCount: contracts.pendingDetailCount };
     }
+    const manifest = await loadCurrentSharedMarketManifest();
+    if (!manifest) throw new Error("No public data is installed. Use Data Control > Check for new data, then install the available update.");
     const summaries = await loadSharedMarketBrowserSummaries();
     window?.webContents.send("market:progress", { mode: "single", regionName: "Installed server-prepared public market", pagesDone: 1, pagesTotal: 1, regionsDone: 1, regionsTotal: 1 });
     return { summaries, storage: { path: `Shared public generation ${manifest.generation}`, retained: 1 }, generation: manifest.generation };

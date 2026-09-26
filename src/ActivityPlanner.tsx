@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ActivityReadinessResult, CharacterSnapshot, HullAccessPreview } from "./types";
 import {
   activityDefinitions,
@@ -568,7 +568,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
             <>
               <div className="activity-summary-ship">
                 <img
-                  src={`https://images.evetech.net/types/${selectedShipPreview.ship.typeId}/render?size=128`}
+                  src={`sage-asset://type/${selectedShipPreview.ship.typeId}/render?size=128`}
                   alt=""
                   onError={(event) => { event.currentTarget.style.display = "none"; }}
                 />
@@ -658,7 +658,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
               )}
               {selectedShipPreview && (
                 <div className="activity-ranked-hull">
-                  <img src={`https://images.evetech.net/types/${selectedShipPreview.ship.typeId}/render?size=128`} alt="" />
+                  <img src={`sage-asset://type/${selectedShipPreview.ship.typeId}/render?size=128`} alt="" />
                   <div><strong>{selectedShipPreview.preview.competencyPercent}%</strong><small>SHIP COMPETENCY</small></div>
                 </div>
               )}
@@ -671,7 +671,7 @@ export function ActivityPlanner({ snapshot, cloneState }: Props) {
           {selectedShip ? (
             <div className="activity-capability-body">
               <div className="activity-capability-orbit">
-                <img src={`https://images.evetech.net/types/${selectedShip.ship.typeId}/render?size=128`} alt="" />
+                <img src={`sage-asset://type/${selectedShip.ship.typeId}/render?size=128`} alt="" />
                 <strong>{selectedShip.analysis.overallPercent}%</strong>
               </div>
               <div className="activity-capability-bars">

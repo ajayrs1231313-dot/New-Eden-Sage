@@ -26,8 +26,18 @@ NOTIFICATION_EVENTS_DICT_NAME = "new-eden-sage-notification-events"
 NOTIFICATION_USER_EVENTS_DICT_NAME = "new-eden-sage-notification-user-events"
 NOTIFICATION_ACKS_DICT_NAME = "new-eden-sage-notification-acks"
 REFRESH_GUARD_DICT_NAME = "new-eden-sage-public-refresh-guard"
-REFRESH_GUARD_KEY = "public-refresh"
-REFRESH_GUARD_LEASE_SECONDS = 15 * 60
+MARKET_REFRESH_GUARD_KEY = "public-refresh"
+CONTRACT_REFRESH_GUARD_KEY = "contract-refresh"
+MARKET_PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 10 * 60
+MARKET_PIPELINE_FUNCTION_TIMEOUT_SECONDS = MARKET_PIPELINE_SUBPROCESS_TIMEOUT_SECONDS + 60
+MARKET_REFRESH_FUNCTION_TIMEOUT_SECONDS = MARKET_PIPELINE_FUNCTION_TIMEOUT_SECONDS + 60
+MARKET_SCHEDULER_DISPATCH_TIMEOUT_SECONDS = 60
+MARKET_REFRESH_GUARD_LEASE_SECONDS = MARKET_REFRESH_FUNCTION_TIMEOUT_SECONDS + 10 * 60
+CONTRACT_PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 25 * 60
+CONTRACT_PIPELINE_FUNCTION_TIMEOUT_SECONDS = CONTRACT_PIPELINE_SUBPROCESS_TIMEOUT_SECONDS + 60
+CONTRACT_REFRESH_FUNCTION_TIMEOUT_SECONDS = CONTRACT_PIPELINE_FUNCTION_TIMEOUT_SECONDS + 60
+CONTRACT_SCHEDULER_DISPATCH_TIMEOUT_SECONDS = 60
+CONTRACT_REFRESH_GUARD_LEASE_SECONDS = CONTRACT_REFRESH_FUNCTION_TIMEOUT_SECONDS + 10 * 60
 METRICS_PRESENCE_WINDOW_SECONDS = 75
 NOTIFICATION_MAX_EVENTS_PER_USER = 250
 NOTIFICATION_MAX_RULES_PER_USER = 500
@@ -64,6 +74,8 @@ image = (
 PUBLISH_ROOT = Path("/published")
 MANIFEST_PATH = PUBLISH_ROOT / "manifest.json"
 SCHEDULER_STATUS_PATH = PUBLISH_ROOT / "source-state" / "scheduler-status.json"
+CONTRACT_SCHEDULER_STATUS_PATH = PUBLISH_ROOT / "source-state" / "contract-scheduler-status.json"
+CONTRACT_CURRENT_PATH = PUBLISH_ROOT / "source-current" / "public-contracts" / "current.json.gz"
 NOTIFICATION_STATUS_PATH = PUBLISH_ROOT / "source-state" / "notification-status.json"
 
 
@@ -84,6 +96,10 @@ def _read_manifest() -> dict | None:
 
 def _read_scheduler_status() -> dict | None:
     return _read_json(SCHEDULER_STATUS_PATH)
+
+
+def _read_contract_scheduler_status() -> dict | None:
+    return _read_json(CONTRACT_SCHEDULER_STATUS_PATH)
 
 
 def _parse_utc(value: object) -> datetime | None:
@@ -428,7 +444,7 @@ def _persist_notification_result(result: dict | None) -> dict:
     volumes={"/published": published_volume, "/history": history_volume},
     cpu=1.0,
     memory=2048,
-    timeout=660,
+    timeout=MARKET_PIPELINE_FUNCTION_TIMEOUT_SECONDS,
 )
 def benchmark_market_pipeline() -> dict:
     """Evaluate public source eligibility, fetch only eligible sources, retain changes, and publish atomically."""
@@ -448,6 +464,7 @@ def benchmark_market_pipeline() -> dict:
     env["NEW_EDEN_SAGE_DISABLE_SHARED_MARKET"] = "1"
     env["NEW_EDEN_SAGE_NOTIFICATION_INPUT_FILE"] = str(notification_input_path)
     env["NEW_EDEN_SAGE_NOTIFICATION_RESULT_FILE"] = str(notification_result_path)
+    env["NEW_EDEN_SAGE_PUBLIC_PIPELINE_MODE"] = "market"
 
     started = time.perf_counter()
     completed = subprocess.run(
@@ -456,7 +473,7 @@ def benchmark_market_pipeline() -> dict:
         env=env,
         capture_output=True,
         text=True,
-        timeout=630,
+        timeout=MARKET_PIPELINE_SUBPROCESS_TIMEOUT_SECONDS,
         check=False,
     )
     wall_ms = round((time.perf_counter() - started) * 1000)
@@ -495,10 +512,53 @@ def benchmark_market_pipeline() -> dict:
 
 @app.function(
     image=image,
+    volumes={"/published": published_volume},
+    cpu=1.0,
+    memory=2048,
+    timeout=CONTRACT_PIPELINE_FUNCTION_TIMEOUT_SECONDS,
+)
+def benchmark_contract_pipeline() -> dict:
+    """Refresh contract source data independently; publication is handled by the fast market pipeline."""
+    env = os.environ.copy()
+    env["NEW_EDEN_SAGE_RAW_MARKET_ROOT"] = "/published/source-current/Raw Orders"
+    env["NEW_EDEN_SAGE_USER_DATA"] = "/tmp/new-eden-sage-user"
+    env["NEW_EDEN_SAGE_DISABLE_SHARED_MARKET"] = "1"
+    env["NEW_EDEN_SAGE_PUBLIC_PIPELINE_MODE"] = "contracts"
+
+    started = time.perf_counter()
+    completed = subprocess.run(
+        ["node", "--max-old-space-size=1536", "/app/public_data_worker.mjs"],
+        cwd="/app",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=CONTRACT_PIPELINE_SUBPROCESS_TIMEOUT_SECONDS,
+        check=False,
+    )
+    wall_ms = round((time.perf_counter() - started) * 1000)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Sage contract source pipeline failed on Modal.\n"
+            f"stdout:\n{completed.stdout[-8000:]}\n"
+            f"stderr:\n{completed.stderr[-8000:]}"
+        )
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError("Sage contract source pipeline returned no result JSON.")
+    result = json.loads(lines[-1])
+    published_volume.commit()
+    result["wallMs"] = wall_ms
+    result["modalCpu"] = 1.0
+    result["modalMemoryMiB"] = 2048
+    return result
+
+
+@app.function(
+    image=image,
     volumes={"/published": published_volume, "/history": history_volume},
-    cpu=0.25,
-    memory=256,
-    timeout=700,
+    cpu=0.125,
+    memory=128,
+    timeout=MARKET_REFRESH_FUNCTION_TIMEOUT_SECONDS,
     max_containers=4,
 )
 @modal.concurrent(max_inputs=1)
@@ -509,18 +569,18 @@ def refresh_market_if_stale() -> dict:
     previous = _read_manifest()
 
     now = time.time()
-    existing = refresh_guard.get(REFRESH_GUARD_KEY)
+    existing = refresh_guard.get(MARKET_REFRESH_GUARD_KEY)
     if isinstance(existing, dict) and float(existing.get("expiresAt", 0) or 0) <= now:
-        refresh_guard.pop(REFRESH_GUARD_KEY, None)
+        refresh_guard.pop(MARKET_REFRESH_GUARD_KEY, None)
 
     lease_token = f"{time.time_ns()}-{os.getpid()}"
     lease = {
         "token": lease_token,
         "startedAt": datetime.now(timezone.utc).isoformat(),
-        "expiresAt": now + REFRESH_GUARD_LEASE_SECONDS,
+        "expiresAt": now + MARKET_REFRESH_GUARD_LEASE_SECONDS,
     }
-    if not refresh_guard.put(REFRESH_GUARD_KEY, lease, skip_if_exists=True):
-        active = refresh_guard.get(REFRESH_GUARD_KEY)
+    if not refresh_guard.put(MARKET_REFRESH_GUARD_KEY, lease, skip_if_exists=True):
+        active = refresh_guard.get(MARKET_REFRESH_GUARD_KEY)
         if previous is None:
             raise RuntimeError("Public refresh already in progress and no known-good manifest is available yet.")
         return {
@@ -557,15 +617,88 @@ def refresh_market_if_stale() -> dict:
             "refreshWallMs": result.get("wallMs"),
         }
     finally:
-        active = refresh_guard.get(REFRESH_GUARD_KEY)
+        active = refresh_guard.get(MARKET_REFRESH_GUARD_KEY)
         if isinstance(active, dict) and active.get("token") == lease_token:
-            refresh_guard.pop(REFRESH_GUARD_KEY, None)
+            refresh_guard.pop(MARKET_REFRESH_GUARD_KEY, None)
 
 
-@app.function(image=image, schedule=modal.Period(minutes=5), timeout=720)
+@app.function(
+    image=image,
+    schedule=modal.Period(minutes=5),
+    cpu=0.125,
+    memory=128,
+    timeout=MARKET_SCHEDULER_DISPATCH_TIMEOUT_SECONDS,
+)
 def scheduled_market_refresh() -> dict:
-    """Producer-only five-minute scheduler. Eligibility is decided per CCP source by the worker."""
-    return refresh_market_if_stale.remote()
+    """Dispatch the guarded market/public refresh without billing a cron container for the worker runtime."""
+    refresh_market_if_stale.spawn()
+    return {"dispatched": True, "pipeline": "market"}
+
+
+@app.function(
+    image=image,
+    volumes={"/published": published_volume},
+    cpu=0.125,
+    memory=128,
+    timeout=CONTRACT_REFRESH_FUNCTION_TIMEOUT_SECONDS,
+    max_containers=2,
+)
+@modal.concurrent(max_inputs=1)
+def refresh_contracts_if_stale() -> dict:
+    """Refresh public contracts independently without holding up market/public publication."""
+    published_volume.reload()
+    previous_status = _read_contract_scheduler_status()
+    now = time.time()
+    existing = refresh_guard.get(CONTRACT_REFRESH_GUARD_KEY)
+    if isinstance(existing, dict) and float(existing.get("expiresAt", 0) or 0) <= now:
+        refresh_guard.pop(CONTRACT_REFRESH_GUARD_KEY, None)
+
+    lease_token = f"{time.time_ns()}-{os.getpid()}"
+    lease = {
+        "token": lease_token,
+        "startedAt": datetime.now(timezone.utc).isoformat(),
+        "expiresAt": now + CONTRACT_REFRESH_GUARD_LEASE_SECONDS,
+    }
+    if not refresh_guard.put(CONTRACT_REFRESH_GUARD_KEY, lease, skip_if_exists=True):
+        return {
+            "refreshed": False,
+            "sourceUpdated": False,
+            "skipped": True,
+            "skipReason": "contract-refresh-in-progress",
+            "activeRefresh": refresh_guard.get(CONTRACT_REFRESH_GUARD_KEY),
+            "contractScheduler": previous_status,
+        }
+
+    try:
+        result = benchmark_contract_pipeline.remote()
+        published_volume.reload()
+        return {
+            "refreshed": True,
+            "sourceUpdated": bool(result.get("sourceUpdated")),
+            "contractSourceId": result.get("contractSourceId"),
+            "contractCount": result.get("contractCount"),
+            "contractPendingDetailCount": result.get("contractPendingDetailCount"),
+            "contractComputeMs": result.get("contractComputeMs"),
+            "refreshWallMs": result.get("wallMs"),
+            "contractScheduler": _read_contract_scheduler_status(),
+        }
+    finally:
+        active = refresh_guard.get(CONTRACT_REFRESH_GUARD_KEY)
+        if isinstance(active, dict) and active.get("token") == lease_token:
+            refresh_guard.pop(CONTRACT_REFRESH_GUARD_KEY, None)
+
+
+@app.function(
+    image=image,
+    schedule=modal.Period(minutes=10),
+    cpu=0.125,
+    memory=128,
+    timeout=CONTRACT_SCHEDULER_DISPATCH_TIMEOUT_SECONDS,
+)
+def scheduled_contract_refresh() -> dict:
+    """Dispatch the independent contract-source refresh and return immediately."""
+    refresh_contracts_if_stale.spawn()
+    return {"dispatched": True, "pipeline": "contracts"}
 
 
 @app.local_entrypoint()
@@ -628,6 +761,57 @@ def shared_market_web():
         except RuntimeError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
+    contract_metadata_cache: dict[str, object] = {"mtimeNs": None, "value": None}
+
+    def latest_contract_metadata() -> dict:
+        published_volume.reload()
+        if not CONTRACT_CURRENT_PATH.is_file():
+            raise HTTPException(status_code=503, detail="No current server contract snapshot is available.")
+        stat = CONTRACT_CURRENT_PATH.stat()
+        if contract_metadata_cache.get("mtimeNs") == stat.st_mtime_ns and isinstance(contract_metadata_cache.get("value"), dict):
+            return dict(contract_metadata_cache["value"])
+        import gzip
+        with gzip.open(CONTRACT_CURRENT_PATH, "rt", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if payload.get("schemaVersion") != 1 or payload.get("dataset") != "public-contracts" or not payload.get("snapshotId"):
+            raise HTTPException(status_code=503, detail="Current server contract snapshot is invalid.")
+        digest = hashlib.sha256()
+        with CONTRACT_CURRENT_PATH.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        scheduler = _read_contract_scheduler_status()
+        value = {
+            "schemaVersion": 1,
+            "dataset": "public-contracts",
+            "snapshotId": str(payload.get("snapshotId")),
+            "createdAt": str(payload.get("createdAt") or ""),
+            "bytes": stat.st_size,
+            "sha256": digest.hexdigest(),
+            "regionCount": int(payload.get("regionCount") or 0),
+            "contractCount": int(payload.get("contractCount") or 0),
+            "pendingDetailCount": int(payload.get("pendingDetailCount") or 0),
+            "completedAt": str((scheduler or {}).get("completedAt") or payload.get("createdAt") or ""),
+        }
+        contract_metadata_cache["mtimeNs"] = stat.st_mtime_ns
+        contract_metadata_cache["value"] = value
+        return dict(value)
+
+    @web.get("/v1/contracts/latest")
+    def latest_contracts():
+        return {"contract": latest_contract_metadata()}
+
+    @web.get("/v1/contracts/latest.gz")
+    def latest_contracts_file():
+        metadata = latest_contract_metadata()
+        return FileResponse(
+            CONTRACT_CURRENT_PATH,
+            media_type="application/gzip",
+            headers={
+                "ETag": str(metadata["sha256"]),
+                "X-New-Eden-Sage-Contract-Snapshot": str(metadata["snapshotId"]),
+            },
+        )
+
     def own_notification_rule(request_id: str, sage_id: str) -> dict | None:
         rule = notification_rules.get(request_id)
         if not isinstance(rule, dict) or str(rule.get("sageId") or "") != sage_id:
@@ -649,12 +833,16 @@ def shared_market_web():
     @web.get("/status")
     def status():
         manifest, scheduler = reload_state()
+        contract_scheduler = _read_contract_scheduler_status()
         return {
             "ok": manifest is not None,
             "current": manifest is not None and _scheduler_is_healthy(scheduler),
             "manifestAgeSeconds": _age_seconds(manifest.get("publishedAt")) if manifest else None,
             "schedulerAgeSeconds": _age_seconds(scheduler.get("completedAt")) if scheduler else None,
+            "contractSchedulerAgeSeconds": _age_seconds(contract_scheduler.get("completedAt")) if contract_scheduler else None,
+            "contractSchedulerHealthy": _scheduler_is_healthy(contract_scheduler),
             "scheduler": scheduler,
+            "contractScheduler": contract_scheduler,
             "manifest": manifest,
         }
 

@@ -12,6 +12,9 @@ const REQUIRED_ENTRIES = [
   "dogmaEffects.jsonl",
   "dogmaAttributes.jsonl",
   "marketGroups.jsonl",
+  "blueprints.jsonl",
+  "typeMaterials.jsonl",
+  "mapSolarSystems.jsonl",
 ];
 
 type WorkerInput = {

@@ -1,5 +1,6 @@
 const suites = [
   ['route-engine', require('./route-engine.test.cjs')],
+  ['ansiblex', require('./ansiblex.test.cjs')],
   ['intelligence', require('./intelligence.test.cjs')],
   ['eve-export', require('./eve-export.test.cjs')],
   ['capital', require('./capital.test.cjs')],

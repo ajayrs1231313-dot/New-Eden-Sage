@@ -44,50 +44,82 @@ function configPath() {
   return path.join(USER_DATA_ROOT, "settings.json");
 }
 
+function configBackupPath() {
+  return `${configPath()}.bak`;
+}
+
+function normaliseConfig(parsed: Partial<AppConfig> & Record<string, unknown>): AppConfig {
+  return {
+    eveClientId: parsed.eveClientId?.trim() || defaults.eveClientId,
+    callbackUrl: parsed.callbackUrl ?? defaults.callbackUrl,
+    encryptedRefreshTokens: parsed.encryptedRefreshTokens ?? {},
+    esiScopeSchemaVersion: Number.isFinite(parsed.esiScopeSchemaVersion) ? Number(parsed.esiScopeSchemaVersion) : 0,
+    esiScopeMigratedAt: typeof parsed.esiScopeMigratedAt === "string" ? parsed.esiScopeMigratedAt : undefined,
+    reauthorizationRequiredCharacterIds: Array.isArray(parsed.reauthorizationRequiredCharacterIds) ? [...new Set(parsed.reauthorizationRequiredCharacterIds.map((value) => String(value)).filter(Boolean))] : [],
+    eveAuthorizations: parsed.eveAuthorizations && typeof parsed.eveAuthorizations === "object" ? parsed.eveAuthorizations as AppConfig["eveAuthorizations"] : {},
+    encryptedPrivateDataKey: typeof parsed.encryptedPrivateDataKey === "string" ? parsed.encryptedPrivateDataKey : undefined,
+    dpapiPrivateDataKey: typeof parsed.dpapiPrivateDataKey === "string" ? parsed.dpapiPrivateDataKey : undefined,
+    privateDataKeyVersion: Number.isFinite(parsed.privateDataKeyVersion) ? Number(parsed.privateDataKeyVersion) : 1,
+    encryptedSageSessionToken: typeof parsed.encryptedSageSessionToken === "string" ? parsed.encryptedSageSessionToken : undefined,
+    identitySchemaVersion: Number.isFinite(parsed.identitySchemaVersion) ? Number(parsed.identitySchemaVersion) : 0,
+    sageAccountId: typeof parsed.sageAccountId === "string" ? parsed.sageAccountId : undefined,
+    primaryCharacterId: typeof parsed.primaryCharacterId === "string" ? parsed.primaryCharacterId : undefined,
+    identityMigratedAt: typeof parsed.identityMigratedAt === "string" ? parsed.identityMigratedAt : undefined,
+    characterResetMigrationId: typeof parsed.characterResetMigrationId === "string" ? parsed.characterResetMigrationId : undefined,
+    characterResetMigratedAt: typeof parsed.characterResetMigratedAt === "string" ? parsed.characterResetMigratedAt : undefined,
+  };
+}
+
+async function readConfigFile(filePath: string) {
+  return JSON.parse(await fs.readFile(filePath, "utf8")) as Partial<AppConfig> & Record<string, unknown>;
+}
+
 export async function readConfig(): Promise<AppConfig> {
   try {
-    const parsed = JSON.parse(
-      await fs.readFile(configPath(), "utf8"),
-    ) as Partial<AppConfig> & Record<string, unknown>;
-    const clean: AppConfig = {
-      eveClientId: parsed.eveClientId?.trim() || defaults.eveClientId,
-      callbackUrl: parsed.callbackUrl ?? defaults.callbackUrl,
-      encryptedRefreshTokens: parsed.encryptedRefreshTokens ?? {},
-      esiScopeSchemaVersion: Number.isFinite(parsed.esiScopeSchemaVersion) ? Number(parsed.esiScopeSchemaVersion) : 0,
-      esiScopeMigratedAt: typeof parsed.esiScopeMigratedAt === "string" ? parsed.esiScopeMigratedAt : undefined,
-      reauthorizationRequiredCharacterIds: Array.isArray(parsed.reauthorizationRequiredCharacterIds) ? [...new Set(parsed.reauthorizationRequiredCharacterIds.map((value) => String(value)).filter(Boolean))] : [],
-      eveAuthorizations: parsed.eveAuthorizations && typeof parsed.eveAuthorizations === "object" ? parsed.eveAuthorizations as AppConfig["eveAuthorizations"] : {},
-      encryptedPrivateDataKey: typeof parsed.encryptedPrivateDataKey === "string" ? parsed.encryptedPrivateDataKey : undefined,
-      dpapiPrivateDataKey: typeof parsed.dpapiPrivateDataKey === "string" ? parsed.dpapiPrivateDataKey : undefined,
-      privateDataKeyVersion: Number.isFinite(parsed.privateDataKeyVersion) ? Number(parsed.privateDataKeyVersion) : 1,
-      encryptedSageSessionToken: typeof parsed.encryptedSageSessionToken === "string" ? parsed.encryptedSageSessionToken : undefined,
-      identitySchemaVersion: Number.isFinite(parsed.identitySchemaVersion)
-        ? Number(parsed.identitySchemaVersion)
-        : 0,
-      sageAccountId: typeof parsed.sageAccountId === "string" ? parsed.sageAccountId : undefined,
-      primaryCharacterId: typeof parsed.primaryCharacterId === "string" ? parsed.primaryCharacterId : undefined,
-      identityMigratedAt: typeof parsed.identityMigratedAt === "string" ? parsed.identityMigratedAt : undefined,
-      characterResetMigrationId: typeof parsed.characterResetMigrationId === "string" ? parsed.characterResetMigrationId : undefined,
-      characterResetMigratedAt: typeof parsed.characterResetMigratedAt === "string" ? parsed.characterResetMigratedAt : undefined,
-    };
-    if ("encryptedOpenAIKey" in parsed || "openAIModel" in parsed) {
-      await fs.writeFile(configPath(), JSON.stringify(clean, null, 2), {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    }
+    const parsed = await readConfigFile(configPath());
+    const clean = normaliseConfig(parsed);
+    if ("encryptedOpenAIKey" in parsed || "openAIModel" in parsed) await writeConfig(clean);
     return clean;
   } catch {
-    return { ...defaults };
+    try {
+      // A hard reset or storage crash can interrupt a settings write. Recover the
+      // last known-good cloud/session credentials instead of silently becoming a
+      // brand-new disconnected install.
+      const recovered = normaliseConfig(await readConfigFile(configBackupPath()));
+      await writeConfig(recovered);
+      return recovered;
+    } catch {
+      return { ...defaults };
+    }
   }
 }
 
 export async function writeConfig(next: AppConfig) {
   await fs.mkdir(path.dirname(configPath()), { recursive: true });
-  await fs.writeFile(configPath(), JSON.stringify(next, null, 2), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const target = configPath();
+  const backup = configBackupPath();
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  const serialized = JSON.stringify(next, null, 2);
+
+  try {
+    // Preserve only a parseable predecessor. A corrupt primary must never replace
+    // the known-good backup.
+    try {
+      const previous = await fs.readFile(target, "utf8");
+      JSON.parse(previous);
+      await fs.writeFile(backup, previous, { encoding: "utf8", mode: 0o600 });
+    } catch {
+      // First write, or the primary was damaged. Keep any existing good backup.
+    }
+
+    await fs.writeFile(temporary, serialized, { encoding: "utf8", mode: 0o600 });
+    // Same-directory rename is the atomic commit point; the original remains
+    // intact until the replacement file is complete.
+    await fs.rename(temporary, target);
+    await fs.writeFile(backup, serialized, { encoding: "utf8", mode: 0o600 });
+  } finally {
+    await fs.unlink(temporary).catch(() => undefined);
+  }
 }
 
 export function encrypt(value: string) {

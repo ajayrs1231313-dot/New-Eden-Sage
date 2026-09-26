@@ -37,12 +37,16 @@ const fingerprint = analysis => JSON.stringify({
   let mutableTypes=0;
   let mappingCount=0;
   const failures=[];
+  const cradleCoverage = new Map();
 
   for(const candidate of candidates){
     const options=await dogma.getMutationOptionsLocal(candidate.id);
     if(!options.length) continue;
     mutableTypes++;
     for(const option of options){
+      if (['Radical Drone Link Augmentor Mutaplasmid', 'Radical Drone Navigation Computer Mutaplasmid', 'Radical Omnidirectional Tracking Enhancer Mutaplasmid', 'Radical Omnidirectional Tracking Link Mutaplasmid'].includes(option.mutaplasmidName)) {
+        cradleCoverage.set(option.mutaplasmidName, (cradleCoverage.get(option.mutaplasmidName) ?? 0) + 1);
+      }
       const attributes=option.attributes.filter(attribute=>Math.abs(attribute.maxValue-attribute.minValue)>1e-12);
       if(!attributes.length) continue;
       mappingCount++;
@@ -71,8 +75,14 @@ const fingerprint = analysis => JSON.stringify({
     }
   }
 
-  assert.equal(mutableTypes,945,'current mutable base-type count changed; audit the SDE mutation catalogue intentionally');
-  assert.equal(mappingCount,5227,'current mutaplasmid mapping count changed; audit the SDE mutation catalogue intentionally');
+  assert.equal(mutableTypes,980,'current mutable base-type count changed; audit the SDE mutation catalogue intentionally');
+  assert.equal(mappingCount,5262,'current mutaplasmid mapping count changed; audit the SDE mutation catalogue intentionally');
+  assert.deepEqual(Object.fromEntries([...cradleCoverage].sort()), {
+    'Radical Drone Link Augmentor Mutaplasmid': 7,
+    'Radical Drone Navigation Computer Mutaplasmid': 8,
+    'Radical Omnidirectional Tracking Enhancer Mutaplasmid': 10,
+    'Radical Omnidirectional Tracking Link Mutaplasmid': 10,
+  }, 'Cradle of War Radical drone mutaplasmid coverage changed');
   assert.deepEqual(failures,[],`mutaplasmid catalogue endpoint failures:\n${failures.slice(0,30).join('\n')}`);
   console.log(`Mutaplasmid catalogue stress: PASS (${mutableTypes} mutable types, ${mappingCount} mutation mappings, min/max endpoints)`);
 })().catch(error=>{console.error(error);process.exitCode=1;});

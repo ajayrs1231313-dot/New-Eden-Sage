@@ -179,11 +179,11 @@ function CharacterStatusStrip({ snapshot }: { snapshot: CharacterSnapshot }) {
   return (
     <section className="character-status-strip-v2">
       <StatusCell label="CORPORATION" value={snapshot.character.corporation_name || "Sync required"} detail="Current corporation" visual={<img className="character-status-logo" src={`https://images.evetech.net/corporations/${snapshot.character.corporation_id}/logo?size=64`} alt=""/>}/>
-      <StatusCell label="CURRENT SHIP" value={shipName} detail={snapshot.ship.ship_name && snapshot.ship.ship_name !== shipName ? snapshot.ship.ship_name : "Active ship"} visual={<img className="character-status-ship" src={`https://images.evetech.net/types/${snapshot.ship.ship_type_id}/render?size=64`} alt=""/>}/>
+      <StatusCell label="CURRENT SHIP" value={shipName} detail={snapshot.ship.ship_name && snapshot.ship.ship_name !== shipName ? snapshot.ship.ship_name : "Active ship"} visual={<img className="character-status-ship" src={`sage-asset://type/${snapshot.ship.ship_type_id}/render?size=64`} alt=""/>}/>
       <StatusCell label="LOCATION" value={snapshot.location.place_name || snapshot.location.solar_system_name || "Sync required"} detail={snapshot.location.solar_system_name || "Current solar system"} visual={<span className="character-status-hex"><HudGlyph kind="route"/></span>}/>
       <StatusCell label="LIQUID ISK" value={`${isk(snapshot.wallet)} ISK`} detail="Available wallet balance" className="wallet" visual={<svg className="character-wallet-spark" viewBox="0 0 86 30" aria-hidden="true"><path d="M1 25 12 22 20 24 28 14 36 17 44 10 52 13 60 6 69 10 85 3"/></svg>}/>
       <StatusCell label="SECURITY STATUS" value={sec?.toFixed(2) ?? "-"} detail={sec == null ? "Unavailable" : sec < 0 ? "Negative standing" : sec > 0 ? "Positive standing" : "Neutral"} className={`security ${secTone}`}/>
-      <div className="character-status-readiness"><img src={`https://images.evetech.net/types/${snapshot.ship.ship_type_id}/render?size=128`} alt=""/><strong>ACTIVE</strong><small>Current hull</small></div>
+      <div className="character-status-readiness"><img src={`sage-asset://type/${snapshot.ship.ship_type_id}/render?size=128`} alt=""/><strong>ACTIVE</strong><small>Current hull</small></div>
     </section>
   );
 }

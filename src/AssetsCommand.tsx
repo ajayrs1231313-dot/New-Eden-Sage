@@ -31,7 +31,12 @@ type AssetRow={
 
 const money=(value:number)=>new Intl.NumberFormat("en-GB",{maximumFractionDigits:0}).format(value||0);
 const compact=(value:number)=>new Intl.NumberFormat("en-GB",{notation:"compact",maximumFractionDigits:1}).format(value||0);
-const icon=(typeId:number)=>typeId>0?`sage-asset://type/${typeId}/icon?size=64`:"";
+const icon=(typeId:number,blueprintKind?:string)=>{
+  if(!(typeId>0))return "";
+  const kind=String(blueprintKind??"").toUpperCase();
+  if(kind==="BPO"||kind==="BPC")return `sage-asset://blueprint/${typeId}/${kind.toLowerCase()}`;
+  return `sage-asset://type/${typeId}/icon?size=64`;
+};
 
 export function AssetsCommand({snapshots}:{snapshots:CharacterSnapshot[]}){
   const [characterId,setCharacterId]=useState("all");
@@ -116,7 +121,7 @@ export function AssetsCommand({snapshots}:{snapshots:CharacterSnapshot[]}){
     <div className="assets-table">
       <div className="assets-table-head"><span>Asset</span><span>Character</span><span>Location</span><span>Qty</span><span>Est. value</span></div>
       <div className="assets-table-body">{visible.map(row=><article key={row.key}>
-        <div className="assets-item">{row.typeId>0&&<img src={icon(row.typeId)} alt="" loading="lazy"/>}<span><strong>{row.item}</strong><small>{row.blueprintKind?`${blueprintRunLabel({ blueprintKind: row.blueprintKind, blueprintRuns: row.blueprintRuns })} · ME ${row.blueprintME??0}% · TE ${row.blueprintTE??0}%`:`${row.locationFlag||"Asset"} · Type ${row.typeId}`}</small></span></div>
+        <div className="assets-item">{row.typeId>0&&<img src={icon(row.typeId,row.blueprintKind)} alt="" loading="lazy"/>}<span><strong>{row.item}</strong><small>{row.blueprintKind?`${blueprintRunLabel({ blueprintKind: row.blueprintKind, blueprintRuns: row.blueprintRuns })} · ME ${row.blueprintME??0}% · TE ${row.blueprintTE??0}%`:`${row.locationFlag||"Asset"} · Type ${row.typeId}`}</small></span></div>
         <div className="assets-owner"><strong>{row.owners.length===1?row.owners[0]:`${row.owners.length} characters`}</strong><small>{row.owners.length>1?row.owners.join(", "):merge?"Merged view":"Individual stack"}</small></div>
         <div className="assets-location"><strong>{row.station||row.system||`Location ${row.locationId}`}</strong><small>{row.station&&row.system?row.system:row.locationFlag||"Unknown location"}</small></div>
         <div className="assets-number"><strong>{row.quantity.toLocaleString()}</strong><small>{compact(row.totalVolume)} m³</small></div>

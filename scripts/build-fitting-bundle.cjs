@@ -2,11 +2,12 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 (async () => {
+  process.env.NEW_EDEN_SAGE_FORCE_FITTING_REBUILD = "1";
   const root = path.resolve(__dirname, "..");
   const data = require(path.join(root, "dist-electron", "type-volumes.js"));
 
   console.log("Checking CCP static data...");
-  console.log(await data.stageStaticDataRefreshLowImpact(true));
+  console.log(await data.stageStaticDataRefreshLowImpact(false, true));
   console.log("Promoting validated staged data for this build...");
   console.log(await data.prepareStaticDataForProcess());
 

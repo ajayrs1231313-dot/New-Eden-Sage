@@ -15,7 +15,7 @@ const iskLab = read('src/IskLab.tsx');
 const contracts = read('src/MarketContracts.tsx');
 
 assert.doesNotMatch(market, /contracts\/public\//, 'desktop market code must not crawl public contract ESI');
-assert.match(worker, /refreshPublicContracts\(regions\)/, 'Modal worker must prepare public contracts');
+assert.match(worker, /refreshPublicContracts\(regions, \{ writeHistory: false \}\)/, 'Modal worker must prepare public contracts independently');
 assert.match(worker, /public-contracts-v1\.json\.gz/, 'Modal worker must publish a contract artifact');
 assert.match(intelligence, /loadSharedPublicContractsDataset\(\)/, 'contract intelligence must consume the downloaded shared artifact');
 assert.doesNotMatch(intelligence, /loadLatestMarketDatasetByMode\("contracts"\)/, 'contract intelligence must not fall back to legacy machine datasets');
@@ -23,7 +23,10 @@ assert.match(manager, /fork\(path\.join\(__dirname, "contract-intelligence-proce
 assert.match(processSource, /getContractMarketIntelligence\(\)/, 'heavy contract analysis must execute in the dedicated contract process');
 assert.match(main, /market:contract-workspace[^\n]+getContractMarketWorkspace\(/, 'renderer IPC must use the off-main contract workspace path');
 assert.match(main, /market:contract-search[^\n]+searchContractMarketWorkspace\(/, 'contract filtering/search must remain off the renderer/main hot path');
-assert.match(contracts, /window\.sage\.checkPublicData\(\)/, 'manual contract refresh must use the shared server data pull');
+assert.match(contracts, /window\.sage\.refreshServerContracts\(\)/, 'manual contract refresh must use the dedicated Sage server contract pull');
+assert.doesNotMatch(contracts, /window\.sage\.checkPublicData\(\)/, 'manual contract refresh must not run the general public-data updater');
+assert.match(main, /contracts:refresh-server[\s\S]{0,500}?ensureCurrentSharedPublicContractsData\(\)/, 'contract refresh IPC must download from Sage server');
+assert.match(processSource, /loadCurrentSharedPublicContractsRevision\(\)/, 'contract analysis cache key must follow the dedicated server contract snapshot');
 assert.match(main, /adoptInstalledSharedMarketManifest\(result\.manifest\);[\s\S]{0,500}?disposeContractIntelligenceProcess\(\);/, 'public-data reconciliation must restart the contract worker so it cannot retain a stale manifest');
 assert.match(contracts, /const refreshedAt=data\?\.contractsCreatedAt\|\|data\?\.marketCreatedAt\|\|data\?\.generatedAt;/, 'contract freshness must prefer source snapshot timestamps over local recompute time');
 assert.match(iskLab, /contractsVisited/, 'Contracts must remain mounted after first visit');

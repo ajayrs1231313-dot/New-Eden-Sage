@@ -118,6 +118,17 @@ contextBridge.exposeInMainWorld("sage", {
   deleteNotificationRule: (requestId: string) => ipcRenderer.invoke("notifications:delete", requestId),
   getNotificationInbox: (input?: { limit?: number; includeAcknowledged?: boolean }) => ipcRenderer.invoke("notifications:inbox", input),
   acknowledgeNotification: (eventId: string) => ipcRenderer.invoke("notifications:ack", eventId),
+  getSageMailbox: (input: { characterId: string; folder?: "inbox" | "sent" }) => ipcRenderer.invoke("sage-mail:mailbox", input),
+  getSageMailDirectory: (characterId: string) => ipcRenderer.invoke("sage-mail:directory", characterId),
+  sendSageMail: (input: { senderCharacterId: string; recipientCharacterId: number; subject: string; body: string }) => ipcRenderer.invoke("sage-mail:send", input),
+  markSageMailRead: (input: { characterId: string; entryId: number }) => ipcRenderer.invoke("sage-mail:read", input),
+  deleteSageMail: (input: { characterId: string; entryId: number }) => ipcRenderer.invoke("sage-mail:delete", input),
+  sendSageDoctrineMail: (input: { characterId: string; subject: string; body: string; dedupKey: string; metadata?: Record<string, unknown> }) => ipcRenderer.invoke("sage-mail:doctrine", input),
+  getEveMailbox: (input: { characterId: string; limit?: number }) => ipcRenderer.invoke("eve-mail:mailbox", input),
+  getEveMailMessage: (input: { characterId: string; mailId: number }) => ipcRenderer.invoke("eve-mail:message", input),
+  sendEveMail: (input: { characterId: string; recipients: string[]; subject: string; body: string }) => ipcRenderer.invoke("eve-mail:send", input),
+  markEveMailRead: (input: { characterId: string; mailId: number; labels?: number[] }) => ipcRenderer.invoke("eve-mail:read", input),
+  deleteEveMail: (input: { characterId: string; mailId: number }) => ipcRenderer.invoke("eve-mail:delete", input),
   onNotificationsUpdated: (callback: (value: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
     ipcRenderer.on("notifications:updated", listener);
@@ -386,6 +397,7 @@ contextBridge.exposeInMainWorld("sage", {
   getPublicDataStatus: () => ipcRenderer.invoke("public-data:status"),
   checkPublicDataAvailability: () => ipcRenderer.invoke("public-data:check-availability"),
   checkPublicData: () => ipcRenderer.invoke("public-data:check"),
+  refreshServerContracts: () => ipcRenderer.invoke("contracts:refresh-server"),
   onPublicDataStatus: (callback: (value: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value);
     ipcRenderer.on("public-data:status-changed", listener);

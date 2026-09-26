@@ -8,6 +8,7 @@ import {
   type NavigationRouteMode,
   type NavigationSystemNode,
 } from "./universe-route-graph";
+import { assessNavigationAnsiblex, getNavigationAnsiblexShipContext } from "./navigation-ansiblex";
 
 export const NAVIGATION_ROUTE_SCHEMA_VERSION = 4;
 
@@ -16,7 +17,7 @@ export type NavigationRouteProfile = {
   minSecurity: number | null;
   avoids: { systemIds: number[]; constellationIds: number[]; regionIds: number[] };
   dynamicHazards: { providerIds: string[]; excludedSystemIds: number[]; snapshotAt?: string };
-  specialConnections: { enabledTypes: NavigationEdgeType[]; disabledNetworkIds: string[]; wormholePolicy: { avoidEol:boolean; avoidCritical:boolean; avoidFrigateOnly:boolean; shipMassKg:number|null; shipName?:string } };
+  specialConnections: { enabledTypes: NavigationEdgeType[]; disabledNetworkIds: string[]; wormholePolicy: { avoidEol:boolean; avoidCritical:boolean; avoidFrigateOnly:boolean; shipMassKg:number|null; shipName?:string }; ansiblexPolicy:{ shipTypeId:number|null; shipName?:string; travellerAllianceId:number|null; shipGroupId?:number|null; shipGroupName?:string; baseActivationCostTj?:number|null; capitalRestricted?:boolean; capitalException?:boolean } };
 };
 
 export type NavigationLockedSegment = {
@@ -156,6 +157,16 @@ function normalizeProfile(profile?: NavigationPlanInput["profile"]): NavigationR
         shipMassKg: Number(profile?.specialConnections?.wormholePolicy?.shipMassKg ?? 0) > 0 ? Number(profile?.specialConnections?.wormholePolicy?.shipMassKg) : null,
         shipName: profile?.specialConnections?.wormholePolicy?.shipName ? String(profile.specialConnections.wormholePolicy.shipName).slice(0,120) : undefined,
       },
+      ansiblexPolicy: {
+        shipTypeId: Number(profile?.specialConnections?.ansiblexPolicy?.shipTypeId ?? 0) > 0 ? Number(profile?.specialConnections?.ansiblexPolicy?.shipTypeId) : null,
+        shipName: profile?.specialConnections?.ansiblexPolicy?.shipName ? String(profile.specialConnections.ansiblexPolicy.shipName).slice(0,120) : undefined,
+        travellerAllianceId: Number(profile?.specialConnections?.ansiblexPolicy?.travellerAllianceId ?? 0) > 0 ? Number(profile?.specialConnections?.ansiblexPolicy?.travellerAllianceId) : null,
+        shipGroupId: Number(profile?.specialConnections?.ansiblexPolicy?.shipGroupId ?? 0) > 0 ? Number(profile?.specialConnections?.ansiblexPolicy?.shipGroupId) : null,
+        shipGroupName: profile?.specialConnections?.ansiblexPolicy?.shipGroupName ? String(profile.specialConnections.ansiblexPolicy.shipGroupName).slice(0,120) : undefined,
+        baseActivationCostTj: Number.isFinite(Number(profile?.specialConnections?.ansiblexPolicy?.baseActivationCostTj)) ? Number(profile?.specialConnections?.ansiblexPolicy?.baseActivationCostTj) : null,
+        capitalRestricted: profile?.specialConnections?.ansiblexPolicy?.capitalRestricted === true,
+        capitalException: profile?.specialConnections?.ansiblexPolicy?.capitalException === true,
+      },
     },
   };
 }
@@ -238,17 +249,65 @@ export function activeNavigationCustomConnections(connections: NavigationCustomC
   return connections.filter((connection) => customConnectionUsable(connection, profile, now));
 }
 
+function numberMetadata(connection:NavigationCustomConnection,key:string){
+  const value=Number(connection.metadata?.[key]);
+  return Number.isFinite(value)?value:null;
+}
+
+function ansiblexEdgeMetadata(connection:NavigationCustomConnection,profile:NavigationRouteProfile,reverse:boolean){
+  const raw={ ...(connection.metadata ?? {}) };
+  const distance=numberMetadata(connection,reverse?"reverseEndpointDistanceFromCapitalLy":"forwardEndpointDistanceFromCapitalLy");
+  const capacitor=numberMetadata(connection,reverse?"toAvailableCapacitorTj":"fromAvailableCapacitorTj");
+  const startingSov=numberMetadata(connection,reverse?"toSystemSovereigntyAllianceId":"fromSystemSovereigntyAllianceId");
+  const owningAlliance=numberMetadata(connection,"owningAllianceId");
+  const policy=profile.specialConnections.ansiblexPolicy;
+  const assessment=assessNavigationAnsiblex({
+    baseCostTj:policy.baseActivationCostTj,
+    endpointDistanceFromCapitalLy:distance,
+    availableCapacitorTj:capacitor,
+    travellerAllianceId:policy.travellerAllianceId,
+    owningAllianceId:owningAlliance,
+    startingSystemSovereigntyAllianceId:startingSov,
+    capitalRestricted:policy.capitalRestricted,
+    shipName:policy.shipName,
+  });
+  return {
+    ...raw,
+    ansiblexShipTypeId:policy.shipTypeId ?? null,
+    ansiblexShipName:policy.shipName ?? null,
+    ansiblexShipGroupId:policy.shipGroupId ?? null,
+    ansiblexShipGroupName:policy.shipGroupName ?? null,
+    ansiblexBaseCostTj:assessment.baseCostTj,
+    ansiblexEndpointDistanceFromCapitalLy:assessment.distanceLy,
+    ansiblexDistanceMultiplier:assessment.multiplier,
+    ansiblexActivationCostTj:assessment.activationCostTj,
+    ansiblexAvailableCapacitorTj:assessment.availableCapacitorTj,
+    ansiblexCapacityTj:assessment.capacityTj,
+    ansiblexUsable:assessment.usable,
+    ansiblexBlockers:assessment.blockers.join(" | ") || null,
+    ansiblexWarnings:assessment.warnings.join(" | ") || null,
+  };
+}
+
 function customEdges(connections: NavigationCustomConnection[], profile: NavigationRouteProfile) {
   const edges: NavigationRouteEdge[] = [];
   for (const connection of activeNavigationCustomConnections(connections, profile)) {
-    const metadata = {
+    const baseMetadata = {
       connectionId: connection.connectionId, label: connection.label ?? null, networkId: connection.networkId ?? null, networkName: connection.networkName ?? null,
       ownerId: connection.ownerId ?? null, ownerName: connection.ownerName ?? null, access: connection.access ?? null, discoveredAt: connection.discoveredAt ?? null, expiresAt: connection.expiresAt ?? null,
       connectionClass: connection.connectionClass ?? null, status: connection.status ?? null, maxJumpMassKg: connection.maxJumpMassKg ?? null, remainingMassKg: connection.remainingMassKg ?? null,
       shipRestriction: connection.shipRestriction ?? null, ...(connection.metadata ?? {}),
     };
-    edges.push({ from: connection.fromSystemId, to: connection.toSystemId, type: connection.type, metadata });
-    if (connection.bidirectional) edges.push({ from: connection.toSystemId, to: connection.fromSystemId, type: connection.type, metadata });
+    const forwardAssessment=connection.type==="ansiblex"?ansiblexEdgeMetadata(connection,profile,false):null;
+    const forwardMetadata=forwardAssessment?{...baseMetadata,...forwardAssessment}:baseMetadata;
+    if(!forwardAssessment || forwardAssessment.ansiblexUsable!==false)
+      edges.push({ from: connection.fromSystemId, to: connection.toSystemId, type: connection.type, metadata:forwardMetadata });
+    if (connection.bidirectional) {
+      const reverseAssessment=connection.type==="ansiblex"?ansiblexEdgeMetadata(connection,profile,true):null;
+      const reverseMetadata=reverseAssessment?{...baseMetadata,...reverseAssessment}:baseMetadata;
+      if(!reverseAssessment || reverseAssessment.ansiblexUsable!==false)
+        edges.push({ from: connection.toSystemId, to: connection.fromSystemId, type: connection.type, metadata:reverseMetadata });
+    }
   }
   return edges;
 }
@@ -298,7 +357,19 @@ function makePlanBase(input: NavigationPlanInput, profile: NavigationRouteProfil
 }
 
 export async function calculateNavigationPlan(input: NavigationPlanInput): Promise<NavigationRoutePlan> {
-  const profile = normalizeProfile(input?.profile);
+  let profile = normalizeProfile(input?.profile);
+  if(profile.specialConnections.ansiblexPolicy.shipTypeId){
+    const ship=await getNavigationAnsiblexShipContext(profile.specialConnections.ansiblexPolicy.shipTypeId);
+    if(ship) profile={...profile,specialConnections:{...profile.specialConnections,ansiblexPolicy:{
+      ...profile.specialConnections.ansiblexPolicy,
+      shipName:ship.shipName,
+      shipGroupId:ship.shipGroupId,
+      shipGroupName:ship.shipGroupName,
+      baseActivationCostTj:ship.baseActivationCostTj,
+      capitalRestricted:ship.capitalRestricted,
+      capitalException:ship.capitalException,
+    }}};
+  }
   const waypointSystemIds = Array.isArray(input?.waypointSystemIds) ? input.waypointSystemIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0) : [];
   const lockedSegments = normalizeLockedSegments(input?.lockedSegments);
   const customConnections = normalizeCustomConnections(input?.customConnections);

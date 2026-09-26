@@ -155,6 +155,7 @@ export type WargameUnit = {
   capacitorRechargeSeconds?: number;
   capacitorDemandGjPerSecond?: number;
   capacitorInjectedGjPerSecond?: number;
+  remoteCapacitorReceiveMultiplier?: number;
   baseSpeed?: number;
   propulsionKind?: "ab" | "mwd";
   targetingRange?: number;

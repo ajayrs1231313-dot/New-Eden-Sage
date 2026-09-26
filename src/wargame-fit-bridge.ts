@@ -62,6 +62,7 @@ export type WargameFitResult = {
   capacitorRechargeSeconds: number;
   capacitorDemandGjPerSecond: number;
   capacitorInjectedGjPerSecond: number;
+  remoteCapacitorReceiveMultiplier: number;
   baseSpeedMps: number;
   alignTimeSeconds: number;
   warpSpeedAuPerSecond: number;
@@ -392,6 +393,7 @@ export async function analyzeWargameFit(text: string, characterId: string, envir
     capacitorRechargeSeconds: Math.max(0, Number(analysis?.capacitor?.rechargeSeconds) || 0),
     capacitorDemandGjPerSecond: Math.max(0, Number(analysis?.capacitor?.demandGjPerSecond) || 0),
     capacitorInjectedGjPerSecond: Math.max(0, Number(analysis?.capacitor?.injectedGjPerSecond) || 0),
+    remoteCapacitorReceiveMultiplier: Math.max(0, Math.min(1, Number(analysis?.capacitor?.remoteCapacitorReceiveMultiplier ?? 1))),
     baseSpeedMps: Math.max(0, Number(analysis?.navigation?.baseMaximumVelocity) || 0),
     alignTimeSeconds: Math.max(0.1, Number(analysis?.navigation?.alignSeconds) || 6),
     warpSpeedAuPerSecond: Math.max(0.1, Number(analysis?.navigation?.warpSpeedAuPerSecond) || 3),

@@ -22,6 +22,8 @@ const DEFAULT_SHARED_MARKET_BASE_URL = "https://newedensage--new-eden-sage-marke
 const MANIFEST_FILE = "manifest.json";
 
 export const SHARED_MARKET_ROOT = path.join(MARKET_DATA_ROOT, "Shared Market");
+const SHARED_CONTRACT_ROOT = path.join(MARKET_DATA_ROOT, "Shared Contracts");
+const SHARED_CONTRACT_MANIFEST_FILE = "manifest.json";
 
 export type SharedMarketArtifact = {
   version: string;
@@ -104,6 +106,27 @@ export type SharedPublicContractsDataset = {
   regions: Array<{ regionId: number; regionName: string; publicContracts: any[] }>;
 };
 
+export type SharedPublicContractsServerManifest = {
+  schemaVersion: 1;
+  dataset: "public-contracts";
+  snapshotId: string;
+  createdAt: string;
+  bytes: number;
+  sha256: string;
+  regionCount: number;
+  contractCount: number;
+  pendingDetailCount: number;
+  completedAt?: string;
+};
+
+export type SharedPublicContractsSyncResult = {
+  changed: boolean;
+  snapshotId: string;
+  createdAt: string;
+  contractCount: number;
+  pendingDetailCount: number;
+};
+
 export type SharedMarketSyncResult = {
   manifest: SharedMarketManifest;
   changed: string[];
@@ -137,6 +160,7 @@ const shortageGenerationCache = new Map<string, Promise<SharedPreparedShortageDa
 const hubDepthGenerationCache = new Map<string, Promise<SharedMarketHubDepthDataset | null>>();
 const publicSharedGenerationCache = new Map<string, Promise<SharedPreparedPublicDataset | null>>();
 const contractGenerationCache = new Map<string, Promise<SharedPublicContractsDataset | null>>();
+const dedicatedContractCache = new Map<string, Promise<SharedPublicContractsDataset | null>>();
 
 export function invalidateSharedMarketMemoryCache() {
   manifestMemory = undefined;
@@ -147,10 +171,131 @@ export function invalidateSharedMarketMemoryCache() {
   hubDepthGenerationCache.clear();
   publicSharedGenerationCache.clear();
   contractGenerationCache.clear();
+  dedicatedContractCache.clear();
 }
 
 export function sharedMarketServerBaseUrl() {
   return String(process.env.NEW_EDEN_SAGE_SHARED_MARKET_URL || DEFAULT_SHARED_MARKET_BASE_URL).trim().replace(/\/$/, "");
+}
+
+function contractManifestPath() {
+  return path.join(SHARED_CONTRACT_ROOT, SHARED_CONTRACT_MANIFEST_FILE);
+}
+
+function contractSnapshotPath(snapshotId: string) {
+  return path.join(SHARED_CONTRACT_ROOT, "snapshots", `${snapshotId}.json.gz`);
+}
+
+function validateContractServerManifest(value: unknown): SharedPublicContractsServerManifest {
+  const manifest = (value as any)?.contract ?? value;
+  if (!manifest || typeof manifest !== "object") throw new Error("Sage contract server response is invalid.");
+  const row = manifest as SharedPublicContractsServerManifest;
+  if (row.schemaVersion !== 1 || row.dataset !== "public-contracts") throw new Error("Sage contract server schema is unsupported.");
+  if (!row.snapshotId || !/^[A-Za-z0-9._-]+$/.test(row.snapshotId)) throw new Error("Sage contract snapshot id is invalid.");
+  if (!row.createdAt || !Number.isFinite(Date.parse(row.createdAt))) throw new Error("Sage contract snapshot time is invalid.");
+  if (!Number.isFinite(row.bytes) || row.bytes <= 0) throw new Error("Sage contract snapshot byte size is invalid.");
+  if (!/^[a-f0-9]{64}$/i.test(String(row.sha256))) throw new Error("Sage contract snapshot SHA-256 is invalid.");
+  if (!Number.isFinite(row.contractCount) || row.contractCount < 0 || !Number.isFinite(row.pendingDetailCount) || row.pendingDetailCount < 0) {
+    throw new Error("Sage contract snapshot counts are invalid.");
+  }
+  return row;
+}
+
+async function loadInstalledContractManifest(): Promise<SharedPublicContractsServerManifest | null> {
+  try {
+    return validateContractServerManifest(JSON.parse(await fs.readFile(contractManifestPath(), "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+async function replaceContractManifestAtomically(manifest: SharedPublicContractsServerManifest) {
+  await fs.mkdir(SHARED_CONTRACT_ROOT, { recursive: true });
+  const target = contractManifestPath();
+  const partial = `${target}.${process.pid}.${randomUUID()}.partial`;
+  const backup = `${target}.${process.pid}.${randomUUID()}.backup`;
+  await fs.writeFile(partial, JSON.stringify(manifest, null, 2), "utf8");
+  let hadPrevious = false;
+  try {
+    await fs.rename(target, backup);
+    hadPrevious = true;
+  } catch {}
+  try {
+    await fs.rename(partial, target);
+    if (hadPrevious) await fs.rm(backup, { force: true });
+  } catch (error) {
+    await fs.rm(partial, { force: true }).catch(() => undefined);
+    if (hadPrevious) await fs.rename(backup, target).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function parseDedicatedContractSnapshot(manifest: SharedPublicContractsServerManifest): Promise<SharedPublicContractsDataset | null> {
+  const payload = JSON.parse((await gunzipAsync(await fs.readFile(contractSnapshotPath(manifest.snapshotId)))).toString("utf8")) as SharedPublicContractsDataset;
+  if (payload.schemaVersion !== 1 || payload.dataset !== "public-contracts" || payload.snapshotId !== manifest.snapshotId) throw new Error("Dedicated Sage contract snapshot identity is invalid.");
+  if (!Array.isArray(payload.regions) || payload.contractCount !== manifest.contractCount || payload.pendingDetailCount !== manifest.pendingDetailCount) {
+    throw new Error("Dedicated Sage contract snapshot counts do not match its server manifest.");
+  }
+  return payload;
+}
+
+async function loadDedicatedContractSnapshot(): Promise<SharedPublicContractsDataset | null> {
+  const manifest = await loadInstalledContractManifest();
+  if (!manifest) return null;
+  let value = dedicatedContractCache.get(manifest.snapshotId);
+  if (!value) {
+    value = parseDedicatedContractSnapshot(manifest).catch(async (error) => {
+      dedicatedContractCache.delete(manifest.snapshotId);
+      await logEvent("warn", "shared_contract.load_failed", { snapshotId: manifest.snapshotId, error: error instanceof Error ? error.message : String(error) });
+      return null;
+    });
+    dedicatedContractCache.set(manifest.snapshotId, value);
+  }
+  return value;
+}
+
+export async function ensureCurrentSharedPublicContractsData(): Promise<SharedPublicContractsSyncResult> {
+  const root = sharedMarketServerBaseUrl();
+  if (!root) throw new Error("Sage public data server URL is not configured.");
+  const metadataResponse = await request(`${root}/v1/contracts/latest`, 10_000, 2);
+  const available = validateContractServerManifest(await metadataResponse.json());
+  const installed = await loadInstalledContractManifest();
+  if (installed?.snapshotId === available.snapshotId && installed.sha256.toLowerCase() === available.sha256.toLowerCase()) {
+    return { changed: false, snapshotId: available.snapshotId, createdAt: available.createdAt, contractCount: available.contractCount, pendingDetailCount: available.pendingDetailCount };
+  }
+
+  const response = await request(`${root}/v1/contracts/latest.gz`, 90_000, 2);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (buffer.byteLength !== available.bytes) throw new Error("Sage contract snapshot byte count did not match the server manifest.");
+  const digest = createHash("sha256").update(buffer).digest("hex");
+  if (digest.toLowerCase() !== available.sha256.toLowerCase()) throw new Error("Sage contract snapshot failed SHA-256 validation.");
+  const payload = JSON.parse((await gunzipAsync(buffer)).toString("utf8")) as SharedPublicContractsDataset;
+  if (payload.schemaVersion !== 1 || payload.dataset !== "public-contracts" || payload.snapshotId !== available.snapshotId || !Array.isArray(payload.regions)) {
+    throw new Error("Sage contract snapshot payload is invalid.");
+  }
+  if (payload.contractCount !== available.contractCount || payload.pendingDetailCount !== available.pendingDetailCount) {
+    throw new Error("Sage contract snapshot counts do not match the server manifest.");
+  }
+
+  const snapshotsRoot = path.join(SHARED_CONTRACT_ROOT, "snapshots");
+  await fs.mkdir(snapshotsRoot, { recursive: true });
+  const target = contractSnapshotPath(available.snapshotId);
+  const partial = `${target}.${process.pid}.${randomUUID()}.partial`;
+  await fs.writeFile(partial, buffer, { flag: "wx" });
+  try {
+    await fs.rename(partial, target);
+  } catch {
+    await fs.rm(target, { force: true });
+    await fs.rename(partial, target);
+  }
+  await replaceContractManifestAtomically(available);
+  dedicatedContractCache.clear();
+  dedicatedContractCache.set(available.snapshotId, Promise.resolve(payload));
+  let files: string[] = [];
+  try { files = await fs.readdir(snapshotsRoot); } catch {}
+  await Promise.all(files.filter((name) => name.endsWith(".json.gz") && name !== `${available.snapshotId}.json.gz`).map((name) => fs.rm(path.join(snapshotsRoot, name), { force: true }).catch(() => undefined)));
+  void logEvent("info", "shared_contract.promoted", { snapshotId: available.snapshotId, bytes: available.bytes, contractCount: available.contractCount, pendingDetailCount: available.pendingDetailCount });
+  return { changed: true, snapshotId: available.snapshotId, createdAt: available.createdAt, contractCount: available.contractCount, pendingDetailCount: available.pendingDetailCount };
 }
 
 function manifestPath() {
@@ -665,7 +810,18 @@ export async function loadSharedMarketHubDepthDataset(): Promise<SharedMarketHub
   return cachedLoad(hubDepthGenerationCache, manifest, "market-hub-depth", () => parseJsonDataset<SharedMarketHubDepthDataset>(manifest, generationRoot(manifest.generation), "market-hub-depth", "market-hub-depth"));
 }
 
+export async function loadCurrentSharedPublicContractsRevision(): Promise<{ snapshotId: string; createdAt: string; source: "dedicated" | "shared" } | null> {
+  const dedicated = await loadInstalledContractManifest();
+  if (dedicated) return { snapshotId: dedicated.snapshotId, createdAt: dedicated.createdAt, source: "dedicated" };
+  const manifest = await loadCurrentSharedMarketManifest();
+  const artifact = manifest?.files["public-contracts"];
+  if (!manifest || !artifact) return null;
+  return { snapshotId: artifact.version, createdAt: manifest.publishedAt, source: "shared" };
+}
+
 export async function loadSharedPublicContractsDataset(): Promise<SharedPublicContractsDataset | null> {
+  const dedicated = await loadDedicatedContractSnapshot();
+  if (dedicated) return dedicated;
   const manifest = await loadCurrentSharedMarketManifest();
   if (!manifest?.files["public-contracts"]) return null;
   return cachedLoad(contractGenerationCache, manifest, "public-contracts", () => parseJsonDataset<SharedPublicContractsDataset>(manifest, generationRoot(manifest.generation), "public-contracts", "public-contracts"));

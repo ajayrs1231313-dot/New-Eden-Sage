@@ -1,6 +1,6 @@
 import { getContractMarketIntelligence } from "./market-intelligence";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
-import { loadCurrentSharedMarketManifest } from "./shared-market-data";
+import { loadCurrentSharedMarketManifest, loadCurrentSharedPublicContractsRevision } from "./shared-market-data";
 
 type SecurityKey = "high" | "low" | "null" | "unknown";
 type SearchQuery = {
@@ -57,12 +57,12 @@ function progress(id: string, percent: number, message: string) {
 }
 
 async function cacheKey() {
-  const manifest = await loadCurrentSharedMarketManifest() as any;
-  if (!manifest) throw new Error("No server-prepared public data is installed. Check Data Control for the latest public generation first.");
+  const [manifest, contracts] = await Promise.all([loadCurrentSharedMarketManifest(), loadCurrentSharedPublicContractsRevision()]);
+  if (!manifest) throw new Error("No server-prepared public market data is installed. Check Data Control for the latest public generation first.");
   const value = {
-    schema: 2,
+    schema: 3,
     generation: String(manifest.generation ?? "none"),
-    contractsVersion: String(manifest.files?.["public-contracts"]?.version ?? "none"),
+    contractsVersion: String(contracts?.snapshotId ?? "none"),
     marketVersion: String(manifest.files?.["market-global"]?.version ?? "none"),
   };
   return { value, serialized: JSON.stringify(value) };

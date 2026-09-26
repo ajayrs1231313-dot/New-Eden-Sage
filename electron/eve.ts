@@ -1,4 +1,4 @@
-﻿import crypto from "node:crypto";
+import crypto from "node:crypto";
 import http from "node:http";
 
 import { itemCategoryIds, itemVolumes } from "./type-volumes";
@@ -731,6 +731,38 @@ export async function fetchCharacterSnapshot(
         },
       )).flat()
     : corporationAssets;
+  const enrichedCorporationStructures = Array.isArray(corporationStructures)
+    ? await mapLimited(
+        corporationStructures as Array<Record<string, any>>,
+        6,
+        async (row) => {
+          const structureId = Number(row?.structure_id ?? 0);
+          if (!(structureId > 0)) return row;
+          try {
+            const structure = await get<{ name: string; solar_system_id: number }>(
+              `/universe/structures/${structureId}/`,
+            );
+            let systemName: string | null = null;
+            try {
+              const system = await publicGet<{ name: string }>(
+                `/universe/systems/${structure.solar_system_id}/`,
+              );
+              systemName = system.name;
+            } catch {
+              systemName = null;
+            }
+            return {
+              ...row,
+              name: structure.name,
+              solar_system_id: structure.solar_system_id,
+              solar_system_name: systemName,
+            };
+          } catch {
+            return row;
+          }
+        },
+      )
+    : corporationStructures;
   const contractItems = Array.isArray(contracts)
     ? await mapLimited(
         contracts as Array<{ contract_id: number }>,
@@ -945,7 +977,7 @@ export async function fetchCharacterSnapshot(
         medals: corporationMedals,
         standings: corporationStandings,
         starbases: corporationStarbases,
-        structures: corporationStructures,
+        structures: enrichedCorporationStructures,
         contracts: corporationContracts,
         industryJobs: corporationIndustryJobs,
         marketOrders: corporationMarketOrders,

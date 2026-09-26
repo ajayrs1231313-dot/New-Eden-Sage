@@ -41,7 +41,7 @@ type AvoidEntry = {
 };
 
 type SavedRouteEntry = { id: string; name: string; route: NavigationRoutePlan; avoids: AvoidEntry[]; notes?: string; savedAt: string };
-type ConnectedCharacter = { characterId: string; name: string; systemId?: number; systemName?: string; updatedAt?: string; shipItemId?:number; shipTypeId?:number; shipName?:string; fittedItems?:Array<{ item_id:number; type_id:number; location_id:number; location_flag:string; quantity:number; item?:string; category_id?:number }> };
+type ConnectedCharacter = { characterId: string; name: string; allianceId?:number; systemId?: number; systemName?: string; updatedAt?: string; shipItemId?:number; shipTypeId?:number; shipName?:string; fittedItems?:Array<{ item_id:number; type_id:number; location_id:number; location_flag:string; quantity:number; item?:string; category_id?:number }> };
 
 const GLOBAL_AVOIDS_KEY = "new-eden-sage-navigation-global-avoids-v1";
 const SAVED_ROUTES_KEY = "new-eden-sage-navigation-saved-routes-v1";
@@ -161,7 +161,7 @@ export function NavigationCommand() {
       .catch((error) => { if (!cancelled) setHazardError(error instanceof Error ? error.message : "Dynamic hazard data is unavailable."); });
     window.sage.listSnapshots().then((rows) => {
       if (cancelled) return;
-      const next = (rows ?? []).map((row: any) => ({ characterId: String(row.characterId ?? row.character?.character_id ?? ""), name: String(row.character?.name ?? row.characterName ?? row.characterId ?? "Character"), systemId: Number(row.location?.solar_system_id ?? 0) || undefined, systemName: row.location?.solar_system_name ? String(row.location.solar_system_name) : undefined, updatedAt: row.updatedAt ? String(row.updatedAt) : undefined, shipItemId:Number(row.ship?.ship_item_id ?? 0)||undefined, shipTypeId:Number(row.ship?.ship_type_id ?? 0)||undefined, shipName:row.ship?.ship_type_name?String(row.ship.ship_type_name):undefined, fittedItems:Array.isArray(row.extended?.currentShipFit)?row.extended.currentShipFit:[] })).filter((row) => row.characterId);
+      const next = (rows ?? []).map((row: any) => ({ characterId: String(row.characterId ?? row.character?.character_id ?? ""), name: String(row.character?.name ?? row.characterName ?? row.characterId ?? "Character"), allianceId:Number(row.character?.alliance_id ?? 0)||undefined, systemId: Number(row.location?.solar_system_id ?? 0) || undefined, systemName: row.location?.solar_system_name ? String(row.location.solar_system_name) : undefined, updatedAt: row.updatedAt ? String(row.updatedAt) : undefined, shipItemId:Number(row.ship?.ship_item_id ?? 0)||undefined, shipTypeId:Number(row.ship?.ship_type_id ?? 0)||undefined, shipName:row.ship?.ship_type_name?String(row.ship.ship_type_name):undefined, fittedItems:Array.isArray(row.extended?.currentShipFit)?row.extended.currentShipFit:[] })).filter((row) => row.characterId);
       setCharacters(next);
       setSelectedCharacterId((current) => current || next[0]?.characterId || "");
     }).catch(() => undefined);
@@ -269,6 +269,8 @@ export function NavigationCommand() {
       .filter((provider) => enabledHazards.includes(provider.id) && provider.available)
       .flatMap((provider) => provider.systemIds),
   ), [hazards, enabledHazards]);
+
+  const selectedRouteCharacter = useMemo(() => characters.find((row)=>row.characterId===selectedCharacterId), [characters, selectedCharacterId]);
 
   const profile = useMemo<NavigationRouteProfile>(() => ({
     mode,

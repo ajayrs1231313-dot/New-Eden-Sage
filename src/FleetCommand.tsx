@@ -94,7 +94,7 @@ const INITIAL_UNITS: WargameUnit[] = [];
 const INITIAL_TERRAIN: WargameTerrain[] = [];
 
 function imageUrl(typeId: number) {
-  return `https://images.evetech.net/types/${typeId}/render?size=128`;
+  return `sage-asset://type/${typeId}/render?size=128`;
 }
 
 function supportSystemDetail(system: WargameSupportSystem) {
@@ -199,6 +199,7 @@ function wargameUnitFromFit(unit: WargameUnit, result: WargameFitResult, fitText
     capacitorRechargeSeconds: result.capacitorRechargeSeconds,
     capacitorDemandGjPerSecond: result.capacitorDemandGjPerSecond,
     capacitorInjectedGjPerSecond: result.capacitorInjectedGjPerSecond,
+    remoteCapacitorReceiveMultiplier: result.remoteCapacitorReceiveMultiplier,
     baseSpeed: result.baseSpeedMps,
     alignTimeSeconds: result.alignTimeSeconds,
     warpSpeedAuPerSecond: result.warpSpeedAuPerSecond,

@@ -1,16 +1,42 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { blueprintRunLabel } from "./blueprint-display";
+import { appendShoppingList, OPEN_SHOPPING_LIST_EVENT, OPEN_SHOPPING_LIST_PENDING_KEY, type ShoppingListAdd } from "./shopping-list";
 
 type Blueprint = { item_id?: number; type_id?: number; quantity?: number; material_efficiency?: number; time_efficiency?: number; runs?: number; scope: "personal" | "corporation" };
 type ManualBlueprint = { blueprintTypeId: number; blueprintName: string; productTypeId: number; productName: string; productPerRun: number };
 type OwnerType = "member" | "division" | "project";
-type FoundryWorkbenchTab = "requirements" | "materials" | "assignments" | "stores" | "dependencies" | "production" | "groups" | "allocation";
+type FoundryWorkbenchTab = "requirements" | "materials" | "assignments" | "stores" | "dependencies" | "groups" | "allocation";
 const memberNameCache = new Map<number, string>();
 
 const n = (value: number) => new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(Number(value ?? 0));
 const pc = (value: number) => `${Math.round(Math.max(0, Math.min(1, Number(value ?? 0))) * 100)}%`;
 const isk = (value: unknown) => { const amount = Number(value); return Number.isFinite(amount) && amount >= 0 ? new Intl.NumberFormat("en-GB", { maximumFractionDigits: 0 }).format(amount) + " ISK" : "PRICE UNAVAILABLE"; };
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+export function foundryMaterialShoppingLines(materialPlan: any, tabKey: string): ShoppingListAdd[] {
+  if (!materialPlan) return [];
+
+  if (tabKey === "ore") {
+    return (materialPlan.orePlan ?? []).flatMap((row: any) => {
+      const typeId = Number(row?.typeId ?? 0);
+      const quantity = Math.max(0, Math.ceil(Number(row?.oreUnits ?? 0)));
+      return typeId > 0 && quantity > 0
+        ? [{ typeId, name: String(row?.name ?? ("Type " + typeId)), quantity }]
+        : [];
+    });
+  }
+
+  const group = (materialPlan.acquisitionGroups ?? []).find((row: any) => String(row?.key ?? "") === tabKey);
+  if (!group || !["pi", "reactions"].includes(String(group.key))) return [];
+
+  return (group.rows ?? []).flatMap((row: any) => {
+    const typeId = Number(row?.typeId ?? 0);
+    const quantity = Math.max(0, Math.ceil(Number(row?.required ?? 0)));
+    return typeId > 0 && quantity > 0
+      ? [{ typeId, name: String(row?.name ?? ("Type " + typeId)), quantity }]
+      : [];
+  });
+}
 
 export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, blueprints, typeNames }: { characterId: string; corporationName: string; snapshotUpdatedAt?: string; blueprints: Blueprint[]; typeNames: Record<number, string> }) {
   const [workspace, setWorkspace] = useState<any>(null);
@@ -39,14 +65,23 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
   const [filter, setFilter] = useState("");
   const [workbenchTab, setWorkbenchTab] = useState<FoundryWorkbenchTab>("requirements");
   const [showCreate, setShowCreate] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [storeTargetId, setStoreTargetId] = useState("__default__");
   const [storeKey, setStoreKey] = useState("personal:owner");
+  const [storeStationKey, setStoreStationKey] = useState("");
   const [blueprintMenuOpen, setBlueprintMenuOpen] = useState(false);
   const [expandedBuildLines, setExpandedBuildLines] = useState<Set<string>>(new Set());
   const [materialPlanTab, setMaterialPlanTab] = useState<string>("totals");
   const [materialPlan, setMaterialPlan] = useState<any>(null);
   const [materialPlanBusy, setMaterialPlanBusy] = useState(false);
   const [projectStoreIconRevision, setProjectStoreIconRevision] = useState(0);
+  const buildLinesPanelRef = useRef<HTMLElement | null>(null);
+  const pipelinePanelRef = useRef<HTMLElement | null>(null);
+  const dashboardMainRef = useRef<HTMLDivElement | null>(null);
+  const projectInfoPanelRef = useRef<HTMLElement | null>(null);
+  const projectStoresPanelRef = useRef<HTMLElement | null>(null);
+  const [buildLinesPanelHeight, setBuildLinesPanelHeight] = useState<number | null>(null);
+  const [projectInfoPanelHeight, setProjectInfoPanelHeight] = useState<number | null>(null);
   const [refineryCharacterId, setRefineryCharacterId] = useState("");
   const [refineryStationKey, setRefineryStationKey] = useState("");
   const [foundryRefineryRig, setFoundryRefineryRig] = useState<"none" | "t1" | "t2">("none");
@@ -67,7 +102,11 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
 
   const owned = useMemo(() => blueprints.filter((row) => Number(row.type_id ?? 0) > 0), [blueprints]);
   const selectedOwned = owned[ownedIndex] ?? owned[0];
-  const project = useMemo(() => (workspace?.projects ?? []).find((row: any) => row.id === projectId) ?? workspace?.projects?.[0] ?? null, [workspace, projectId]);
+  const activeProjects = useMemo(() => (workspace?.projects ?? []).filter((row: any) => String(row?.status ?? "") !== "complete"), [workspace?.projects]);
+  const completedProjects = useMemo(() => (workspace?.projects ?? [])
+    .filter((row: any) => String(row?.status ?? "") === "complete")
+    .sort((a: any, b: any) => String(b?.completedAt ?? b?.updatedAt ?? "").localeCompare(String(a?.completedAt ?? a?.updatedAt ?? ""))), [workspace?.projects]);
+  const project = useMemo(() => activeProjects.find((row: any) => row.id === projectId) ?? activeProjects[0] ?? null, [activeProjects, projectId]);
   const minimumProjectQuantity = Math.max(
     1,
     Math.ceil(Number(project?.producedQuantity ?? 0)),
@@ -80,7 +119,9 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     try {
       const result = await window.sage.getFoundryWorkspace({ characterId, projectId: selectId });
       setWorkspace(result);
-      setProjectId(result?.selectedProject?.id ?? result?.projects?.[0]?.id ?? "");
+      const nextActive = (result?.projects ?? []).filter((row: any) => String(row?.status ?? "") !== "complete");
+      const preferred = nextActive.find((row: any) => String(row?.id ?? "") === String(selectId ?? "")) ?? nextActive[0] ?? null;
+      setProjectId(preferred?.id ?? "");
       setMessage(result?.corporationAssetsAvailable ? "Foundry is using the latest synced corporation state." : "Foundry is ready. Corp inventory will populate when corporation asset access is available.");
       return result;
     } catch (error) {
@@ -112,6 +153,21 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     } finally {
       setMaterialPlanBusy(false);
     }
+  }
+
+
+  function exportMaterialPlanToShoppingList(tabKey: string, label: string) {
+    const additions = foundryMaterialShoppingLines(materialPlan, tabKey);
+    if (!additions.length) {
+      setMessage(tabKey === "ore"
+        ? "No ore requirements are available in this plan."
+        : "No " + label.toLowerCase() + " requirements are available in this plan.");
+      return;
+    }
+    const result = appendShoppingList(additions, label + " exported from Project Foundry.");
+    sessionStorage.setItem(OPEN_SHOPPING_LIST_PENDING_KEY, "1");
+    window.dispatchEvent(new CustomEvent(OPEN_SHOPPING_LIST_EVENT));
+    setMessage(label + ": added " + result.addedLines + " item type" + (result.addedLines === 1 ? "" : "s") + " / " + result.addedUnits.toLocaleString() + " units to Shopping List.");
   }
 
   useEffect(() => { void load(); }, [characterId, snapshotUpdatedAt]);
@@ -183,6 +239,62 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     finally { setBusy(false); }
   }
 
+  function downloadHistoryFile(contents: string, filename: string, type: string) {
+    const blob = new Blob([contents], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exportProjectHistory(format: "csv" | "json") {
+    const rows = completedProjects.map((row: any) => ({
+      completedAt: row.completedAt ?? row.updatedAt ?? "",
+      projectName: row.name ?? "",
+      product: row.productName ?? "",
+      quantity: Number(row.quantity ?? 0),
+      mode: row.mode ?? "",
+      owner: row.completedByCharacterName ?? row.createdByCharacterName ?? "",
+      completionSource: row.completionSource ?? "built",
+      blueprint: row.blueprintName ?? "",
+      materialEfficiency: Number(row.materialEfficiency ?? 0),
+      timeEfficiency: Number(row.timeEfficiency ?? 0),
+    }));
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (format === "json") {
+      downloadHistoryFile(JSON.stringify({ schema: "new-eden-sage.foundry-history.v1", exportedAt: new Date().toISOString(), projects: rows }, null, 2), `new-eden-sage-foundry-history-${stamp}.json`, "application/json");
+      return;
+    }
+    const escapeCsv = (value: unknown) => {
+      const text = String(value ?? "");
+      return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const headers = ["Completed", "Project", "Product", "Quantity", "Mode", "Owner", "Completion", "Blueprint", "ME", "TE"];
+    const csv = [headers.join(","), ...rows.map((row: any) => [
+      row.completedAt, row.projectName, row.product, row.quantity, row.mode, row.owner,
+      row.completionSource === "already-built" ? "Already built" : "Built", row.blueprint,
+      row.materialEfficiency, row.timeEfficiency,
+    ].map(escapeCsv).join(","))].join("\n");
+    downloadHistoryFile(csv, `new-eden-sage-foundry-history-${stamp}.csv`, "text/csv;charset=utf-8");
+  }
+
+  async function completeProject(source: "built" | "already-built") {
+    if (!project || busy) return;
+    const completedAt = new Date().toISOString();
+    await save({
+      ...project,
+      status: "complete",
+      completedAt,
+      completionSource: source,
+      completedByCharacterId: characterId,
+      completedByCharacterName: workspace?.characterName ?? project.createdByCharacterName,
+    }, source === "already-built" ? "Project marked complete and added to Project History." : "Build complete. Project added to Project History.");
+  }
+
   async function applyProjectQuantity() {
     if (!project) return;
     const target = Math.max(minimumProjectQuantity, Math.floor(Number(projectQuantity) || 1));
@@ -231,6 +343,40 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     setStoreTargetId("__default__");
     setExpandedBuildLines(new Set());
   }, [project?.id]);
+  useEffect(() => {
+    const main = dashboardMainRef.current;
+    const pipeline = pipelinePanelRef.current;
+    const projectStores = projectStoresPanelRef.current;
+    if (!main || !pipeline || !projectStores || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const update = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const peerTopHeight = Math.max(
+          250,
+          Math.ceil(pipeline.scrollHeight),
+          Math.ceil(projectInfoPanelRef.current?.scrollHeight ?? 0),
+        );
+        const mainBottom = main.getBoundingClientRect().bottom;
+        const storesTop = projectStores.getBoundingClientRect().top;
+        const available = Math.max(160, Math.floor(mainBottom - storesTop));
+        setProjectInfoPanelHeight((current) => current === peerTopHeight ? current : peerTopHeight);
+        setBuildLinesPanelHeight((current) => current === available ? current : available);
+      });
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(main);
+    observer.observe(pipeline);
+    if (projectInfoPanelRef.current) observer.observe(projectInfoPanelRef.current);
+    observer.observe(projectStores);
+    window.addEventListener("resize", update);
+    update();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+      observer.disconnect();
+    };
+  }, [project?.id, workbenchTab, coreBuildLines.length, expandedBuildLines.size]);
   const limit = (target: string) => target === "final-assembly" ? Number(project?.quantity ?? 0) : Number((project?.buildTree ?? []).find((row: any) => row.id === target)?.required ?? 0);
   const assigned = (target: string) => (assignmentsByTarget.get(target) ?? []).reduce((sum: number, row: any) => sum + Number(row.quantity ?? 0), 0);
   const remaining = (target: string) => Math.max(0, limit(target) - assigned(target));
@@ -260,11 +406,32 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     await save({ ...project, groups: [...(project.groups ?? []), row] }, `Created work group ${row.name}.`);
   }
 
-  const stores = [
-    { kind: "personal", key: "personal:owner", name: "Project owner personal assets", typeName: "Personal inventory", division: "All synced owner assets" },
+  const storeStations = workspace?.stores?.stations ?? [];
+  const selectedStoreStation = storeStations.find((row: any) => row.key === storeStationKey) ?? storeStations[0] ?? null;
+  const corporationStores = [
     ...(workspace?.stores?.divisions ?? []),
     ...(workspace?.stores?.containers ?? []),
-  ];
+  ].filter((row: any) => !selectedStoreStation || Number(row.rootLocationId ?? 0) === Number(selectedStoreStation.rootLocationId ?? 0));
+  const stores = project?.mode === "solo"
+    ? [{ kind: "personal", key: "personal:owner", name: "Project owner personal assets", typeName: "Personal inventory", division: "All synced owner assets" }]
+    : corporationStores;
+  useEffect(() => {
+    if (project?.mode === "solo") {
+      if (storeStationKey) setStoreStationKey("");
+      if (storeKey !== "personal:owner") setStoreKey("personal:owner");
+      return;
+    }
+    const firstStation = storeStations[0];
+    if (!firstStation) {
+      if (storeStationKey) setStoreStationKey("");
+      if (storeKey) setStoreKey("");
+      return;
+    }
+    const effectiveStation = storeStations.find((row: any) => row.key === storeStationKey) ?? firstStation;
+    if (storeStationKey !== effectiveStation.key) setStoreStationKey(effectiveStation.key);
+    const choices = [...(workspace?.stores?.divisions ?? []), ...(workspace?.stores?.containers ?? [])].filter((row: any) => Number(row.rootLocationId ?? 0) === Number(effectiveStation.rootLocationId ?? 0));
+    if (!choices.some((row: any) => row.key === storeKey)) setStoreKey(choices[0]?.key ?? "");
+  }, [project?.mode, workspace?.stores, storeStationKey]);
   const storeRoutes = project?.storeRoutes ?? [];
   const storeByKey = new Map<string, any>(stores.map((row: any) => [row.key, row]));
   const routeByTarget = new Map<string, any>(storeRoutes.map((row: any) => [row.targetId, row]));
@@ -277,7 +444,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     if (!project || !storeKey) return;
     const store = storeByKey.get(storeKey);
     if (!store || activeStoreKeys.has(storeKey)) return;
-    const binding = { kind: store.kind, key: store.key, itemId: store.itemId, locationFlag: store.locationFlag, name: store.name };
+    const binding = { kind: store.kind, key: store.key, itemId: store.itemId, locationFlag: store.locationFlag, rootLocationId: store.rootLocationId, station: store.station, system: store.system, name: store.name };
     if (storeTargetId === "__default__") {
       await save({ ...project, linkedStores: [...(project.linkedStores ?? []), binding] }, `Added ${store.name} to the project default source.`);
       return;
@@ -311,6 +478,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
   const componentUnits = componentRows.reduce((sum: number, row: any) => sum + Math.max(0, Number(row.required ?? 0)), 0);
   const componentCoveredUnits = componentRows.reduce((sum: number, row: any) => sum + Math.max(0, Math.min(Number(row.required ?? 0), Number(row.availableToProject ?? 0))), 0);
   const projectStoreSummary = project?.projectStoreSummary ?? null;
+  const displayProgress = Math.max(0, Math.min(1, Number(projectStoreSummary?.progress ?? project?.progress ?? 0)));
   const projectStoreLabel = String(projectStoreSummary?.selectedStoreLabel ?? (project?.mode === "solo" ? "Owner personal assets" : "No project store selected"));
   const projectStoreIconTypeIds = useMemo(() => [...new Set<number>([
     ...(projectStoreSummary?.parts ?? []).map((row: any) => Number(row?.typeId ?? 0)),
@@ -330,10 +498,9 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
   const deliveryComplete = String(project?.status ?? "").toLowerCase() === "complete";
   const pipelineStages: Array<{ label: string; detail: string; progress: number; badge: string; state: string; current: boolean; target: FoundryWorkbenchTab }> = project ? [
     { label: "Materials", detail: materialProgress >= .999999 ? "Inputs covered" : "Collect required materials", progress: materialProgress, badge: pc(materialProgress), state: materialProgress >= .999999 ? "complete" : "active", current: materialProgress < .999999, target: "requirements" },
-    { label: "Research", detail: project.materialEfficiency > 0 || project.timeEfficiency > 0 ? `ME ${project.materialEfficiency} / TE ${project.timeEfficiency} in calculations` : "No blueprint research", progress: project.materialEfficiency > 0 || project.timeEfficiency > 0 ? 1 : 0, badge: project.materialEfficiency > 0 || project.timeEfficiency > 0 ? "APPLIED" : "OPTIONAL", state: "optional", current: false, target: "requirements" },
     { label: "Manufacturing", detail: manufacturingProgress >= .999999 ? "Component chain covered" : "Build subcomponents", progress: manufacturingProgress, badge: pc(manufacturingProgress), state: manufacturingProgress >= .999999 ? "complete" : materialProgress >= .999999 ? "active" : "blocked", current: materialProgress >= .999999 && manufacturingProgress < .999999, target: "dependencies" },
     { label: "Final Assembly", detail: finalReady ? "Dependencies satisfied" : `${project.finalAssembly?.blockerCount ?? 0} blocker(s)`, progress: finalReady ? 1 : 0, badge: finalReady ? "READY" : "BLOCKED", state: finalReady ? "complete" : manufacturingProgress >= .999999 ? "active" : "blocked", current: manufacturingProgress >= .999999 && !finalReady, target: "dependencies" },
-    { label: "Delivery", detail: deliveryComplete ? "Project complete" : "Awaiting finished output", progress: deliveryComplete ? 1 : 0, badge: deliveryComplete ? "DONE" : "PENDING", state: deliveryComplete ? "complete" : finalReady ? "active" : "blocked", current: finalReady && !deliveryComplete, target: "production" },
+    { label: "Delivery", detail: deliveryComplete ? "Project complete" : "Awaiting finished output", progress: deliveryComplete ? 1 : 0, badge: deliveryComplete ? "DONE" : "PENDING", state: deliveryComplete ? "complete" : finalReady ? "active" : "blocked", current: finalReady && !deliveryComplete, target: "dependencies" },
   ] : [];
   const productTypeId = Number(project?.productTypeId ?? project?.product_type_id ?? 0);
   const allocationOwnerMap = new Map<string, { key: string; name: string; count: number; quantity: number }>();
@@ -377,13 +544,26 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
     <section className="foundry-commandbar" aria-label="Project Foundry command bar">
       <div className="foundry-commandbar-title">
         <span className="foundry-commandbar-icon">PF</span>
-        <div><small>INDUSTRIAL / PROJECT FOUNDRY</small><strong>Project Foundry</strong><em>Plan. Assemble. Deliver.</em></div>
+        <div>
+          <small>INDUSTRIAL / PROJECT FOUNDRY</small>
+          <strong>Project Foundry</strong>
+          <em>Plan. Assemble. Deliver.</em>
+          <button
+            type="button"
+            className="foundry-production-schedule-button"
+            disabled={!project}
+            onClick={() => openWorkbench("allocation")}
+            title={project ? "Open production schedule" : "Create or select a project first"}
+          >
+            Production Schedule
+          </button>
+        </div>
       </div>
       <label className="foundry-project-picker">
         <span>PROJECT</span>
         <select value={project?.id ?? ""} onChange={(event) => { setProjectId(event.target.value); setSelected(new Set()); setWorkbenchTab("requirements"); setShowCreate(false); }}>
-          {(workspace?.projects ?? []).map((row: any) => <option key={row.id} value={row.id}>{row.name} · {row.quantity} × {row.productName}</option>)}
-          {!(workspace?.projects ?? []).length && <option value="">No projects yet</option>}
+          {activeProjects.map((row: any) => <option key={row.id} value={row.id}>{row.name} · {row.quantity} × {row.productName}</option>)}
+          {!activeProjects.length && <option value="">No active projects</option>}
         </select>
       </label>
       {project && <div className="foundry-project-quantity" aria-label="Project build quantity">
@@ -400,7 +580,10 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
         {project && <button type="button" onClick={() => void save({ ...project, status: project.status === "archived" ? "planning" : "archived" }, project.status === "archived" ? "Project restored to planning." : "Project archived.")}>{project.status === "archived" ? "Restore" : "Archive"}</button>}
         {project && <button type="button" className="danger" onClick={async () => { if (!window.confirm(`Delete ${project.name}?`)) return; const result = await window.sage.deleteFoundryProject({ characterId, projectId: project.id }); setWorkspace(result); setProjectId(result?.selectedProject?.id ?? ""); setSelected(new Set()); }}>Delete</button>}
       </div>
-      <div className="foundry-command-sync"><span className="live-dot" /> <strong>Live Foundry</strong><small>{workspace?.snapshotUpdatedAt ? new Date(workspace.snapshotUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Local state"}</small></div>
+      <div className="foundry-command-sync">
+        <div className="foundry-command-live"><span className="live-dot" /><strong>Live Foundry</strong><small>{workspace?.snapshotUpdatedAt ? new Date(workspace.snapshotUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Local state"}</small></div>
+        <button type="button" className="foundry-history-button" onClick={() => setShowHistory(true)}>History <span>{completedProjects.length}</span></button>
+      </div>
     </section>
 
     {(showCreate || !project) && <article className="industrial-panel foundry-create foundry-create-compact">
@@ -418,7 +601,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
 
     {project && <>
       <section className="foundry-summary-strip">
-        <div className="foundry-progress-orb"><strong>{pc(project.progress)}</strong><span>BUILD PROGRESS</span></div>
+        <div className="foundry-progress-orb"><strong>{pc(displayProgress)}</strong><span>BUILD PROGRESS</span></div>
         <div><small>CURRENT STAGE</small><strong>{project.finalAssembly?.ready ? "Final Assembly" : project.progress > 0 ? "Manufacturing" : "Materials"}</strong><span>{project.finalAssembly?.ready ? "Dependencies fulfilled" : `${n(project.missingUnits)} dependency units missing`}</span></div>
         <div className={project.finalAssembly?.blockerCount ? "warn" : "good"}><small>BLOCKERS</small><strong>{n(project.finalAssembly?.blockerCount ?? 0)}</strong><span>{project.finalAssembly?.ready ? "Clear for assembly" : "Missing materials / components"}</span></div>
         <div><small>ASSIGNED TO</small><strong>{project.mode === "solo" ? "1 owner" : `${new Set((project.assignments ?? []).map((row: any) => `${row.ownerType}:${row.ownerId}`)).size} owner(s)`}</strong><span>{project.mode === "solo" ? project.createdByCharacterName : `${project.assignments?.length ?? 0} assignment splits`}</span></div>
@@ -427,8 +610,8 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
       </section>
 
       <div className="foundry-dashboard-grid">
-        <div className="foundry-dashboard-main">
-          <article className="industrial-panel foundry-pipeline-panel">
+        <div ref={dashboardMainRef} className="foundry-dashboard-main">
+          <article ref={pipelinePanelRef} className="industrial-panel foundry-pipeline-panel" style={projectInfoPanelHeight ? ({ "--foundry-info-height": projectInfoPanelHeight + "px" } as any) : undefined}>
             <div className="foundry-section-head">
               <div><small>BUILD PIPELINE</small><strong>Project stages and dependencies</strong></div>
               <button type="button" className="foundry-quiet-action" onClick={() => openWorkbench("dependencies")}>View dependencies</button>
@@ -449,7 +632,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
               <div className="foundry-output-summary">
                 <div className="foundry-summary-heading"><small>PROJECT OUTPUT</small><strong>Final product and build targets</strong></div>
                 <div className="foundry-output-product">
-                  {productTypeId > 0 ? <img src={`https://images.evetech.net/types/${productTypeId}/render?size=128`} alt="" /> : <div className="foundry-product-placeholder">PF</div>}
+                  {productTypeId > 0 ? <img src={`sage-asset://type/${productTypeId}/render?size=128`} alt="" /> : <div className="foundry-product-placeholder">PF</div>}
                   <span><strong>{project.productName}</strong><small>{project.blueprintName}</small></span>
                 </div>
                 <div className="foundry-output-stats">
@@ -458,25 +641,21 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
                   <span><small>UNITS MISSING</small><b className={Number(project.missingUnits ?? 0) > 0 ? "warn" : ""}>{n(project.missingUnits)}</b></span>
                 </div>
               </div>
-              <div className="foundry-dependency-summary">
-                <div className="foundry-summary-heading"><small>DEPENDENCY STATE</small><strong>Blocking items and requirements</strong></div>
-                <span className={`foundry-final-build-state ${finalReady ? "ready" : "blocked"}`}>{finalReady ? "READY" : "FINAL BUILD BLOCKED"}</span>
-                <div className="foundry-blocker-copy">
-                  <strong>{finalReady ? "All dependencies satisfied" : `${n(project.finalAssembly?.blockerCount ?? blockers.length)} blocking requirement${Number(project.finalAssembly?.blockerCount ?? blockers.length) === 1 ? "" : "s"}`}</strong>
-                  <small>{finalReady ? "Final assembly can begin." : "Required materials and components must be available before final assembly can start."}</small>
-                </div>
-                {!finalReady && <div className="foundry-blocker-list">
-                  {blockers.slice(0, 2).map((row: any, index: number) => <span key={row.typeId ?? row.id ?? `${row.name}-${index}`}>
-                    <strong title={row.name}>{row.name}</strong><em>{n(row.outstanding)} missing</em>
-                  </span>)}
-                  {blockers.length > 2 && <span className="more"><strong>+{n(blockers.length - 2)} more blockers</strong></span>}
-                </div>}
-                <button type="button" className="foundry-quiet-action foundry-dependency-action" onClick={() => openWorkbench("dependencies")}>View dependencies</button>
+              <div className={`foundry-dependency-summary ${deliveryComplete ? "completed" : finalReady ? "ready-to-complete" : "blocked"}`}>
+                {deliveryComplete
+                  ? <span className="foundry-final-build-state ready">PROJECT COMPLETE</span>
+                  : finalReady
+                    ? <button type="button" className="foundry-built-action" disabled={busy} onClick={() => void completeProject("built")}>I BUILT THIS</button>
+                    : <>
+                        <span className="foundry-final-build-state blocked">FINAL BUILD BLOCKED</span>
+                        <button type="button" className="foundry-quiet-action foundry-dependency-action" onClick={() => openWorkbench("stores")}>See Project Stores</button>
+                      </>}
+                {!deliveryComplete && <button type="button" className="foundry-built-override" disabled={busy} onClick={() => void completeProject("already-built")}>I HAVE ALREADY BUILT THIS</button>}
               </div>
             </div>
           </article>
 
-          <article className="industrial-panel foundry-stage-focus foundry-build-lines-panel">
+          <article ref={buildLinesPanelRef} className="industrial-panel foundry-stage-focus foundry-build-lines-panel">
             <div className="foundry-section-head">
               <div><small>ACTIVE BUILD LINES</small><strong>{project.productName} core production tree</strong></div>
               <div className="foundry-build-lines-actions">
@@ -529,7 +708,6 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
               {project.mode === "corporation" && <button type="button" className={workbenchTab === "assignments" ? "active" : ""} onClick={() => setWorkbenchTab("assignments")}>Assignments <span>{project.assignments?.length ?? 0}</span></button>}
               <button type="button" className={workbenchTab === "stores" ? "active" : ""} onClick={() => setWorkbenchTab("stores")}>Project Stores</button>
               <button type="button" className={workbenchTab === "dependencies" ? "active" : ""} onClick={() => setWorkbenchTab("dependencies")}>Dependencies <span>{tree.length}</span></button>
-              <button type="button" className={workbenchTab === "production" ? "active" : ""} onClick={() => setWorkbenchTab("production")}>Production Lots <span>{project.productionLots?.length ?? 0}</span></button>
               {project.mode === "corporation" && <button type="button" className={workbenchTab === "groups" ? "active" : ""} onClick={() => setWorkbenchTab("groups")}>Work Groups <span>{project.groups?.length ?? 0}</span></button>}
               <button type="button" className={workbenchTab === "allocation" ? "active" : ""} onClick={() => setWorkbenchTab("allocation")}>Work Allocation <span>{project.mode === "solo" ? 1 : allocationOwners.length}</span></button>
             </nav>
@@ -649,6 +827,7 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
                         : "MINE THESE ORES — HIGH FIRST, THEN LOW, THEN NULL"}</strong>
                   </span>
                   <em>Every row below is additive. Mine the stated quantity of every listed ore.</em>
+                  <button type="button" className="foundry-small foundry-shopping-export" onClick={() => exportMaterialPlanToShoppingList("ore", "Lowest-resistance ore plan")}>Export to Shopping List</button>
                 </div>
 
                 {(materialPlan?.orePlan ?? []).length > 0 && <div className="foundry-ore-plan-table">
@@ -717,39 +896,62 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
                       {(["high", "low", "null"] as const).map((reach) => <button type="button" key={reach} className={foundryMiningReach === reach ? "active" : ""} disabled={materialPlanBusy} onClick={() => setFoundryMiningReach(reach)}>{reach === "high" ? "HIGH" : reach === "low" ? "LOW" : "NULL"}</button>)}
                     </div>
                   </div>}
-                  <div className="foundry-acquisition-plan-head"><span><small>{String(group.label).toUpperCase()}</small><strong>{group.rows.length} required input type{group.rows.length === 1 ? "" : "s"}</strong></span><em>{isT2 ? "High-sec component build; lower security only for inputs that require it" : "Production route plus current buy alternative"}</em></div>
+                  <div className="foundry-acquisition-plan-head">
+                    <span><small>{String(group.label).toUpperCase()}</small><strong>{group.rows.length} required input type{group.rows.length === 1 ? "" : "s"}</strong></span>
+                    <div className="foundry-acquisition-plan-actions">
+                      <em>{isT2 ? "High-sec component build; lower security only for inputs that require it" : "Production route plus current buy alternative"}</em>
+                      {(group.key === "pi" || group.key === "reactions") && <button type="button" className="foundry-small foundry-shopping-export" onClick={() => exportMaterialPlanToShoppingList(group.key, group.label)}>Export to Shopping List</button>}
+                    </div>
+                  </div>
                   <div className="foundry-acquisition-table">
-                    <div className="foundry-acquisition-row heading"><span>Material</span><span>Required</span><span>Path of least resistance</span><span>Recipe / source</span><span>Buy complete item</span></div>
-                    {(group.rows ?? []).map((row: any) => <div className="foundry-acquisition-row" key={row.typeId}>
-                      <span className="material-name"><img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" /><span><strong>{row.name}</strong><small>{row.badge} · {row.detail}</small></span></span>
-                      <span><strong>{n(row.required)}</strong></span>
-                      <div className="acquisition-way">
-                        <details className="foundry-acquisition-instruction">
-                          <summary><span>{row.bestWay}</span><i aria-hidden="true">⌄</i></summary>
-                          <div className="foundry-acquisition-instruction-body">
-                            {(row.instructions?.length ? row.instructions : [row.bestWay]).map((instruction: string, index: number) => <p key={index}>{instruction}</p>)}
-                          </div>
-                        </details>
-                        {row.facility && <small>{row.facility}</small>}
-                        {row.security && <small className="security-rule">{row.category === "reactions" ? "LOW-SEC · NULL-SEC · WORMHOLE · NO HIGH-SEC" : row.security}</small>}
-                      </div>
-                      <span className="acquisition-recipe">
-                        {row.runsRequired ? <small className="recipe-total-note"><span>Calculated job total</span><b>{n(row.runsRequired)} run{row.runsRequired === 1 ? "" : "s"}</b></small> : null}
-                        {isT2 && row.inputPlans?.length ? row.inputPlans.map((part: any) => <small className={"t2-input-plan " + part.action} key={part.typeId}>
-                          <span><b>{part.label}</b>{part.name}</span>
-                          <strong>{n(part.quantity)}×</strong>
-                          <em>{part.action === "buy" ? isk(part.buyCost) : part.reach === "low" ? "SOURCE IN LOW-SEC" : "SOURCE IN HIGH-SEC"}</em>
-                        </small>) : row.recipe?.length ? row.recipe.map((part: any) => <small key={part.typeId}><span>{part.name}</span><b>{n(part.quantity)}×</b><em>{part.buyCost != null ? isk(part.buyCost) : ""}</em></small>) : <small><span>{row.sourceLabel}</span></small>}
-                        {!isT2 && row.recipeBuyCost != null && row.recipe?.length ? <small className="recipe-cost-total"><span>Buy all recipe inputs</span><b>{isk(row.recipeBuyCost)}</b></small> : null}
-                        {isT2 && row.inputBuyCost != null && row.inputBuyCost > 0 ? <small className="recipe-cost-total"><span>Inputs you must buy at this reach</span><b>{isk(row.inputBuyCost)}</b></small> : null}
-                      </span>
-                      <span className="acquisition-buy-cost">
-                        <small>BUY {isT2 ? "COMPONENT" : "MATERIAL"}</small>
-                        <strong>{isk(row.buyCost)}</strong>
-                        <em>{row.buyUnitPrice != null ? n(row.required) + " × " + isk(row.buyUnitPrice) : row.buyPriceSource}</em>
-                        {row.buyLocation && <i>{row.buyLocation}{row.buyRegion ? " · " + row.buyRegion : ""}</i>}
-                      </span>
-                    </div>)}
+                    <div className="foundry-acquisition-row heading"><span>Material</span><span>Need</span><span>Recommended</span><span>Make from inputs</span><span>Buy finished</span></div>
+                    {(group.rows ?? []).map((row: any) => {
+                      const action = isT2 ? "source" : String(row.recommendationAction ?? "unknown");
+                      const recommendationLabel = isT2
+                        ? "MAKE / SOURCE"
+                        : action === "buy"
+                          ? "BUY FINISHED"
+                          : action === "make"
+                            ? "MAKE FROM INPUTS"
+                            : action === "source"
+                              ? "SOURCE DIRECTLY"
+                              : "CHECK PRICES";
+                      return <div className={"foundry-acquisition-row " + (row.costComparisonAvailable ? "has-comparison" : "")} key={row.typeId}>
+                        <span className="material-name"><img src={"sage-asset://type/" + row.typeId + "/icon?size=64"} alt="" loading="lazy" /><span><strong>{row.name}</strong><small>{row.badge} - {row.detail}</small></span></span>
+                        <span className="acquisition-required"><strong>{n(row.required)}</strong></span>
+                        <div className={"acquisition-way recommendation-" + action}>
+                          <strong className="recommendation-label">{recommendationLabel}</strong>
+                          {row.costComparisonAvailable
+                            ? <small className="recommendation-cost">{isk(row.recommendationCost)} <b>SAVES {isk(row.recommendationSavings)}</b></small>
+                            : <small>{isT2 ? "Uses selected security reach" : action === "source" ? "No input recipe to compare" : "Need complete market prices to compare"}</small>}
+                          <details className="foundry-acquisition-instruction">
+                            <summary><span>Why / instructions</span><i aria-hidden="true">+</i></summary>
+                            <div className="foundry-acquisition-instruction-body">
+                              <p>{row.bestWay}</p>
+                              {(row.instructions?.length ? row.instructions : []).filter((instruction: string) => instruction && instruction !== row.bestWay).map((instruction: string, index: number) => <p key={index}>{instruction}</p>)}
+                              {row.facility && <p>Facility: {row.facility}</p>}
+                              {row.security && <p>{row.category === "reactions" ? "LOW-SEC / NULL-SEC / WORMHOLE / NO HIGH-SEC" : row.security}</p>}
+                            </div>
+                          </details>
+                        </div>
+                        <span className="acquisition-recipe">
+                          {row.runsRequired ? <small className="recipe-total-note"><span>Calculated total</span><b>{n(row.runsRequired)} run{row.runsRequired === 1 ? "" : "s"}</b></small> : null}
+                          {isT2 && row.inputPlans?.length ? row.inputPlans.map((part: any) => <small className={"t2-input-plan " + part.action} key={part.typeId}>
+                            <span><b>{part.label}</b>{part.name}</span>
+                            <strong>{n(part.quantity)}x</strong>
+                            <em>{part.action === "buy" ? isk(part.buyCost) : part.reach === "low" ? "SOURCE IN LOW-SEC" : "SOURCE IN HIGH-SEC"}</em>
+                          </small>) : row.recipe?.length ? row.recipe.map((part: any) => <small key={part.typeId}><span>{part.name}</span><b>{n(part.quantity)}x</b><em>{part.buyCost != null ? isk(part.buyCost) : ""}</em></small>) : <small><span>{row.sourceLabel}</span></small>}
+                          {!isT2 && row.recipeBuyCost != null && row.recipe?.length ? <small className="recipe-cost-total"><span>MAKE COST - BUY INPUTS</span><b>{isk(row.recipeBuyCost)}</b></small> : null}
+                          {isT2 && row.inputBuyCost != null && row.inputBuyCost > 0 ? <small className="recipe-cost-total"><span>Inputs you must buy at this reach</span><b>{isk(row.inputBuyCost)}</b></small> : null}
+                        </span>
+                        <span className={"acquisition-buy-cost " + (action === "buy" ? "recommended" : "")}>
+                          <small>BUY FINISHED</small>
+                          <strong>{isk(row.buyCost)}</strong>
+                          <em>{row.buyUnitPrice != null ? n(row.required) + " x " + isk(row.buyUnitPrice) : row.buyPriceSource}</em>
+                          {row.buyLocation && <i>{row.buyLocation}{row.buyRegion ? " - " + row.buyRegion : ""}</i>}
+                        </span>
+                      </div>;
+                    })}
                   </div>
                 </div>;
               })()}
@@ -780,8 +982,9 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
             {workbenchTab === "stores" && <article className="industrial-panel foundry-stores foundry-workbench-panel">
               <div className="industrial-panel-head"><div><p className="eyebrow">PROJECT STORES</p><h3>Source routing</h3><p>Tell Sage exactly where each part of the build should come from. A build-line route overrides the project default source.</p></div><span className="industrial-status live">{storeRoutes.length} OVERRIDE{storeRoutes.length === 1 ? "" : "S"}</span></div>
               <div className="foundry-store-router">
-                <label><span>Build part</span><select value={storeTargetId} onChange={(e) => setStoreTargetId(e.target.value)}><option value="__default__">Project default / all unassigned parts</option>{routableTargets.map((row: any) => <option key={row.id} value={row.id}>{`${"—".repeat(Math.max(0, Number(row.depth ?? 1) - 1))} ${row.name} · ${n(row.required)} required`}</option>)}</select></label>
-                <label><span>Look for it in</span><select value={storeKey} onChange={(e) => setStoreKey(e.target.value)}>{stores.map((row: any) => <option key={row.key} value={row.key}>{row.name}{row.kind === "container" ? ` · ${row.division ?? "Corp assets"}` : row.kind === "division" ? " · Corp hangar" : ""}</option>)}</select></label>
+                <label><span>Build part</span><select value={storeTargetId} onChange={(e) => setStoreTargetId(e.target.value)}><option value="__default__">Project default / all unassigned parts</option>{routableTargets.map((row: any) => <option key={row.id} value={row.id}>{row.name} - {n(row.required)} required</option>)}</select></label>
+                {project.mode === "corporation" && <label><span>Station / structure</span><select value={selectedStoreStation?.key ?? ""} onChange={(e) => setStoreStationKey(e.target.value)} disabled={!storeStations.length}>{storeStations.length ? storeStations.map((row: any) => <option key={row.key} value={row.key}>{row.name}{row.system ? " - " + row.system : ""}</option>) : <option value="">No corporation asset locations found</option>}</select></label>}
+                <label><span>Look for it in</span><select value={storeKey} onChange={(e) => setStoreKey(e.target.value)} disabled={!stores.length}>{stores.length ? stores.map((row: any) => <option key={row.key} value={row.key}>{row.name}{row.kind === "container" ? " - " + (row.division ?? "Corp assets") : row.kind === "division" ? " - Corp hangar" : ""}</option>) : <option value="">No stores at this location</option>}</select></label>
                 <button type="button" className="foundry-primary" disabled={busy || !storeKey || activeStoreKeys.has(storeKey)} onClick={() => void addStoreBinding()}>{activeStoreKeys.has(storeKey) ? "Already routed" : "Add source"}</button>
               </div>
               <div className="foundry-store-route-summary">
@@ -794,23 +997,31 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
                 {storeRoutes.flatMap((route: any) => { const target = routableTargets.find((row: any) => row.id === route.targetId); return (route.stores ?? []).map((binding: any) => <div className="foundry-store-route-row routed" key={`${route.targetId}:${binding.key}`}><span><strong>{target?.name ?? "Unknown build line"}</strong><small>{target ? `${target.kind === "component" ? "Component" : "Material"} · ${n(target.required)} required` : route.targetId}</small></span><span><strong>{binding.name}</strong><small>{binding.kind === "personal" ? "Owner personal assets" : binding.kind === "division" ? binding.locationFlag : "Named container + nested stock"}</small></span><b>OVERRIDE</b><button type="button" className="remove" onClick={() => void removeStoreBinding(route.targetId, binding.key)}>×</button></div>); })}
                 {!(project.linkedStores ?? []).length && !storeRoutes.length && <div className="foundry-store-empty"><strong>No custom routes yet.</strong><span>{project.mode === "solo" ? "Sage currently checks all synced personal assets. Add a project default or a build-part override to narrow or redirect the source." : "Choose a build part and a corporation hangar/container above. Until a source is configured, corporation stock does not count toward the project."}</span></div>}
               </div>
-              <div className="industrial-notice">Example: route <b>Capital Construction Parts</b> to <b>Corp Hangar A</b>, minerals to a named mineral container, and leave everything else on the project default. Sage evaluates each dependency against its routed source independently.</div>
+
             </article>}
 
             {workbenchTab === "dependencies" && <article className="industrial-panel foundry-tree-panel foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">PRODUCTION HIERARCHY</p><h3>{project.productName} build tree</h3><p>Actual SDE build stages. Assign the work itself, not a generic database bucket.</p></div><button className="foundry-small" onClick={() => setFullTree((v) => !v)}>{fullTree ? "Core stages" : "Full chain"}</button></div><div className="foundry-root"><span><b>FINAL PRODUCT</b><strong>{project.quantity} × {project.productName}</strong><small>{project.blueprintName}</small></span><em className={project.finalAssembly?.ready ? "ready" : ""}>{project.finalAssembly?.ready ? "ASSEMBLY READY" : "FINAL BUILD BLOCKED"}</em></div><div className="foundry-tree"><div className="foundry-tree-row heading"><span>Stage / requirement</span><span>Required</span><span>Available</span><span>Missing</span><span>Responsibility</span><span>State</span></div>{visibleTree.map((row: any) => { const rows = assignmentsByTarget.get(row.id) ?? []; const open = remaining(row.id); const state = row.coverage >= .999999 ? "DELIVERED" : rows.some((x: any) => x.status === "in-progress") ? "IN PRODUCTION" : rows.length ? "ASSIGNED" : "UNASSIGNED"; return <div className={`foundry-tree-row depth-${Math.min(4, Number(row.depth ?? 0))} kind-${row.kind} ${row.outstanding <= 0 ? "covered" : ""} ${selected.has(row.id) ? "selected" : ""}`} key={row.id}><span className="tree-name" style={{ paddingLeft: `${Math.max(0, row.depth - 1) * 15}px` }}>{project.mode === "corporation" && <input type="checkbox" checked={selected.has(row.id)} disabled={open <= 0} onChange={() => toggleTarget(row.id)} />}<span><strong>{row.name}</strong><small>{row.kind === "component" ? `COMPONENT · ${row.runs ?? "?"} runs` : row.direct ? "DIRECT INPUT" : "MATERIAL INPUT"}</small></span></span><span>{n(row.required)}</span><span>{n(row.availableToProject)}</span><span className="missing">{n(row.outstanding)}</span><span className="who">{rows.length ? rows.map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") : project.mode === "solo" ? project.createdByCharacterName : "Unassigned"}{rows.length && open > 0 ? ` · ${n(open)} open` : ""}</span><span><b className={`state ${state.toLowerCase().replace(/\s/g, "-")}`}>{state}</b></span></div>; })}</div><div className={`foundry-final ${project.finalAssembly?.ready ? "ready" : ""}`}><span className="tree-name">{project.mode === "corporation" && <input type="checkbox" checked={selected.has("final-assembly")} disabled={remaining("final-assembly") <= 0} onChange={() => toggleTarget("final-assembly")} />}<span><strong>Final Assembly</strong><small>{project.finalAssembly?.ready ? "Dependencies satisfied" : `${project.finalAssembly?.blockerCount} blockers`}</small></span></span><b>{project.finalAssembly?.ready ? "READY TO BUILD" : "BLOCKED"}</b><span>{(assignmentsByTarget.get("final-assembly") ?? []).map((x: any) => `${x.ownerName}: ${n(x.quantity)}`).join(" · ") || (project.mode === "solo" ? project.createdByCharacterName : "Unassigned")}</span></div></article>}
 
-            {workbenchTab === "production" && <article className="industrial-panel foundry-production-lots foundry-workbench-panel"><div className="industrial-panel-head"><div><p className="eyebrow">PRODUCTION LOTS</p><h3>Traceable output</h3><p>Every completed manufacturing run keeps a stable Sage identifier through Foundry and Wallet Ledger reconciliation.</p></div><span className="industrial-status live">{(project.productionLots ?? []).length} LOT{(project.productionLots ?? []).length === 1 ? "" : "S"}</span></div>{(project.productionLots ?? []).length ? <div className="foundry-lot-list"><div className="foundry-lot-row heading"><span>Production ID</span><span>Produced</span><span>Output</span><span>Sold</span><span>Remaining</span><span>Ledger</span></div>{(project.productionLots ?? []).map((lot: any) => <div className="foundry-lot-row" key={lot.id}><span className="foundry-lot-id"><strong>{lot.id}</strong><small>EVE job {lot.industryJobId}</small></span><span>{new Date(lot.producedAt).toLocaleString()}</span><span>{n(lot.quantity)}</span><span>{n(lot.soldQuantity)}</span><span>{n(lot.remainingQuantity)}</span><b className={`state ${lot.reconciliationStatus}`}>{String(lot.reconciliationStatus).toUpperCase()}</b></div>)}</div> : <div className="industrial-notice">No production lots have been recorded for this project yet.</div>}</article>}
           </section>
         </div>
 
         <aside className="foundry-dashboard-rail">
-          <article className="industrial-panel foundry-rail-panel foundry-project-info">
+          <article ref={projectInfoPanelRef} className="industrial-panel foundry-rail-panel foundry-project-info" style={projectInfoPanelHeight ? ({ "--foundry-info-height": projectInfoPanelHeight + "px" } as any) : undefined}>
             <div className="foundry-section-head"><div><small>PROJECT INFORMATION</small><strong>Live project metadata</strong></div></div>
-            <dl><div><dt>Project Name</dt><dd>{project.name}</dd></div><div><dt>Product</dt><dd>{project.productName}</dd></div><div><dt>Quantity</dt><dd>{n(project.quantity)}</dd></div><div><dt>Blueprint</dt><dd>{project.blueprintName}</dd></div><div><dt>Mode</dt><dd>{project.mode === "solo" ? "Solo" : "Corporation"}</dd></div><div><dt>Status</dt><dd><select value={project.status} onChange={(e) => void save({ ...project, status: e.target.value }, `Status changed to ${e.target.value}.`)}><option value="planning">Planning</option><option value="active">Active</option><option value="complete">Complete</option><option value="archived">Archived</option></select></dd></div><div><dt>Owner</dt><dd>{project.createdByCharacterName}</dd></div><div><dt>Source</dt><dd>{project.blueprintSource === "manual" ? "Manual SDE" : "Synced blueprint"}</dd></div></dl>
+            <dl className="foundry-project-info-grid">
+              <div><dt>Project Name</dt><dd>{project.name}</dd></div>
+              <div><dt>Product</dt><dd>{project.productName}</dd></div>
+              <div><dt>Quantity</dt><dd>{n(project.quantity)}</dd></div>
+              <div><dt>Blueprint</dt><dd>{project.blueprintName}</dd></div>
+              <div className="foundry-project-status-field"><dt>Status</dt><dd><select value={project.status} onChange={(e) => void save({ ...project, status: e.target.value }, `Status changed to ${e.target.value}.`)}><option value="planning">Planning</option><option value="active">Active</option><option value="complete">Complete</option><option value="archived">Archived</option></select></dd></div>
+              <div><dt>Owner</dt><dd>{project.createdByCharacterName}</dd></div>
+              <div><dt>Source</dt><dd>{project.blueprintSource === "manual" ? "Manual SDE" : "Synced blueprint"}</dd></div>
+              <div><dt>Efficiency</dt><dd>ME {project.materialEfficiency} / TE {project.timeEfficiency}</dd></div>
+            </dl>
             <div className="foundry-mode-inline"><b>MODE</b><button className={project.mode === "solo" ? "active" : ""} onClick={() => void save({ ...project, mode: "solo" }, "Switched to solo planning.")}>Solo</button><button className={project.mode === "corporation" ? "active" : ""} onClick={() => void save({ ...project, mode: "corporation" }, "Switched to corporation planning.")}>Corporation</button></div>
           </article>
 
-          <article className="industrial-panel foundry-rail-panel foundry-project-stores-summary">
+          <article ref={projectStoresPanelRef} className="industrial-panel foundry-rail-panel foundry-project-stores-summary" style={buildLinesPanelHeight ? ({ "--foundry-peer-height": buildLinesPanelHeight + "px" } as any) : undefined}>
             <div className="foundry-section-head"><div><small>PROJECT STORES</small><strong>Completed parts and gathered materials</strong></div></div>
             <dl className="foundry-store-summary-list">
               <div><dt>Selected hangar</dt><dd title={projectStoreLabel}>{projectStoreLabel}</dd></div>
@@ -911,5 +1122,30 @@ export function IndustrialProjectFoundry({ characterId, snapshotUpdatedAt, bluep
         </article>
       </aside>
     </section>}
+
+    {showHistory && <div className="foundry-history-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHistory(false); }}>
+      <section className="foundry-history-popout" role="dialog" aria-modal="true" aria-label="Project History">
+        <header className="foundry-history-head">
+          <div><small>PROJECT HISTORY</small><strong>Completed Foundry projects</strong><span>{completedProjects.length} completed project{completedProjects.length === 1 ? "" : "s"}</span></div>
+          <div className="foundry-history-actions">
+            <button type="button" disabled={!completedProjects.length} onClick={() => exportProjectHistory("csv")}>Export CSV</button>
+            <button type="button" disabled={!completedProjects.length} onClick={() => exportProjectHistory("json")}>Export JSON</button>
+            <button type="button" className="close" onClick={() => setShowHistory(false)}>Close</button>
+          </div>
+        </header>
+        <div className="foundry-history-table">
+          <div className="foundry-history-row heading"><span>Completed</span><span>Project</span><span>Product</span><span>Qty</span><span>Owner</span><span>Completion</span></div>
+          {completedProjects.map((row: any) => <div className="foundry-history-row" key={row.id}>
+            <span>{new Date(row.completedAt ?? row.updatedAt ?? Date.now()).toLocaleString()}</span>
+            <span><strong>{row.name}</strong><small>{row.blueprintName}</small></span>
+            <span>{row.productName}</span>
+            <span>{n(row.quantity)}</span>
+            <span>{row.completedByCharacterName ?? row.createdByCharacterName ?? "Unknown"}</span>
+            <span><b className={row.completionSource === "already-built" ? "manual" : "built"}>{row.completionSource === "already-built" ? "ALREADY BUILT" : "BUILT"}</b></span>
+          </div>)}
+          {!completedProjects.length && <div className="foundry-history-empty">No completed Foundry projects yet.</div>}
+        </div>
+      </section>
+    </div>}
   </div>;
 }
