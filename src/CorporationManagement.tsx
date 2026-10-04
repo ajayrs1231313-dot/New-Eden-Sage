@@ -228,7 +228,7 @@ export function CorporationManagement() {
       <button className={section === "discord" ? "active" : ""} onClick={() => setSection("discord")}>Discord Setup</button>
     </div>
 
-    {section === "system-news" ? <SystemNews /> : section === "find-home" ? <CorporationFindHome corporation={corporation} /> : section === "ore-buyback" ? <CorporationOreBuyback /> : section === "alliance" ? <AllianceManagementReserved /> : <>
+    {section === "system-news" ? <SystemNews /> : section === "find-home" ? <CorporationFindHome corporation={corporation} /> : section === "ore-buyback" ? <CorporationOreBuyback corporation={corporation} /> : section === "alliance" ? <AllianceManagementReserved /> : <>
       <div className="corp-data-head">
         <div>
           <p className="eyebrow">CORPORATION · COMMAND</p>

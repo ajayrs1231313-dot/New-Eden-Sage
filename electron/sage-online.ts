@@ -430,3 +430,73 @@ export async function listSageWorkspaceAudit(sageSessionToken:string,workspaceId
   const body=await parseResponse<{audit?:SageWorkspaceAuditEntry[]}>(response);
   return Array.isArray(body.audit)?body.audit:[];
 }
+
+export type SageBuybackItem = {
+  typeId:number;
+  itemName:string;
+  quantity:number;
+  resourceKind:string;
+  payoutPercent:number;
+  grossValueIsk:number;
+  payoutIsk:number;
+  weightedAverageRealisedUnitPrice?:number|null;
+};
+export type SageBuybackRequest = {
+  id:string;
+  workspace_id:string;
+  contract_id:number;
+  issuer_character_id:number;
+  issuer_character_name:string;
+  corporation_id:number;
+  contract_title:string;
+  contract_status:string;
+  contract_issued_at?:string|null;
+  contract_expires_at?:string|null;
+  detected_at:string;
+  submitted_at:string;
+  last_synced_at:string;
+  gross_value_isk:number;
+  payout_isk:number;
+  payout_percent:number;
+  corp_margin_isk:number;
+  item_count:number;
+  status:"pending"|"paid"|"rejected"|"cancelled"|"expired";
+  paid_by_character_id?:number|null;
+  paid_by_character_name?:string|null;
+  paid_at?:string|null;
+  rejected_by_character_id?:number|null;
+  rejected_by_character_name?:string|null;
+  rejected_at?:string|null;
+  rejection_note?:string|null;
+  payload:{items?:SageBuybackItem[];valuation_source?:unknown;quote_created_at?:string;contract_price_isk?:number;start_location_id?:number|null;contract_type?:string;contract_snapshot?:unknown};
+  events?:Array<{id:number;event_type:string;actor_account_id?:string|null;actor_character_id?:number|null;actor_character_name?:string|null;detail?:Record<string,unknown>;created_at:string}>;
+};
+
+export async function listSageBuybacks(sageSessionToken:string,workspaceId:string,characterId:number,options:{status?:string;mine?:boolean}={}) {
+  const query=new URLSearchParams({character_id:String(characterId)});
+  if(options.status) query.set("status",options.status);
+  if(options.mine) query.set("mine","true");
+  const response=await fetch(`${SAGE_ONLINE_URL}/v1/workspaces/${encodeURIComponent(workspaceId)}/buybacks?${query.toString()}`,{headers:{Authorization:`Bearer ${sageSessionToken}`,"X-Sage-Character-ID":String(characterId)}});
+  return parseResponse<{requests:SageBuybackRequest[];can_manage:boolean}>(response);
+}
+
+export async function submitSageBuyback(sageSessionToken:string,workspaceId:string,characterId:number,input:Record<string,unknown>) {
+  const response=await fetch(`${SAGE_ONLINE_URL}/v1/workspaces/${encodeURIComponent(workspaceId)}/buybacks`,{method:"POST",headers:{Authorization:`Bearer ${sageSessionToken}`,"Content-Type":"application/json","X-Sage-Character-ID":String(characterId)},body:JSON.stringify(input)});
+  return parseResponse<{request:SageBuybackRequest;idempotent_replay?:boolean;notified_director_accounts?:number}>(response);
+}
+
+export async function setSageBuybackState(sageSessionToken:string,workspaceId:string,characterId:number,requestId:string,status:"paid"|"rejected",note="") {
+  const response=await fetch(`${SAGE_ONLINE_URL}/v1/workspaces/${encodeURIComponent(workspaceId)}/buybacks/${encodeURIComponent(requestId)}/state`,{method:"POST",headers:{Authorization:`Bearer ${sageSessionToken}`,"Content-Type":"application/json","X-Sage-Character-ID":String(characterId)},body:JSON.stringify({status,note})});
+  return parseResponse<{request:SageBuybackRequest}>(response);
+}
+
+export async function getSageBuybackNotifications(sageSessionToken:string,options:{limit?:number;includeAcknowledged?:boolean}={}) {
+  const query=new URLSearchParams({limit:String(Math.max(1,Math.min(100,Math.trunc(options.limit??50)))),include_acknowledged:options.includeAcknowledged?"true":"false"});
+  const response=await fetch(`${SAGE_ONLINE_URL}/v1/buyback-notifications?${query.toString()}`,{headers:{Authorization:`Bearer ${sageSessionToken}`}});
+  return parseResponse<{events:Array<any>;unread:number}>(response);
+}
+
+export async function acknowledgeSageBuybackNotification(sageSessionToken:string,eventId:string) {
+  const response=await fetch(`${SAGE_ONLINE_URL}/v1/buyback-notifications/${encodeURIComponent(eventId)}/ack`,{method:"POST",headers:{Authorization:`Bearer ${sageSessionToken}`}});
+  return parseResponse<{acknowledged:boolean;eventId:string;acknowledgedAt:string}>(response);
+}

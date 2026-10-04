@@ -1,3 +1,4 @@
+import { handleBuybackWorkspaceApi, listBuybackNotifications, acknowledgeBuybackNotification } from "./buybacks";
 import { WorkspaceHub } from "./realtime/workspace-hub";
 import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, recoverLinkedIdentitySession, verifyEveAccessToken } from "./identity";
 import type { EventEnvelope, Principal, SageEnv } from "./types";
@@ -216,6 +217,7 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'wormholes.manage', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_wormholes_director`, workspaceId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'hr.manage', 'eve_title', 'Recruitment Officer')`).bind(`perm_${workspaceId}_hr_manage_recruitment_officer`, workspaceId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'hr.review', 'eve_title', 'Recruitment Officer')`).bind(`perm_${workspaceId}_hr_review_recruitment_officer`, workspaceId),
+    env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'buyback.manage', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_buyback_manage_director`, workspaceId),
 
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value)
       SELECT 'wormholes_bootstrap_backfill_' || ?1 || '_' || authority_value, ?1, 'wormholes.manage', 'account', authority_value
@@ -246,10 +248,11 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
   const canApproveFleetOps = await hasPermission(env, workspaceId, principal.accountId, "fleet.approve", identity.characterId);
   const canManageHr = await hasPermission(env, workspaceId, principal.accountId, "hr.manage", identity.characterId);
   const canReviewHr = await hasPermission(env, workspaceId, principal.accountId, "hr.review", identity.characterId);
+  const canManageBuybacks = await hasPermission(env, workspaceId, principal.accountId, "buyback.manage", identity.characterId);
   const canManageDiscord = canManageFleetOps;
   const membership = await getActiveMembership(env, workspaceId, principal.accountId, identity.characterId);
   const administrator = await corporationAdministratorStatus(env, workspaceId, membership);
-  return json({ workspace_id: workspaceId, workspace_type: "corporation", corporation_id: identity.corporationId, corporation_name: corporationName, character_id: identity.characterId, character_name: identity.characterName, can_publish_routes: canPublishRoutes, can_manage_wormholes: canManageWormholes, can_manage_fleet_ops: canManageFleetOps, can_approve_fleet_ops: canApproveFleetOps, can_manage_hr: canManageHr, can_review_hr: canReviewHr, can_manage_discord: canManageDiscord, can_configure_permissions: administrator.canConfigure, is_corporation_ceo: administrator.isCeo, roles: [...roles], titles: [...titles], member_access: "active" }, isNew ? 201 : 200);
+  return json({ workspace_id: workspaceId, workspace_type: "corporation", corporation_id: identity.corporationId, corporation_name: corporationName, character_id: identity.characterId, character_name: identity.characterName, can_publish_routes: canPublishRoutes, can_manage_wormholes: canManageWormholes, can_manage_fleet_ops: canManageFleetOps, can_approve_fleet_ops: canApproveFleetOps, can_manage_hr: canManageHr, can_review_hr: canReviewHr, can_manage_buybacks: canManageBuybacks, can_manage_discord: canManageDiscord, can_configure_permissions: administrator.canConfigure, is_corporation_ceo: administrator.isCeo, roles: [...roles], titles: [...titles], member_access: "active" }, isNew ? 201 : 200);
 }
 
 
@@ -265,6 +268,7 @@ const CORPORATION_PERMISSION_DEFINITIONS = [
   { key: "fleet.approve", label: "Approve / Deny Operation Applications", description: "Review member role requests when an operation requires leadership approval.", defaultRoles: DEFAULT_OPERATION_AUTHORITY_ROLES },
   { key: "hr.manage", label: "HR - Create / Manage Vetting Requests", description: "Create and revoke one-time applicant vetting requests and issue recruitment codes.", defaultRoles: ["Personnel_Manager"] as const },
   { key: "hr.review", label: "HR - Review Applicant Dossiers", description: "Read submitted applicant snapshots, add recruiter notes and record HR decisions.", defaultRoles: ["Personnel_Manager"] as const },
+  { key: "buyback.manage", label: "Buyback - Review / Pay Requests", description: "Review corporation buyback requests, record payment decisions and export the buyback ledger.", defaultRoles: ["Director"] as const },
 ] as const;
 
 type CorporationAuthorityType = "eve_role" | "eve_title";
@@ -1052,6 +1056,9 @@ async function handleWorkspaceApi(request: Request, env: SageEnv, url: URL): Pro
   const hrResponse = await handleHrWorkspaceApi(request, env, url, principal, workspaceId, tail, (permission, characterId) => hasPermission(env, workspaceId, principal.accountId, permission, characterId));
   if (hrResponse) return hrResponse;
 
+  const buybackResponse = await handleBuybackWorkspaceApi(request, env, url, principal, workspaceId, tail, { hasPermission: (workspaceId, accountId, permission, characterId) => hasPermission(env, workspaceId, accountId, permission, characterId), getActiveMembership: (workspaceId, accountId, characterId) => getActiveMembership(env, workspaceId, accountId, characterId), parseStringArray, newId, json, error });
+  if (buybackResponse) return buybackResponse;
+
   if (tail === "permissions" && request.method === "GET") return json(await corporationPermissionState(env, principal, workspaceId, Number(url.searchParams.get("character_id") ?? 0) || undefined));
   const permissionPolicyMatch = tail.match(/^permissions\/(.+)$/);
   if (permissionPolicyMatch && request.method === "PUT") return updateCorporationPermissionPolicy(request, env, principal, workspaceId, decodeURIComponent(permissionPolicyMatch[1]));
@@ -1317,6 +1324,19 @@ export default {
       if (principal instanceof Response) return principal;
       const hrResponse = await handleHrApplicantApi(request, env, url, principal);
       if (hrResponse) return hrResponse;
+    }
+
+    if (url.pathname === "/v1/buyback-notifications" && request.method === "GET") {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      const events = await listBuybackNotifications(env, principal, url.searchParams.get("include_acknowledged") === "true", Number(url.searchParams.get("limit") ?? 50));
+      return json({ events, unread: events.filter((event:any) => !event.acknowledged).length });
+    }
+    const buybackNotificationAck = url.pathname.match(/^\/v1\/buyback-notifications\/([^/]+)\/ack$/);
+    if (buybackNotificationAck && request.method === "POST") {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      return json(await acknowledgeBuybackNotification(env, principal, decodeURIComponent(buybackNotificationAck[1])));
     }
 
     if (url.pathname === "/v1/workspaces/corporation/ensure" && request.method === "POST") {

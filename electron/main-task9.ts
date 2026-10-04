@@ -20,7 +20,7 @@ import { CURRENT_ESI_SCOPE_SCHEMA_VERSION, EVE_SCOPES } from "./esi-scope-manife
 import { sageMcpLaunch } from "./mcp-launch";
 import { configureSnapshotEncryptionKey } from "./snapshot-crypto";
 import { configurePrivateEsiEncryptionKey, migrateLegacyPrivateEsiCache } from "./private-esi-cache";
-import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, recoverSageIdentitySession, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
+import { acknowledgeSageBuybackNotification, announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageBuybackNotifications, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageBuybacks, listSageOperations, publishSageOperation, recoverSageIdentitySession, sendSageDiscordAnnouncement, setSageBuybackState, submitSageBuyback, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
 import {
   addImportedInformation,
   deletePrivateEsiDatasetRecords,
@@ -59,7 +59,7 @@ import { analyzeActivityReadiness } from "./activity-readiness";
 import { analyzeCurrentShipUse, type CurrentShipUseProfileId } from "./capability-engine";
 import { loadPersistedResult, savePersistedResult } from "./persistent-result-cache";
 import { searchRawMarketOrders } from "./raw-market-search";
-import { searchMarketTypes } from "./market-static-index";
+import { getMarketType, searchMarketTypes } from "./market-static-index";
 import { searchMcpMarketOrders } from "./mcp-market-search";
 import { quoteMarketDepth } from "./market-depth";
 import { adoptInstalledSharedMarketManifest, checkSharedMarketDataAvailability, ensureCurrentSharedPublicContractsData, loadCurrentMarketRevision, loadCurrentSharedMarketManifest, loadSharedPublicContractsDataset, loadSharedRegionalMarketAggregateIndex, SHARED_MARKET_ROOT, startSharedPublicDataListener, type SharedMarketSyncResult } from "./shared-market-data";
@@ -760,6 +760,97 @@ process.on(
       error: error instanceof Error ? error : String(error),
     }),
 );
+
+function buybackResourcePolicy(type:any) {
+  const path = String(type?.marketGroupPathLabel ?? "");
+  const group = String(type?.groupName ?? "");
+  const marketGroup = String(type?.marketGroupName ?? "");
+  const name = String(type?.name ?? "");
+  const isIce = /ice/i.test(path) || /ice/i.test(group) || /ice/i.test(marketGroup);
+  if (type?.categoryName === "Asteroid" && isIce) return { kind:"ice", label:"Ice", payoutPercent:90 };
+  if (group === "Harvestable Cloud" || /Gas Clouds Materials/i.test(path)) return { kind:"gas", label:"Gas", payoutPercent:90 };
+  if (type?.categoryName === "Asteroid" && !/^Compressed |^Batch Compressed /i.test(name)) return { kind:"ore", label:"Ore", payoutPercent:90 };
+  if (/Advanced Components|Advanced Capital Construction Components/i.test(path+" "+group+" "+marketGroup)) return { kind:"t2_component", label:"T2 Component", payoutPercent:80 };
+  if (/Salvaged Materials/i.test(path+" "+group+" "+marketGroup)) return { kind:"t2_salvage", label:"T2 Salvage", payoutPercent:80 };
+  return null;
+}
+
+async function fetchEsiJsonWithToken(url:string, accessToken:string) {
+  const response = await fetch(url,{headers:{Authorization:`Bearer ${accessToken}`,"X-Compatibility-Date":"2026-08-02","X-User-Agent":"NewEdenSage/1.1.32"}});
+  if(!response.ok){
+    const detail=(await response.text()).slice(0,500);
+    const error=new Error(`EVE contract sync failed (${response.status})${detail?`: ${detail}`:""}`) as Error & {status?:number};
+    error.status=response.status;
+    throw error;
+  }
+  return response.json() as Promise<any>;
+}
+
+async function syncBuybackContracts(characterId:string) {
+  const snapshot=getSnapshot(characterId) as any;
+  if(!snapshot) throw new Error("Sync this character in Sage before using corporation buyback.");
+  const corporationId=Number(snapshot?.character?.corporation_id ?? snapshot?.character?.corporation_data?.corporation_id ?? 0);
+  if(!Number.isSafeInteger(corporationId)||corporationId<=0) throw new Error("Sage cannot determine this character's current corporation.");
+  const accessToken=await eveWriteAccessToken(characterId);
+  const contracts=await fetchEsiJsonWithToken(`https://esi.evetech.net/latest/characters/${encodeURIComponent(characterId)}/contracts/?datasource=tranquility`,accessToken);
+  const matching=(Array.isArray(contracts)?contracts:[]).filter((contract:any)=>
+    Number(contract?.issuer_id)===Number(characterId)
+    && Number(contract?.assignee_id)===corporationId
+    && String(contract?.type??"")==="item_exchange"
+    && /buyback/i.test(String(contract?.title??""))
+    && ["outstanding","in_progress"].includes(String(contract?.status??""))
+  );
+  const discovered:any[]=[];
+  for(const contract of matching){
+    const rawItems=await fetchEsiJsonWithToken(`https://esi.evetech.net/latest/characters/${encodeURIComponent(characterId)}/contracts/${Number(contract.contract_id)}/items/?datasource=tranquility`,accessToken);
+    const items:any[]=[];
+    const rejected:any[]=[];
+    for(const item of Array.isArray(rawItems)?rawItems:[]){
+      if(item?.is_included===false) continue;
+      const typeId=Number(item?.type_id??0), quantity=Math.max(0,Number(item?.quantity??0)||0);
+      if(!Number.isSafeInteger(typeId)||typeId<=0||quantity<=0) continue;
+      const type=await getMarketType(typeId);
+      const policy=buybackResourcePolicy(type);
+      const row={typeId,itemName:String(type?.name??`Type ${typeId}`),quantity,groupName:String(type?.groupName??""),marketGroupPath:String(type?.marketGroupPathLabel??"")};
+      if(!policy){rejected.push(row);continue;}
+      items.push({...row,resourceKind:policy.kind,resourceLabel:policy.label,payoutPercent:policy.payoutPercent});
+    }
+    if(!items.length){
+      discovered.push({contractId:Number(contract.contract_id),contract,items:[],rejected,eligible:false,error:"No eligible unprocessed ore, ice, gas or T2 component/salvage items were found in this contract."});
+      continue;
+    }
+    const quote=await quoteMarketDepth({items:items.map(item=>({typeId:item.typeId,quantity:item.quantity})),regionId:10000002,locationId:60003760,side:"buy",fresh:true}) as any;
+    const quotedItems=(Array.isArray(quote?.items)?quote.items:[]);
+    let gross=0,payout=0;
+    const valuedItems=items.map((item,index)=>{
+      const q=quotedItems[index]??{};
+      const grossValue=Number(q?.totalRealisedIsk??0)||0;
+      const itemPayout=grossValue*Number(item.payoutPercent)/100;
+      gross+=grossValue;payout+=itemPayout;
+      return {...item,grossValueIsk:grossValue,payoutIsk:itemPayout,weightedAverageRealisedUnitPrice:q?.weightedAverageRealisedUnitPrice??null,highestBidUsed:q?.highestBidUsed??null,fullMarketDepthSufficient:Boolean(q?.fullMarketDepthSufficient),unfilledQuantity:Number(q?.unfilledQuantity??0)};
+    });
+    discovered.push({
+      contractId:Number(contract.contract_id),
+      contract,
+      items:valuedItems,
+      rejected,
+      eligible:true,
+      grossValueIsk:gross,
+      payoutIsk:payout,
+      payoutPercent:gross>0?payout/gross*100:0,
+      corpMarginIsk:gross-payout,
+      quoteCreatedAt:String(quote?.createdAt??new Date().toISOString()),
+      valuationSource:quote?.source??null,
+      fullMarketDepthSufficient:Boolean(quote?.fullMarketDepthSufficient),
+    });
+  }
+  return {characterId:Number(characterId),corporationId,contracts:discovered,detectedAt:new Date().toISOString()};
+}
+
+async function buybackOnlineContext(characterId:string) {
+  const context=await planetaryCorporationContext(characterId);
+  return { ...context, characterId:Number(characterId) };
+}
 
 let walletReconciliationRunning = false;
 
@@ -2870,6 +2961,55 @@ if (!hasSingleInstanceLock) {
       return type.categoryName === "Asteroid" && !isIce && !type.name.startsWith("Batch Compressed ");
     }).slice(0, limit);
   });
+  ipcMain.handle("corp-buyback:sync-contracts", async (_event, characterId: string) => syncBuybackContracts(String(characterId ?? "")));
+  ipcMain.handle("corp-buyback:list", async (_event, input: { characterId?: string; status?: string; mine?: boolean }) => {
+    const characterId=String(input?.characterId??"");
+    const ctx=await buybackOnlineContext(characterId);
+    return listSageBuybacks(ctx.sessionToken,ctx.workspace.workspace_id,ctx.characterId,{status:String(input?.status??""),mine:Boolean(input?.mine)});
+  });
+  ipcMain.handle("corp-buyback:submit", async (_event, input: { characterId?: string; candidate?: any; detectedAt?: string }) => {
+    const characterId=String(input?.characterId??"");
+    const candidate=input?.candidate??{};
+    if(!candidate?.eligible) throw new Error("This contract has no eligible buyback items.");
+    const ctx=await buybackOnlineContext(characterId);
+    const contract=candidate.contract??{};
+    return submitSageBuyback(ctx.sessionToken,ctx.workspace.workspace_id,ctx.characterId,{
+      contract_id:Number(candidate.contractId),corporation_id:Number(ctx.workspace.corporation_id),issuer_character_id:ctx.characterId,contract_title:String(contract.title??""),contract_status:String(contract.status??"outstanding"),contract_issued_at:contract.date_issued??null,contract_expires_at:contract.date_expired??null,detected_at:String(input?.detectedAt??new Date().toISOString()),gross_value_isk:Number(candidate.grossValueIsk??0),payout_isk:Number(candidate.payoutIsk??0),payout_percent:Number(candidate.payoutPercent??0),items:Array.isArray(candidate.items)?candidate.items:[],valuation_source:candidate.valuationSource??null,quote_created_at:String(candidate.quoteCreatedAt??new Date().toISOString()),contract_price_isk:Number(contract.price??0),start_location_id:Number(contract.start_location_id??0)||null,contract_type:String(contract.type??"item_exchange"),contract_snapshot:contract
+    });
+  });
+  ipcMain.handle("corp-buyback:set-state", async (_event, input: { characterId?: string; requestId?: string; status?: "paid"|"rejected"; note?: string }) => {
+    const characterId=String(input?.characterId??"");
+    const ctx=await buybackOnlineContext(characterId);
+    return setSageBuybackState(ctx.sessionToken,ctx.workspace.workspace_id,ctx.characterId,String(input?.requestId??""),input?.status==="rejected"?"rejected":"paid",String(input?.note??""));
+  });
+  ipcMain.handle("corp-buyback:export", async (_event, input: { format?: "csv"|"xlsx"; rows?: any[]; label?: string }) => {
+    if(!window) return null;
+    const rows=Array.isArray(input?.rows)?input.rows:[];
+    const format=input?.format==="csv"?"csv":"xlsx";
+    const stamp=new Date().toISOString().slice(0,10);
+    const result=await dialog.showSaveDialog(window,{title:"Export corporation buyback history",defaultPath:`corp-buyback-history-${stamp}.${format}`,filters:[format==="csv"?{name:"CSV",extensions:["csv"]}:{name:"Excel Workbook",extensions:["xlsx"]}]});
+    if(result.canceled||!result.filePath)return null;
+    const summaryRows=rows.map((row:any)=>({RequestId:String(row.id??""),ContractId:Number(row.contract_id??0),Member:String(row.issuer_character_name??""),Status:String(row.status??""),ContractStatus:String(row.contract_status??""),IssuedAt:String(row.contract_issued_at??""),DetectedAt:String(row.detected_at??""),SubmittedAt:String(row.submitted_at??""),LastSyncedAt:String(row.last_synced_at??""),PaidAt:String(row.paid_at??""),PaidBy:String(row.paid_by_character_name??""),RejectedAt:String(row.rejected_at??""),RejectedBy:String(row.rejected_by_character_name??""),GrossValueISK:Number(row.gross_value_isk??0),PayoutPercent:Number(row.payout_percent??0),PayoutISK:Number(row.payout_isk??0),CorpMarginISK:Number(row.corp_margin_isk??0),ItemCount:Number(row.item_count??0),Title:String(row.contract_title??"")}));
+    if(format==="csv"){
+      const headers=Object.keys(summaryRows[0]??{RequestId:"",ContractId:"",Member:"",Status:"",SubmittedAt:"",PayoutISK:""});
+      const esc=(value:unknown)=>{const v=String(value??"");return /[",\r\n]/.test(v)?`"${v.replaceAll('"','""')}"`:v;};
+      const text=[headers.join(","),...summaryRows.map((row:any)=>headers.map(key=>esc(row[key])).join(","))].join("\r\n");
+      await fs.writeFile(result.filePath,text,"utf8");
+      return result.filePath;
+    }
+    const workbook=new ExcelJS.Workbook();
+    workbook.creator="New Eden Sage"; workbook.created=new Date();
+    const addSheet=(name:string,data:any[])=>{const sheet=workbook.addWorksheet(name);const headers=Object.keys(data[0]??{});if(headers.length){sheet.columns=headers.map(key=>({header:key,key,width:Math.max(12,Math.min(32,key.length+4))}));for(const row of data)sheet.addRow(row);sheet.views=[{state:"frozen",ySplit:1}];sheet.autoFilter={from:{row:1,column:1},to:{row:Math.max(1,sheet.rowCount),column:Math.max(1,headers.length)}};}return sheet;};
+    addSheet("Buybacks",summaryRows);
+    const itemRows=rows.flatMap((row:any)=>(Array.isArray(row?.payload?.items)?row.payload.items:[]).map((item:any)=>({RequestId:String(row.id??""),ContractId:Number(row.contract_id??0),Member:String(row.issuer_character_name??""),SubmittedAt:String(row.submitted_at??""),Status:String(row.status??""),TypeId:Number(item.typeId??0),Item:String(item.itemName??""),ResourceKind:String(item.resourceKind??""),Quantity:Number(item.quantity??0),GrossValueISK:Number(item.grossValueIsk??0),PayoutPercent:Number(item.payoutPercent??0),PayoutISK:Number(item.payoutIsk??0),WeightedAvgUnitPrice:Number(item.weightedAverageRealisedUnitPrice??0)})));
+    addSheet("Line Items",itemRows);
+    const eventRows=rows.flatMap((row:any)=>(Array.isArray(row?.events)?row.events:[]).map((event:any)=>({RequestId:String(row.id??""),ContractId:Number(row.contract_id??0),EventId:Number(event.id??0),EventType:String(event.event_type??""),ActorCharacterId:Number(event.actor_character_id??0)||"",Actor:String(event.actor_character_name??""),Timestamp:String(event.created_at??""),Detail:JSON.stringify(event.detail??{})})));
+    addSheet("Audit Trail",eventRows);
+    const paid=rows.filter((row:any)=>row.status==="paid");
+    addSheet("Summary",[{ExportedAt:new Date().toISOString(),Filter:String(input?.label??"Current view"),Requests:rows.length,PaidRequests:paid.length,PendingRequests:rows.filter((row:any)=>row.status==="pending").length,GrossValueISK:rows.reduce((s:number,row:any)=>s+Number(row.gross_value_isk??0),0),PayoutISK:rows.reduce((s:number,row:any)=>s+Number(row.payout_isk??0),0),CorpMarginISK:rows.reduce((s:number,row:any)=>s+Number(row.corp_margin_isk??0),0)}]);
+    await workbook.xlsx.writeFile(result.filePath);
+    return result.filePath;
+  });
   ipcMain.handle("market:quote-depth", async (_event, input) => quoteMarketDepth(input ?? {}));
   ipcMain.handle("market:raw-search", async (_event, input) => {
     const searchInput = input ?? { query: "" };
@@ -2899,12 +3039,17 @@ if (!hasSingleInstanceLock) {
     if (!normalized) throw new Error("Notification request ID is required.");
     return deleteSageNotificationRule(await sageOnlineSessionTokenOnly(), normalized);
   });
-  ipcMain.handle("notifications:inbox", async (_event, input?: { limit?: number; includeAcknowledged?: boolean }) =>
-    getSageNotificationInbox(await sageOnlineSessionTokenOnly(), input ?? {}));
+  ipcMain.handle("notifications:inbox", async (_event, input?: { limit?: number; includeAcknowledged?: boolean }) => {
+    const session=await sageOnlineSessionTokenOnly();
+    const [base,buyback]=await Promise.all([getSageNotificationInbox(session,input??{}),getSageBuybackNotifications(session,input??{}).catch(()=>({events:[],unread:0}))]);
+    const events=[...(base.events??[]),...(buyback.events??[])].sort((a:any,b:any)=>new Date(String(b.triggeredAt??0)).getTime()-new Date(String(a.triggeredAt??0)).getTime()).slice(0,Math.max(1,Math.min(100,Number(input?.limit??50))));
+    return {events,unread:Number(base.unread??0)+Number(buyback.unread??0)};
+  });
   ipcMain.handle("notifications:ack", async (_event, eventId: string) => {
     const normalized = String(eventId ?? "").trim();
     if (!normalized) throw new Error("Notification event ID is required.");
-    const result = await acknowledgeSageNotification(await sageOnlineSessionTokenOnly(), normalized);
+    const session=await sageOnlineSessionTokenOnly();
+    const result = normalized.startsWith("buyback:") ? await acknowledgeSageBuybackNotification(session, normalized) : await acknowledgeSageNotification(session, normalized);
     void publishCustomNotificationInbox();
     return result;
   });

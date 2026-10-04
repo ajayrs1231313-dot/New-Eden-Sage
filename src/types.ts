@@ -1666,6 +1666,11 @@ declare global {
         minSpreadPercent?: number | null; maxSpreadPercent?: number | null; minRegionalPremiumPercent?: number | null; minDemandSupplyRatio?: number | null; maxItemVolumeM3?: number | null; sort?: RegionalMarketSort; offset?: number; limit?: number;
       }): Promise<RegionalMarketFilterResult>;
       searchOreMarketTypes(query:string, limit?:number, kind?:"ore"|"ice"|"gas"|"salvage"): Promise<Array<{ typeId:number; name:string; categoryId:number; categoryName:string }>>;
+      syncBuybackContracts(characterId: string): Promise<any>;
+      listBuybackRequests(input: { characterId:string; status?:string; mine?:boolean }): Promise<{requests:any[];can_manage:boolean}>;
+      submitBuybackRequest(input: { characterId:string; candidate:any; detectedAt?:string }): Promise<any>;
+      setBuybackRequestState(input: { characterId:string; requestId:string; status:"paid"|"rejected"; note?:string }): Promise<any>;
+      exportBuybackHistory(input: { format:"csv"|"xlsx"; rows:any[]; label?:string }): Promise<string|null>;
       quoteMarketDepth(input: {
         items?: Array<{ typeId?: number; name?: string; quantity: number }>;
         typeId?: number;
