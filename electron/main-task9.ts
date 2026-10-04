@@ -20,7 +20,7 @@ import { CURRENT_ESI_SCOPE_SCHEMA_VERSION, EVE_SCOPES } from "./esi-scope-manife
 import { sageMcpLaunch } from "./mcp-launch";
 import { configureSnapshotEncryptionKey } from "./snapshot-crypto";
 import { configurePrivateEsiEncryptionKey, migrateLegacyPrivateEsiCache } from "./private-esi-cache";
-import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
+import { announceSageOperationToDiscord, applySageOperationRole, cancelSageOperation, setSageOperationApplicationNotifications, takeSageOperationOwnership, claimSageIdentity, configureSageDiscord, decideSageOperationApplication, ensureSageCorporationWorkspace, getSageDiscordLinkUrl, getSageDiscordServerStructure, getSageDiscordStatus, getSageOperation, linkSageCharacter, listSageOperations, publishSageOperation, recoverSageIdentitySession, sendSageDiscordAnnouncement, testSageDiscordDm, unlinkSageDiscord, updateSageDiscordNotificationTargets, updateSageOperation, getSageCorporationPermissions, updateSageCorporationPermission } from "./sage-online";
 import {
   addImportedInformation,
   deletePrivateEsiDatasetRecords,
@@ -1074,41 +1074,40 @@ async function enforceFullEsiScopeCatalogue() {
 }
 async function planetaryCorporationContext(characterId: string) {
   const config = await readConfig();
-  if (!config.encryptedSageSessionToken) {
-    throw new Error("Sage Online is not connected. Reconnect your primary Sage character first.");
-  }
-
   const requested = String(characterId ?? "").trim();
-  if (!requested) {
-    throw new Error("Select a connected EVE character for corporation verification.");
-  }
-
+  if (!requested) throw new Error("Select a connected EVE character for corporation verification.");
   const refreshEncrypted = config.encryptedRefreshTokens[requested];
-  if (!refreshEncrypted) {
-    throw new Error("No EVE refresh token is available for the selected character. Reconnect that character before using corporation tools.");
-  }
-
+  if (!refreshEncrypted) throw new Error("No EVE refresh token is available for the selected character. Reconnect that character before using corporation tools.");
   const refreshed = await refreshEveToken(config.eveClientId, decrypt(refreshEncrypted));
-  const sessionToken = decrypt(config.encryptedSageSessionToken);
-  const workspace = await ensureSageCorporationWorkspace(sessionToken, refreshed.access_token);
-  const verifiedCharacterId = String(workspace.character_id ?? "");
-
-  if (verifiedCharacterId !== requested) {
-    if (refreshed.refresh_token && verifiedCharacterId) {
-      config.encryptedRefreshTokens[verifiedCharacterId] = encrypt(refreshed.refresh_token);
+  if (refreshed.refresh_token) config.encryptedRefreshTokens[requested] = encrypt(refreshed.refresh_token);
+  let sessionToken = config.encryptedSageSessionToken ? decrypt(config.encryptedSageSessionToken) : "";
+  let workspace: Awaited<ReturnType<typeof ensureSageCorporationWorkspace>> | null = null;
+  if (sessionToken) {
+    try { workspace = await ensureSageCorporationWorkspace(sessionToken, refreshed.access_token); }
+    catch (error) {
+      const status = Number((error as any)?.status ?? 0);
+      const code = String((error as any)?.code ?? "");
+      if (status !== 401 && code !== "invalid_session" && code !== "missing_session") throw error;
+      sessionToken = "";
     }
+  }
+  if (!sessionToken || !workspace) {
+    const recovered = await recoverSageIdentitySession(refreshed.access_token);
+    if (config.sageAccountId && recovered.account_id !== config.sageAccountId) throw new Error("The selected character is linked to a different Sage Online account than this desktop profile.");
+    sessionToken = recovered.session_token;
+    config.encryptedSageSessionToken = encrypt(sessionToken);
+    config.sageAccountId = recovered.account_id;
+    workspace = await ensureSageCorporationWorkspace(sessionToken, refreshed.access_token);
+    await logEvent("info", "sage-online.session-recovered-from-linked-character", { characterId: requested, accountId: recovered.account_id, primary: recovered.primary });
+  }
+  const verifiedCharacterId = String(workspace.character_id ?? "");
+  if (verifiedCharacterId !== requested) {
+    if (refreshed.refresh_token && verifiedCharacterId) config.encryptedRefreshTokens[verifiedCharacterId] = encrypt(refreshed.refresh_token);
     delete config.encryptedRefreshTokens[requested];
     await writeConfig(config);
-    throw new Error(
-      `Stored EVE credentials for character ${requested} resolved to ${workspace.character_name || verifiedCharacterId}. Reconnect the selected character before using corporation tools.`,
-    );
+    throw new Error(`Stored EVE credentials for character ${requested} resolved to ${workspace.character_name || verifiedCharacterId}. Reconnect the selected character before using corporation tools.`);
   }
-
-  if (refreshed.refresh_token) {
-    config.encryptedRefreshTokens[requested] = encrypt(refreshed.refresh_token);
-    await writeConfig(config);
-  }
-
+  await writeConfig(config);
   return { sessionToken, workspace, eveAccessToken: refreshed.access_token };
 }
 

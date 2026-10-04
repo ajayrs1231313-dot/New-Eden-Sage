@@ -259,6 +259,54 @@ export async function claimPrimaryIdentity(request: Request, env: SageEnv): Prom
   }, existingPrimary ? 200 : 201);
 }
 
+export async function recoverLinkedIdentitySession(request: Request, env: SageEnv): Promise<Response> {
+  const packetReceipt = await requireReadablePacket(request, "identity.recover_linked_session");
+  if (packetReceipt instanceof Response) return packetReceipt;
+
+  const authorization = request.headers.get("Authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match) return error(401, "missing_eve_token", "A verified EVE access token is required.");
+
+  let identity: EveIdentity;
+  try {
+    identity = await verifyEveAccessToken(match[1], env);
+  } catch (cause) {
+    return error(401, "invalid_eve_identity", cause instanceof Error ? cause.message : "EVE identity verification failed.");
+  }
+
+  const linked = await env.DB.prepare(
+    `SELECT ei.account_id, ei.is_primary, a.primary_eve_character_id
+       FROM eve_identities ei
+       INNER JOIN accounts a ON a.id = ei.account_id
+      WHERE ei.character_id = ?1
+        AND a.status = 'active'
+      LIMIT 1`,
+  ).bind(identity.characterId).first<{ account_id: string; is_primary: number; primary_eve_character_id: number | null }>();
+
+  if (!linked) {
+    return error(403, "identity_not_linked", "This EVE character is not linked to an active Sage account.");
+  }
+
+  // Refresh identity metadata while preserving the account relationship and primary flag.
+  try {
+    await upsertEveIdentity(env, linked.account_id, identity, linked.is_primary === 1);
+  } catch (cause) {
+    return error(409, "identity_conflict", cause instanceof Error ? cause.message : "Identity conflict.");
+  }
+
+  const session = await issueSession(env, linked.account_id);
+  return json({
+    account_id: linked.account_id,
+    character_id: identity.characterId,
+    character_name: identity.characterName,
+    primary_character_id: linked.primary_eve_character_id,
+    primary: linked.is_primary === 1,
+    session_token: session.token,
+    session_expires_at: session.expiresAt,
+    transport: { schema: PACKET_SCHEMA, reply_to: packetReceipt.packetId, message_type: "identity.recover_linked_session.result" },
+  });
+}
+
 export async function linkCharacterIdentity(request: Request, env: SageEnv): Promise<Response> {
   const packetReceipt = await requireReadablePacket(request, "identity.link_character");
   if (packetReceipt instanceof Response) return packetReceipt;

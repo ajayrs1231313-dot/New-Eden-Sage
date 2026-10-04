@@ -115,6 +115,30 @@ export async function claimSageIdentity(eveAccessToken: string): Promise<ClaimRe
   return parseResponse<ClaimResponse>(response);
 }
 
+export async function recoverSageIdentitySession(eveAccessToken: string): Promise<{
+  account_id: string;
+  character_id: number;
+  character_name: string;
+  primary_character_id: number | null;
+  primary: boolean;
+  session_token: string;
+  session_expires_at: string;
+}> {
+  const body = packet("identity.recover_linked_session", {
+    action: "recover_sage_session_from_linked_character",
+    identity_anchor: "verified_linked_eve_character_id",
+  });
+  const response = await fetch(`${SAGE_ONLINE_URL}/v1/identity/recover-session`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${eveAccessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  return parseResponse(response);
+}
+
 export async function linkSageCharacter(sageSessionToken: string, eveAccessToken: string): Promise<LinkResponse> {
   const body = packet("identity.link_character", {
     action: "link_verified_eve_character",

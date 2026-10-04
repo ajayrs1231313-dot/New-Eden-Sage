@@ -1,5 +1,5 @@
 import { WorkspaceHub } from "./realtime/workspace-hub";
-import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, verifyEveAccessToken } from "./identity";
+import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, recoverLinkedIdentitySession, verifyEveAccessToken } from "./identity";
 import type { EventEnvelope, Principal, SageEnv } from "./types";
 import { deleteDiscordChannelMessage, discordBotRequest, discordGuildInviteUrl, discordInstallationState, findDiscordOperationAnnouncement, readDiscordGuildStructure, sendDiscordChannelMessage, sendDiscordDmToCharacter } from "./discord/service";
 import { cleanupDiscordSecurity, consumeDiscordActionTicket, issueDiscordActionTicket, registerDiscordDevice } from "./discord/security";
@@ -1285,6 +1285,10 @@ export default {
     }
     if (url.pathname === "/v1/identity/claim" && request.method === "POST") {
       return claimPrimaryIdentity(request, env);
+    }
+
+    if (url.pathname === "/v1/identity/recover-session" && request.method === "POST") {
+      return recoverLinkedIdentitySession(request, env);
     }
 
     if (url.pathname === "/v1/identity/link" && request.method === "POST") {
