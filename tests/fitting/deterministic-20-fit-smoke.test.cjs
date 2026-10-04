@@ -177,5 +177,5 @@ function rawAttrs(typeDogma, typeId) {
     rows.push({n:index+1,ship:p.ship,class:p.size,role:p.role,profile:profileName,items:items.length,cpu:`${reference.cpu[0].toFixed(2)}/${reference.cpu[1].toFixed(2)}`,pg:`${reference.pg[0].toFixed(2)}/${reference.pg[1].toFixed(2)}`,cal:`${reference.calibration[0].toFixed(0)}/${reference.calibration[1].toFixed(0)}`,cap:`${reference.capacitor[0].toFixed(1)} GJ / ${reference.capacitor[1].toFixed(1)}s`,ehp:reference.ehp.toFixed(1),weaponDps:reference.dps[0].toFixed(2),droneDps:reference.dps[1].toFixed(2),speed:reference.speed.toFixed(1),issues:reference.issues.join(',')||'-'});
   }
   console.table(rows);
-  console.log(`deterministic 20-fit numerical smoke: PASS (${selected.length} stratified-random ships, seed 0x${SEED.toString(16)}, ${RUNS} identical runs each, raw CCP SDE hull cross-checks)`);
+  console.log(`deterministic 20-fit numerical smoke: PASS (${selected.length} stratified-random ships, seed 0x${SEED.toString(16)}, ${RUNS} identical runs each, raw CCP SDE hull cross-checks when available)`);
 })().catch(error=>{console.error(error);process.exitCode=1;});
