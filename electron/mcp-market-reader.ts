@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { createGunzip } from "node:zlib";
@@ -88,7 +88,16 @@ async function streamRegionalRows(
   manifest: SharedMarketManifest,
   visit: (row: RegionalMarketAggregateRow) => void,
 ) {
-  const input = createReadStream(sharedRegionalArtifactPath(manifest));
+  const artifactPath = sharedRegionalArtifactPath(manifest);
+  try {
+    await fs.access(artifactPath);
+  } catch {
+    throw new Error(`The installed shared regional market artifact is missing: ${artifactPath}`);
+  }
+  const input = createReadStream(artifactPath);
+  // Attach an error handler before piping so a filesystem race cannot become
+  // an unhandled ReadStream error that terminates the MCP process.
+  input.on("error", () => {});
   const gunzip = createGunzip();
   const rl = createInterface({ input: input.pipe(gunzip), crlfDelay: Infinity });
   let header: RegionalArtifactHeader | null = null;

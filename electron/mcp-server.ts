@@ -8,6 +8,7 @@ import { gunzip } from "node:zlib";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadMarketIndexHeaders, loadMarketRegion, loadLatestMarketDatasetByMode } from "./market-storage";
+import { getMarketItemHistory } from "./market-item-history";
 import { loadCurrentRawMarketManifest, loadRawMarketRegion } from "./raw-market-storage";
 import { loadMcpMarketRegion, loadMcpMarketRegionSummaries } from "./mcp-market-reader";
 import { filterMcpRawMarketOrders, type McpRawMarketOrderFilterOptions } from "./mcp-raw-market-filter";
@@ -26,7 +27,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 const READ_ONLY_LIVE = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
-const FIT_IMPORT_INSTRUCTIONS = `When creating or importing a fit into New Eden Sage, call save_sage_fit. The fit payload is intentionally flexible: you may send a normal LLM JSON object, Sage JSON, ESI fitting JSON, a JSON array or wrapped collection of fits, EFT/PYFA text, PYFA XML, EVE DNA, fenced code blocks, or clearly labelled plain text sections. Prefer exact current EVE item names and realistic quantities. Type IDs are optional; omit uncertain IDs rather than inventing them. For JSON, preferred fields are: name, ship or hull, modules.high/mid/low/rig/subsystem, drones, fighters, cargo, implants, boosters, and instructions. Each item may be a string or an object such as { name, typeId?, quantity?, charge?, chargeTypeId?, chargeQuantity?, state? }. Multiple fits may be supplied at once. Sage normalizes all supported formats into its canonical fitting shape before saving.`;
+const FIT_IMPORT_INSTRUCTIONS = `When creating or importing a fit into New Eden Sage, call save_sage_fit. The fit payload is intentionally flexible: you may send a normal LLM JSON object, Sage JSON, ESI fitting JSON, a JSON array or wrapped collection of fits, EFT/PYFA text, PYFA XML, EVE DNA, fenced code blocks, or clearly labelled plain text sections. Prefer exact current EVE item names and realistic quantities. Type IDs are optional; omit uncertain IDs rather than inventing them. For JSON, use canonical Sage fields at the top level: name, hull, low, mid, high, rig, subsystem, drones, fighters, cargo, implants, boosters, and instructions. Do not send a modules array because it may import as an empty fit. Each item may be a string or an object such as { name, typeId?, quantity?, charge?, chargeTypeId?, chargeQuantity?, state? }. Multiple fits may be supplied at once. Sage normalizes all supported formats into its canonical fitting shape before saving.`;
 const database = new DatabaseSync(path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "new-eden-sage", "new-eden-sage.sqlite"), { readOnly: true });
 const rendererDataPath = path.join(process.env.APPDATA ?? process.env.LOCALAPPDATA ?? process.cwd(), "new-eden-sage", "mcp-renderer-data.json");
 const execFileAsync = promisify(execFile);
@@ -632,6 +633,12 @@ export async function startMcpServer() {
       limit: z.number().int().min(1).max(5000).default(1000),
     }, annotations: READ_ONLY,
   }, async ({ regionId, typeId, systemId, security, minSecurity, maxSecurity, offset, limit }) => result(await readRawMarketRegion(regionId, { typeId, systemId, security, minSecurity, maxSecurity, offset, limit })));
+
+  server.registerTool("get_market_history", {
+    title: "Read retained market history",
+    description: "Read Sage retained historical regional market snapshots for one EVE type. Returns best buy/sell, order counts and volumes per region for each retained snapshot; this is order-book history, not proof of completed sales.",
+    inputSchema: { typeId: z.number().int().positive(), snapshotLimit: z.number().int().min(1).max(500).default(120) }, annotations: READ_ONLY,
+  }, async ({ typeId, snapshotLimit }) => result(await getMarketItemHistory(typeId, snapshotLimit)));
 
   server.registerTool("get_market_dataset_status", {
     title: "Read market dataset status", description: "Read the active shared market generation, prepared trade/shortage/contract coverage, public source catalog, and legacy fallback metadata.", inputSchema: {}, annotations: READ_ONLY,

@@ -20,7 +20,7 @@ export type UsagePresence = {
 };
 
 const DEFAULT_METRICS_BASE_URL =
-  "https://newedensage--new-eden-sage-market-benchmark-metrics-web.modal.run";
+  "https://new-eden-sage-metrics-uzohm5sppa-nw.a.run.app";
 
 function metricsBaseUrl() {
   return String(process.env.NEW_EDEN_SAGE_METRICS_BASE_URL || DEFAULT_METRICS_BASE_URL).replace(/\/+$/, "");

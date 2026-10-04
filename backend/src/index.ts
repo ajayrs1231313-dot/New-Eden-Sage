@@ -210,6 +210,8 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
     env.DB.prepare(`INSERT INTO workspace_members (workspace_id, account_id, eve_character_id, membership_state, last_verified_at) VALUES (?1, ?2, ?3, 'active', datetime('now')) ON CONFLICT(workspace_id, account_id, eve_character_id) DO UPDATE SET membership_state = 'active', last_verified_at = datetime('now')`).bind(workspaceId, principal.accountId, identity.characterId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'route.publish', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_route_director`, workspaceId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'wormholes.manage', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_wormholes_director`, workspaceId),
+    env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'hr.manage', 'eve_title', 'Recruitment Officer')`).bind(`perm_${workspaceId}_hr_manage_recruitment_officer`, workspaceId),
+    env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'hr.review', 'eve_title', 'Recruitment Officer')`).bind(`perm_${workspaceId}_hr_review_recruitment_officer`, workspaceId),
 
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value)
       SELECT 'wormholes_bootstrap_backfill_' || ?1 || '_' || authority_value, ?1, 'wormholes.manage', 'account', authority_value

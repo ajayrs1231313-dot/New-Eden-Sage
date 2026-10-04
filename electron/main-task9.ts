@@ -122,7 +122,8 @@ const startupSyncGuardUntil = Date.now() + STARTUP_SYNC_GUARD_MS;
 
 let stopSharedPublicListener: (() => void) | undefined;
 let publicReconcileTimer: NodeJS.Timeout | undefined;
-const PUBLIC_RECONCILE_INTERVAL_MS = 60 * 60 * 1000;
+let publicInstallActive = false;
+const PUBLIC_RECONCILE_INTERVAL_MS = 5 * 60 * 1000;
 let publicAvailability = {
   updateAvailable: false,
   availableGeneration: null as string | null,
@@ -194,6 +195,25 @@ function markPublicDataAvailable(generation: string) {
   void loadPublicDataStatus().then(publishPublicDataStatus).catch(() => undefined);
 }
 
+async function reconcilePublicData(source: string) {
+  if (publicInstallActive) return;
+  publicInstallActive = true;
+  try {
+    const availability = await checkSharedMarketDataAvailability();
+    publicAvailability = {
+      updateAvailable: availability.updateAvailable,
+      availableGeneration: availability.availableGeneration,
+      lastCheckedAt: availability.checkedAt,
+    };
+    publishPublicDataStatus(await loadPublicDataStatus());
+    if (availability.updateAvailable) await installSharedPublicData();
+  } catch (error) {
+    void logEvent("warn", "shared_public.reconcile_failed", { source, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    publicInstallActive = false;
+  }
+}
+
 function publicInstallPercent(message: string, completed?: number, total?: number) {
   if (/ready/i.test(message)) return 100;
   if (/install/i.test(message)) return 96;
@@ -243,7 +263,7 @@ async function publishCustomNotificationInbox() {
 function startSharedPublicDataFlow() {
   stopSharedPublicListener?.();
   stopSharedPublicListener = startSharedPublicDataListener(
-    (notice) => markPublicDataAvailable(notice.generation),
+    (notice) => { markPublicDataAvailable(notice.generation); void reconcilePublicData("event"); },
     (notice) => {
       const triggered = Number(notice.notifications?.triggered ?? notice.notifications?.delivered ?? 0);
       if (triggered > 0) void publishCustomNotificationInbox();
@@ -251,11 +271,11 @@ function startSharedPublicDataFlow() {
   );
   if (publicReconcileTimer) clearInterval(publicReconcileTimer);
   publicReconcileTimer = setInterval(() => {
-    void refreshPublicDataAvailability().catch((error) => void logEvent("warn", "shared_public.hourly_availability_check_failed", { error: error instanceof Error ? error.message : String(error) }));
+    void reconcilePublicData("timer");
   }, PUBLIC_RECONCILE_INTERVAL_MS);
   publicReconcileTimer.unref?.();
   powerMonitor.on("resume", () => {
-    void refreshPublicDataAvailability().catch((error) => void logEvent("warn", "shared_public.resume_availability_check_failed", { error: error instanceof Error ? error.message : String(error) }));
+    void reconcilePublicData("resume");
   });
 }
 
@@ -1013,6 +1033,45 @@ async function ensureEsiScopeSchemaMigration() {
     await fs.unlink(ESI_SCOPE_MIGRATION_LOCK_PATH).catch(() => undefined);
   }
 }
+async function enforceFullEsiScopeCatalogue() {
+  const config = await readConfig();
+  const snapshotCharacterIds = listSnapshots().map((snapshot: any) => String(snapshot?.characterId ?? "")).filter(Boolean);
+  const knownCharacterIds = [...new Set([
+    ...snapshotCharacterIds,
+    ...Object.keys(config.encryptedRefreshTokens),
+    ...Object.keys(config.eveAuthorizations),
+  ])];
+  const invalidated: Array<{ characterId: string; missingScopes: number; missingGrantRecord: boolean; staleSchema: boolean }> = [];
+
+  for (const characterId of knownCharacterIds) {
+    const authorization = config.eveAuthorizations[characterId];
+    const granted = new Set(Array.isArray(authorization?.grantedScopes) ? authorization.grantedScopes : []);
+    const missingScopes = EVE_SCOPES.filter((scope) => !granted.has(scope));
+    const missingGrantRecord = !authorization;
+    const staleSchema = Number(authorization?.scopeSchemaVersion ?? 0) !== CURRENT_ESI_SCOPE_SCHEMA_VERSION;
+    if (!missingGrantRecord && !staleSchema && missingScopes.length === 0) continue;
+
+    mergeReauthorizationIds(config, [characterId]);
+    delete config.encryptedRefreshTokens[characterId];
+    if (authorization) {
+      config.eveAuthorizations[characterId] = {
+        ...authorization,
+        lastRefreshStatus: "error",
+        lastRefreshError: "Reauthorization required: Sage requires the complete current ESI permission catalogue (" + EVE_SCOPES.length + " scopes).",
+      };
+    }
+    invalidated.push({ characterId, missingScopes: missingScopes.length, missingGrantRecord, staleSchema });
+  }
+
+  if (!invalidated.length) return;
+  await writeConfig(config);
+  await logEvent("warn", "esi.full_scope_catalogue.characters_invalidated", {
+    requiredScopes: EVE_SCOPES.length,
+    affectedCharacters: invalidated.length,
+    characters: invalidated,
+    localSnapshotsPreserved: true,
+  });
+}
 async function planetaryCorporationContext(characterId: string) {
   const config = await readConfig();
   if (!config.encryptedSageSessionToken) {
@@ -1387,6 +1446,7 @@ if (!hasSingleInstanceLock) {
     await ensurePrimaryIdentityMigration();
     await ensureOneTimeCharacterResetMigration();
     await ensureEsiScopeSchemaMigration();
+    await enforceFullEsiScopeCatalogue();
   protocol.handle("sage-asset", (request) => typeImageProtocolResponse(request.url));
   ipcMain.handle("assets:cache-type-icons", (_event, input: { typeIds?: number[]; size?: number }) => cacheTypeIconsLocal(Array.isArray(input?.typeIds) ? input.typeIds : [], Number(input?.size ?? 64)));
   registerWormholeCommandIpc();

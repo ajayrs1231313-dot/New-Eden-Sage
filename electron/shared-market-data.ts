@@ -18,7 +18,7 @@ const gunzipAsync = promisify(gunzip);
 const SHARED_MANIFEST_SCHEMA = 1;
 const REQUIRED_ARTIFACTS = ["market-global", "market-regional"] as const;
 const KNOWN_OPTIONAL_ARTIFACTS = ["market-trades", "market-shortages", "market-hub-depth", "public-shared", "public-contracts"] as const;
-const DEFAULT_SHARED_MARKET_BASE_URL = "https://newedensage--new-eden-sage-market-benchmark-shared-market-web.modal.run";
+const DEFAULT_SHARED_MARKET_BASE_URL = "https://new-eden-sage-live-uzohm5sppa-nw.a.run.app";
 const MANIFEST_FILE = "manifest.json";
 
 export const SHARED_MARKET_ROOT = path.join(MARKET_DATA_ROOT, "Shared Market");

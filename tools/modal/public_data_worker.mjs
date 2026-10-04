@@ -8,7 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { evaluateNotificationRules } from './notification_engine.mjs';
 
 const ESI = 'https://esi.evetech.net';
-const PUBLISH_ROOT = '/published';
+const PUBLISH_ROOT = process.env.NEW_EDEN_SAGE_PUBLISH_ROOT || '/published';
 const CURRENT_ROOT = path.join(PUBLISH_ROOT, 'source-current');
 const STATE_ROOT = path.join(PUBLISH_ROOT, 'source-state');
 const RAW_ROOT = process.env.NEW_EDEN_SAGE_RAW_MARKET_ROOT || path.join(CURRENT_ROOT, 'Raw Orders');
@@ -21,6 +21,7 @@ const CONTRACT_REGION_ROOT = path.join(CONTRACT_ROOT, 'regions');
 const CONTRACT_ITEM_ROOT = path.join(CONTRACT_ROOT, 'items');
 const CONTRACT_NAME_CACHE = path.join(CONTRACT_ROOT, 'name-cache.json');
 const CONTRACT_SNAPSHOT_FILE = path.join(CONTRACT_ROOT, 'current.json.gz');
+const CONTRACT_CANDIDATE_FILE = path.join(CONTRACT_ROOT, 'candidate.json.gz');
 const CONTRACT_SDE_ARCHIVE = process.env.NEW_EDEN_SAGE_SDE_ARCHIVE || '/app/New Eden Sage Data/Static Data/eve-static-data-jsonl.zip';
 const RETENTION_DAYS = Math.max(1, Number(process.env.NEW_EDEN_SAGE_PUBLIC_HISTORY_RETENTION_DAYS || 120));
 const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -837,7 +838,19 @@ async function refreshPublicContracts(regions, options = {}) {
     schemaVersion: 1, dataset: 'public-contracts', snapshotId: `${safeTimestamp(createdAt)}-contracts`, createdAt, digest, sourceDigest, contractSourceDigest, marketPriceDigest,
     regionCount: payloadRegions.length, contractCount: payloadRegions.reduce((sum, region) => sum + region.publicContracts.length, 0), pendingDetailCount, regions: payloadRegions,
   };
+  if (pendingDetailCount > 0) {
+    await gzipJsonAtomic(CONTRACT_CANDIDATE_FILE, snapshot);
+    return {
+      changed: false,
+      snapshot: previous,
+      pendingDetailCount,
+      enrichmentChanged,
+      candidateSnapshot: snapshot,
+      durationMs: Math.round(performance.now() - started),
+    };
+  }
   await gzipJsonAtomic(CONTRACT_SNAPSHOT_FILE, snapshot);
+  await fs.rm(CONTRACT_CANDIDATE_FILE, { force: true }).catch(() => undefined);
   if (writeHistoryEnabled) await writeContractHistory(previous, snapshot);
   return { changed: true, snapshot, pendingDetailCount, enrichmentChanged, durationMs: Math.round(performance.now() - started) };
 }

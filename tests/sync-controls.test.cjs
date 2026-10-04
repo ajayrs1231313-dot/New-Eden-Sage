@@ -58,7 +58,7 @@ assert.doesNotMatch(mainSource, /PRIVATE_REFRESH_AFTER_PUBLIC_MS|schedulePrivate
 assert.match(mainSource, /startSharedPublicDataListener/);
 assert.match(mainSource, /checkSharedMarketDataAvailability/);
 assert.match(mainSource, /public-data:check-availability/);
-assert.match(mainSource, /PUBLIC_RECONCILE_INTERVAL_MS = 60 \* 60 \* 1000/);
+assert.match(mainSource, /PUBLIC_RECONCILE_INTERVAL_MS = 5 \* 60 \* 1000/);
 assert.match(mainSource, /powerMonitor\.on\("resume"/);
 
 const appSource = fs.readFileSync(path.join(repoRoot, "src", "App.tsx"), "utf8");

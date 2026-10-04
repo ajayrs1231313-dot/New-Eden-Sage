@@ -4,7 +4,7 @@ import path from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
 import { app } from "electron";
 import { decrypt, encrypt, getOrCreatePrivateDataEncryptionKey, readConfig, writeConfig } from "./config";
-import { refreshEveToken } from "./eve";
+import { missingCurrentEsiScopes, refreshEveToken } from "./eve";
 import { logEvent } from "./logger";
 
 export type MasterUpdateProgress = {
@@ -142,6 +142,21 @@ async function refreshConnectedCharacters(
       const stored = config.encryptedRefreshTokens[characterId];
       if (!stored) throw new Error("Character refresh token is missing.");
       const tokens = await refreshEveToken(config.eveClientId, decrypt(stored));
+      const missingScopes = missingCurrentEsiScopes(tokens.access_token);
+      if (missingScopes.length) {
+        delete config.encryptedRefreshTokens[characterId];
+        if (!config.reauthorizationRequiredCharacterIds.includes(characterId)) config.reauthorizationRequiredCharacterIds.push(characterId);
+        const authorization = config.eveAuthorizations[characterId];
+        if (authorization) {
+          config.eveAuthorizations[characterId] = {
+            ...authorization,
+            lastRefreshStatus: "error",
+            lastRefreshError: "Reauthorization required: refreshed EVE token is missing " + missingScopes.length + " current ESI permission(s).",
+          };
+        }
+        configChanged = true;
+        throw new Error("Character must rejoin Sage: EVE authorization is missing " + missingScopes.length + " required ESI permission(s).");
+      }
       if (tokens.refresh_token) {
         config.encryptedRefreshTokens[characterId] = encrypt(tokens.refresh_token);
         configChanged = true;

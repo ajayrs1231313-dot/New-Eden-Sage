@@ -67,7 +67,7 @@ async function serviceHarness() {
   return { service, dir };
 }
 
-test("Mail is an explicit supported read-only HR category", () => {
+test("Mail HR capture stays read-only even though Sage requests the full ESI catalogue", () => {
   const mail = HR_DATA_CATEGORIES.find((row) => row.id === "mail");
   assert.ok(mail);
   assert.equal(mail.supported, true);
@@ -75,7 +75,8 @@ test("Mail is an explicit supported read-only HR category", () => {
   const eve = fs.readFileSync(new URL("../../electron/eve.ts", import.meta.url), "utf8");
   const scopeManifest = fs.readFileSync(new URL("../../electron/esi-scope-manifest.ts", import.meta.url), "utf8");
   assert.match(scopeManifest, /esi-mail\.read_mail\.v1/);
-  assert.doesNotMatch(scopeManifest, /esi-mail\.(?:send_mail|organize_mail)\.v1/);
+  assert.match(scopeManifest, /esi-mail\.send_mail\.v1/);
+  assert.match(scopeManifest, /esi-mail\.organize_mail\.v1/);
   assert.match(eve, /captureMailHeaders\(250\)/);
   assert.match(eve, /slice\(0, 100\)/);
 });
@@ -189,6 +190,11 @@ test("desktop-to-desktop HR transport is server-backed and does not refresh appl
   assert.match(backendHr, /eve_identities WHERE account_id=\?1 AND character_id=\?2/);
   assert.match(backendHr, /code_hash/);
   assert.match(migration, /corporation_hr_applications/);
+  const recruiterMigration = fs.readFileSync(new URL("../../backend/migrations/0012_recruitment_officer_hr.sql", import.meta.url), "utf8");
+  assert.match(recruiterMigration, /Recruitment Officer/);
+  assert.match(recruiterMigration, /hr\.manage/);
+  assert.match(recruiterMigration, /hr\.review/);
+  assert.match(recruiterMigration, /eve_title/);
   assert.match(migration, /hr\.manage/);
   assert.match(migration, /hr\.review/);
 });

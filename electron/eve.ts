@@ -29,6 +29,15 @@ function decodeJwt(token: string) {
   };
 }
 
+export function eveAccessTokenScopes(accessToken: string) {
+  const claims = decodeJwt(accessToken);
+  return Array.isArray(claims.scp) ? claims.scp.filter((scope): scope is string => typeof scope === "string") : [];
+}
+
+export function missingCurrentEsiScopes(accessToken: string) {
+  const granted = new Set(eveAccessTokenScopes(accessToken));
+  return EVE_SCOPES.filter((scope) => !granted.has(scope));
+}
 export async function loginWithEve(clientId: string, callbackUrl: string) {
   if (!clientId.trim())
     throw new Error("Add the EVE Client ID in Settings first.");

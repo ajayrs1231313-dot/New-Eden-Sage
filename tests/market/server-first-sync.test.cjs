@@ -42,7 +42,7 @@ assert.match(master, /character_refresh\.total/);
 const main = read("electron/main-task9.ts");
 assert.match(main, /Public market data is server-managed/);
 assert.match(main, /public-data:check-availability/);
-assert.match(main, /PUBLIC_RECONCILE_INTERVAL_MS = 60 \* 60 \* 1000/);
+assert.match(main, /PUBLIC_RECONCILE_INTERVAL_MS = 5 \* 60 \* 1000/);
 assert.doesNotMatch(main.slice(main.indexOf('ipcMain.handle("market:pull"'), main.indexOf("createWindow();", main.indexOf('ipcMain.handle("market:pull"'))), /pullMarketRegion|beginRawMarketSnapshot|saveRawMarketRegion|pullRegionContracts/);
 assert.match(main, /input\?\.mode !== "contracts"/);
 assert.match(main, /loadSharedPublicContractsDataset/);
@@ -125,7 +125,7 @@ assert.match(worker, /items = JSON\.parse\(buffer\.toString\('utf8'\)\)[\s\S]*?c
 assert.match(worker, /key: 'sovereignty-systems', url: '\/sovereignty\/systems\/'/);
 assert.doesNotMatch(worker, /sovereignty-map|sovereignty\/map/);
 assert.match(worker, /const sourceDigest = sha256\(Buffer\.from\(JSON\.stringify\(\{ contractSourceDigest, marketPriceDigest \}\)\)\)/);
-assert.match(worker, /if \(!sourceChanged && previous\)[\s\S]*?changed: false/, "contract enrichment progress alone must not publish a new outer generation");
+assert.match(worker, /if \(pendingDetailCount > 0\)[\s\S]*?CONTRACT_CANDIDATE_FILE[\s\S]*?changed: false[\s\S]*?snapshot: previous/, "incomplete contract enrichment must preserve the previous complete snapshot");
 assert.match(worker, /removedContractIds/);
 assert.match(worker, /HISTORY_PARTITION_INDEX_ROOT/);
 assert.match(worker, /ensureHistoryMetadata/);
