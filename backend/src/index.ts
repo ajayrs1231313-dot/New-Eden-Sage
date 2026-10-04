@@ -127,6 +127,16 @@ async function corporationAdministratorStatus(env: SageEnv, workspaceId: string,
   return { isCeo, isDirector, canConfigure: isCeo || isDirector };
 }
 
+async function hasHrAuthority(env: SageEnv, workspaceId: string, accountId: string, characterId?: number): Promise<boolean> {
+  const membership = await getActiveMembership(env, workspaceId, accountId, characterId);
+  if (!membership) return false;
+  const roles = new Set(parseStringArray(membership.roles_json));
+  const titles = new Set(parseStringArray(membership.titles_json).map((value) => value.trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
+  const administrator = await corporationAdministratorStatus(env, workspaceId, membership);
+  if (administrator.isCeo || administrator.isDirector) return true;
+  return titles.has("recruitment officer");
+}
+
 async function hasPermission(env: SageEnv, workspaceId: string, accountId: string, permission: string, characterId?: number): Promise<boolean> {
   const membership = await getActiveMembership(env, workspaceId, accountId, characterId);
   if (!membership) return false;
@@ -135,12 +145,8 @@ async function hasPermission(env: SageEnv, workspaceId: string, accountId: strin
 
   const roles = new Set(parseStringArray(membership.roles_json));
   const titles = new Set(parseStringArray(membership.titles_json));
-  const normalizedTitles = new Set([...titles].map((value) => value.trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
   const administrator = await corporationAdministratorStatus(env, workspaceId, membership);
   if (administrator.canConfigure) return true;
-  // Recruitment Officer is an invariant HR authority, not merely a configurable default.
-  // This survives disabled legacy rules and harmless title casing/spacing differences.
-  if ((permission === "hr.manage" || permission === "hr.review") && normalizedTitles.has("recruitment officer")) return true;
 
   const rules = await env.DB.prepare(
     `SELECT authority_type, authority_value
@@ -215,8 +221,6 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
     env.DB.prepare(`INSERT INTO workspace_members (workspace_id, account_id, eve_character_id, membership_state, last_verified_at) VALUES (?1, ?2, ?3, 'active', datetime('now')) ON CONFLICT(workspace_id, account_id, eve_character_id) DO UPDATE SET membership_state = 'active', last_verified_at = datetime('now')`).bind(workspaceId, principal.accountId, identity.characterId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'route.publish', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_route_director`, workspaceId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'wormholes.manage', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_wormholes_director`, workspaceId),
-    env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'hr.manage', 'eve_title', 'Recruitment Officer')`).bind(`perm_${workspaceId}_hr_manage_recruitment_officer`, workspaceId),
-    env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'hr.review', 'eve_title', 'Recruitment Officer')`).bind(`perm_${workspaceId}_hr_review_recruitment_officer`, workspaceId),
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'buyback.manage', 'eve_role', 'Director')`).bind(`perm_${workspaceId}_buyback_manage_director`, workspaceId),
 
     env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value)
@@ -233,11 +237,6 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
         ).bind(`perm_${workspaceId}_${permission.replace(/[^a-z0-9]+/gi, "_")}_${roleKey.toLowerCase()}`, workspaceId, permission, roleKey));
       }
     }
-    for (const permission of ["hr.manage", "hr.review"]) {
-      statements.push(env.DB.prepare(
-        `INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, ?3, 'eve_role', 'Personnel_Manager')`,
-      ).bind(`perm_${workspaceId}_${permission.replace(/[^a-z0-9]+/gi, "_")}_personnel_manager`, workspaceId, permission));
-    }
   }
   if (isNew) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'route.publish', 'account', ?3)`).bind(`perm_${workspaceId}_route_bootstrap`, workspaceId, principal.accountId));
   if (isNew) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO workspace_permission_rules (id, workspace_id, permission, authority_type, authority_value) VALUES (?1, ?2, 'wormholes.manage', 'account', ?3)`).bind(`perm_${workspaceId}_wormholes_bootstrap`, workspaceId, principal.accountId));
@@ -246,8 +245,8 @@ async function ensureCorporationWorkspace(request: Request, env: SageEnv, princi
   const canManageWormholes = await hasPermission(env, workspaceId, principal.accountId, "wormholes.manage", identity.characterId);
   const canManageFleetOps = await hasPermission(env, workspaceId, principal.accountId, "fleet.manage", identity.characterId);
   const canApproveFleetOps = await hasPermission(env, workspaceId, principal.accountId, "fleet.approve", identity.characterId);
-  const canManageHr = await hasPermission(env, workspaceId, principal.accountId, "hr.manage", identity.characterId);
-  const canReviewHr = await hasPermission(env, workspaceId, principal.accountId, "hr.review", identity.characterId);
+  const canManageHr = await hasHrAuthority(env, workspaceId, principal.accountId, identity.characterId);
+  const canReviewHr = canManageHr;
   const canManageBuybacks = await hasPermission(env, workspaceId, principal.accountId, "buyback.manage", identity.characterId);
   const canManageDiscord = canManageFleetOps;
   const membership = await getActiveMembership(env, workspaceId, principal.accountId, identity.characterId);
@@ -266,8 +265,6 @@ const DEFAULT_OPERATION_AUTHORITY_ROLES = [
 const CORPORATION_PERMISSION_DEFINITIONS = [
   { key: "fleet.manage", label: "Create / Manage Operations", description: "Create, broadcast, edit and manage corporation operations.", defaultRoles: DEFAULT_OPERATION_AUTHORITY_ROLES },
   { key: "fleet.approve", label: "Approve / Deny Operation Applications", description: "Review member role requests when an operation requires leadership approval.", defaultRoles: DEFAULT_OPERATION_AUTHORITY_ROLES },
-  { key: "hr.manage", label: "HR - Create / Manage Vetting Requests", description: "Create and revoke one-time applicant vetting requests and issue recruitment codes.", defaultRoles: ["Personnel_Manager"] as const },
-  { key: "hr.review", label: "HR - Review Applicant Dossiers", description: "Read submitted applicant snapshots, add recruiter notes and record HR decisions.", defaultRoles: ["Personnel_Manager"] as const },
   { key: "buyback.manage", label: "Buyback - Review / Pay Requests", description: "Review corporation buyback requests, record payment decisions and export the buyback ledger.", defaultRoles: ["Director"] as const },
 ] as const;
 
@@ -1053,7 +1050,7 @@ async function handleWorkspaceApi(request: Request, env: SageEnv, url: URL): Pro
     return error(403, "workspace_access_denied", "Active verified workspace membership is required.");
   }
 
-  const hrResponse = await handleHrWorkspaceApi(request, env, url, principal, workspaceId, tail, (permission, characterId) => hasPermission(env, workspaceId, principal.accountId, permission, characterId));
+  const hrResponse = await handleHrWorkspaceApi(request, env, url, principal, workspaceId, tail, (_permission, characterId) => hasHrAuthority(env, workspaceId, principal.accountId, characterId));
   if (hrResponse) return hrResponse;
 
   const buybackResponse = await handleBuybackWorkspaceApi(request, env, url, principal, workspaceId, tail, { hasPermission: (workspaceId, accountId, permission, characterId) => hasPermission(env, workspaceId, accountId, permission, characterId), getActiveMembership: (workspaceId, accountId, characterId) => getActiveMembership(env, workspaceId, accountId, characterId), parseStringArray, newId, json, error });

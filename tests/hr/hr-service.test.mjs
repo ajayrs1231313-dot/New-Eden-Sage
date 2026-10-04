@@ -199,10 +199,18 @@ test("desktop-to-desktop HR transport is server-backed and does not refresh appl
   assert.match(migration, /hr\.review/);
 });
 
-test("HR management permissions are registered in the existing corporation permission architecture", () => {
+test("HR authority is isolated from generic corporation permissions", () => {
   const backend = fs.readFileSync(new URL("../../backend/src/index.ts", import.meta.url), "utf8");
-  assert.match(backend, /key: "hr\.manage"/);
-  assert.match(backend, /key: "hr\.review"/);
-  assert.match(backend, /hasPermission\(env, workspaceId, principal\.accountId, "hr\.manage"/);
-  assert.match(backend, /hasPermission\(env, workspaceId, principal\.accountId, "hr\.review"/);
+  const desktop = fs.readFileSync(new URL("../../electron/main-task9.ts", import.meta.url), "utf8");
+  const migration = fs.readFileSync(new URL("../../backend/migrations/0014_hr_permission_rewrite.sql", import.meta.url), "utf8");
+  assert.match(backend, /async function hasHrAuthority\(/);
+  assert.match(backend, /roles\.has\("Director"\)/);
+  assert.match(backend, /titles\.has\("recruitment officer"\)/);
+  assert.match(backend, /administrator\.isCeo \|\| administrator\.isDirector/);
+  assert.doesNotMatch(backend, /key: "hr\.manage"/);
+  assert.doesNotMatch(backend, /key: "hr\.review"/);
+  assert.match(backend, /handleHrWorkspaceApi[\s\S]*hasHrAuthority/);
+  assert.match(desktop, /roles\.has\("Director"\)/);
+  assert.match(desktop, /titles\.has\("recruitment officer"\)/);
+  assert.match(migration, /permission IN \('hr\.manage', 'hr\.review'\)/);
 });

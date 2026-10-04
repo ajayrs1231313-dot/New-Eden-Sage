@@ -1509,13 +1509,15 @@ const hasSingleInstanceLock =
   ?? app.requestSingleInstanceLock();
 
 function hrWorkspaceAuthority(workspace:any) {
-  const normalizedTitles = new Set((Array.isArray(workspace?.titles) ? workspace.titles : []).map((value:any) => String(value ?? "").trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
-  const recruitmentOfficer = normalizedTitles.has("recruitment officer");
-  const legacyDefault = Boolean(workspace?.can_configure_permissions || workspace?.is_corporation_ceo || (Array.isArray(workspace?.roles) && workspace.roles.includes("Personnel_Manager")) || recruitmentOfficer);
-  return {
-    canManage: recruitmentOfficer || (typeof workspace?.can_manage_hr === "boolean" ? workspace.can_manage_hr : legacyDefault),
-    canReview: recruitmentOfficer || (typeof workspace?.can_review_hr === "boolean" ? workspace.can_review_hr : legacyDefault),
-  };
+  if (typeof workspace?.can_manage_hr === "boolean" || typeof workspace?.can_review_hr === "boolean") {
+    const canManage = Boolean(workspace?.can_manage_hr);
+    const canReview = typeof workspace?.can_review_hr === "boolean" ? Boolean(workspace.can_review_hr) : canManage;
+    return { canManage, canReview };
+  }
+  const roles = new Set((Array.isArray(workspace?.roles) ? workspace.roles : []).map((value:any) => String(value ?? "")));
+  const titles = new Set((Array.isArray(workspace?.titles) ? workspace.titles : []).map((value:any) => String(value ?? "").trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
+  const allowed = Boolean(workspace?.is_corporation_ceo || roles.has("Director") || titles.has("recruitment officer"));
+  return { canManage: allowed, canReview: allowed };
 }
 
 if (!hasSingleInstanceLock) {
