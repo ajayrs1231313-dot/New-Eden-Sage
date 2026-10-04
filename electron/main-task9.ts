@@ -1418,10 +1418,12 @@ const hasSingleInstanceLock =
   ?? app.requestSingleInstanceLock();
 
 function hrWorkspaceAuthority(workspace:any) {
-  const legacyDefault = Boolean(workspace?.can_configure_permissions || workspace?.is_corporation_ceo || (Array.isArray(workspace?.roles) && workspace.roles.includes("Personnel_Manager")));
+  const normalizedTitles = new Set((Array.isArray(workspace?.titles) ? workspace.titles : []).map((value:any) => String(value ?? "").trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
+  const recruitmentOfficer = normalizedTitles.has("recruitment officer");
+  const legacyDefault = Boolean(workspace?.can_configure_permissions || workspace?.is_corporation_ceo || (Array.isArray(workspace?.roles) && workspace.roles.includes("Personnel_Manager")) || recruitmentOfficer);
   return {
-    canManage: typeof workspace?.can_manage_hr === "boolean" ? workspace.can_manage_hr : legacyDefault,
-    canReview: typeof workspace?.can_review_hr === "boolean" ? workspace.can_review_hr : legacyDefault,
+    canManage: recruitmentOfficer || (typeof workspace?.can_manage_hr === "boolean" ? workspace.can_manage_hr : legacyDefault),
+    canReview: recruitmentOfficer || (typeof workspace?.can_review_hr === "boolean" ? workspace.can_review_hr : legacyDefault),
   };
 }
 

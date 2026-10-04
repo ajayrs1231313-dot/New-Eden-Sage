@@ -134,8 +134,12 @@ async function hasPermission(env: SageEnv, workspaceId: string, accountId: strin
 
   const roles = new Set(parseStringArray(membership.roles_json));
   const titles = new Set(parseStringArray(membership.titles_json));
+  const normalizedTitles = new Set([...titles].map((value) => value.trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
   const administrator = await corporationAdministratorStatus(env, workspaceId, membership);
   if (administrator.canConfigure) return true;
+  // Recruitment Officer is an invariant HR authority, not merely a configurable default.
+  // This survives disabled legacy rules and harmless title casing/spacing differences.
+  if ((permission === "hr.manage" || permission === "hr.review") && normalizedTitles.has("recruitment officer")) return true;
 
   const rules = await env.DB.prepare(
     `SELECT authority_type, authority_value
@@ -786,7 +790,8 @@ async function discordAnnounceOperation(request:Request,env:SageEnv,principal:Pr
   let payload:any;try{payload=JSON.parse(row.payload_json);}catch{return error(500,"operation_payload_invalid","The stored operation payload could not be read.");}
   const requestedRoleIds=Array.isArray(payload?.discordNotifyRoleIds)?payload.discordNotifyRoleIds.map(String).filter(Boolean):[];
   const requestedUserIds=Array.isArray(payload?.discordNotifyUserIds)?payload.discordNotifyUserIds.map(String).filter(Boolean):[];
-  const target=await validateDiscordSendTarget(env,workspaceId,undefined,requestedRoleIds,requestedUserIds);
+  const requestedChannelId=String(payload?.discordAnnouncementChannelId??"").trim()||undefined;
+  const target=await validateDiscordSendTarget(env,workspaceId,requestedChannelId,requestedRoleIds,requestedUserIds);
   if(target.error)return target.error;
   const roleIds=target.roleIds??[];
   const userIds=target.userIds??[];
@@ -855,7 +860,8 @@ async function cancelCorporationOperation(request:Request,env:SageEnv,principal:
     const requestedUserIds=Array.isArray(payload?.discordNotifyUserIds)?payload.discordNotifyUserIds.map(String).filter(Boolean):[];
     if(announceCancellation){
       try{
-        const target=await validateDiscordSendTarget(env,workspaceId,cleanupChannelId||undefined,requestedRoleIds,requestedUserIds);
+        const requestedChannelId=String(payload?.discordAnnouncementChannelId??"").trim()||undefined;
+        const target=await validateDiscordSendTarget(env,workspaceId,cleanupChannelId||requestedChannelId,requestedRoleIds,requestedUserIds);
         if(target.error){const targetBody=await target.error.clone().json().catch(()=>({})) as Record<string,unknown>;discordCancellationWarning=String(targetBody.message??targetBody.error??"Discord cancellation notice could not be routed.");}
         else{
           const roleIds=target.roleIds??[],userIds=target.userIds??[];
