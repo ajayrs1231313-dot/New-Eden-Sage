@@ -559,7 +559,7 @@ async function askStrategicCommandInternal(input: {
   }
   const fullHistory = (Array.isArray(input.history) ? input.history : [])
     .filter((item): item is StrategicMessage => (item?.role === "user" || item?.role === "assistant") && typeof item?.content === "string");
-  const recentHistory = fullHistory.slice(-20);
+  const recentHistory = fullHistory.slice(-12);
   const masterActivation = fullHistory.find((item) =>
     item.role === "user" &&
     /\bcommand\ override\ owner\b/i.test(item.content),
@@ -595,7 +595,7 @@ async function askStrategicCommandInternal(input: {
     tools: sageAiTools(selectedTools, includeWeb),
     tool_choice: "auto",
     temperature: 0.2,
-    max_tokens: 4096,
+    max_tokens: 2048,
   };
 
   const trace: Array<{ tool: string; status: "ok" | "blocked" | "error"; detail?: string }> = [];
@@ -609,6 +609,7 @@ async function askStrategicCommandInternal(input: {
   for (let round = 0; ; round += 1) {
     const timedOut = !developerMode && Date.now() - startedAt >= standardDeadlineMs;
     let completion;
+    const completionStartedAt = Date.now();
     try {
       completion = await sageAiCompletion(
         sessionToken,
@@ -646,6 +647,12 @@ async function askStrategicCommandInternal(input: {
       };
       throw enriched;
     }
+    strategicDebug("model-round-timing", {
+      round,
+      elapsedMs: Date.now() - completionStartedAt,
+      messageCount: messages.length,
+      toolCount: timedOut || forceSynthesis ? 0 : selectedTools.length,
+    });
     requestId = completion.requestId || requestId;
     developerMode = completion.developerMode === true;
     if (diagnostics) {
@@ -693,7 +700,7 @@ async function askStrategicCommandInternal(input: {
         : {}),
     });
 
-    for (const call of toolCalls) {
+    const executeToolCall = async (call: SageAiToolCall) => {
       const callId = String(call.id || "");
       const name = String(call.function?.name || "");
       const tool = byName.get(name);
@@ -706,7 +713,7 @@ async function askStrategicCommandInternal(input: {
           tool_call_id: callId,
           content: JSON.stringify({ error: "Unknown Sage tool." }),
         });
-        continue;
+        return;
       }
 
       if (tool?.annotations?.destructiveHint && !destructiveIntent(message)) {
@@ -716,7 +723,7 @@ async function askStrategicCommandInternal(input: {
           tool_call_id: callId,
           content: JSON.stringify({ blocked: true, reason: "Destructive Sage actions require explicit destructive intent from the user." }),
         });
-        continue;
+        return;
       }
 
       try {
@@ -751,7 +758,26 @@ async function askStrategicCommandInternal(input: {
           content: JSON.stringify({ error: detail }),
         });
       }
+    };
+
+    const canParallelise = toolCalls.length > 1 && toolCalls.every((call) => {
+      const name = String(call.function?.name || "");
+      if (name === "sage_web_search" || name === "sage_web_open") return true;
+      return byName.get(name)?.annotations?.readOnlyHint === true;
+    });
+
+    const toolStartedAt = Date.now();
+    if (canParallelise) {
+      await Promise.all(toolCalls.map((call) => executeToolCall(call)));
+    } else {
+      for (const call of toolCalls) await executeToolCall(call);
     }
+    strategicDebug("tool-batch-timing", {
+      round,
+      count: toolCalls.length,
+      parallel: canParallelise,
+      elapsedMs: Date.now() - toolStartedAt,
+    });
   }
 
 }
