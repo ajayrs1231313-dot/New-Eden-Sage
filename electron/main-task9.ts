@@ -1754,21 +1754,15 @@ if (!hasSingleInstanceLock) {
   });
   ipcMain.handle("corp:hr-state", async (_event, characterId:string) => {
     const {sessionToken,workspace}=await planetaryCorporationContext(String(characterId??""));
-    const authority=hrWorkspaceAuthority(workspace);
-    if(!authority.canManage && !authority.canReview) throw new Error("Corporation HR authority is required to open applicant command data.");
     const remote=await listSageHrApplications(sessionToken,workspace.workspace_id,Number(workspace.character_id));
-    return {workspace:{...workspace,can_manage_hr:authority.canManage,can_review_hr:authority.canReview},categories:HR_DATA_CATEGORIES,applications:remote.applications,transport:remote.transport};
+    return {workspace:{...workspace,can_manage_hr:true,can_review_hr:true},categories:HR_DATA_CATEGORIES,applications:remote.applications,transport:remote.transport};
   });
   ipcMain.handle("corp:hr-create", async (_event, input:{characterId:string;requestedCategories:HrDataCategoryId[];expiresInHours?:number}) => {
     const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
-    const authority=hrWorkspaceAuthority(workspace);
-    if(!authority.canManage) throw new Error("HR request management authority is required to create applicant vetting requests.");
     return createSageHrRequest(sessionToken,workspace.workspace_id,Number(workspace.character_id),{requestedCategories:Array.isArray(input?.requestedCategories)?input.requestedCategories:[],expiresInHours:Number(input?.expiresInHours||0)||undefined});
   });
   ipcMain.handle("corp:hr-revoke", async (_event, input:{characterId:string;applicationId:string}) => {
     const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
-    const authority=hrWorkspaceAuthority(workspace);
-    if(!authority.canManage) throw new Error("HR request management authority is required to revoke applicant codes.");
     return revokeSageHrRequest(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.applicationId??""));
   });
   ipcMain.handle("corp:hr-resolve-code", async (_event, code:string) => {
@@ -1788,8 +1782,6 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("corp:hr-withdraw", async (_event, code:string) => withdrawSageHrRequest(await sageOnlineSessionTokenOnly(),String(code??"")));
   ipcMain.handle("corp:hr-note", async (_event, input:{characterId:string;applicationId:string;text:string}) => {
     const {sessionToken,workspace}=await planetaryCorporationContext(String(input?.characterId??""));
-    const authority=hrWorkspaceAuthority(workspace);
-    if(!authority.canManage && !authority.canReview) throw new Error("HR review authority is required to add recruiter notes.");
     return addSageHrNote(sessionToken,workspace.workspace_id,Number(workspace.character_id),String(input?.applicationId??""),String(input?.text??""));
   });
   ipcMain.handle("corp:hr-decision", async (_event, input:{characterId:string;applicationId:string;status:HrApplicationStatus}) => {

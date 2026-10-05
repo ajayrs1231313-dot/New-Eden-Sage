@@ -139,14 +139,14 @@ export async function handleHrApplicantApi(request:Request,env:SageEnv,url:URL,p
 
 export async function handleHrWorkspaceApi(request:Request,env:SageEnv,url:URL,principal:Principal,workspaceId:string,tail:string,can:PermissionCheck):Promise<Response|null>{
   if(tail==="hr/applications"&&request.method==="GET"){
-    const actor=Number(url.searchParams.get("character_id")??0);if(!actor||(!(await can("hr.manage",actor))&&!(await can("hr.review",actor))))return error(403,"permission_denied","HR review authority is required to view applicant dossiers.");
+    const actor=Number(url.searchParams.get("character_id")??0);if(!actor)return error(400,"character_required","A corporation character is required.");
     await env.DB.prepare("UPDATE corporation_hr_applications SET status='expired',updated_at=datetime('now') WHERE workspace_id=?1 AND snapshot_json IS NULL AND status IN ('awaiting-applicant','in-progress') AND julianday(expires_at)<=julianday('now')").bind(workspaceId).run();
     const rows=await env.DB.prepare("SELECT * FROM corporation_hr_applications WHERE workspace_id=?1 ORDER BY created_at DESC LIMIT 500").bind(workspaceId).all<HrRow>();
     const applications=[];for(const row of rows.results)applications.push(await recordView(env,row,true));
     return json({applications,transport:"sage-online-desktop"});
   }
   if(tail==="hr/applications"&&request.method==="POST"){
-    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor||!(await can("hr.manage",actor)))return error(403,"permission_denied","HR request management authority is required to create applicant codes.");
+    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor)return error(400,"character_required","A corporation character is required.");
     let body:{requested_categories?:unknown[];expires_in_hours?:number};try{body=await request.json();}catch{return error(400,"invalid_json","HR request must be valid JSON.");}
     const requested=parseCategories(body.requested_categories);if(!requested.length)return error(400,"hr_categories_required","Select at least one HR information category.");
     const workspace=await env.DB.prepare("SELECT eve_corporation_id,name FROM workspaces WHERE id=?1 AND type='corporation' AND archived_at IS NULL LIMIT 1").bind(workspaceId).first<{eve_corporation_id:number;name:string}>();if(!workspace)return error(404,"workspace_not_found","Corporation workspace not found.");
@@ -158,19 +158,19 @@ export async function handleHrWorkspaceApi(request:Request,env:SageEnv,url:URL,p
     const row=await rowById(env,workspaceId,id);return row?json({request:requestView(row),applicationCode:code,transport:"sage-online-desktop"},201):error(500,"hr_create_missing","HR request could not be reloaded.");
   }
   const revoke=tail.match(/^hr\/applications\/([^/]+)\/revoke$/);if(revoke&&request.method==="POST"){
-    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor||!(await can("hr.manage",actor)))return error(403,"permission_denied","HR request management authority is required to revoke applicant codes.");
+    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor)return error(400,"character_required","A corporation character is required.");
     const id=decodeURIComponent(revoke[1]);const row=await rowById(env,workspaceId,id);if(!row)return error(404,"hr_application_not_found","HR application not found.");if(row.snapshot_json)return error(409,"hr_already_submitted","Submitted snapshots are immutable and cannot be revoked.");
     const now=new Date().toISOString();const result=await env.DB.prepare("UPDATE corporation_hr_applications SET status='revoked',revoked_at=?3,updated_at=?3 WHERE id=?1 AND workspace_id=?2 AND snapshot_json IS NULL AND status IN ('awaiting-applicant','in-progress')").bind(id,workspaceId,now).run();if(Number(result.meta.changes??0)!==1)return error(409,"hr_not_revocable",`This application is ${row.status}.`);
     await audit(env,workspaceId,principal,"corporation.hr.revoke",id,{actor_character_id:actor});const updated=await rowById(env,workspaceId,id);return updated?json(await recordView(env,updated,true)):error(500,"hr_revoke_missing","Revoked record could not be reloaded.");
   }
   const note=tail.match(/^hr\/applications\/([^/]+)\/notes$/);if(note&&request.method==="POST"){
-    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor||(!(await can("hr.review",actor))&&!(await can("hr.manage",actor))))return error(403,"permission_denied","HR review authority is required to add recruiter notes.");
+    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor)return error(400,"character_required","A corporation character is required.");
     const id=decodeURIComponent(note[1]);const row=await rowById(env,workspaceId,id);if(!row)return error(404,"hr_application_not_found","HR application not found.");if(!row.snapshot_json)return error(409,"hr_snapshot_required","Recruiter notes can be added after the applicant submits a snapshot.");
     let body:{text?:string};try{body=await request.json();}catch{return error(400,"invalid_json","Recruiter note must be valid JSON.");}const text=String(body.text??"").trim();if(!text)return error(400,"hr_note_required","Recruiter note text is required.");if(text.length>5000)return error(413,"hr_note_too_large","Recruiter notes are limited to 5,000 characters.");
     const recruiterName=await actorName(env,principal,actor);const noteId=`hrnote_${crypto.randomUUID()}`;await env.DB.prepare("INSERT INTO corporation_hr_notes (id,application_id,recruiter_account_id,recruiter_character_id,recruiter_name,note_text,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)").bind(noteId,id,principal.accountId,actor,recruiterName,text,new Date().toISOString()).run();await audit(env,workspaceId,principal,"corporation.hr.note",id,{note_id:noteId,actor_character_id:actor});const updated=await rowById(env,workspaceId,id);return updated?json(await recordView(env,updated,true)):error(500,"hr_note_missing","HR record could not be reloaded.");
   }
   const decision=tail.match(/^hr\/applications\/([^/]+)\/decision$/);if(decision&&request.method==="POST"){
-    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor||(!(await can("hr.review",actor))&&!(await can("hr.manage",actor))))return error(403,"permission_denied","HR review authority is required to record an application decision.");
+    const actor=Number(request.headers.get("X-Sage-Character-ID")??0);if(!actor)return error(400,"character_required","A corporation character is required.");
     const id=decodeURIComponent(decision[1]);const row=await rowById(env,workspaceId,id);if(!row)return error(404,"hr_application_not_found","HR application not found.");if(!row.snapshot_json)return error(409,"hr_snapshot_required","A submitted applicant snapshot is required before recording a review status.");
     let body:{status?:string};try{body=await request.json();}catch{return error(400,"invalid_json","HR decision must be valid JSON.");}const status=String(body.status??"");if(!HR_REVIEW_STATUSES.has(status))return error(400,"hr_status_invalid","Unsupported HR review status.");
     const recruiterName=await actorName(env,principal,actor);const now=new Date().toISOString();await env.DB.prepare("UPDATE corporation_hr_applications SET status=?3,decision_by_account_id=?4,decision_by_character_id=?5,decision_by_character_name=?6,decision_at=?7,updated_at=?7 WHERE id=?1 AND workspace_id=?2 AND snapshot_json IS NOT NULL").bind(id,workspaceId,status,principal.accountId,actor,recruiterName,now).run();await audit(env,workspaceId,principal,"corporation.hr.decision",id,{status,actor_character_id:actor});const updated=await rowById(env,workspaceId,id);return updated?json(await recordView(env,updated,true)):error(500,"hr_decision_missing","HR record could not be reloaded.");
