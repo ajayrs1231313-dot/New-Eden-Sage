@@ -1,3 +1,4 @@
+import { SAGE_ACTION_MANIFEST } from "./sage-action-manifest";
 import { USER_DATA_ROOT } from "./data-paths";
 import crypto from "node:crypto";
 import http from "node:http";
@@ -16,6 +17,10 @@ type BridgeAction =
   | "delete_sage_fit"
   | "push_eve_fitting"
   | "delete_eve_fitting"
+  | "capture_sage_page"
+  | "list_sage_pages"
+  | "get_sage_page_values"
+  | "navigate_sage_page"
   | "list_sage_controls"
   | "invoke_sage_control"
   | "list_sage_actions"
@@ -151,14 +156,92 @@ function liveWindow(getWindow: () => BrowserWindow | null) {
   return target;
 }
 
+
+async function executeSageScript(target: BrowserWindow, script: string, userGesture = true): Promise<any> {
+  const reply = await target.webContents.executeJavaScript(`(async () => {
+    try { return { ok: true, value: await (${script}) }; }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+  })()`, userGesture) as { ok: boolean; value?: unknown; error?: string };
+  if (!reply.ok) throw new Error(reply.error || "Sage renderer action failed");
+  return reply.value;
+}
+
+async function listSagePages(getWindow: () => BrowserWindow | null) {
+  return executeSageScript(liveWindow(getWindow), `(() => ({
+    currentPageId: document.documentElement.dataset.sagePage,
+    pages: JSON.parse(document.documentElement.dataset.sagePages || "[]").map(page => ({
+      ...page, mounted: page.id === document.documentElement.dataset.sagePage ||
+        !!document.querySelector('[data-sage-page="' + page.id + '"]')
+    }))
+  }))()`, true);
+}
+
+async function navigateSagePage(input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
+  const target = liveWindow(getWindow);
+  const pageId = String(input.pageId ?? "");
+  const pages = await listSagePages(getWindow) as { pages: Array<{ id: string }> };
+  if (!pages.pages.some(page => page.id === pageId)) throw new Error("Unknown Sage page: " + pageId);
+  await executeSageScript(target, `window.dispatchEvent(new CustomEvent("sage:mcp-navigate", { detail: { pageId: ${JSON.stringify(pageId)} } }))`, true);
+  // Wait for React to commit the destination, without starting any refresh loop.
+  await executeSageScript(target, `new Promise((resolve, reject) => {
+    const started = Date.now();
+    const check = () => {
+      if (document.documentElement.dataset.sagePage === ${JSON.stringify(pageId)}) resolve(true);
+      else if (Date.now() - started > 5000) reject(new Error("Sage navigation timed out"));
+      else setTimeout(check, 20);
+    }; check();
+  })`, true);
+  return { success: true, pageId };
+}
+
+async function getSagePageValues(input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
+  const payload = JSON.stringify({ offset: Number(input.offset ?? 0), limit: Number(input.limit ?? 500), query: String(input.query ?? ""), includeHidden: input.includeHidden === true });
+  return executeSageScript(liveWindow(getWindow), `(() => {
+    const input = ${payload};
+    const hidden = element => !!element.closest('[hidden],[aria-hidden="true"]') ||
+      getComputedStyle(element).display === "none" || getComputedStyle(element).visibility === "hidden" || !element.getClientRects().length;
+    const state = globalThis.__sageMcpValueState || (globalThis.__sageMcpValueState = { nextId: 1 });
+    const values = [];
+    const add = (element, kind, value) => {
+      if (!value || (!input.includeHidden && hidden(element))) return;
+      if (element.closest('script,style,noscript,input[type="password"]')) return;
+      let valueId = element.getAttribute("data-sage-mcp-value-id");
+      if (!valueId) { valueId = "sage-value-" + state.nextId++; element.setAttribute("data-sage-mcp-value-id", valueId); }
+      values.push({ valueId, kind, value, tag: element.tagName.toLowerCase(),
+        label: element.getAttribute("aria-label") || element.getAttribute("title") || element.getAttribute("name") || undefined,
+        pageId: element.closest('[data-sage-page]')?.getAttribute('data-sage-page') || document.documentElement.dataset.sagePage,
+        hidden: hidden(element) });
+    };
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const text = node.textContent.trim();
+      if (node.parentElement && text) add(node.parentElement, "text", text);
+    }
+    for (const element of document.querySelectorAll('input,textarea,select,meter,progress,img,svg,canvas,time,[title],[aria-label],[aria-valuenow]')) {
+      if (element instanceof HTMLInputElement && element.type === "password") continue;
+      if ('value' in element) add(element, "value", String(element.value));
+      for (const attr of ['title','aria-label','aria-valuenow','aria-valuetext','alt','datetime']) add(element, attr, element.getAttribute(attr));
+      if (element instanceof HTMLSelectElement) for (const option of element.options) add(element, "option", JSON.stringify({ value: option.value, text: option.text, selected: option.selected, disabled: option.disabled }));
+      if ('checked' in element) add(element, "checked", String(element.checked));
+      if (element instanceof HTMLCanvasElement) add(element, "graphic", "Canvas graphic; use page-specific data actions for underlying values");
+    }
+    const filtered = values.filter(item => !input.query || JSON.stringify(item).toLowerCase().includes(input.query.toLowerCase()));
+    return { pageId: document.documentElement.dataset.sagePage, capturedAt: new Date().toISOString(),
+      total: filtered.length, offset: input.offset, values: filtered.slice(input.offset, input.offset + input.limit),
+      nextOffset: input.offset + input.limit < filtered.length ? input.offset + input.limit : null };
+  })()`, true);
+}
+
 async function listSageControls(input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
   const target = liveWindow(getWindow);
   const payload = JSON.stringify({
     query: String(input.query ?? "").trim(),
     includeHidden: input.includeHidden === true,
     limit: Math.max(1, Math.min(2000, Number(input.limit ?? 500))),
+    offset: Math.max(0, Number(input.offset ?? 0)),
   });
-  return target.webContents.executeJavaScript(`(() => {
+  return executeSageScript(target, `(() => {
     const input = ${payload};
     const selector = [
       "button",
@@ -182,7 +265,13 @@ async function listSageControls(input: Record<string, unknown>, getWindow: () =>
       "[tabindex]:not([tabindex='-1'])"
     ].join(",");
     const state = globalThis.__sageMcpControlState || (globalThis.__sageMcpControlState = { nextId: 1 });
-    const elements = Array.from(document.querySelectorAll(selector));
+    const eventsFor = element => {
+      const key = Object.keys(element).find(key => key.startsWith("__reactProps$"));
+      const props = key ? element[key] : null;
+      return props ? Object.keys(props).filter(name => /^on[A-Z]/.test(name) && typeof props[name] === "function") : [];
+    };
+    const elements = Array.from(document.querySelectorAll("*"))
+      .filter(element => element.matches(selector) || eventsFor(element).length || element.matches('canvas,[draggable="true"]'));
     const describe = (element) => {
       const rect = element.getBoundingClientRect();
       const style = globalThis.getComputedStyle(element);
@@ -202,8 +291,11 @@ async function listSageControls(input: Record<string, unknown>, getWindow: () =>
       const tag = element.tagName.toLowerCase();
       const inputType = tag === "input" ? String(element.type || "text").toLowerCase() : undefined;
       const rawText = String(element.innerText || element.textContent || "").replace(/\\s+/g, " ").trim();
+      const referencedText = (attribute) => String(element.getAttribute(attribute) || "")
+        .split(/\\s+/).filter(Boolean).map(id => document.getElementById(id)?.textContent || "").join(" ").trim();
       const label = String(
         element.getAttribute("aria-label") ||
+        referencedText("aria-labelledby") ||
         element.getAttribute("title") ||
         (element.labels && element.labels[0] && element.labels[0].innerText) ||
         element.getAttribute("placeholder") ||
@@ -215,15 +307,54 @@ async function listSageControls(input: Record<string, unknown>, getWindow: () =>
       const value = tag === "input" || tag === "textarea" || tag === "select"
         ? (inputType === "password" ? "[hidden]" : String(element.value ?? ""))
         : undefined;
+      const events = eventsFor(element);
+      const role = element.getAttribute("role");
+      const explicitDescription = element.getAttribute("data-sage-mcp-description");
+      const accessibleDescription = element.getAttribute("aria-description") || referencedText("aria-describedby");
+      const tooltip = element.getAttribute("title");
+      const region = element.closest('dialog,[role="dialog"],fieldset,section,article,[role="region"],form');
+      const heading = region?.querySelector('legend,h1,h2,h3,h4,h5,h6');
+      const context = String(heading?.textContent || "").replace(/\\s+/g, " ").trim();
+      const hasMeaningfulLabel = label !== controlId && !/^[+×✕?…⋮⋯−-]$/.test(label);
+      const subject = hasMeaningfulLabel ? JSON.stringify(label) : "this unlabeled control";
+      let behavior;
+      const supportedActions = ["focus", "blur", "scroll_into_view", "press_key"];
+      if (tag === "select") { behavior = "Choose an option for " + subject + ". Use select_option with an option's value, not its display text."; supportedActions.push("select_option"); }
+      else if (inputType === "file") { behavior = "Import local files using " + subject + ". Use upload_files with absolute file paths."; supportedActions.push("upload_files"); }
+      else if (["checkbox", "radio"].includes(inputType) || ["checkbox", "radio", "switch"].includes(role)) { behavior = "Change the enabled or selected state of " + subject + ". The checked field reports the current state."; supportedActions.push("click"); if (["checkbox", "radio"].includes(inputType)) supportedActions.push("set_checked"); }
+      else if (["input", "textarea"].includes(tag) || element.isContentEditable) { behavior = "Enter or edit " + subject + ". Use set_value; changes are sent through the page's input handlers."; if (!element.readOnly) supportedActions.push("set_value"); }
+      else if (tag === "summary") { behavior = "Expand or collapse " + subject + " to show or hide its details."; supportedActions.push("click"); }
+      else if (role === "tab" || element.closest('[role="tablist"]')) { behavior = "Open the " + subject + " section in the current Sage workspace."; supportedActions.push("click"); }
+      else if (tag === "a") { behavior = "Follow the " + subject + " link. The href field identifies its destination."; supportedActions.push("click"); }
+      else if (tag === "form") { behavior = "Submit " + subject + " after filling its fields; normal form validation still applies."; supportedActions.push("submit"); }
+      else if (tag === "canvas") { behavior = "Interact with this graphical view. Use capture_sage_page to inspect it and the listed events to identify available gestures."; supportedActions.push("click"); }
+      else { behavior = "Activate " + subject + ". Its precise effect is only known when the label, tooltip or explicit description explains it."; if (tag === "button" || role === "button" || events.includes("onClick")) supportedActions.push("click"); }
+      if (events.some(name => /MouseEnter|MouseOver|MouseMove|PointerEnter|PointerMove/.test(name))) { behavior += " Responds to hovering or pointer movement; inspect the page after hovering for any tooltip or changed state."; supportedActions.push("hover"); }
+      if (events.includes("onContextMenu")) { behavior += " Right-click opens its context action or information."; supportedActions.push("right_click"); }
+      if (events.includes("onDoubleClick")) { behavior += " A double-click handler is available."; supportedActions.push("double_click"); }
+      if (events.some(name => /Drag|Drop/.test(name)) || element.draggable) { behavior += " Supports drag/drop interaction; use a discovered destination control."; supportedActions.push("drag_drop"); }
+      if (events.includes("onPointerDown") || events.includes("onMouseDown")) supportedActions.push("pointer_drag");
+      if (events.includes("onWheel")) { behavior += " Wheel input is available for this view."; supportedActions.push("wheel"); }
+      if (element.readOnly) behavior += " This field is read-only.";
+      const descriptionSource = explicitDescription ? "explicit" : accessibleDescription ? "accessibility" : tooltip ? "tooltip" : hasMeaningfulLabel ? "label-and-control-type" : "control-type-only";
+      const description = [explicitDescription || accessibleDescription || tooltip, behavior, context ? "Context: " + context + "." : ""].filter(Boolean).join(" ");
       return {
         controlId,
         tag,
         type: inputType,
         role: element.getAttribute("role") || undefined,
-        label: label.slice(0, 300),
-        text: rawText.slice(0, 500),
+        label,
+        description,
+        descriptionSource,
+        purposeNeedsClarification: !explicitDescription && !accessibleDescription && !tooltip && !hasMeaningfulLabel,
+        context: context || undefined,
+        supportedActions,
+        text: rawText,
+        events,
+        pageId: element.closest("[data-sage-page]")?.getAttribute("data-sage-page") || document.documentElement.dataset.sagePage,
+        options: tag === "select" ? Array.from(element.options).map(option => ({ value: option.value, text: option.text, disabled: option.disabled, selected: option.selected })) : undefined,
         value,
-        checked: typeof element.checked === "boolean" ? element.checked : undefined,
+        checked: typeof element.checked === "boolean" ? element.checked : element.getAttribute("aria-checked") === "true" ? true : element.getAttribute("aria-checked") === "false" ? false : undefined,
         disabled: Boolean(element.disabled || element.getAttribute("aria-disabled") === "true"),
         hidden,
         id: element.id || undefined,
@@ -239,7 +370,7 @@ async function listSageControls(input: Record<string, unknown>, getWindow: () =>
     const filtered = all.filter((control) => {
       if (!input.includeHidden && control.hidden) return false;
       if (!query) return true;
-      return [control.controlId, control.label, control.text, control.id, control.name, control.placeholder, control.role, control.type]
+      return [control.controlId, control.label, control.description, control.context, control.text, control.id, control.name, control.placeholder, control.role, control.type]
         .some((value) => String(value || "").toLowerCase().includes(query));
     });
     return {
@@ -247,21 +378,79 @@ async function listSageControls(input: Record<string, unknown>, getWindow: () =>
       title: document.title,
       totalDiscovered: all.length,
       matching: filtered.length,
-      returned: Math.min(filtered.length, input.limit),
-      controls: filtered.slice(0, input.limit)
+      returned: Math.min(Math.max(0, filtered.length - input.offset), input.limit),
+      offset: input.offset,
+      nextOffset: input.offset + input.limit < filtered.length ? input.offset + input.limit : null,
+      controls: filtered.slice(input.offset, input.offset + input.limit)
     };
   })()`, true);
 }
 
 async function invokeSageControl(input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
   const target = liveWindow(getWindow);
+  if (input.action === "upload_files") {
+    const files = Array.isArray(input.filePaths) ? input.filePaths.map(String) : [];
+    for (const file of files) {
+      if (!path.isAbsolute(file)) throw new Error("Upload requires absolute file paths");
+      if (!(await fs.stat(file)).isFile()) throw new Error("Upload path is not a file");
+    }
+    await executeSageScript(target, `(() => {
+      const el=Array.from(document.querySelectorAll("[data-sage-mcp-control-id]")).find(el=>el.getAttribute("data-sage-mcp-control-id")===${JSON.stringify(String(input.controlId))});
+      if (!(el instanceof HTMLInputElement) || el.type!=="file") throw new Error("upload_files requires a file input");
+      if(el.disabled) throw new Error("File input is disabled");
+      if(!el.multiple && ${files.length}>1) throw new Error("This input accepts only one file");
+    })()`);
+    const debuggerApi = target.webContents.debugger;
+    const attachedHere = !debuggerApi.isAttached();
+    if (attachedHere) debuggerApi.attach("1.3");
+    try {
+      const {root} = await debuggerApi.sendCommand("DOM.getDocument");
+      const {nodeId} = await debuggerApi.sendCommand("DOM.querySelector", {nodeId:root.nodeId,selector:'[data-sage-mcp-control-id='+JSON.stringify(String(input.controlId))+']'});
+      if(!nodeId) throw new Error("File input is no longer present");
+      await debuggerApi.sendCommand("DOM.setFileInputFiles",{nodeId,files});
+    } finally {if(attachedHere) debuggerApi.detach();}
+    return {success:true,controlId:input.controlId,action:input.action,fileCount:files.length};
+  }
+  if (["pointer_drag", "wheel"].includes(String(input.action))) {
+    const bounds = await executeSageScript(target, `(async () => {
+      const element = Array.from(document.querySelectorAll("[data-sage-mcp-control-id]")).find(el => el.getAttribute("data-sage-mcp-control-id") === ${JSON.stringify(String(input.controlId))});
+      if (!element) throw new Error("Control is no longer present; rediscover controls");
+      if (element.disabled || element.getAttribute("aria-disabled") === "true" || element.closest("[hidden],[inert]")) throw new Error("Control is disabled or hidden");
+      element.scrollIntoView({block:"nearest"}); await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))); const r=element.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};
+    })()`) as { x: number; y: number; width: number; height: number };
+    const x = Math.round(bounds.x + Number(input.x ?? bounds.width / 2));
+    const y = Math.round(bounds.y + Number(input.y ?? bounds.height / 2));
+    target.webContents.sendInputEvent({type:"mouseMove",x,y});
+    await new Promise(resolve=>setTimeout(resolve,30));
+    if (input.action === "wheel") {
+      const deltaX = Number(input.deltaX ?? 0);
+      const deltaY = Number(input.deltaY ?? 0);
+      await executeSageScript(target, `(() => { const element=Array.from(document.querySelectorAll("[data-sage-mcp-control-id]")).find(el=>el.getAttribute("data-sage-mcp-control-id")===${JSON.stringify(String(input.controlId))}); if(!element) throw new Error("Control is no longer present; rediscover controls"); element.dispatchEvent(new WheelEvent("wheel",{deltaX:${deltaX},deltaY:${deltaY},clientX:${x},clientY:${y},bubbles:true,cancelable:true})); return true; })()`);
+    }
+    else {
+      target.webContents.sendInputEvent({type:"mouseDown",x,y,button:"left",clickCount:1});
+      try {
+        const endX=Math.round(bounds.x+Number(input.endX ?? bounds.width / 2)), endY=Math.round(bounds.y+Number(input.endY ?? bounds.height / 2));
+        for(let step=1;step<=10;step++) {
+          target.webContents.sendInputEvent({type:"mouseMove",x:Math.round(x+(endX-x)*step/10),y:Math.round(y+(endY-y)*step/10)});
+          await new Promise(resolve=>setTimeout(resolve,16));
+        }
+        target.webContents.sendInputEvent({type:"mouseUp",x:endX,y:endY,button:"left",clickCount:1});
+      } catch(error) { target.webContents.sendInputEvent({type:"mouseUp",x,y,button:"left",clickCount:1}); throw error; }
+    }
+    return {success:true,controlId:input.controlId,action:input.action};
+  }
   const payload = JSON.stringify({
     controlId: String(input.controlId ?? ""),
     action: String(input.action ?? ""),
     value: input.value,
     key: input.key == null ? undefined : String(input.key),
+    targetControlId: input.targetControlId,
+    data: input.data,
+    modifiers: input.modifiers,
+    x: input.x, y: input.y,
   });
-  return target.webContents.executeJavaScript(`(() => {
+  return executeSageScript(target, `(() => {
     const input = ${payload};
     const element = Array.from(document.querySelectorAll("[data-sage-mcp-control-id]"))
       .find((candidate) => candidate.getAttribute("data-sage-mcp-control-id") === input.controlId);
@@ -275,6 +464,7 @@ async function invokeSageControl(input: Record<string, unknown>, getWindow: () =
       element.dispatchEvent(new Event("change", { bubbles: true }));
     };
     const setNativeValue = (value) => {
+      if (element.readOnly) throw new Error("This Sage field is read-only.");
       if (element instanceof HTMLInputElement) {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
         setter ? setter.call(element, value) : (element.value = value);
@@ -294,14 +484,44 @@ async function invokeSageControl(input: Record<string, unknown>, getWindow: () =
     element.scrollIntoView({ block: "nearest", inline: "nearest" });
     switch (input.action) {
       case "click":
-        element.click();
+        if (input.x != null || input.y != null || element instanceof HTMLCanvasElement || element instanceof SVGElement) {
+          const rect = element.getBoundingClientRect();
+          element.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: rect.x + Number(input.x ?? rect.width / 2), clientY: rect.y + Number(input.y ?? rect.height / 2) }));
+        } else element.click();
         break;
+      case "hover":
+      case "double_click":
+      case "right_click": {
+        const rect = element.getBoundingClientRect();
+        const clientX = rect.x + Number(input.x ?? rect.width / 2);
+        const clientY = rect.y + Number(input.y ?? rect.height / 2);
+        const names = input.action === "hover" ? ["mouseover", "mouseenter", "mousemove"] : input.action === "right_click" ? ["contextmenu"] : ["dblclick"];
+        for (const name of names) element.dispatchEvent(new MouseEvent(name, { bubbles: true, cancelable: true, clientX, clientY, button: input.action === "right_click" ? 2 : 0 }));
+        if (input.action === "hover") for (const name of ["pointerover", "pointerenter", "pointermove"]) element.dispatchEvent(new PointerEvent(name, { bubbles: true, cancelable: true, clientX, clientY, pointerId: 1, pointerType: "mouse" }));
+        break;
+      }
+      case "drag_drop": {
+        const destination = Array.from(document.querySelectorAll("[data-sage-mcp-control-id]")).find(candidate => candidate.getAttribute("data-sage-mcp-control-id") === input.targetControlId);
+        if (!destination) throw new Error("Destination control is no longer present; rediscover controls.");
+        if (destination.disabled || destination.getAttribute("aria-disabled") === "true") throw new Error("Destination is disabled.");
+        const dataTransfer = new DataTransfer();
+        for (const [type, value] of Object.entries(input.data || {})) dataTransfer.setData(type, String(value));
+        const fire = (node, type) => node.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer }));
+        fire(element, "dragstart"); fire(destination, "dragenter"); fire(destination, "dragover"); fire(destination, "drop"); fire(element, "dragend");
+        break;
+      }
+      case "submit": {
+        const form = element instanceof HTMLFormElement ? element : element.form || element.closest("form");
+        if (!form) throw new Error("submit requires a form or form control");
+        form.requestSubmit();
+        break;
+      }
       case "set_value":
         setNativeValue(String(input.value ?? ""));
         break;
       case "select_option":
         if (!(element instanceof HTMLSelectElement)) throw new Error("select_option requires a select control.");
-        if (!Array.from(element.options).some((option) => option.value === String(input.value ?? ""))) {
+        if (!Array.from(element.options).some((option) => option.value === String(input.value ?? "") && !option.disabled)) {
           throw new Error("No option with that value exists on the Sage control.");
         }
         setNativeValue(String(input.value ?? ""));
@@ -332,8 +552,8 @@ async function invokeSageControl(input: Record<string, unknown>, getWindow: () =
         const key = String(input.key || input.value || "");
         if (!key) throw new Error("press_key requires key.");
         element.focus();
-        element.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
-        element.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true }));
+        element.dispatchEvent(new KeyboardEvent("keydown", { key, ctrlKey:input.modifiers?.includes("control"),shiftKey:input.modifiers?.includes("shift"),altKey:input.modifiers?.includes("alt"),metaKey:input.modifiers?.includes("meta"), bubbles: true, cancelable: true }));
+        element.dispatchEvent(new KeyboardEvent("keyup", { key, ctrlKey:input.modifiers?.includes("control"),shiftKey:input.modifiers?.includes("shift"),altKey:input.modifiers?.includes("alt"),metaKey:input.modifiers?.includes("meta"), bubbles: true, cancelable: true }));
         break;
       }
       case "scroll_into_view":
@@ -360,13 +580,15 @@ async function invokeSageControl(input: Record<string, unknown>, getWindow: () =
 
 async function listSageActions(getWindow: () => BrowserWindow | null) {
   const target = liveWindow(getWindow);
-  return target.webContents.executeJavaScript(`(() => {
+  const manifest = JSON.stringify(SAGE_ACTION_MANIFEST);
+  return executeSageScript(target, `(() => {
     const sage = globalThis.sage;
     if (!sage || typeof sage !== "object") throw new Error("The Sage renderer bridge is not available.");
     return {
       bridgeInfo: sage.bridgeInfo ?? null,
       actions: Object.keys(sage).sort().filter((name) => typeof sage[name] === "function").map((name) => ({
         name,
+        ...(${manifest}[name] || {}),
         kind: /^on[A-Z]/.test(name) ? "event-subscription" : "action"
       }))
     };
@@ -379,7 +601,7 @@ async function invokeSageAction(input: Record<string, unknown>, getWindow: () =>
     actionName: String(input.actionName ?? ""),
     args: Array.isArray(input.args) ? input.args : [],
   });
-  return target.webContents.executeJavaScript(`(async () => {
+  return executeSageScript(target, `(async () => {
     const input = ${payload};
     const sage = globalThis.sage;
     if (!sage || typeof sage !== "object") throw new Error("The Sage renderer bridge is not available.");
@@ -394,6 +616,13 @@ async function invokeSageAction(input: Record<string, unknown>, getWindow: () =>
 }
 
 async function perform(action: BridgeAction, input: Record<string, unknown>, getWindow: () => BrowserWindow | null) {
+  if (action === "capture_sage_page") {
+    const image = await liveWindow(getWindow).webContents.capturePage();
+    return { mimeType: "image/png", data: image.toPNG().toString("base64") };
+  }
+  if (action === "list_sage_pages") return listSagePages(getWindow);
+  if (action === "navigate_sage_page") return navigateSagePage(input, getWindow);
+  if (action === "get_sage_page_values") return getSagePageValues(input, getWindow);
   if (action === "list_sage_controls") return listSageControls(input, getWindow);
   if (action === "invoke_sage_control") return invokeSageControl(input, getWindow);
   if (action === "list_sage_actions") return listSageActions(getWindow);
@@ -411,7 +640,12 @@ async function perform(action: BridgeAction, input: Record<string, unknown>, get
       operations.push({ fitId: fit.id, operation: index >= 0 ? "updated" : "created" });
     }
     await saveRendererData(data, getWindow, operations[0]?.fitId);
-    return { success: true, count: imported.length, fits: operations, fitId: operations[0]?.fitId, operation: operations[0]?.operation };
+    if (input.openInFitter === true) {
+      await navigateSagePage({ pageId: "fittings" }, getWindow);
+      // The destination may have mounted after the initial IPC update.
+      await saveRendererData(data, getWindow, operations[0]?.fitId);
+    }
+    return { success: true, count: imported.length, fits: operations, fitId: operations[0]?.fitId, operation: operations[0]?.operation, openedInFitter: input.openInFitter === true };
   }
   if (action === "delete_sage_fit") {
     const fitId = String(input.fitId ?? "");

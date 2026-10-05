@@ -6,6 +6,8 @@ import { deleteDiscordChannelMessage, discordBotRequest, discordGuildInviteUrl, 
 import { cleanupDiscordSecurity, consumeDiscordActionTicket, issueDiscordActionTicket, registerDiscordDevice } from "./discord/security";
 import { handleHrApplicantApi, handleHrWorkspaceApi } from "./hr";
 import { handleMailApi } from "./mail";
+import { cleanupStrategicAiLogs, handleStrategicAi, handleStrategicAiFailureReport } from "./strategic-ai";
+import { cleanupStrategicBrowserLogs, handleStrategicBrowserOpen, handleStrategicBrowserSearch } from "./strategic-browser";
 
 export { WorkspaceHub };
 
@@ -1309,6 +1311,29 @@ export default {
       return getSageIdentity(request, env);
     }
 
+    if (url.pathname === "/v1/strategic-ai/completion" && request.method === "POST") {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      return handleStrategicAi(request, env, principal);
+    }
+    if (url.pathname === "/v1/strategic-ai/failure-report" && request.method === "POST") {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      return handleStrategicAiFailureReport(request, env, principal);
+    }
+
+    if (url.pathname === "/v1/strategic-ai/browser/search" && request.method === "POST") {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      return handleStrategicBrowserSearch(request, env, principal);
+    }
+
+    if (url.pathname === "/v1/strategic-ai/browser/open" && request.method === "POST") {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      return handleStrategicBrowserOpen(request, env, principal);
+    }
+
     if (url.pathname.startsWith("/v1/mail")) {
       const principal = await requireSession(request, env);
       if (principal instanceof Response) return principal;
@@ -1358,5 +1383,7 @@ export default {
     await recoverOutbox(env);
     await env.DB.prepare("DELETE FROM discord_oauth_states WHERE expires_at <= datetime('now')").run().catch(() => undefined);
     await cleanupDiscordSecurity(env);
+    await cleanupStrategicAiLogs(env);
+    await cleanupStrategicBrowserLogs(env);
   },
 } satisfies ExportedHandler<SageEnv, EventEnvelope>;

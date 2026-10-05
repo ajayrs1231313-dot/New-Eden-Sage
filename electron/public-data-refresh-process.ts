@@ -1,4 +1,5 @@
 import { ensureCurrentSharedMarketData } from "./shared-market-data";
+import { ensureCurrentEveKnowledge } from "./eve-knowledge-refresh";
 
 function finish(message: unknown) {
   if (typeof process.send !== "function") {

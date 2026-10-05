@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const {spawnSync}=require('node:child_process');
+const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;
+fs.mkdirSync(path.resolve('work'),{recursive:true});
+env.NEW_EDEN_SAGE_USER_DATA=fs.mkdtempSync(path.resolve('work/mcp-page-test-'));
+const result=spawnSync(require('electron'),['tests/mcp/page-surface-live.cjs'],{cwd:path.resolve('.'),env,windowsHide:true,encoding:'utf8',timeout:60000});
+assert.equal(result.status,0,result.stderr||result.error?.message);
+assert.match(result.stdout,/Live Electron MCP checks passed/);
+console.log(result.stdout.trim());

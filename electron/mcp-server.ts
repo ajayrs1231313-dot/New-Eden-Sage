@@ -22,6 +22,29 @@ import { getWormholeReference, getWormholeReferenceEntry, getWormholeSystemRefer
 import { PAGE_STATE_CACHE_KIND } from "./page-state-persistence";
 import { getSnapshot as getDatabaseSnapshot, listSnapshots as listDatabaseSnapshots } from "./database";
 import { SAGE_MCP_AI_INSTRUCTIONS, SAGE_CHARACTER_LIST_GUIDANCE, SAGE_CHARACTER_DATA_GUIDANCE, SAGE_SAVED_FITTINGS_GUIDANCE, SAGE_FIT_SKILL_GUIDANCE } from "./mcp-ai-policy";
+import { registerSageFittingTool } from "./mcp-fitting";
+import {
+  launchThirdPartyDevProject,
+  listThirdPartyDevProcesses,
+  listThirdPartyDevProjects,
+  listThirdPartyDevTree,
+  readThirdPartyDevSource,
+  searchThirdPartyDevSource,
+  stopThirdPartyDevProject,
+} from "./third-party-dev-lab";
+import {
+  developmentWorkspaceStatus,
+  developmentWorkspaceList,
+  developmentWorkspaceRead,
+  developmentWorkspaceWrite,
+  developmentWorkspaceMkdir,
+  developmentWorkspaceDelete,
+  developmentWorkspaceMove,
+  developmentWorkspaceCopy,
+  developmentWorkspaceSearch,
+  developmentWorkspaceCommand,
+} from "./development-workspace";
+import { EVE_KNOWLEDGE_SOURCES, getEveKnowledgeArticle, knowledgeStatus, searchEveKnowledge } from "./eve-knowledge";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const READ_ONLY_LIVE = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -389,6 +412,7 @@ async function marketDatasetStatus() {
 
 export async function startMcpServer() {
   const server = new McpServer({ name: "new-eden-sage", version: "0.1.0" }, { instructions: SAGE_MCP_AI_INSTRUCTIONS });
+  registerSageFittingTool(server, { getSnapshot, getSavedFits: async () => (await rendererData()).savedFits ?? [] }, result);
 
   server.registerTool("list_characters", {
     title: "List Sage characters", description: SAGE_CHARACTER_LIST_GUIDANCE, inputSchema: {}, annotations: READ_ONLY,
@@ -439,25 +463,51 @@ export async function startMcpServer() {
     title: "Read saved fittings", description: SAGE_SAVED_FITTINGS_GUIDANCE, inputSchema: {}, annotations: READ_ONLY,
   }, async () => result(await rendererData()));
 
+  server.registerTool("capture_sage_page", {
+    title: "See the Sage page", description: "Capture the current Sage viewport as an image to inspect graphical values, maps, charts, canvas diagrams and visual state. Scroll with live controls to inspect other areas. Sage must be open.", inputSchema: {}, annotations: READ_ONLY,
+  }, async () => {
+    const image = await writeAction("capture_sage_page", {}) as { mimeType: string; data: string };
+    return { content: [{ type: "image" as const, mimeType: image.mimeType, data: image.data }] };
+  });
+  server.registerTool("list_sage_pages", {
+    title: "List Sage pages", description: "List every customer-facing Sage command page with its ID and mounted state, and identify the current page. Navigate to unmounted pages before inspecting their values and controls.", inputSchema: {}, annotations: READ_ONLY,
+  }, async () => result(await writeAction("list_sage_pages", {})));
+  server.registerTool("navigate_sage_page", {
+    title: "Open a Sage page", description: "Take the user to any page returned by list_sage_pages. Waits for navigation to commit. Discover and operate that page's nested tabs using list_sage_controls and invoke_sage_control.",
+    inputSchema: { pageId: z.string().min(1).max(100) }, annotations: WRITE,
+  }, async (input) => result(await writeAction("navigate_sage_page", input)));
+  server.registerTool("get_sage_page_values", {
+    title: "Read all live Sage page values", description: "Read customer-facing text, numbers, clocks, Alpha/Omega status, sync age, tooltips, accessible labels, form values and select options on the current page and global shell. Includes offscreen rendered content. Results are paginated without text truncation; follow nextOffset until null. Hidden cached content is optional and may be stale. Navigate and open nested tabs/details to inspect unmounted content. Passwords are excluded. Graphics require underlying data actions.",
+    inputSchema: { query: z.string().max(300).optional(), includeHidden: z.boolean().default(false), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(2000).default(500) }, annotations: READ_ONLY,
+  }, async (input) => result(await writeAction("get_sage_page_values", input)));
+
   server.registerTool("list_sage_controls", {
     title: "List live Sage controls",
-    description: "Discover the complete live New Eden Sage renderer control surface: buttons, tabs, links, inputs, selects, checkboxes, switches, menu items, sliders and other actionable elements. Control IDs remain valid while those elements remain mounted. Use includeHidden=true to include controls in cached/hidden Sage views. Sage must be open.",
+    description: "Discover the complete live New Eden Sage renderer control surface: buttons, tabs, links, inputs, selects, checkboxes, switches, menu items, sliders and other actionable elements. Every control includes a description, descriptionSource, context and supportedActions. Explicit data-sage-mcp-description, accessible descriptions and tooltips take precedence over label/type-based behavior explanations. purposeNeedsClarification flags controls whose actual purpose is unclear; do not guess their business effect. Follow nextOffset until null to read all controls. Control IDs remain valid while those elements remain mounted. Use includeHidden=true to include controls in cached/hidden Sage views. Sage must be open.",
     inputSchema: {
       query: z.string().max(300).optional(),
       includeHidden: z.boolean().default(false),
       limit: z.number().int().min(1).max(2000).default(500),
+      offset: z.number().int().min(0).default(0),
     },
     annotations: READ_ONLY,
   }, async (input) => result(await writeAction("list_sage_controls", input)));
 
   server.registerTool("invoke_sage_control", {
     title: "Operate a live Sage control",
-    description: "Operate any control returned by list_sage_controls. Supports click, text/value entry, select changes, checkbox/radio state, focus/blur, key presses and scrolling. This is the generic UI control path for every Sage page, including controls added in future releases. Sage must be open.",
+    description: "Operate any control returned by list_sage_controls. Supports click, text/value entry, select changes, checkbox/radio state, focus/blur, key presses, scrolling, hover tooltips, double-click, context menus and HTML5 drag/drop (targetControlId, optional MIME data). submit validates and submits forms; upload_files supplies absolute local filePaths to file inputs. press_key accepts modifiers. Native pointer_drag supports canvas/map panning using x/y and endX/endY relative to the element; wheel supports zoom/scroll with deltaX/deltaY. This is the generic UI control path for every Sage page, including controls added in future releases. Sage must be open.",
     inputSchema: {
       controlId: z.string().min(1),
-      action: z.enum(["click", "set_value", "select_option", "set_checked", "focus", "blur", "press_key", "scroll_into_view"]),
+      action: z.enum(["click", "set_value", "select_option", "set_checked", "focus", "blur", "press_key", "scroll_into_view", "hover", "double_click", "right_click", "drag_drop", "pointer_drag", "wheel", "submit", "upload_files"]),
       value: z.unknown().optional(),
       key: z.string().max(100).optional(),
+      targetControlId: z.string().optional(),
+      data: z.record(z.string(), z.string()).optional(),
+      x: z.number().optional(), y: z.number().optional(),
+      endX: z.number().optional(), endY: z.number().optional(),
+      deltaX: z.number().optional(), deltaY: z.number().optional(),
+      modifiers: z.array(z.enum(["control", "shift", "alt", "meta"])).optional(),
+      filePaths: z.array(z.string().min(1)).max(100).optional(),
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   }, async (input) => result(await writeAction("invoke_sage_control", input)));
@@ -482,8 +532,8 @@ export async function startMcpServer() {
   server.registerTool("save_sage_fit", {
     title: "Create or update a Sage fit",
     description: SAGE_FIT_SKILL_GUIDANCE + " " + FIT_IMPORT_INSTRUCTIONS + " Sage must be open.",
-    inputSchema: { fit: z.unknown() }, annotations: WRITE,
-  }, async ({ fit }) => result(await writeAction("save_sage_fit", { fit })));
+    inputSchema: { fit: z.unknown(), openInFitter: z.boolean().default(false) }, annotations: WRITE,
+  }, async ({ fit, openInFitter }) => result(await writeAction("save_sage_fit", { fit, openInFitter })));
 
   server.registerTool("delete_sage_fit", {
     title: "Delete a Sage fit",
@@ -709,6 +759,170 @@ export async function startMcpServer() {
     title: "Read prepared page state", description: "Read the newest persisted last-known-good prepared state for a Sage module and optional scope. Credentials and secrets are sanitized before return.",
     inputSchema: { moduleId: z.string().min(1), scopeKind: z.enum(["global", "account", "character", "region"]).optional(), scopeId: z.string().optional() }, annotations: READ_ONLY,
   }, async ({ moduleId, scopeKind, scopeId }) => result(await getPreparedPageState(moduleId, scopeKind, scopeId)));
+
+
+  server.registerTool("dev_eve_third_party_list", {
+    title: "List owner EVE third-party development lab",
+    description: "OWNER-ONLY. List locally cloned open-source EVE third-party projects available for development research.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  }, async () => result(await listThirdPartyDevProjects()));
+
+  server.registerTool("dev_eve_third_party_tree", {
+    title: "Browse owner EVE third-party source tree",
+    description: "OWNER-ONLY. Browse files and directories inside a locally cloned third-party EVE project.",
+    inputSchema: {
+      project: z.string().min(1),
+      directory: z.string().optional(),
+      limit: z.number().int().min(1).max(500).default(200),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await listThirdPartyDevTree(input)));
+
+  server.registerTool("dev_eve_third_party_search", {
+    title: "Search owner EVE third-party source",
+    description: "OWNER-ONLY. Search locally cloned EVE third-party source for architecture, algorithms, ESI usage and implementation patterns.",
+    inputSchema: {
+      query: z.string().min(2).max(500),
+      project: z.string().optional(),
+      limit: z.number().int().min(1).max(100).default(40),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await searchThirdPartyDevSource(input)));
+
+  server.registerTool("dev_eve_third_party_read", {
+    title: "Read owner EVE third-party source",
+    description: "OWNER-ONLY. Read a bounded source/text range from the local third-party EVE development lab.",
+    inputSchema: {
+      project: z.string().min(1),
+      file: z.string().min(1),
+      startLine: z.number().int().min(1).optional(),
+      maxLines: z.number().int().min(1).max(800).default(250),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await readThirdPartyDevSource(input)));
+
+
+  server.registerTool("dev_eve_third_party_run", {
+    title: "Run owner EVE third-party project",
+    description: "OWNER-ONLY. Launch a locally cloned third-party EVE project for live development/testing. Pyfa has a built-in launch profile; other projects may supply an explicit command and args.",
+    inputSchema: {
+      project: z.string().min(1),
+      command: z.string().min(1).optional(),
+      args: z.array(z.string().max(10000)).max(128).optional(),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (input) => result(await launchThirdPartyDevProject(input)));
+
+  server.registerTool("dev_eve_third_party_processes", {
+    title: "List running owner EVE third-party projects",
+    description: "OWNER-ONLY. Show third-party development applications launched by Sage Developer Mode and whether they are still running.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  }, async () => result(await listThirdPartyDevProcesses()));
+
+  server.registerTool("dev_eve_third_party_stop", {
+    title: "Stop owner EVE third-party project",
+    description: "OWNER-ONLY. Stop a third-party development application previously launched by Sage Developer Mode.",
+    inputSchema: {
+      project: z.string().min(1),
+      force: z.boolean().default(true),
+    },
+    annotations: DESTRUCTIVE,
+  }, async (input) => result(await stopThirdPartyDevProject(input)));
+
+  server.registerTool("dev_workspace_status", {
+    title: "Developer workspace status",
+    description: "OWNER-ONLY. Report the active New Eden Sage development workspace and available shell/tooling.",
+    inputSchema: {},
+    annotations: READ_ONLY,
+  }, async () => result(await developmentWorkspaceStatus()));
+
+  server.registerTool("dev_workspace_list", {
+    title: "Developer file explorer",
+    description: "OWNER-ONLY. List files and directories inside the New Eden Sage development workspace.",
+    inputSchema: {
+      directory: z.string().optional(),
+      limit: z.number().int().min(1).max(1000).default(300),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await developmentWorkspaceList(input)));
+
+  server.registerTool("dev_workspace_read", {
+    title: "Read developer workspace file",
+    description: "OWNER-ONLY. Read a line range from a file in the New Eden Sage development workspace.",
+    inputSchema: {
+      file: z.string().min(1),
+      startLine: z.number().int().min(1).optional(),
+      maxLines: z.number().int().min(1).max(1500).default(400),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await developmentWorkspaceRead(input)));
+
+  server.registerTool("dev_workspace_search", {
+    title: "Search developer workspace",
+    description: "OWNER-ONLY. Search source/text across the New Eden Sage development workspace.",
+    inputSchema: {
+      query: z.string().min(2).max(1000),
+      directory: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(60),
+    },
+    annotations: READ_ONLY,
+  }, async (input) => result(await developmentWorkspaceSearch(input)));
+
+  server.registerTool("dev_workspace_write", {
+    title: "Write developer workspace file",
+    description: "OWNER-ONLY. Create or replace a UTF-8 file inside the New Eden Sage development workspace.",
+    inputSchema: {
+      file: z.string().min(1),
+      content: z.string(),
+      createDirectories: z.boolean().default(true),
+    },
+    annotations: WRITE,
+  }, async (input) => result(await developmentWorkspaceWrite(input)));
+
+  server.registerTool("dev_workspace_mkdir", {
+    title: "Create developer workspace directory",
+    description: "OWNER-ONLY. Create a directory inside the New Eden Sage development workspace.",
+    inputSchema: { directory: z.string().min(1) },
+    annotations: WRITE,
+  }, async (input) => result(await developmentWorkspaceMkdir(input)));
+
+  server.registerTool("dev_workspace_copy", {
+    title: "Copy developer workspace path",
+    description: "OWNER-ONLY. Copy a file or directory inside the New Eden Sage development workspace.",
+    inputSchema: { from: z.string().min(1), to: z.string().min(1) },
+    annotations: WRITE,
+  }, async (input) => result(await developmentWorkspaceCopy(input)));
+
+  server.registerTool("dev_workspace_move", {
+    title: "Move developer workspace path",
+    description: "OWNER-ONLY. Move or rename a file or directory inside the New Eden Sage development workspace.",
+    inputSchema: { from: z.string().min(1), to: z.string().min(1) },
+    annotations: WRITE,
+  }, async (input) => result(await developmentWorkspaceMove(input)));
+
+  server.registerTool("dev_workspace_delete", {
+    title: "Delete developer workspace path",
+    description: "OWNER-ONLY. Delete a file or directory inside the New Eden Sage development workspace.",
+    inputSchema: {
+      path: z.string().min(1),
+      recursive: z.boolean().default(false),
+    },
+    annotations: DESTRUCTIVE,
+  }, async (input) => result(await developmentWorkspaceDelete(input)));
+
+  server.registerTool("dev_workspace_command", {
+    title: "Run developer command or shell",
+    description: "OWNER-ONLY. Run development commands inside the New Eden Sage workspace. Supports Git, Node/npm tooling, PowerShell/PowerShell Core and CMD. Shells execute with the normal Windows permissions of the Sage process.",
+    inputSchema: {
+      command: z.enum(["git", "npm", "node", "npx", "tsc", "vite", "powershell", "pwsh", "cmd"]),
+      args: z.array(z.string().max(10000)).max(128).default([]),
+      cwd: z.string().optional(),
+      timeoutMs: z.number().int().min(1000).max(300000).default(120000),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  }, async (input) => result(await developmentWorkspaceCommand(input)));
 
   server.registerTool("cloudflare_wrangler_status", {
     title: "Check Cloudflare Wrangler",

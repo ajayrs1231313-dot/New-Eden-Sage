@@ -93,6 +93,7 @@ import {
 } from "./industrial-preparation";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
+import { askStrategicCommand, getStrategicCommandStatus } from "./strategic-command";
 import { hydrateCanonicalFittingStore, saveCanonicalFittingStore } from "./fitting-persistence";
 import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility, repairClaudeDesktopDirectConfig, showClaudeDesktopBundle } from "./claude-integration";
 import { cacheTypeIconsLocal, typeImageProtocolResponse } from "./eve-assets";
@@ -1509,15 +1510,24 @@ const hasSingleInstanceLock =
   ?? app.requestSingleInstanceLock();
 
 function hrWorkspaceAuthority(workspace:any) {
-  if (typeof workspace?.can_manage_hr === "boolean" || typeof workspace?.can_review_hr === "boolean") {
-    const canManage = Boolean(workspace?.can_manage_hr);
-    const canReview = typeof workspace?.can_review_hr === "boolean" ? Boolean(workspace.can_review_hr) : canManage;
-    return { canManage, canReview };
-  }
-  const roles = new Set((Array.isArray(workspace?.roles) ? workspace.roles : []).map((value:any) => String(value ?? "")));
-  const titles = new Set((Array.isArray(workspace?.titles) ? workspace.titles : []).map((value:any) => String(value ?? "").trim().replace(/\s+/g, " " ).toLocaleLowerCase("en")));
-  const allowed = Boolean(workspace?.is_corporation_ceo || roles.has("Director") || titles.has("recruitment officer"));
-  return { canManage: allowed, canReview: allowed };
+  const roles = new Set((Array.isArray(workspace?.roles) ? workspace.roles : []).map((value:any) =>
+    String(value ?? "").trim().replace(/\s+/g, " "),
+  ));
+  const normalizedRoles = new Set(Array.from(roles).map((value) => String(value).toLocaleLowerCase("en")));
+  const titles = new Set((Array.isArray(workspace?.titles) ? workspace.titles : []).map((value:any) =>
+    String(value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase("en"),
+  ));
+  const eveAuthority = Boolean(
+    workspace?.is_corporation_ceo
+    || roles.has("Director")
+    || normalizedRoles.has("director")
+    || titles.has("recruitment officer")
+  );
+  const declaredManage = typeof workspace?.can_manage_hr === "boolean" ? workspace.can_manage_hr : false;
+  const declaredReview = typeof workspace?.can_review_hr === "boolean" ? workspace.can_review_hr : false;
+  const canManage = Boolean(eveAuthority || declaredManage);
+  const canReview = Boolean(eveAuthority || declaredReview || canManage);
+  return { canManage, canReview };
 }
 
 if (!hasSingleInstanceLock) {
@@ -1620,7 +1630,8 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("mcp:tunnel-configure", (_event, input: { tunnelId: string; runtimeKey: string }) => configureAndStartMcpTunnel(input));
   ipcMain.handle("mcp:open-chatgpt", () => shell.openExternal("https://chatgpt.com/plugins"));
   ipcMain.handle("mcp:open-tunnels", () => shell.openExternal("https://platform.openai.com/settings/organization/tunnels"));
-  ipcMain.handle("mcp:open-api-keys", () => shell.openExternal("https://platform.openai.com/settings/organization/api-keys"));
+  ipcMain.handle("strategic:status", () => getStrategicCommandStatus());
+  ipcMain.handle("strategic:ask", (_event, input: { message: string; history?: Array<{ role: "user" | "assistant"; content: string }> }) => askStrategicCommand(input));
   void startMcpTunnel().catch((error) => void logEvent("error", "mcp.tunnel_start_failed", { error }));
   void startMcpWriteBridge(() => window).catch((error) => void logEvent("error", "mcp.write_bridge_start_failed", { error }));
   void ensureClaudeCompatibility()

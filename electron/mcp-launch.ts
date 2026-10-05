@@ -4,7 +4,7 @@ import { USER_DATA_ROOT } from "./data-paths";
 
 export function sageMcpLaunch() {
   const command = app.getPath("exe");
-  const script = path.join(app.getAppPath(), "dist-electron", "mcp-cli.js");
+  const script = path.join(__dirname, "mcp-cli.js");
   return {
     command,
     args: [script],

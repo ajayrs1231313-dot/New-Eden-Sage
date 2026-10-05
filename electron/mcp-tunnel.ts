@@ -4,8 +4,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sageMcpLaunch } from "./mcp-launch";
+import { assertOwnerSageIdentity, ensureExternalMcpOwnerToken } from "./mcp-owner-access";
 
-type TunnelConfig = { tunnelId: string; encryptedRuntimeKey: string };
+type TunnelConfig = {
+  tunnelId: string;
+  encryptedRuntimeKey: string;
+  dpapiOwnerAccessToken?: string;
+};
 
 let tunnelProcess: ChildProcess | null = null;
 
@@ -50,13 +55,24 @@ async function runClient(args: string[], runtimeKey?: string) {
 }
 
 async function writeLauncher() {
+  await assertOwnerSageIdentity();
+  await ensureExternalMcpOwnerToken();
+
   const root = runtimeRoot();
   await fs.mkdir(root, { recursive: true });
   const launcher = path.join(root, "sage-mcp.cmd");
   const launch = sageMcpLaunch();
-  const args = launch.args.map((value) => `"${value.replaceAll('"','\\"')}"`).join(" ");
-  const envLines = Object.entries(launch.env).map(([name, value]) => `set "${name}=${String(value).replaceAll('"','')}"`).join("\r\n");
-  await fs.writeFile(launcher, `@echo off\r\n${envLines}\r\n"${launch.command}" ${args}\r\n`, { encoding: "utf8", mode: 0o600 });
+  const ownerScript = path.join(path.dirname(launch.args[0]), "mcp-owner-launch.js");
+  const args = `"${ownerScript.replaceAll('"', '\\"')}"`;
+  const envLines = Object.entries(launch.env)
+    .map(([name, value]) => `set "${name}=${String(value).replaceAll('"', "")}"`)
+    .join("\r\n");
+
+  await fs.writeFile(
+    launcher,
+    `@echo off\r\n${envLines}\r\n"${launch.command}" ${args}\r\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   return launcher.replaceAll("\\", "/");
 }
 
@@ -77,51 +93,102 @@ export async function getMcpTunnelStatus() {
   } catch {
     ready = false;
   }
-  return { configured: Boolean(config), tunnelId: config?.tunnelId ?? "", running: Boolean(tunnelProcess && !tunnelProcess.killed), ready, healthUrl };
+  return {
+    configured: Boolean(config),
+    tunnelId: config?.tunnelId ?? "",
+    running: Boolean(tunnelProcess && !tunnelProcess.killed),
+    ready,
+    healthUrl,
+  };
 }
 
 export async function configureAndStartMcpTunnel(input: { tunnelId: string; runtimeKey: string }) {
+  await assertOwnerSageIdentity();
+
   const tunnelId = input.tunnelId.trim();
   const runtimeKey = input.runtimeKey.trim();
   if (!/^tunnel_[a-zA-Z0-9]+$/.test(tunnelId)) throw new Error("Enter a valid OpenAI tunnel ID.");
   if (!runtimeKey) throw new Error("Enter the OpenAI runtime API key for this tunnel.");
   if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows secure storage is unavailable.");
+
   await fs.mkdir(path.dirname(configPath()), { recursive: true });
-  await fs.writeFile(configPath(), JSON.stringify({ tunnelId, encryptedRuntimeKey: safeStorage.encryptString(runtimeKey).toString("base64") }, null, 2), { encoding: "utf8", mode: 0o600 });
+
+  const existing = await readTunnelConfig();
+  await fs.writeFile(
+    configPath(),
+    JSON.stringify({
+      tunnelId,
+      encryptedRuntimeKey: safeStorage.encryptString(runtimeKey).toString("base64"),
+      ...(existing?.dpapiOwnerAccessToken ? { dpapiOwnerAccessToken: existing.dpapiOwnerAccessToken } : {}),
+    }, null, 2),
+    { encoding: "utf8", mode: 0o600 },
+  );
+
+  await ensureExternalMcpOwnerToken();
   return startMcpTunnel();
 }
 
 export async function startMcpTunnel() {
+  await assertOwnerSageIdentity();
+
   const config = await readTunnelConfig();
-  if (!config) return { configured: false, running: false, ready: false, tunnelId: "", healthUrl: "" };
+  if (!config) {
+    return { configured: false, running: false, ready: false, tunnelId: "", healthUrl: "" };
+  }
+
   const existing = await getMcpTunnelStatus();
   if (existing.ready) return existing;
+
   const root = runtimeRoot();
   const profileDir = path.join(root, "profiles");
   const healthFile = path.join(root, "health.url");
   await fs.mkdir(profileDir, { recursive: true });
   await fs.rm(healthFile, { force: true });
+
   const launcher = await writeLauncher();
-  const initialized = await runClient(["init", "--sample", "sample_mcp_stdio_local", "--profile", "new-eden-sage", "--profile-dir", profileDir, "--tunnel-id", config.tunnelId, "--mcp-command", launcher, "--health-listen-addr", "127.0.0.1:0", "--force"]);
-  if (initialized.code !== 0) throw new Error(initialized.output.trim() || "Could not configure the OpenAI tunnel client.");
+  const initialized = await runClient([
+    "init",
+    "--sample",
+    "sample_mcp_stdio_local",
+    "--profile",
+    "new-eden-sage",
+    "--profile-dir",
+    profileDir,
+    "--tunnel-id",
+    config.tunnelId,
+    "--mcp-command",
+    launcher,
+    "--health-listen-addr",
+    "127.0.0.1:0",
+    "--force",
+  ]);
+  if (initialized.code !== 0) {
+    throw new Error(initialized.output.trim() || "Could not configure the OpenAI tunnel client.");
+  }
+
   const profile = path.join(profileDir, "new-eden-sage.yaml");
   let yaml = await fs.readFile(profile, "utf8");
-  yaml = yaml.replace(/# url_file:.*$/m, `url_file: "${healthFile.replaceAll("\\", "/")}"`);
+  yaml = yaml.replace(
+    /# url_file:.*$/m,
+    `url_file: "${healthFile.replaceAll("\\", "/")}"`,
+  );
   await fs.writeFile(profile, yaml, { encoding: "utf8", mode: 0o600 });
+
   const key = decryptRuntimeKey(config);
-  // spawn() duplicates/inherits the supplied descriptors for the child. Keep the
-  // parent FileHandle objects alive only until spawn returns, then close them
-  // explicitly so Electron never relies on GC to release descriptors.
   const stdout = await fs.open(path.join(root, "tunnel.stdout.log"), "a");
   try {
     const stderr = await fs.open(path.join(root, "tunnel.stderr.log"), "a");
     try {
-      tunnelProcess = spawn(tunnelExecutable(), ["run", "--profile-dir", profileDir, "--profile", "new-eden-sage"], {
-        detached: true,
-        windowsHide: true,
-        stdio: ["ignore", stdout.fd, stderr.fd],
-        env: { ...process.env, CONTROL_PLANE_API_KEY: key },
-      });
+      tunnelProcess = spawn(
+        tunnelExecutable(),
+        ["run", "--profile-dir", profileDir, "--profile", "new-eden-sage"],
+        {
+          detached: true,
+          windowsHide: true,
+          stdio: ["ignore", stdout.fd, stderr.fd],
+          env: { ...process.env, CONTROL_PLANE_API_KEY: key },
+        },
+      );
       tunnelProcess.unref();
     } finally {
       await stderr.close().catch(() => undefined);
@@ -129,6 +196,7 @@ export async function startMcpTunnel() {
   } finally {
     await stdout.close().catch(() => undefined);
   }
+
   await new Promise((resolve) => setTimeout(resolve, 1200));
   return getMcpTunnelStatus();
 }

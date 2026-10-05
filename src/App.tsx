@@ -1,4 +1,4 @@
-import { FormEvent, memo, useEffect, useRef, useState } from "react";
+﻿import { FormEvent, memo, useEffect, useRef, useState } from "react";
 import type {
   CharacterSnapshot,
   MarketItem,
@@ -21,6 +21,7 @@ import { IndustrialCommand } from "./IndustrialCommand";
 import { Loot } from "./Loot";
 import { AssetsCommand } from "./AssetsCommand";
 import { CorporationManagement } from "./CorporationManagement";
+import { StrategicCommand } from "./StrategicCommand";
 import { FleetCommand } from "./FleetCommand";
 import { NavigationCommand } from "./NavigationCommand";
 import { WormholeCommand } from "./WormholeCommand";
@@ -56,6 +57,7 @@ type View =
   | "wormholes"
   | "industrial"
   | "corporation"
+  | "strategic"
   | "fleet"
   | "fittings"
   | "loot"
@@ -77,6 +79,7 @@ const nav: Array<{ id: View; label: string }> = [
   { id: "loot", label: "Asset Command" },
   { id: "industrial", label: "Industrial Command" },
   { id: "corporation", label: "Corporation Command" },
+  { id: "strategic", label: "Strategic Command" },
   { id: "fleet", label: "Fleet Command" },
   { id: "settings", label: "Settings" },
 ];
@@ -132,6 +135,18 @@ function useVisibleValue<T>(value: T, visible: boolean): T {
 
 export default function App() {
   const [view, setView] = useState<View>("overview");
+  useEffect(() => {
+    const navigate = (event: Event) => {
+      const pageId = (event as CustomEvent<{ pageId: View }>).detail?.pageId;
+      if (nav.some((page) => page.id === pageId)) setView(pageId);
+    };
+    window.addEventListener("sage:mcp-navigate", navigate);
+    return () => window.removeEventListener("sage:mcp-navigate", navigate);
+  }, []);
+  useEffect(() => {
+    document.documentElement.dataset.sagePage = view;
+    document.documentElement.dataset.sagePages = JSON.stringify(nav);
+  }, [view]);
   const [fleetWargameActive, setFleetWargameActive] = useState(false);
   const [industrialSelectionCount, setIndustrialSelectionCount] = useState(0);
   const [industrialSection, setIndustrialSection] = useState("overview");
@@ -707,7 +722,7 @@ export default function App() {
           <button type="button" onClick={confirmSidebarOnboarding}>Got it</button>
         </div>
       )}
-      <main>
+      <main className={view === "strategic" ? "strategic-main" : undefined}>
         {view === "fittings" && (
           <div className="fitting-shell-topbar">
             <div className="fitting-shell-brand"><span>&#9671;</span><strong>NEW EDEN SAGE</strong><small>CAPSULEER INTELLIGENCE</small></div>
@@ -723,9 +738,11 @@ export default function App() {
                 ? "Plan activities, fittings and training for the selected capsuleer"
                 : view === "industrial"
                   ? "Live production, shared assets and industrial planning across your selected capsuleers"
-                  : "Unified public and private data controls for this command workspace"
+                  : view === "strategic"
+                    ? "Your EVE intelligence hub — ask Sage, plan, compare and act"
+                    : "Unified public and private data controls for this command workspace"
           }
-          kicker={view === "overview" ? "COMMAND DECK" : view === "industrial" ? "CAPSULEER PRODUCTION CONTROL" : "CAPSULEER INTELLIGENCE"}
+          kicker={view === "overview" ? "COMMAND DECK" : view === "industrial" ? "CAPSULEER PRODUCTION CONTROL" : view === "strategic" ? "STRATEGIC INTELLIGENCE" : "CAPSULEER INTELLIGENCE"}
           snapshot={active}
           busy={busy}
           privateRefreshing={privateRefreshActive}
@@ -737,7 +754,7 @@ export default function App() {
           showConnectedCount={ownerConnectedCountVisible}
         />}
         {mountedViews.current.has("overview") && (
-          <div className="cached-view" hidden={view !== "overview"}>
+          <div className="cached-view" data-sage-page="overview" hidden={view !== "overview"}>
             <CharacterCommand
               snapshot={overviewSnapshot}
               snapshots={overviewSnapshots}
@@ -754,7 +771,7 @@ export default function App() {
           <Settings config={config} snapshots={snapshots} onSaved={setConfig} />
         )}
         {mountedViews.current.has("skills") && (
-          <div className="cached-view" hidden={view !== "skills"}>
+          <div className="cached-view" data-sage-page="skills" hidden={view !== "skills"}>
             <RetainedSkillsWorkspace
               snapshot={skillsSnapshot}
               cloneState={skillsSnapshot ? cloneStates[skillsSnapshot.characterId] : undefined}
@@ -767,7 +784,7 @@ export default function App() {
           </div>
         )}
         {mountedViews.current.has("isk") && (
-          <div className="cached-view" hidden={view !== "isk"}>
+          <div className="cached-view" data-sage-page="isk" hidden={view !== "isk"}>
             <RetainedIskLab
               snapshot={iskSnapshot}
               active={view === "isk"}
@@ -778,12 +795,12 @@ export default function App() {
           </div>
         )}
         {mountedViews.current.has("fittings") && (
-          <div className="cached-view" hidden={view !== "fittings"}>
+          <div className="cached-view" data-sage-page="fittings" hidden={view !== "fittings"}>
             <RetainedFittingsWorkspace activeCharacterId={fittingsCharacterId} onExportToPlanner={(intent) => { if (intent.characterId) setActiveId(intent.characterId); setPlannerHullTypeId(intent.hullTypeId); setPlannerFitIntent(intent); setActivityCommandTab("planner"); setView("skills"); }} />
           </div>
         )}
         {mountedViews.current.has("loot") && (
-          <div className="cached-view" hidden={view !== "loot"}>
+          <div className="cached-view" data-sage-page="loot" hidden={view !== "loot"}>
             <AssetCommand
               snapshot={assetSnapshot}
               snapshots={assetSnapshots}
@@ -798,17 +815,17 @@ export default function App() {
           </div>
         )}
         {mountedViews.current.has("navigation") && (
-          <div className="cached-view" hidden={view !== "navigation"}>
+          <div className="cached-view" data-sage-page="navigation" hidden={view !== "navigation"}>
             <RetainedNavigationCommand />
           </div>
         )}
         {mountedViews.current.has("wormholes") && (
-          <div className="cached-view" hidden={view !== "wormholes"}>
+          <div className="cached-view" data-sage-page="wormholes" hidden={view !== "wormholes"}>
             <RetainedWormholeCommand snapshots={wormholeSnapshots} activeCharacterId={wormholeCharacterId} onSelectCharacter={selectCharacter} />
           </div>
         )}
         {mountedViews.current.has("industrial") && (
-          <div className="cached-view" hidden={view !== "industrial"}>
+          <div className="cached-view" data-sage-page="industrial" hidden={view !== "industrial"}>
             <RetainedIndustrialCommand
               snapshots={industrialSnapshots}
               activeCharacterId={industrialCharacterId}
@@ -820,8 +837,9 @@ export default function App() {
           </div>
         )}
         {view === "corporation" && <CorporationManagement />}
+        {view === "strategic" && <StrategicCommand />}
         {mountedViews.current.has("fleet") && (
-          <div className="cached-view" hidden={view !== "fleet"}>
+          <div className="cached-view" data-sage-page="fleet" hidden={view !== "fleet"}>
             <RetainedFleetCommand active={view === "fleet"} onWargameActiveChange={setFleetWargameActive} />
           </div>
         )}
@@ -1141,7 +1159,7 @@ function WalletCommand({ snapshot, snapshots, walletView, onWalletViewChange }: 
               <span><strong>{typeNames[Number(row.type_id)]??("Type "+row.type_id)}</strong><small className={row.is_buy?"buy":"sell"}>{row.is_buy?"BUY":"SELL"} · #{row.transaction_id}</small></span>
               <span>{Number(row.quantity??0).toLocaleString()}</span>
               <span>{money(Number(row.unit_price??0))} ISK</span>
-              <strong className={row.is_buy?"negative":"positive"}>{row.is_buy?"−":"+"}{money(Math.abs(Number(row.quantity??0)*Number(row.unit_price??0)))} ISK</strong>
+              <strong className={row.is_buy?"negative":"positive"}>{row.is_buy?"âˆ’":"+"}{money(Math.abs(Number(row.quantity??0)*Number(row.unit_price??0)))} ISK</strong>
             </div>)}
             {!walletRows.length&&<div className="empty-panel">No synced wallet transactions are available for this character yet.</div>}
           </div>
@@ -1451,6 +1469,7 @@ function Settings({
   const [tunnelId, setTunnelId] = useState("");
   const [runtimeKey, setRuntimeKey] = useState("");
   const [tunnelReady, setTunnelReady] = useState(false);
+  const ownerExternalAi = config.sageAccountId === "569399317" || config.primaryCharacterId === "569399317";
   const [claudeStatus, setClaudeStatus] = useState<ClaudeCompatibilityStatus | null>(null);
   const [claudeBusy, setClaudeBusy] = useState(false);
   useEffect(() => {
@@ -1524,7 +1543,7 @@ function Settings({
         <div>
           <p className="eyebrow">SAGE CONFIGURATION</p>
           <h2>Settings</h2>
-          <p>Connection, authorization and AI integration controls for this Sage installation.</p>
+          <p>Connection, authorization and Sage AI controls for this Sage installation.</p>
         </div>
       </header>
 
@@ -1546,7 +1565,7 @@ function Settings({
               const current = Boolean(authorization && authorization.scopeSchemaVersion === config.esiScopeSchemaVersion && !reauthorizationRequired);
               return <article key={snapshot.characterId}>
                 <div className="settings-character-auth-avatar">{snapshot.character.name.slice(0,1)}</div>
-                <div className="settings-character-auth-copy"><strong>{snapshot.character.name}</strong><span>{snapshot.character.corporation_name ?? "EVE character"}</span><small>{reauthorizationRequired ? "Local data preserved — live private ESI blocked until this character is re-authorised." : current ? `Scope schema current • ${authorization?.grantedScopes.length ?? 0} scopes • Full sync ${authorization?.lastFullPrivateSyncAt ? new Date(authorization.lastFullPrivateSyncAt).toLocaleString() : "pending"}` : "Saved locally — authorization metadata is not current."}</small>{authorization?.lastRefreshStatus === "error" && authorization.lastRefreshError && <small className="settings-auth-error">Last sync: {authorization.lastRefreshError}</small>}</div>
+                <div className="settings-character-auth-copy"><strong>{snapshot.character.name}</strong><span>{snapshot.character.corporation_name ?? "EVE character"}</span><small>{reauthorizationRequired ? "Local data preserved — live private ESI blocked until this character is re-authorised." : current ? `Scope schema current · ${authorization?.grantedScopes.length ?? 0} scopes · Full sync ${authorization?.lastFullPrivateSyncAt ? new Date(authorization.lastFullPrivateSyncAt).toLocaleString() : "pending"}` : "Saved locally — authorization metadata is not current."}</small>{authorization?.lastRefreshStatus === "error" && authorization.lastRefreshError && <small className="settings-auth-error">Last sync: {authorization.lastRefreshError}</small>}</div>
                 <span className={`settings-state ${reauthorizationRequired ? "muted" : current ? "ready" : "muted"}`}>{reauthorizationRequired ? "RE-AUTH REQUIRED" : current ? "CURRENT" : "LOCAL ONLY"}</span>
               </article>;
             })}</div> : <div className="settings-character-auth-empty">No EVE characters are saved on this PC.</div>}
@@ -1554,50 +1573,28 @@ function Settings({
           </div>
         </article>
 
+        {ownerExternalAi && (
         <article className="settings-connection-card mcp-settings-card settings-ai-card">
           <div className="settings-card-head">
-            <div><p className="eyebrow">AI INTEGRATIONS</p><h3>AI / MCP access</h3></div>
-            <span className={`settings-state ${tunnelReady ? "ready" : "muted"}`}>{tunnelReady ? "CHATGPT READY" : "LOCAL MCP"}</span>
+            <div><p className="eyebrow">OWNER INTEGRATION</p><h3>Private ChatGPT / Sage bridge</h3></div>
+            <span className={`settings-state ${tunnelReady ? "ready" : "muted"}`}>{tunnelReady ? "CHATGPT READY" : "OWNER ONLY"}</span>
           </div>
-          <p>Connect ChatGPT, Claude or Codex to Sage's local dataset. Character snapshots, ESI datasets, imported information and retained market data are exposed; credentials and encrypted values are removed.</p>
-
-          <div className="settings-integration-grid">
-            <section className="mcp-tunnel-panel settings-integration-card">
-              <div className="settings-integration-head"><div><span>CHATGPT</span><strong>Secure MCP Tunnel</strong></div><b className={tunnelReady ? "ready" : "muted"}>{tunnelReady ? "Ready" : "Not connected"}</b></div>
-              <label><span>Tunnel ID</span><input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" /></label>
-              <label><span>Runtime key</span><input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" /></label>
-              <div className="mcp-setup-actions">
-                <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
-                <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
-                <button className="primary" onClick={() => void connectChatGpt()}>Save and start</button>
-                <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
-              </div>
-              <small>The runtime key is encrypted with Windows secure storage and remains only on this PC.</small>
-            </section>
-
-            <ClaudeIntegrationCard
-              status={claudeStatus}
-              setup={mcpSetup}
-              busy={claudeBusy}
-              onInstall={() => void repairClaude()}
-              onVerify={() => void verifyClaude()}
-              onShowBundle={() => void showClaudeBundle()}
-              onDirectRepair={() => void repairClaudeDirect()}
-              onCopyCode={() => mcpSetup && void copyMcp(mcpSetup.claudeCode, "Claude Code command")}
-            />
-          </div>
-
-          {mcpSetup && <details className="mcp-advanced-settings">
-            <summary><span>Advanced MCP configuration</span><small>Codex, generic stdio config and manual setup</small></summary>
-            <div className="mcp-advanced-body">
-              <small>Transport: local stdio / Server: new-eden-sage / {mcpSetup.access}</small>
-              <div className="mcp-setup-actions"><button onClick={() => void copyMcp(mcpSetup.json, "Generic MCP configuration")}>Copy MCP config</button><button onClick={() => void copyMcp(mcpSetup.codex, "Codex configuration")}>Copy Codex config</button></div>
-              <div className="mcp-instructions"><strong>Manual connection notes</strong><ol><li>Sync characters and refresh any market data the AI needs.</li><li>For ChatGPT, create a tunnel and runtime key above, then choose <b>Add in ChatGPT</b>.</li><li>For Claude Desktop, use the Claude card above. The recommended MCPB install uses Claude's own approval screen; full manual steps and a direct-config fallback are included there.</li><li>For Codex, copy the Codex configuration into its <code>config.toml</code>.</li><li>Ask the AI to list Sage characters or available Sage data before detailed analysis.</li></ol><small>Sage can serve already-saved read data through the configured MCP transport; keep the desktop app available for workflows that require live Sage writes.</small></div>
-              <code className="mcp-command-preview">{mcpSetup.command} {mcpSetup.args.join(" ")}</code>
+          <p>This private bridge is available only to the Sage owner account. Customer accounts use Sage AI directly and do not expose external AI integrations.</p>
+          <section className="mcp-tunnel-panel settings-integration-card">
+            <div className="settings-integration-head"><div><span>CHATGPT</span><strong>Secure MCP Tunnel</strong></div><b className={tunnelReady ? "ready" : "muted"}>{tunnelReady ? "Ready" : "Not connected"}</b></div>
+            <label><span>Tunnel ID</span><input value={tunnelId} onChange={(event) => setTunnelId(event.target.value)} placeholder="OpenAI tunnel ID (tunnel_...)" /></label>
+            <label><span>Runtime key</span><input type="password" value={runtimeKey} onChange={(event) => setRuntimeKey(event.target.value)} placeholder="OpenAI runtime API key" autoComplete="off" /></label>
+            <div className="mcp-setup-actions">
+              <button onClick={() => void window.sage.openOpenAiTunnels()}>Create / view tunnel</button>
+              <button onClick={() => void window.sage.openOpenAiApiKeys()}>Create runtime key</button>
+              <button className="primary" onClick={() => void connectChatGpt()}>Save and start</button>
+              <button onClick={() => void window.sage.openChatGptPlugins()}>Add in ChatGPT</button>
             </div>
-          </details>}
+            <small>The runtime key is encrypted with Windows secure storage and remains only on this PC.</small>
+          </section>
           {mcpMessage && <div className="mcp-copy-status settings-message">{mcpMessage}</div>}
         </article>
+        )}
       </div>
     </section>
   );
@@ -2174,3 +2171,4 @@ function OrderDepth({
     </div>
   );
 }
+
