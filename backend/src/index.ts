@@ -4,7 +4,7 @@ import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, recoverLi
 import type { EventEnvelope, Principal, SageEnv } from "./types";
 import { deleteDiscordChannelMessage, discordBotRequest, discordGuildInviteUrl, discordInstallationState, findDiscordOperationAnnouncement, readDiscordGuildStructure, sendDiscordChannelMessage, sendDiscordDmToCharacter } from "./discord/service";
 import { cleanupDiscordSecurity, consumeDiscordActionTicket, issueDiscordActionTicket, registerDiscordDevice } from "./discord/security";
-import { handleHrApplicantApi, handleHrWorkspaceApi } from "./hr";
+import { handleHrApplicantApi, handleHrRecruiterApi } from "./hr";
 import { handleMailApi } from "./mail";
 import { cleanupStrategicAiLogs, handleStrategicAi, handleStrategicAiFailureReport } from "./strategic-ai";
 import { cleanupStrategicBrowserLogs, handleStrategicBrowserOpen, handleStrategicBrowserSearch } from "./strategic-browser";
@@ -1052,9 +1052,6 @@ async function handleWorkspaceApi(request: Request, env: SageEnv, url: URL): Pro
     return error(403, "workspace_access_denied", "Active verified workspace membership is required.");
   }
 
-  const hrResponse = await handleHrWorkspaceApi(request, env, url, principal, workspaceId, tail, (_permission, characterId) => hasHrAuthority(env, workspaceId, principal.accountId, characterId));
-  if (hrResponse) return hrResponse;
-
   const buybackResponse = await handleBuybackWorkspaceApi(request, env, url, principal, workspaceId, tail, { hasPermission: (workspaceId, accountId, permission, characterId) => hasPermission(env, workspaceId, accountId, permission, characterId), getActiveMembership: (workspaceId, accountId, characterId) => getActiveMembership(env, workspaceId, accountId, characterId), parseStringArray, newId, json, error });
   if (buybackResponse) return buybackResponse;
 
@@ -1339,6 +1336,13 @@ export default {
       if (principal instanceof Response) return principal;
       const mailResponse = await handleMailApi(request, env, url, principal);
       if (mailResponse) return mailResponse;
+    }
+
+    if (url.pathname.startsWith("/v1/hr/recruiter")) {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      const hrResponse = await handleHrRecruiterApi(request, env, url, principal);
+      if (hrResponse) return hrResponse;
     }
 
     if (url.pathname.startsWith("/v1/hr/applications/")) {

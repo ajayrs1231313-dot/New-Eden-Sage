@@ -179,7 +179,7 @@ contextBridge.exposeInMainWorld("sage", {
   findCorporationHomes: (input:unknown) => ipcRenderer.invoke("corp:find-home", input),
   scanCorporationHomeCandidate: (input:unknown) => ipcRenderer.invoke("corp:find-home-scan", input),
   updateCorporationRolePermission: (input:unknown) => ipcRenderer.invoke("corp:roles-update", input),
-  getCorporationHrState: (characterId:string) => ipcRenderer.invoke("corp:hr-state", characterId),
+  getCorporationHrState: (input:unknown) => ipcRenderer.invoke("corp:hr-state", input),
   createCorporationHrRequest: (input:unknown) => ipcRenderer.invoke("corp:hr-create", input),
   revokeCorporationHrRequest: (input:unknown) => ipcRenderer.invoke("corp:hr-revoke", input),
   resolveCorporationHrCode: (code:string) => ipcRenderer.invoke("corp:hr-resolve-code", code),

@@ -195,6 +195,7 @@ function ReportSection({section,applicantCharacterId}:{section:Section;applicant
   </details>;
 }
 
+
 export function CorporationHr({corporation,snapshots}:{corporation:CorpRecord;snapshots:any[]}){
   const [tab,setTab]=useState<"command"|"applications">("command");
   const [state,setState]=useState<HrState|null>(null);
@@ -217,15 +218,25 @@ export function CorporationHr({corporation,snapshots}:{corporation:CorpRecord;sn
 
   useEffect(()=>setLocalSnapshots(snapshots),[snapshots]);
 
+  const recruiterContext=useMemo(()=>({
+    characterId:corporation.characterId,
+    corporationId:corporation.corporationId,
+    corporationName:corporation.name,
+  }),[corporation.characterId,corporation.corporationId,corporation.name]);
+
   async function load(){
     setLoadError("");
     try{
-      const next=await (window.sage as any).getCorporationHrState(corporation.characterId) as HrState;
+      const next=await (window.sage as any).getCorporationHrState(recruiterContext) as HrState;
       setState(next);
-      if(!selectedId){const first=next.applications.find(row=>row.snapshot)?.request.applicationId??"";setSelectedId(first);}
-    }catch(error){setState(null);setLoadError(error instanceof Error?error.message:"Corporation HR command data is unavailable for this character.");}
+      setSelectedId(current=>{
+        if(current&&next.applications.some(row=>row.request.applicationId===current))return current;
+        return next.applications.find(row=>row.snapshot)?.request.applicationId??"";
+      });
+    }catch(error){setLoadError(error instanceof Error?error.message:String(error));}
   }
-  useEffect(()=>{void load();},[corporation.characterId]);
+
+  useEffect(()=>{void load();},[recruiterContext.characterId,recruiterContext.corporationId,recruiterContext.corporationName]);
 
   const categories=state?.categories??resolved?.categories??[];
   const labels=useMemo(()=>categoryMap(categories),[categories]);
@@ -241,65 +252,90 @@ export function CorporationHr({corporation,snapshots}:{corporation:CorpRecord;sn
   function toggleApplicant(id:CategoryId){setApplicantSelected(current=>{const next=new Set(current);next.has(id)?next.delete(id):next.add(id);return next;});}
 
   async function createRequest(){
-    setBusy(true);setCreated(null);
-    try{const result=await (window.sage as any).createCorporationHrRequest({characterId:corporation.characterId,requestedCategories:[...requested],expiresInHours:expiryHours});setCreated(result);await load();}
-    catch(error){setLoadError(error instanceof Error?error.message:"Could not create the HR request.");}finally{setBusy(false);}
+    setBusy(true);setLoadError("");
+    try{
+      const result=await (window.sage as any).createCorporationHrRequest({...recruiterContext,requestedCategories:[...requested],expiresInHours:expiryHours});
+      setCreated(result);await load();
+    }catch(error){setLoadError(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
   }
-  async function revoke(applicationId:string){setBusy(true);try{await (window.sage as any).revokeCorporationHrRequest({characterId:corporation.characterId,applicationId});await load();}catch(error){setLoadError(error instanceof Error?error.message:"Could not revoke the HR request.");}finally{setBusy(false);}}
+  async function revoke(applicationId:string){
+    setBusy(true);setLoadError("");
+    try{await (window.sage as any).revokeCorporationHrRequest({...recruiterContext,applicationId});await load();}
+    catch(error){setLoadError(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
+  }
   async function resolveCode(){
-    setApplicantStatus("");setResolved(null);setConsent(false);
+    setBusy(true);setApplicantStatus("");
     try{
       const result=await (window.sage as any).resolveCorporationHrCode(applicationCode.trim()) as Resolved;
       setResolved(result);
-      setApplicantSelected(new Set(result.requestedCategories.filter(id=>result.categories.find(row=>row.id===id)?.supported!==false)));
-      const first=connectedSnapshots[0]?.characterId;setApplicantCharacterId(first?String(first):"");
-      setApplicantStatus("Code resolved. Nothing has been submitted yet. Refresh ESI before submission if you want the report built from current data.");
-    }catch(error){setApplicantStatus(error instanceof Error?error.message:"Application code could not be resolved.");}
+      setApplicantSelected(new Set(result.requestedCategories.filter(id=>result.categories.find(c=>c.id===id)?.supported)));
+      const first=connectedSnapshots[0]?.characterId;setApplicantCharacterId(first?String(first):"");setConsent(false);
+    }catch(error){setApplicantStatus(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
   }
   async function refreshApplicantEsi(){
     if(!applicantCharacterId)return;
-    setApplicantRefreshBusy(true);
-    setApplicantStatus("Refreshing the selected character from ESI using Sage's stored authorization…");
+    setApplicantRefreshBusy(true);setApplicantStatus("");
     try{
-      const result=await (window.sage as any).runMasterUpdate({characterIds:[applicantCharacterId]});
-      if(result?.alreadyRunning)throw new Error("Another Sage private-data refresh is already running. Wait for it to finish and try again.");
+      await (window.sage as any).runMasterUpdate({characterIds:[applicantCharacterId]});
       const latest=await (window.sage as any).listSnapshots();
       const rows=Array.isArray(latest)?latest:[];setLocalSnapshots(rows);
       const fresh=rows.find((item:any)=>String(item?.characterId)===String(applicantCharacterId));
-      if(!fresh||fresh.snapshotState!=="synced")throw new Error("ESI refresh finished without a complete synced snapshot for this character.");
-      const selectedIds=[...applicantSelected];
-      const ready=selectedIds.filter(id=>categoryAvailable(fresh,id));
-      const missing=selectedIds.filter(id=>!categoryAvailable(fresh,id));
-      setApplicantStatus(`ESI refreshed ${date(fresh.updatedAt)}. ${ready.length}/${selectedIds.length} selected categories are available${missing.length?`; unavailable: ${missing.map(id=>labels.get(id)?.label??id).join(", ")}. If EVE returned a missing-scope error, update that character's authorization once in Settings.`:". The submission will use this fresh local snapshot."}`);
-    }catch(error){
-      const message=error instanceof Error?error.message:String(error);
-      setApplicantStatus(`ESI refresh failed: ${message} Sage reuses the stored refresh token; reconnecting is only required if EVE has revoked it or the character lacks a newly required scope.`);
-    }finally{setApplicantRefreshBusy(false);}
+      setApplicantStatus(fresh?.snapshotState==="synced"?"Applicant ESI snapshot refreshed.":"Refresh completed, but this character is not fully synced.");
+    }catch(error){setApplicantStatus(error instanceof Error?error.message:String(error));}
+    finally{setApplicantRefreshBusy(false);}
   }
   async function submitApplicant(){
-    if(!resolved||!applicantCharacterId||!consent||!applicantReady)return;
-    setBusy(true);
-    try{const result=await (window.sage as any).submitCorporationHrSnapshot({code:applicationCode.trim(),characterId:applicantCharacterId,selectedCategories:[...applicantSelected]});setApplicantStatus(`Submitted one-time snapshot at ${date(result?.snapshot?.capturedAt)}. No ongoing access was granted.`);setConsent(false);setResolved(null);await load();}
-    catch(error){setApplicantStatus(error instanceof Error?error.message:"Snapshot submission failed.");}finally{setBusy(false);}
+    if(!resolved||!applicantCharacterId||!consent)return;
+    setBusy(true);setApplicantStatus("");
+    try{
+      await (window.sage as any).submitCorporationHrSnapshot({code:applicationCode.trim(),characterId:applicantCharacterId,selectedCategories:[...applicantSelected]});
+      setApplicantStatus("Application snapshot submitted.");setResolved(null);setConsent(false);
+    }catch(error){setApplicantStatus(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
   }
-  async function withdrawApplicant(){if(!resolved)return;setBusy(true);try{await (window.sage as any).withdrawCorporationHrRequest(applicationCode.trim());setApplicantStatus("Application request declined/withdrawn. No snapshot was sent.");setConsent(false);setResolved(null);setApplicationCode("");}catch(error){setApplicantStatus(error instanceof Error?error.message:"Could not withdraw this application request.");}finally{setBusy(false);}}
-  async function addNote(){if(!selected||!note.trim())return;setBusy(true);try{await (window.sage as any).addCorporationHrNote({characterId:corporation.characterId,applicationId:selected.request.applicationId,text:note.trim()});setNote("");await load();}catch(error){setLoadError(error instanceof Error?error.message:"Could not add recruiter note.");}finally{setBusy(false);}}
-  async function setDecision(status:Status){if(!selected)return;setBusy(true);try{await (window.sage as any).setCorporationHrDecision({characterId:corporation.characterId,applicationId:selected.request.applicationId,status});await load();}catch(error){setLoadError(error instanceof Error?error.message:"Could not update application status.");}finally{setBusy(false);}}
+  async function withdrawApplicant(){
+    if(!resolved)return;
+    setBusy(true);
+    try{await (window.sage as any).withdrawCorporationHrRequest(applicationCode.trim());setApplicantStatus("Application request withdrawn.");setResolved(null);setConsent(false);}
+    catch(error){setApplicantStatus(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
+  }
+  async function addNote(){
+    if(!selected||!note.trim())return;
+    setBusy(true);setLoadError("");
+    try{await (window.sage as any).addCorporationHrNote({...recruiterContext,applicationId:selected.request.applicationId,text:note.trim()});setNote("");await load();}
+    catch(error){setLoadError(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
+  }
+  async function setDecision(status:Status){
+    if(!selected)return;
+    setBusy(true);setLoadError("");
+    try{await (window.sage as any).setCorporationHrDecision({...recruiterContext,applicationId:selected.request.applicationId,status});await load();}
+    catch(error){setLoadError(error instanceof Error?error.message:String(error));}
+    finally{setBusy(false);}
+  }
   async function copy(value:string){try{await (window.sage as any).copyText(value);}catch{await navigator.clipboard.writeText(value);}}
 
   return <div className="corp-hr">
-    <header className="corp-hr-hero"><div><p className="eyebrow">CORPORATION PERSONNEL COMMAND</p><h3>HR & Applicant Vetting</h3><p>Consensual recruitment intelligence built from immutable, one-time applicant snapshots. Submission never grants the corporation reusable ESI credentials or background access.</p></div><button className="primary" onClick={()=>setApplicantOpen(value=>!value)}>{applicantOpen?"Close applicant submission":"Submit an application code"}</button></header>
+    <header className="corp-hr-hero">
+      <div><p className="eyebrow">CORPORATION PERSONNEL COMMAND</p><h3>HR & Applicant Vetting</h3><p>Recruiter HR uses the selected Sage corporation identity directly. Applicant submissions remain consent-based, one-time snapshots.</p></div>
+      <button className="primary" onClick={()=>setApplicantOpen(value=>!value)}>{applicantOpen?"Close applicant submission":"Submit an application code"}</button>
+    </header>
 
     {applicantOpen&&<section className="corp-hr-applicant-panel">
-      <div className="corp-hr-one-time"><strong>ONE-TIME SNAPSHOT</strong><span>The applicant chooses exactly what is included. The corporation receives a report, not your EVE token, and Sage does not keep refreshing this application after submission.</span></div>
-      {!resolved?<div className="corp-hr-code-entry"><input value={applicationCode} onChange={event=>setApplicationCode(event.target.value)} placeholder="Paste NES-HR application code"/><button className="primary" onClick={()=>void resolveCode()} disabled={!applicationCode.trim()}>Resolve code</button></div>:<>
-        <div className="corp-hr-request-identity"><div><small>REQUESTING CORPORATION</small><strong>{resolved.corporationName}</strong><span>Recruiter: {resolved.recruiterName}</span></div><div><small>CODE EXPIRES</small><strong>{date(resolved.expiresAt)}</strong><span>Desktop-to-desktop via Sage Online</span></div></div>
-        <label className="corp-hr-character-picker"><span>Character being submitted</span><select value={applicantCharacterId} onChange={event=>{setApplicantCharacterId(event.target.value);setConsent(false);}}>{connectedSnapshots.map(item=><option key={item.characterId} value={item.characterId}>{item?.character?.name??`Character ${item.characterId}`} · {item.snapshotState==="synced"?`synced ${date(item.updatedAt)}`:"needs ESI refresh"}</option>)}</select></label>
-        <div className={`corp-hr-refresh-strip ${applicantReady?"ready":"needs-refresh"}`}><div><strong>{applicantReady?"LOCAL ESI SNAPSHOT READY":"ESI REFRESH REQUIRED"}</strong><span>{applicantSnapshot?.updatedAt?`Last refreshed ${date(applicantSnapshot.updatedAt)}`:"This character has not completed a private ESI sync yet."}</span><small>Refresh reuses Sage's stored EVE refresh token. It does not reconnect the character or send credentials to the recruiter. Only the categories you leave checked below are submitted.</small></div><button className="primary" disabled={!applicantCharacterId||applicantRefreshBusy} onClick={()=>void refreshApplicantEsi()}>{applicantRefreshBusy?"Refreshing ESI…":"Refresh applicant ESI"}</button></div>
-        <div className="corp-hr-consent-grid">{resolved.categories.map(category=>{const wanted=resolved.requestedCategories.includes(category.id);const checked=applicantSelected.has(category.id);const available=applicantSnapshot?categoryAvailable(applicantSnapshot,category.id):false;return <label key={category.id} className={`corp-hr-consent-card ${checked?"selected":""} ${!category.supported?"unsupported":""}`}><input type="checkbox" checked={checked} disabled={!category.supported} onChange={()=>toggleApplicant(category.id)}/><span><strong>{category.label}</strong><small>{wanted?"REQUESTED BY CORPORATION":"OPTIONAL / NOT REQUESTED"} {applicantReady?`· ${available?"READY":"UNAVAILABLE"}`:""}</small><p>{category.description}</p>{!category.supported&&<em>Not currently available from Sage; it will be reported as unavailable rather than treated as withheld.</em>}</span></label>;})}</div>
+      <div className="corp-hr-one-time"><strong>ONE-TIME SNAPSHOT</strong><span>The applicant chooses exactly what is included. The corporation receives a report, not reusable ESI credentials.</span></div>
+      {!resolved?<div className="corp-hr-code-entry"><input value={applicationCode} onChange={event=>setApplicationCode(event.target.value)} placeholder="Paste NES-HR application code"/><button className="primary" onClick={()=>void resolveCode()} disabled={!applicationCode.trim()||busy}>{busy?"Resolving…":"Resolve code"}</button></div>:<>
+        <div className="corp-hr-request-identity"><div><small>REQUESTING CORPORATION</small><strong>{resolved.corporationName}</strong><span>Recruiter: {resolved.recruiterName}</span></div><div><small>CODE EXPIRES</small><strong>{date(resolved.expiresAt)}</strong><span>Single-use Sage request</span></div></div>
+        <label className="corp-hr-character-picker"><span>Character being submitted</span><select value={applicantCharacterId} onChange={event=>{setApplicantCharacterId(event.target.value);setConsent(false);}}>{connectedSnapshots.map(item=><option key={item.characterId} value={item.characterId}>{item?.character?.name??("Character "+item.characterId)} · {item.snapshotState==="synced"?"synced":"refresh needed"}</option>)}</select></label>
+        <div className={"corp-hr-refresh-strip "+(applicantReady?"ready":"needs-refresh")}><div><strong>{applicantReady?"LOCAL ESI SNAPSHOT READY":"ESI REFRESH REQUIRED"}</strong><span>{applicantSnapshot?.updatedAt?("Last refreshed "+date(applicantSnapshot.updatedAt)):"No synced private snapshot."}</span></div><button className="primary" disabled={!applicantCharacterId||applicantRefreshBusy} onClick={()=>void refreshApplicantEsi()}>{applicantRefreshBusy?"Refreshing…":"Refresh applicant ESI"}</button></div>
+        <div className="corp-hr-consent-grid">{resolved.categories.map(category=>{const wanted=resolved.requestedCategories.includes(category.id);const checked=applicantSelected.has(category.id);return <label key={category.id} className={(checked?"selected ":"")+(!category.supported?"unsupported":"")}><input type="checkbox" checked={checked} disabled={!category.supported} onChange={()=>toggleApplicant(category.id)}/><span><strong>{category.label}</strong><small>{wanted?"REQUESTED BY CORPORATION":"OPTIONAL / NOT REQUESTED"}</small><p>{category.description}</p></span></label>;})}</div>
         <div className="corp-hr-consent-summary"><strong>What will be sent</strong><span>Selected: {[...applicantSelected].map(id=>labels.get(id)?.label??id).join(", ")||"Nothing"}</span><span>Requested but excluded: {resolved.requestedCategories.filter(id=>!applicantSelected.has(id)).map(id=>labels.get(id)?.label??id).join(", ")||"None"}</span></div>
-        <label className="corp-hr-confirm"><input type="checkbox" checked={consent} onChange={event=>setConsent(event.target.checked)}/><span>I confirm that this sends a one-time snapshot of the selected information to <strong>{resolved.corporationName}</strong>. It does not give the corporation ongoing access to my EVE account.</span></label>
-        <button className="primary corp-hr-submit" disabled={!consent||!applicantCharacterId||!applicantReady||busy||applicantRefreshBusy} onClick={()=>void submitApplicant()}>{!applicantReady?"Refresh ESI before submitting":busy?"Submitting snapshot…":"Submit one-time snapshot"}</button><button className="corp-hr-decline" disabled={busy||applicantRefreshBusy} onClick={()=>void withdrawApplicant()}>Decline / withdraw request</button>
+        <label className="corp-hr-confirm"><input type="checkbox" checked={consent} onChange={event=>setConsent(event.target.checked)}/><span>I confirm this sends a one-time snapshot of the selected information to <strong>{resolved.corporationName}</strong>.</span></label>
+        <button className="primary corp-hr-submit" disabled={!consent||!applicantCharacterId||!applicantReady||busy||applicantRefreshBusy} onClick={()=>void submitApplicant()}>{busy?"Submitting…":"Submit one-time snapshot"}</button>
+        <button className="corp-hr-decline" disabled={busy||applicantRefreshBusy} onClick={()=>void withdrawApplicant()}>Decline / withdraw request</button>
       </>}
       {applicantStatus&&<div className="corp-hr-status-line">{applicantStatus}</div>}
     </section>}
@@ -308,21 +344,24 @@ export function CorporationHr({corporation,snapshots}:{corporation:CorpRecord;sn
     {loadError&&<div className="corp-hr-warning">{loadError}</div>}
 
     {tab==="command"?<div className="corp-hr-command">
-      <section className="corp-hr-panel"><div className="corp-hr-panel-head"><div><p className="eyebrow">NEW VETTING REQUEST</p><h4>Choose what you would like the applicant to provide</h4><p>These are requests, not compulsory permissions. The applicant can remove any supported category before submission.</p></div><div className="corp-hr-expiry"><span>Expires</span><select value={expiryHours} onChange={event=>setExpiryHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={72}>3 days</option><option value={168}>7 days</option><option value={336}>14 days</option><option value={720}>30 days</option></select></div></div>
-        <div className="corp-hr-category-grid">{(state?.categories??[]).map(category=><label key={category.id} className={`${requested.has(category.id)?"selected":""} ${!category.supported?"unsupported":""}`}><input type="checkbox" checked={requested.has(category.id)} disabled={!category.supported} onChange={()=>toggleRequested(category.id)}/><span><strong>{category.label}</strong><small>{category.source}</small><p>{category.description}</p></span></label>)}</div>
+      <section className="corp-hr-panel">
+        <div className="corp-hr-panel-head"><div><p className="eyebrow">NEW VETTING REQUEST</p><h4>Choose what you would like the applicant to provide</h4><p>These are requests. The applicant can remove any supported category before submission.</p></div><div className="corp-hr-expiry"><span>Expires</span><select value={expiryHours} onChange={event=>setExpiryHours(Number(event.target.value))}><option value={24}>24 hours</option><option value={72}>3 days</option><option value={168}>7 days</option><option value={336}>14 days</option><option value={720}>30 days</option></select></div></div>
+        <div className="corp-hr-category-grid">{(state?.categories??[]).map(category=><label key={category.id} className={(requested.has(category.id)?"selected ":"")+(!category.supported?"unsupported":"")}><input type="checkbox" checked={requested.has(category.id)} disabled={!category.supported} onChange={()=>toggleRequested(category.id)}/><span><strong>{category.label}</strong><small>{category.source}</small><p>{category.description}</p></span></label>)}</div>
         <div className="corp-hr-create-row"><span>{requested.size} categories requested</span><button className="primary" disabled={!requested.size||busy} onClick={()=>void createRequest()}>{busy?"Creating…":"Generate application code"}</button></div>
       </section>
-      {created&&<section className="corp-hr-generated"><p className="eyebrow">APPLICATION CREATED</p><h4>Single-use applicant code</h4><div className="corp-hr-generated-code"><code>{created.applicationCode}</code><button onClick={()=>void copy(created.applicationCode)}>Copy code</button></div><div className="corp-hr-desktop-handoff"><strong>Send this code to the applicant</strong><p>They open New Eden Sage → Corporation Management → HR → Submit an application code, paste it, choose their character, refresh ESI if needed, and choose exactly what they consent to send. The code works across Sage desktop installations and can be used only once.</p></div></section>}
-      <section className="corp-hr-panel"><div className="corp-hr-panel-head"><div><p className="eyebrow">OUTSTANDING REQUESTS</p><h4>Awaiting applicants</h4></div><button onClick={()=>void load()}>Refresh</button></div>{!pending.length?<div className="system-empty">No live one-time applicant codes.</div>:<div className="corp-hr-request-list">{pending.map(row=><article key={row.request.applicationId}><div><strong>{row.request.applicationId.slice(0,8)}</strong><span>{row.request.requestedCategories.length} categories · expires {date(row.request.expiresAt)}</span><small>Code hint …{row.request.codeHint??""}</small></div><span className={`corp-hr-pill ${row.request.status}`}>{prettyStatus(row.request.status)}</span><button disabled={busy} onClick={()=>void revoke(row.request.applicationId)}>Revoke</button></article>)}</div>}</section>
+
+      {created&&<section className="corp-hr-generated"><p className="eyebrow">APPLICATION CREATED</p><h4>Single-use applicant code</h4><div className="corp-hr-generated-code"><code>{created.applicationCode}</code><button onClick={()=>void copy(created.applicationCode)}>Copy code</button></div><div className="corp-hr-desktop-handoff"><strong>Send this code to the applicant</strong><p>They open Corporation Management → HR → Submit an application code, choose their character, refresh ESI if required, and choose what they consent to send.</p></div></section>}
+
+      <section className="corp-hr-panel"><div className="corp-hr-panel-head"><div><p className="eyebrow">OUTSTANDING REQUESTS</p><h4>Awaiting applicants</h4></div><button onClick={()=>void load()}>Refresh</button></div>{!pending.length?<div className="system-empty">No live one-time applicant codes.</div>:<div className="corp-hr-request-list">{pending.map(row=><article key={row.request.applicationId}><div><strong>{row.request.applicationId.slice(0,8)}</strong><span>{row.request.requestedCategories.length} categories · expires {date(row.request.expiresAt)}</span><small>Code hint …{row.request.codeHint??""}</small></div><span className={"corp-hr-pill "+row.request.status}>{prettyStatus(row.request.status)}</span><button disabled={busy} onClick={()=>void revoke(row.request.applicationId)}>Revoke</button></article>)}</div>}</section>
     </div>:<div className="corp-hr-applications">
-      <aside className="corp-hr-dossier-list">{!completed.length?<div className="system-empty">No completed applicant snapshots yet.</div>:completed.map(row=><button key={row.request.applicationId} className={selected?.request.applicationId===row.request.applicationId?"active":""} onClick={()=>setSelectedId(row.request.applicationId)}><img src={portrait(row.snapshot!.applicantCharacterId,64)} alt=""/><span><strong>{row.snapshot!.applicantCharacterName}</strong><small>{row.snapshot!.applicantCorporationName??"Corporation unavailable"}</small><em>{prettyStatus(row.request.status)} · {date(row.snapshot!.capturedAt)}</em></span><b>{row.snapshot!.withheldCategories.length?`${row.snapshot!.withheldCategories.length} withheld`:"complete"}</b></button>)}</aside>
+      <aside className="corp-hr-dossier-list">{!completed.length?<div className="system-empty">No completed applicant snapshots yet.</div>:completed.map(row=><button key={row.request.applicationId} className={selected?.request.applicationId===row.request.applicationId?"active":""} onClick={()=>setSelectedId(row.request.applicationId)}><img src={portrait(row.snapshot!.applicantCharacterId,64)} alt=""/><span><strong>{row.snapshot!.applicantCharacterName}</strong><small>{row.snapshot!.applicantCorporationName??"Corporation unavailable"}</small><em>{prettyStatus(row.request.status)} · {date(row.snapshot!.capturedAt)}</em></span><b>{row.snapshot!.withheldCategories.length?(row.snapshot!.withheldCategories.length+" withheld"):"complete"}</b></button>)}</aside>
       <main className="corp-hr-dossier">{selected?.snapshot?<>
-        <header className="corp-hr-dossier-head"><img src={portrait(selected.snapshot.applicantCharacterId,128)} alt=""/><div><p className="eyebrow">RECRUITMENT INTELLIGENCE / APPLICANT DOSSIER</p><h3>{selected.snapshot.applicantCharacterName}</h3><p>{selected.snapshot.applicantCorporationName??"Corporation unavailable"}{selected.snapshot.applicantAllianceId?` · Alliance ${selected.snapshot.applicantAllianceId}`:""}</p><div className="corp-hr-dossier-meta"><span>Application {selected.request.applicationId.slice(0,8)}</span><span>Sage Desktop</span><span>Schema v{selected.snapshot.schemaVersion}</span></div></div><span className={`corp-hr-pill ${selected.request.status}`}>{prettyStatus(selected.request.status)}</span></header>
-        <div className="corp-hr-snapshot-banner"><strong>ONE-TIME SNAPSHOT · {date(selected.snapshot.capturedAt)}</strong><span>Snapshot age {age(selected.snapshot.capturedAt)} · source character sync {date(selected.snapshot.sourceSnapshotUpdatedAt)}</span><small>The factual snapshot below is immutable. Recruiter notes and decisions are stored separately.</small></div>
+        <header className="corp-hr-dossier-head"><img src={portrait(selected.snapshot.applicantCharacterId,128)} alt=""/><div><p className="eyebrow">RECRUITMENT INTELLIGENCE / APPLICANT DOSSIER</p><h3>{selected.snapshot.applicantCharacterName}</h3><p>{selected.snapshot.applicantCorporationName??"Corporation unavailable"}</p><div className="corp-hr-dossier-meta"><span>Application {selected.request.applicationId.slice(0,8)}</span><span>Sage Desktop</span><span>Schema v{selected.snapshot.schemaVersion}</span></div></div><span className={"corp-hr-pill "+selected.request.status}>{prettyStatus(selected.request.status)}</span></header>
+        <div className="corp-hr-snapshot-banner"><strong>ONE-TIME SNAPSHOT · {date(selected.snapshot.capturedAt)}</strong><span>Snapshot age {age(selected.snapshot.capturedAt)} · source character sync {date(selected.snapshot.sourceSnapshotUpdatedAt)}</span><small>The factual snapshot is immutable. Recruiter notes and decisions are stored separately.</small></div>
         <div className="corp-hr-completeness"><div><strong>{selected.snapshot.providedCategories.length}</strong><span>Provided</span></div><div><strong>{selected.snapshot.withheldCategories.length}</strong><span>Withheld</span></div><div><strong>{selected.snapshot.unavailableCategories.length}</strong><span>Unavailable</span></div><div><strong>{selected.snapshot.errorCategories.length}</strong><span>Collection errors</span></div></div>
-        {selected.snapshot.reviewFlags.length>0&&<section className="corp-hr-flags"><p className="eyebrow">EVIDENCE-BACKED REVIEW FLAGS</p>{selected.snapshot.reviewFlags.map(flag=>{const evidence=(selected.snapshot?.evidence??[]).filter(item=>flag.evidenceIds.includes(item.id));return <article key={flag.id} className={flag.severity==="review"?"review":"info"}><strong>{flag.label}</strong><p>{flag.detail}</p>{evidence.length>0&&<div className="corp-hr-flag-evidence">{evidence.map(item=><small key={item.id}><b>{item.label}:</b> {item.detail}</small>)}</div>}</article>;})}<small className="corp-hr-flag-disclaimer">Flags identify evidence worth reviewing. They are not an automated spy verdict and should be interpreted with the underlying snapshot.</small></section>}
+        {selected.snapshot.reviewFlags.length>0&&<section className="corp-hr-flags"><p className="eyebrow">EVIDENCE-BACKED REVIEW FLAGS</p>{selected.snapshot.reviewFlags.map(flag=>{const evidence=(selected.snapshot?.evidence??[]).filter(item=>flag.evidenceIds.includes(item.id));return <article key={flag.id} className={flag.severity==="review"?"review":"info"}><strong>{flag.label}</strong><p>{flag.detail}</p>{evidence.map(item=><small key={item.id}><b>{item.label}:</b> {item.detail}</small>)}</article>;})}</section>}
         <section className="corp-hr-report-sections"><p className="eyebrow">SNAPSHOT SECTIONS</p>{selected.snapshot.sections.map(section=><ReportSection key={section.categoryId} section={section} applicantCharacterId={selected.snapshot!.applicantCharacterId}/>)}</section>
-        <section className="corp-hr-review"><div className="corp-hr-review-actions"><p className="eyebrow">RECRUITER STATUS</p><div>{REVIEW_STATUSES.map(option=><button key={option.value} disabled={busy} className={selected.request.status===option.value?"active":""} onClick={()=>void setDecision(option.value)}>{option.label}</button>)}</div></div><div className="corp-hr-notes"><p className="eyebrow">RECRUITER NOTES</p>{selected.notes.map(item=><article key={item.id}><strong>{item.recruiterName}</strong><small>{date(item.createdAt)}</small><p>{item.text}</p></article>)}<div className="corp-hr-note-entry"><textarea value={note} onChange={event=>setNote(event.target.value)} placeholder="Add evidence-based recruiter notes. Notes never modify the submitted snapshot."/><button className="primary" disabled={!note.trim()||busy} onClick={()=>void addNote()}>Add note</button></div></div></section>
+        <section className="corp-hr-review"><div className="corp-hr-review-actions"><p className="eyebrow">RECRUITER STATUS</p><div>{REVIEW_STATUSES.map(option=><button key={option.value} disabled={busy} className={selected.request.status===option.value?"active":""} onClick={()=>void setDecision(option.value)}>{option.label}</button>)}</div></div><div className="corp-hr-notes"><p className="eyebrow">RECRUITER NOTES</p>{selected.notes.map(item=><article key={item.id}><strong>{item.recruiterName}</strong><small>{date(item.createdAt)}</small><p>{item.text}</p></article>)}<div className="corp-hr-note-entry"><textarea value={note} onChange={event=>setNote(event.target.value)} placeholder="Add evidence-based recruiter notes."/><button className="primary" disabled={!note.trim()||busy} onClick={()=>void addNote()}>Add note</button></div></div></section>
       </>:<div className="system-empty">Select a submitted applicant dossier.</div>}</main>
     </div>}
   </div>;

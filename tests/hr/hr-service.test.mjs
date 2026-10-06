@@ -179,7 +179,8 @@ test("desktop-to-desktop HR transport is server-backed and does not refresh appl
   const migration = fs.readFileSync(new URL("../../backend/migrations/0010_corporation_hr.sql", import.meta.url), "utf8");
   assert.match(online, /\/v1\/hr\/applications\/resolve/);
   assert.match(online, /\/v1\/hr\/applications\/submit/);
-  assert.match(online, /hr\/applications\/\$\{encodeURIComponent\(applicationId\)\}\/notes/);
+  assert.ok(online.includes("/v1/hr/recruiter/applications/"));
+  assert.ok(online.includes("/notes"));
   assert.doesNotMatch(online, /refreshEveToken|X-EVE-Access-Token/);
   const submitHandler = main.slice(main.indexOf('ipcMain.handle("corp:hr-submit-snapshot"'), main.indexOf('ipcMain.handle("corp:hr-withdraw"')); 
   assert.match(submitHandler, /getSnapshot/);
@@ -199,18 +200,23 @@ test("desktop-to-desktop HR transport is server-backed and does not refresh appl
   assert.match(migration, /hr\.review/);
 });
 
-test("HR authority is isolated from generic corporation permissions", () => {
+test("HR recruiter path is independent from corporation permission machinery", () => {
   const backend = fs.readFileSync(new URL("../../backend/src/index.ts", import.meta.url), "utf8");
+  const backendHr = fs.readFileSync(new URL("../../backend/src/hr.ts", import.meta.url), "utf8");
   const desktop = fs.readFileSync(new URL("../../electron/main-task9.ts", import.meta.url), "utf8");
-  const migration = fs.readFileSync(new URL("../../backend/migrations/0014_hr_permission_rewrite.sql", import.meta.url), "utf8");
-  assert.match(backend, /async function hasHrAuthority\(/);
-  assert.match(backend, /roles\.has\("Director"\)/);
-  assert.match(backend, /titles\.has\("recruitment officer"\)/);
-  assert.match(backend, /administrator\.isCeo \|\| administrator\.isDirector/);
-  assert.doesNotMatch(backend, /key: "hr\.manage"/);
-  assert.doesNotMatch(backend, /key: "hr\.review"/);
-  assert.match(backend, /handleHrWorkspaceApi[\s\S]*hasHrAuthority/);
-  assert.match(desktop, /roles\.has\("Director"\)/);
-  assert.match(desktop, /titles\.has\("recruitment officer"\)/);
-  assert.match(migration, /permission IN \('hr\.manage', 'hr\.review'\)/);
+  const page = fs.readFileSync(new URL("../../src/CorporationHr.tsx", import.meta.url), "utf8");
+
+  assert.ok(backend.includes('url.pathname.startsWith("/v1/hr/recruiter")'));
+  assert.doesNotMatch(backend, /handleHrWorkspaceApi/);
+  assert.match(backendHr, /handleHrRecruiterApi/);
+  assert.ok(backendHr.includes("eve_identities WHERE character_id=?1 AND account_id=?2"));
+  assert.doesNotMatch(backendHr.slice(backendHr.indexOf("handleHrRecruiterApi")), /hr\.manage|hr\.review|hasHrAuthority/);
+
+  const stateHandler = desktop.slice(
+    desktop.indexOf('ipcMain.handle("corp:hr-state"'),
+    desktop.indexOf('ipcMain.handle("market:global-quotes"'),
+  );
+  assert.match(stateHandler, /sageOnlineSessionTokenOnly/);
+  assert.doesNotMatch(stateHandler, /planetaryCorporationContext|hrWorkspaceAuthority|canManage|canReview/);
+  assert.doesNotMatch(page, /can_manage_hr|can_review_hr|hr\.manage|hr\.review|permission/i);
 });

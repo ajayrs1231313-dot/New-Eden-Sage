@@ -57,23 +57,51 @@ async function mutateJson<T>(path: string, sageSessionToken: string, method: "PO
   return parseResponse<T>(response);
 }
 
-export function listSageHrApplications(sageSessionToken: string, workspaceId: string, characterId: number) {
-  return getJson<{ applications: SageHrApplicationRecord[]; transport: "sage-online-desktop" }>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/hr/applications?character_id=${encodeURIComponent(String(characterId))}`,
+export function listSageHrApplications(sageSessionToken: string, characterId: number, corporationId: number, corporationName: string) {
+  const query = new URLSearchParams({
+    character_id: String(characterId),
+    corporation_id: String(corporationId),
+    corporation_name: corporationName,
+  });
+  return getJson<{ workspace: Record<string, any>; applications: SageHrApplicationRecord[]; transport: "sage-online-desktop" }>(
+    `/v1/hr/recruiter/state?${query.toString()}`,
     sageSessionToken,
   );
 }
 
-export function createSageHrRequest(sageSessionToken: string, workspaceId: string, characterId: number, input: { requestedCategories: SageHrDataCategoryId[]; expiresInHours?: number }) {
+export function createSageHrRequest(
+  sageSessionToken: string,
+  characterId: number,
+  corporationId: number,
+  corporationName: string,
+  input: { requestedCategories: SageHrDataCategoryId[]; expiresInHours?: number },
+) {
+  const query = new URLSearchParams({
+    character_id: String(characterId),
+    corporation_id: String(corporationId),
+    corporation_name: corporationName,
+  });
   return mutateJson<{ request: Record<string, any>; applicationCode: string; transport: "sage-online-desktop" }>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/hr/applications`, sageSessionToken, "POST",
-    { requested_categories: input.requestedCategories, expires_in_hours: input.expiresInHours }, characterId,
+    `/v1/hr/recruiter/request?${query.toString()}`, sageSessionToken, "POST",
+    { requested_categories: input.requestedCategories, expires_in_hours: input.expiresInHours },
   );
 }
 
-export function revokeSageHrRequest(sageSessionToken: string, workspaceId: string, characterId: number, applicationId: string) {
+export function revokeSageHrRequest(
+  sageSessionToken: string,
+  characterId: number,
+  corporationId: number,
+  corporationName: string,
+  applicationId: string,
+) {
+  const query = new URLSearchParams({
+    character_id: String(characterId),
+    corporation_id: String(corporationId),
+    corporation_name: corporationName,
+  });
   return mutateJson<SageHrApplicationRecord>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/hr/applications/${encodeURIComponent(applicationId)}/revoke`, sageSessionToken, "POST", undefined, characterId,
+    `/v1/hr/recruiter/applications/${encodeURIComponent(applicationId)}/revoke?${query.toString()}`,
+    sageSessionToken, "POST",
   );
 }
 
@@ -93,14 +121,40 @@ export function withdrawSageHrRequest(sageSessionToken: string, code: string) {
   );
 }
 
-export function addSageHrNote(sageSessionToken: string, workspaceId: string, characterId: number, applicationId: string, text: string) {
+export function addSageHrNote(
+  sageSessionToken: string,
+  characterId: number,
+  corporationId: number,
+  corporationName: string,
+  applicationId: string,
+  text: string,
+) {
+  const query = new URLSearchParams({
+    character_id: String(characterId),
+    corporation_id: String(corporationId),
+    corporation_name: corporationName,
+  });
   return mutateJson<SageHrApplicationRecord>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/hr/applications/${encodeURIComponent(applicationId)}/notes`, sageSessionToken, "POST", { text }, characterId,
+    `/v1/hr/recruiter/applications/${encodeURIComponent(applicationId)}/notes?${query.toString()}`,
+    sageSessionToken, "POST", { text },
   );
 }
 
-export function setSageHrDecision(sageSessionToken: string, workspaceId: string, characterId: number, applicationId: string, status: string) {
+export function setSageHrDecision(
+  sageSessionToken: string,
+  characterId: number,
+  corporationId: number,
+  corporationName: string,
+  applicationId: string,
+  status: string,
+) {
+  const query = new URLSearchParams({
+    character_id: String(characterId),
+    corporation_id: String(corporationId),
+    corporation_name: corporationName,
+  });
   return mutateJson<SageHrApplicationRecord>(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/hr/applications/${encodeURIComponent(applicationId)}/decision`, sageSessionToken, "POST", { status }, characterId,
+    `/v1/hr/recruiter/applications/${encodeURIComponent(applicationId)}/decision?${query.toString()}`,
+    sageSessionToken, "POST", { status },
   );
 }
