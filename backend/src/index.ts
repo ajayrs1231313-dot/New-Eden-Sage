@@ -1,4 +1,4 @@
-﻿import { handleBuybackWorkspaceApi, listBuybackNotifications, acknowledgeBuybackNotification } from "./buybacks";
+import { handleBuybackWorkspaceApi, listBuybackNotifications, acknowledgeBuybackNotification } from "./buybacks";
 import { WorkspaceHub } from "./realtime/workspace-hub";
 import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, recoverLinkedIdentitySession, verifyEveAccessToken } from "./identity";
 import type { EventEnvelope, Principal, SageEnv } from "./types";
@@ -694,7 +694,7 @@ async function discordOauthCallback(request:Request,env:SageEnv,url:URL){
     env.DB.prepare("DELETE FROM discord_oauth_states WHERE state=?1").bind(state),
     env.DB.prepare(`INSERT INTO audit_log (workspace_id,actor_account_id,action,resource_type,resource_id,detail_json) VALUES (?1,?2,'discord.user_link','discord.user',?3,?4)`).bind(row.workspace_id,row.account_id,user.id,JSON.stringify({eve_character_id:row.eve_character_id,discord_username:user.username??null})),
   ]);
-  return new Response(`<!doctype html><meta charset="utf-8"><title>New Eden Sage Â· Discord Linked</title><style>body{font-family:system-ui;background:#071014;color:#dce8ee;display:grid;place-items:center;height:100vh;margin:0}.c{border:1px solid #385261;background:#0c171d;padding:28px;max-width:520px}h1{color:#9cdb93}</style><div class="c"><h1>Discord linked to New Eden Sage</h1><p>${String(user.global_name??user.username??"Discord user")} is now opted in for Sage Discord alerts on this corporation workspace.</p><p>You can close this window and return to Sage.</p></div>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
+  return new Response(`<!doctype html><meta charset="utf-8"><title>New Eden Sage - Discord Linked</title><style>body{font-family:system-ui;background:#071014;color:#dce8ee;display:grid;place-items:center;height:100vh;margin:0}.c{border:1px solid #385261;background:#0c171d;padding:28px;max-width:520px}h1{color:#9cdb93}</style><div class="c"><h1>Discord linked to New Eden Sage</h1><p>${String(user.global_name??user.username??"Discord user")} is now opted in for Sage Discord alerts on this corporation workspace.</p><p>You can close this window and return to Sage.</p></div>`,{headers:{"Content-Type":"text/html; charset=utf-8"}});
 }
 async function updateDiscordNotificationTargets(request:Request,env:SageEnv,principal:Principal,workspaceId:string){
   const actorCharacterId=Number(request.headers.get("X-Sage-Character-ID")??0);

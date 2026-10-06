@@ -298,3 +298,15 @@ main.strategic-main>footer{flex:0 0 auto}
   .sc-toolbar{align-items:flex-start}
   .sc-toolbar-actions{flex-wrap:wrap;justify-content:flex-end}
 }
+
+
+/* Strategic Command assistant markdown */
+.sc-message-bubble .sc-md-line{min-height:1.35em}
+.sc-message-bubble .sc-md-gap{height:.65em}
+.sc-message-bubble .sc-md-heading{font-weight:700;color:#e7f3f5;margin:.45em 0 .2em}
+.sc-message-bubble .sc-md-h1{font-size:1.16em}
+.sc-message-bubble .sc-md-h2{font-size:1.09em}
+.sc-message-bubble .sc-md-h3{font-size:1.02em}
+.sc-message-bubble .sc-md-list-item{display:flex;align-items:flex-start;gap:.55em;margin:.12em 0}
+.sc-message-bubble .sc-md-bullet{flex:0 0 auto;color:#79aeb7}
+.sc-message-bubble .sc-md-rule{border:0;border-top:1px solid #294249;margin:.7em 0}

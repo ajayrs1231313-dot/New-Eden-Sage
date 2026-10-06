@@ -22,6 +22,37 @@ const STARTERS = [
   ["Ask anything", "Use the whole Sage intelligence layer", "What can you help me with using everything Sage knows about my EVE setup?"],
 ] as const;
 
+function renderInlineMarkdown(text: string) {
+  return text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function renderMessageContent(content: string) {
+  return content.split(/\r?\n/).map((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) return <div key={index} className="sc-md-gap" />;
+    if (/^---+$/.test(trimmed)) return <hr key={index} className="sc-md-rule" />;
+
+    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      const level = heading[1].length;
+      const className = `sc-md-heading sc-md-h${level}`;
+      return <div key={index} className={className}>{renderInlineMarkdown(heading[2])}</div>;
+    }
+
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bullet) {
+      return <div key={index} className="sc-md-list-item"><span className="sc-md-bullet">&bull;</span><span>{renderInlineMarkdown(bullet[1])}</span></div>;
+    }
+
+    return <div key={index} className="sc-md-line">{renderInlineMarkdown(line)}</div>;
+  });
+}
+
 export function StrategicCommand() {
   const sage = window.sage as any;
   const [status, setStatus] = useState<StrategicStatus | null>(null);
@@ -142,7 +173,7 @@ export function StrategicCommand() {
                   <div className="sc-avatar">{message.role === "user" ? "Y" : "S"}</div>
                   <div className="sc-message-content">
                     <div className="sc-message-label">{message.role === "user" ? "You" : "Sage AI"}</div>
-                    <div className="sc-message-bubble">{message.content}</div>
+                    <div className="sc-message-bubble">{renderMessageContent(message.content)}</div>
                   </div>
                 </article>
               ))}

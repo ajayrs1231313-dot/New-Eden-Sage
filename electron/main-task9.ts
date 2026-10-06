@@ -1,4 +1,4 @@
-﻿import { DATA_ROOT, USER_DATA_ROOT } from "./data-paths";
+import { DATA_ROOT, USER_DATA_ROOT } from "./data-paths";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
@@ -668,8 +668,8 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
             const when = producedAt ? " on " + new Date(producedAt).toLocaleString("en-GB") : "";
             await sendSageProductionMail(auth.sageSessionToken, auth.eveAccessToken, {
               characterId: auth.characterId,
-              subject: "Production complete Â· " + productName,
-              body: quantity.toLocaleString() + " Ã— " + productName + " completed for " + projectName + when + ".",
+              subject: "Production complete - " + productName,
+              body: quantity.toLocaleString() + " x " + productName + " completed for " + projectName + when + ".",
               dedupKey: "production:" + String(project.id) + ":" + String(lot.id),
               metadata: {
                 projectId: String(project.id),

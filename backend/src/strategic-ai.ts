@@ -40,26 +40,11 @@ function latestUserText(messages: Array<Record<string, unknown>>) {
 
 function isClearlyBenignEveSageRequest(text: string) {
   const q = text.toLowerCase();
-  const eveSignal = /\b(eve|sage|ajdeathgiver|nedoode|ship|fit|fitting|hull|skill|training|sp\b|tackle|scram|point|web|ewar|tank|ehp|dps|capacitor|cap\b|module|rig|drone|ammo|weapon|frigate|destroyer|cruiser|battlecruiser|battleship|corp|corporation|fleet|market|isk|jita|amarr|industry|blueprint|bpo|bpc|reaction|planetary|wormhole|abyss|killmail|zkill|route|system|jump|gate|esi|doctrine|mining|ore|ice|gas|salvage|mission|agent)\b/.test(q);
+  const eveSignal = /\b(eve|sage|ajdeathgiver|nedoode|ship|fit|fitting|hull|skill|training|sp\b|tackle|scram|point|web|ewar|tank|ehp|dps|capacitor|cap\b|module|rig|drone|ammo|weapon|frigate|destroyer|cruiser|battlecruiser|battleship|corp|corporation|fleet|market|isk|jita|amarr|industry|blueprint|bpo|bpc|reaction|planetary|pi\b|wormhole|abyss|killmail|zkill|route|system|jump|gate|esi|doctrine|mining|ore|ice|gas|salvage|mission|agent)\b/.test(q);
   if (!eveSignal) return false;
 
   const sensitive = /\b(suicide|self[- ]?harm|kill myself|hurt myself|bomb|explosive|poison|malware|ransomware|credential theft|steal password|doxx|track a person|kidnap|sexual abuse|child sexual|real-world weapon|make a gun|build a gun)\b/.test(q);
   return !sensitive;
-}
-
-const MASTER_ACCOUNT_TRIGGERS = ["command override owner"];
-
-function requestsOwnerDeveloperMode(messages: Array<Record<string, unknown>>) {
-  return messages.some((message) => {
-    if (message?.role !== "user" || typeof message?.content !== "string") return false;
-    const normalized = message.content
-      .toLowerCase()
-      .replace(/[\u2018\u2019\u201b\u2032]/g, "'")
-      .replace(/[^a-z0-9' ]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    return MASTER_ACCOUNT_TRIGGERS.some((trigger) => normalized.includes(trigger));
-  });
 }
 
 const OWNER_DEVELOPER_POLICY = `
@@ -78,7 +63,7 @@ For development and testing work:
 - do not hide implementation/tool details behind the normal customer-facing Sage facade when the owner is asking development questions;
 - preserve third-party licence boundaries and treat external code as reference material rather than blindly copying it.
 
-This mode is enabled only because the authenticated Sage owner explicitly activated it in this conversation.
+This mode is enabled automatically for the authenticated Sage owner account. No magic phrase or per-conversation activation is required.
 `.trim();
 
 async function callSageAi(env: SageEnv, body: Record<string, unknown>) {
@@ -210,7 +195,7 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
 
   const name = await primaryCharacterName(env, principal.accountId);
   const policy = strategicPolicyForIdentity({ accountId: principal.accountId, primaryCharacterName: name });
-  const developerMode = policy.tier === "owner" && requestsOwnerDeveloperMode(messages);
+  const developerMode = policy.tier === "owner";
 
   let requestId = String(body.request_id || "").trim();
   if (requestId) {
@@ -393,5 +378,6 @@ export async function cleanupStrategicAiLogs(env: SageEnv) {
     "DELETE FROM strategic_ai_failure_reports WHERE created_at < datetime('now', '-90 days')",
   ).run().catch(() => undefined);
 }
+
 
 

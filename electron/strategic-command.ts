@@ -1,4 +1,4 @@
-﻿import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { readConfig, decrypt } from "./config";
 import { SAGE_ONLINE_URL } from "./sage-online";
@@ -590,8 +590,9 @@ async function askStrategicCommandInternal(input: {
   let preloadedCharacters = false;
   let preloadedSkills = false;
 
-  const needsCharacterContext = /\b(character|ajdeathgiver|nedoode|skill|training|sp\b|fit|fitting|ship|hull|tackle|scram|point|tank|ehp|dps|capacitor|module|rig|drone)\b/i.test(message)
-    || /list my sage characters|my characters/i.test(message);
+  // Always anchor Strategic Command to the current local character roster.
+  // This prevents stale SP/ISK/location values from older conversation context winning over Sage.
+  const needsCharacterContext = true;
 
   if (needsCharacterContext) {
     try {
@@ -601,12 +602,15 @@ async function askStrategicCommandInternal(input: {
         preloaded.characters = characters;
         preloadedCharacters = true;
 
-        const target = characters.find((row: any) => {
+        const namedTarget = characters.find((row: any) => {
           const name = String(row?.name || "").toLowerCase();
           return name && q.includes(name);
         });
+        const target = namedTarget ?? (characters.length === 1 ? characters[0] : undefined);
 
         const needsSkills = /\b(skill|training|sp\b|fit|fitting|ship|hull|tackle|scram|point|tank|ehp|dps|capacitor|module|rig|drone)\b/i.test(message);
+        const needsEconomicSnapshot = /\b(money|isk|wallet|income|profit|opportunit|market|trade|industry|manufactur|mining|ore|ice|gas|planet|pi\b)\b/i.test(message);
+
         if (target?.characterId && needsSkills) {
           const skillResult = await client.callTool({
             name: "get_character_data",
@@ -619,6 +623,25 @@ async function askStrategicCommandInternal(input: {
           );
           preloaded.skills = compactPreloadedSkillEvidence(compactSkills, message);
           preloadedSkills = true;
+        }
+
+        if (target?.characterId && needsEconomicSnapshot) {
+          const characterId = String(target.characterId);
+          const [walletResult, locationResult, skillResult] = await Promise.all([
+            client.callTool({ name: "get_character_data", arguments: { characterId, section: "wallet" } }),
+            client.callTool({ name: "get_character_data", arguments: { characterId, section: "location" } }),
+            client.callTool({ name: "get_character_data", arguments: { characterId, section: "skills" } }),
+          ]);
+          const wallet = compactToolResult("get_character_data", walletResult, { characterId, section: "wallet" });
+          const location = compactToolResult("get_character_data", locationResult, { characterId, section: "location" });
+          const skills = compactToolResult("get_character_data", skillResult, { characterId, section: "skills" }) as any;
+          preloaded.currentCharacter = {
+            character: target,
+            wallet,
+            location,
+            total_sp: skills?.total_sp ?? null,
+            unallocated_sp: skills?.unallocated_sp ?? null,
+          };
         }
       }
     } catch (error) {
@@ -644,7 +667,7 @@ async function askStrategicCommandInternal(input: {
     { role: "system", content: fittingRequest ? fittingStrategicInstructions() : strategicInstructions(tools) },
     ...(Object.keys(preloaded).length ? [{
       role: "system",
-      content: "PRELOADED SAGE EVIDENCE\nThis evidence was fetched locally before the model call. Use it directly and do not re-fetch the same character list or skill snapshot unless the user asks for a refresh.\n" + safeToolOutput(preloaded),
+      content: "PRELOADED SAGE EVIDENCE\nThis evidence was fetched locally immediately before this model call. Treat it as newer and more authoritative than any character SP, wallet, location or profile details mentioned earlier in the conversation. Never repeat conflicting older values. Re-fetch a deeper character section when the question depends on fields not present here.\n" + safeToolOutput(preloaded),
     }] : []),
     ...history,
     { role: "user", content: message },
