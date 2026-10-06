@@ -2381,9 +2381,9 @@ export const SAGE_ACTION_MANIFEST: Record<string, { parameters: Array<{ name: st
   "getCorporationHrState": {
     "parameters": [
       {
-        "name": "characterId",
+        "name": "input",
         "optional": false,
-        "type": "string"
+        "type": "unknown"
       }
     ],
     "returns": "IPC result (not declared in renderer type interface)"

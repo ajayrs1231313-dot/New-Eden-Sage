@@ -77,6 +77,10 @@ async function copyVerified(source, destination) {
 }
 
 async function main() {
+  console.log("Rebuilding application source before Windows packaging...");
+  const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  runNode(npmCli, ["run", "build"]);
+
   await fsp.mkdir(buildRoot, { recursive: true });
   console.log(`Packaging Windows release outside the indexed repo tree:\n  ${buildRoot}`);
 
