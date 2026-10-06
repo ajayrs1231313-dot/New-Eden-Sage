@@ -1,4 +1,4 @@
-const SAGE_ONLINE_URL = "https://new-eden-sage-online.ajayrs2512.workers.dev";
+﻿const SAGE_ONLINE_URL = "https://new-eden-sage-online.ajayrs2512.workers.dev";
 
 export type SageHrDataCategoryId =
   | "identity" | "corporation-history" | "skills" | "kill-loss" | "contacts-standings"
@@ -15,14 +15,13 @@ export type SageHrApplicationRecord = {
 async function parseResponse<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
   if (!response.ok) {
-    const message = typeof body.message === "string"
-      ? body.message
-      : typeof body.error === "string"
-        ? `Sage Online: ${body.error}`
-        : `Sage Online HR request failed (${response.status}).`;
-    const error = new Error(message) as Error & { status?: number; code?: string };
+    const backendStage = typeof body.hr_stage === "string" ? body.hr_stage : "backend_unclassified";
+    const code = typeof body.error === "string" ? body.error : "unknown_error";
+    const detail = typeof body.message === "string" ? body.message : "Sage Online HR request failed.";
+    const error = new Error("[HR_STAGE=http_response/"+backendStage+"] status="+response.status+" code="+code+": "+detail) as Error & { status?: number; code?: string; hrStage?: string };
     error.status = response.status;
-    error.code = typeof body.error === "string" ? body.error : undefined;
+    error.code = code;
+    error.hrStage = backendStage;
     throw error;
   }
   return body as T;
@@ -32,17 +31,20 @@ async function getJson<T>(path: string, sageSessionToken: string): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const response = await fetch(`${SAGE_ONLINE_URL}${path}`, {
-        headers: { Authorization: `Bearer ${sageSessionToken}` },
-      });
+      const response = await fetch(SAGE_ONLINE_URL+path, { headers: { Authorization: "Bearer "+sageSessionToken } });
       if (response.status < 500 || attempt === 2) return parseResponse<T>(response);
     } catch (error) {
       lastError = error;
-      if (attempt === 2) throw error;
+      if (attempt === 2) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("[HR_STAGE=")) throw error;
+        throw new Error("[HR_STAGE=http_fetch] path="+path+": "+message);
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 150 * Math.pow(2, attempt)));
   }
-  throw lastError instanceof Error ? lastError : new Error("Sage Online HR read failed.");
+  const message = lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error");
+  throw new Error("[HR_STAGE=http_fetch_exhausted] path="+path+": "+message);
 }
 
 async function mutateJson<T>(path: string, sageSessionToken: string, method: "POST" | "PUT" | "DELETE", body?: unknown, characterId?: number): Promise<T> {
@@ -158,3 +160,4 @@ export function setSageHrDecision(
     sageSessionToken, "POST", { status },
   );
 }
+

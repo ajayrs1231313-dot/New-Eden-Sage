@@ -1,4 +1,4 @@
-import { DATA_ROOT, USER_DATA_ROOT } from "./data-paths";
+﻿import { DATA_ROOT, USER_DATA_ROOT } from "./data-paths";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
@@ -668,8 +668,8 @@ async function runCompleteSync(sendProgress: (progress: any) => void, skipIfVers
             const when = producedAt ? " on " + new Date(producedAt).toLocaleString("en-GB") : "";
             await sendSageProductionMail(auth.sageSessionToken, auth.eveAccessToken, {
               characterId: auth.characterId,
-              subject: "Production complete · " + productName,
-              body: quantity.toLocaleString() + " × " + productName + " completed for " + projectName + when + ".",
+              subject: "Production complete Â· " + productName,
+              body: quantity.toLocaleString() + " Ã— " + productName + " completed for " + projectName + when + ".",
               dedupKey: "production:" + String(project.id) + ":" + String(lot.id),
               metadata: {
                 projectId: String(project.id),
@@ -1753,9 +1753,18 @@ if (!hasSingleInstanceLock) {
     return {workspace,policy};
   });
   ipcMain.handle("corp:hr-state", async (_event, input:{characterId:string;corporationId:number;corporationName:string}) => {
-    const sessionToken=await sageOnlineSessionTokenOnly();
-    const remote=await listSageHrApplications(sessionToken,Number(input?.characterId??0),Number(input?.corporationId??0),String(input?.corporationName??""));
-    return {workspace:{...remote.workspace,can_manage_hr:true,can_review_hr:true},categories:HR_DATA_CATEGORIES,applications:remote.applications,transport:remote.transport};
+    let hrStage="desktop_session_token";
+    try {
+      const sessionToken=await sageOnlineSessionTokenOnly();
+      hrStage="desktop_http_recruiter_state";
+      const remote=await listSageHrApplications(sessionToken,Number(input?.characterId??0),Number(input?.corporationId??0),String(input?.corporationName??""));
+      hrStage="desktop_render_state";
+      return {workspace:{...remote.workspace,can_manage_hr:true,can_review_hr:true},categories:HR_DATA_CATEGORIES,applications:remote.applications,transport:remote.transport};
+    } catch (error) {
+      const message=error instanceof Error?error.message:String(error);
+      if(message.includes("[HR_STAGE=")) throw error;
+      throw new Error("[HR_STAGE="+hrStage+"] "+message);
+    }
   });
   ipcMain.handle("corp:hr-create", async (_event, input:{characterId:string;corporationId:number;corporationName:string;requestedCategories:HrDataCategoryId[];expiresInHours?:number}) => {
     return createSageHrRequest(
@@ -3860,3 +3869,4 @@ app.on("window-all-closed", () => {
   void stopMcpWriteBridge();
   if (process.platform !== "darwin") app.quit();
 });
+
