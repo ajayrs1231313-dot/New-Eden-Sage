@@ -15,7 +15,7 @@
     "build": "node scripts/build-sage-action-manifest.cjs && tsc --noEmit && tsc -p tsconfig.electron.json && vite build",
     "preview": "vite preview",
     "icon": "node scripts/generate-icon.cjs",
-    "dist:win": "npm run verify:release-resources && npm run icon && npm run test:all && node scripts/build-windows-release.cjs --smoke-install",
+    "dist:win": "npm run verify:release-resources && npm run icon && npm run build && npm run test:all && node scripts/build-windows-release.cjs --smoke-install",
     "dist:linux": "npm run verify:release-resources && npm run icon && npm run build && electron-builder --linux AppImage deb --publish never",
     "dist:mac": "npm run icon && npm run build && electron-builder --mac dmg zip --x64 --arm64 --publish never",
     "verify:release-resources": "node scripts/verify-release-resources.cjs",
