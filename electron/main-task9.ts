@@ -1,4 +1,5 @@
 import { DATA_ROOT, USER_DATA_ROOT } from "./data-paths";
+import { downloadOwnerLogs, listOwnerLogUsers } from "./owner-log-export";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, protocol, shell } from "electron";
 import { autoUpdater } from "electron-updater";
 import { promises as fs } from "node:fs";
@@ -93,7 +94,7 @@ import {
 } from "./industrial-preparation";
 import { configureAndStartMcpTunnel, getMcpTunnelStatus, startMcpTunnel } from "./mcp-tunnel";
 import { startMcpWriteBridge, stopMcpWriteBridge } from "./mcp-write-bridge";
-import { askStrategicCommand, getStrategicCommandStatus } from "./strategic-command";
+import { askStrategicCommand, getStrategicCommandStatus, invalidateStrategicCharacterCache } from "./strategic-command";
 import { hydrateCanonicalFittingStore, saveCanonicalFittingStore } from "./fitting-persistence";
 import { claudeSetupText, ensureClaudeCompatibility, getClaudeCompatibilityStatus, installClaudeCompatibility, repairClaudeDesktopDirectConfig, showClaudeDesktopBundle } from "./claude-integration";
 import { cacheTypeIconsLocal, typeImageProtocolResponse } from "./eve-assets";
@@ -877,6 +878,7 @@ async function runWalletOnlyReconciliation() {
         }
         const snapshot = await fetchWalletOnlySnapshot(characterId, tokens.access_token, existing);
         saveSnapshot(snapshot);
+    invalidateStrategicCharacterCache(String((snapshot as any)?.character?.character_id ?? (snapshot as any)?.characterId ?? ""));
         refreshed += 1;
       } catch (error) {
         failed += 1;
@@ -1630,8 +1632,17 @@ if (!hasSingleInstanceLock) {
   ipcMain.handle("mcp:tunnel-configure", (_event, input: { tunnelId: string; runtimeKey: string }) => configureAndStartMcpTunnel(input));
   ipcMain.handle("mcp:open-chatgpt", () => shell.openExternal("https://chatgpt.com/plugins"));
   ipcMain.handle("mcp:open-tunnels", () => shell.openExternal("https://platform.openai.com/settings/organization/tunnels"));
+  async function ownerLogSession(){
+    const local=await readConfig();
+    if(String(local.sageAccountId)!=="569399317" && String(local.primaryCharacterId)!=="569399317") throw new Error("Owner-only Sage diagnostics.");
+    return sageOnlineSessionTokenOnly();
+  }
+  ipcMain.handle("owner-logs:users", async()=>listOwnerLogUsers(await ownerLogSession()));
+  ipcMain.handle("owner-logs:download", async(_event, accountId:string)=>downloadOwnerLogs(await ownerLogSession(),String(accountId)));
   ipcMain.handle("strategic:status", () => getStrategicCommandStatus());
-  ipcMain.handle("strategic:ask", (_event, input: { message: string; history?: Array<{ role: "user" | "assistant"; content: string }> }) => askStrategicCommand(input));
+  ipcMain.handle("strategic:ask", (event, input: { message: string; history?: Array<{ role: "user" | "assistant"; content: string }> }) => askStrategicCommand(input, (message) => {
+    if (!event.sender.isDestroyed()) event.sender.send("strategic:progress", message);
+  }));
   void startMcpTunnel().catch((error) => void logEvent("error", "mcp.tunnel_start_failed", { error }));
   void startMcpWriteBridge(() => window).catch((error) => void logEvent("error", "mcp.write_bridge_start_failed", { error }));
   void ensureClaudeCompatibility()
@@ -2535,6 +2546,7 @@ if (!hasSingleInstanceLock) {
       getSnapshot(login.characterId),
     );
     saveSnapshot(bootstrap);
+    invalidateStrategicCharacterCache(String((bootstrap as any)?.character?.character_id ?? (bootstrap as any)?.characterId ?? ""));
     await logEvent("info", "character.authorization.current_scope_grant", {
       characterId: login.characterId,
       scopeSchemaVersion: CURRENT_ESI_SCOPE_SCHEMA_VERSION,
@@ -2622,6 +2634,7 @@ if (!hasSingleInstanceLock) {
       getSnapshot(characterId),
     );
     saveSnapshot(snapshot);
+    invalidateStrategicCharacterCache(String((snapshot as any)?.character?.character_id ?? (snapshot as any)?.characterId ?? ""));
     try {
       const lifecycle = synchronizeFoundryLifecycle(characterId);
       await logEvent("info", "character_refresh.industrial_lifecycle_reconciled", { characterId, projects: lifecycle.projects, ledgerRecords: lifecycle.ledgerRecords });
@@ -2643,6 +2656,7 @@ if (!hasSingleInstanceLock) {
     }
     const snapshot = await fetchCharacterCurrentShipSnapshot(characterId, tokens.access_token, existingSnapshot);
     saveSnapshot(snapshot);
+    invalidateStrategicCharacterCache(String((snapshot as any)?.character?.character_id ?? (snapshot as any)?.characterId ?? ""));
     return snapshot;
   });
   ipcMain.handle("snapshot:list", () => listSnapshots());

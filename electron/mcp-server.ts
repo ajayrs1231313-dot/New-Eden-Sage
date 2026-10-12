@@ -23,6 +23,8 @@ import { PAGE_STATE_CACHE_KIND } from "./page-state-persistence";
 import { getSnapshot as getDatabaseSnapshot, listSnapshots as listDatabaseSnapshots } from "./database";
 import { SAGE_MCP_AI_INSTRUCTIONS, SAGE_CHARACTER_LIST_GUIDANCE, SAGE_CHARACTER_DATA_GUIDANCE, SAGE_SAVED_FITTINGS_GUIDANCE, SAGE_FIT_SKILL_GUIDANCE } from "./mcp-ai-policy";
 import { registerSageFittingTool } from "./mcp-fitting";
+import { registerSageFitOptimizer } from "./fitting-optimizer";
+import { registerSageFitSearch } from "./fitting-search";
 import {
   launchThirdPartyDevProject,
   listThirdPartyDevProcesses,
@@ -412,7 +414,10 @@ async function marketDatasetStatus() {
 
 export async function startMcpServer() {
   const server = new McpServer({ name: "new-eden-sage", version: "0.1.0" }, { instructions: SAGE_MCP_AI_INSTRUCTIONS });
-  registerSageFittingTool(server, { getSnapshot, getSavedFits: async () => (await rendererData()).savedFits ?? [] }, result);
+  const fittingDeps = { getSnapshot, getSavedFits: async () => (await rendererData()).savedFits ?? [] };
+  registerSageFittingTool(server, fittingDeps, result);
+  registerSageFitOptimizer(server, fittingDeps, result);
+  registerSageFitSearch(server, fittingDeps, result);
 
   server.registerTool("list_characters", {
     title: "List Sage characters", description: SAGE_CHARACTER_LIST_GUIDANCE, inputSchema: {}, annotations: READ_ONLY,

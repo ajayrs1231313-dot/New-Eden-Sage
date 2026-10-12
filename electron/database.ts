@@ -136,6 +136,14 @@ export function listSnapshots() {
   return rows.map((row) => normalizeSnapshotBlueprintAssetValuation(decryptSnapshotPayload<unknown>(row.payload)));
 }
 
+// Covers writes through this connection and other SQLite connections, including
+// partial wallet/ship refreshes that retain the full snapshot's updatedAt value.
+export function characterSnapshotRevision() {
+  const external = db().prepare("PRAGMA data_version").get() as { data_version: number };
+  const local = db().prepare("SELECT total_changes() AS changes").get() as { changes: number };
+  return `${external.data_version}:${local.changes}`;
+}
+
 export function getSnapshot(characterId?: string) {
   const row = characterId
     ? db()

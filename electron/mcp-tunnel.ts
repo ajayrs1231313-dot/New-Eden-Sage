@@ -82,6 +82,8 @@ function decryptRuntimeKey(config: TunnelConfig) {
 }
 
 export async function getMcpTunnelStatus() {
+  // The bundled external tunnel client and launcher are Windows-only.
+  if (process.platform !== "win32") return { configured: false, tunnelId: "", running: false, ready: false, healthUrl: "" };
   const config = await readTunnelConfig();
   const healthFile = path.join(runtimeRoot(), "health.url");
   let healthUrl = "";
@@ -103,6 +105,7 @@ export async function getMcpTunnelStatus() {
 }
 
 export async function configureAndStartMcpTunnel(input: { tunnelId: string; runtimeKey: string }) {
+  if (process.platform !== "win32") throw new Error("External MCP tunnel setup is currently supported on Windows only.");
   await assertOwnerSageIdentity();
 
   const tunnelId = input.tunnelId.trim();
@@ -129,6 +132,7 @@ export async function configureAndStartMcpTunnel(input: { tunnelId: string; runt
 }
 
 export async function startMcpTunnel() {
+  if (process.platform !== "win32") return getMcpTunnelStatus();
   await assertOwnerSageIdentity();
 
   const config = await readTunnelConfig();

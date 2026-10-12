@@ -1470,6 +1470,36 @@ function Settings({
   const [runtimeKey, setRuntimeKey] = useState("");
   const [tunnelReady, setTunnelReady] = useState(false);
   const ownerExternalAi = config.sageAccountId === "569399317" || config.primaryCharacterId === "569399317";
+  type OwnerLogUser = { account_id: string; character_name: string | null; primary_character_id: number | null; ai_count: number; failure_count: number; browser_count: number };
+  const ownerLogApi = window.sage as unknown as {
+    getOwnerLogUsers: () => Promise<{ users: OwnerLogUser[] }>;
+    downloadOwnerLogs: (accountId: string) => Promise<{ saved: boolean; cancelled?: boolean; file?: string; total?: number }>;
+  };
+  const [ownerLogUsers, setOwnerLogUsers] = useState<OwnerLogUser[]>([]);
+  const [ownerLogAccount, setOwnerLogAccount] = useState("all");
+  const [ownerLogBusy, setOwnerLogBusy] = useState(false);
+  const [ownerLogMessage, setOwnerLogMessage] = useState("");
+  async function refreshOwnerLogUsers() {
+    if (!ownerExternalAi) return;
+    setOwnerLogBusy(true);
+    try {
+      const result = await ownerLogApi.getOwnerLogUsers();
+      setOwnerLogUsers(Array.isArray(result.users) ? result.users : []);
+      setOwnerLogMessage("Found " + result.users.length + " user account(s) with AI diagnostics.");
+    } catch (error) {
+      setOwnerLogMessage(error instanceof Error ? error.message : "Owner diagnostic list unavailable.");
+    } finally { setOwnerLogBusy(false); }
+  }
+  async function saveOwnerLogExport() {
+    setOwnerLogBusy(true);
+    try {
+      const result = await ownerLogApi.downloadOwnerLogs(ownerLogAccount);
+      setOwnerLogMessage(result.saved ? "Saved " + result.total + " records to " + result.file : "Download cancelled.");
+    } catch (error) {
+      setOwnerLogMessage(error instanceof Error ? error.message : "Could not export the requested diagnostics.");
+    } finally { setOwnerLogBusy(false); }
+  }
+  useEffect(() => { if (ownerExternalAi) void refreshOwnerLogUsers(); }, [ownerExternalAi]);
   const [claudeStatus, setClaudeStatus] = useState<ClaudeCompatibilityStatus | null>(null);
   const [claudeBusy, setClaudeBusy] = useState(false);
   useEffect(() => {
@@ -1573,6 +1603,34 @@ function Settings({
           </div>
         </article>
 
+        {ownerExternalAi && (
+        <article className="settings-connection-card mcp-settings-card settings-ai-card">
+          <div className="settings-card-head">
+            <div><p className="eyebrow">OWNER DIAGNOSTICS</p><h3>AI logs and incident exports</h3></div>
+            <span className="settings-state ready">OWNER ONLY</span>
+          </div>
+          <p>Choose an account by permanent identifier to export complete readable AI requests, error reports and browser-action records. The server independently verifies your Sage owner session and audits each export.</p>
+          <div className="settings-integration-card">
+            <label><span>User account</span>
+              <select value={ownerLogAccount} onChange={(event) => setOwnerLogAccount(event.target.value)} disabled={ownerLogBusy}>
+                <option value="all">All users — all AI logs</option>
+                {ownerLogUsers.map((user) => (
+                  <option key={user.account_id} value={user.account_id}>
+                    {(user.character_name || "Unknown character") + " — " + user.account_id +
+                      " (" + (user.ai_count + user.failure_count + user.browser_count) + " records)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="mcp-setup-actions">
+              <button disabled={ownerLogBusy} onClick={() => void refreshOwnerLogUsers()}>Refresh user list</button>
+              <button className="primary" disabled={ownerLogBusy} onClick={() => void saveOwnerLogExport()}>Download selected logs</button>
+            </div>
+            <small>The saved .jsonl is plaintext, readable without a decryption key. It includes full prompt, response, error and request/session identifiers. Treat it as confidential evidence.</small>
+            {ownerLogMessage && <div className="mcp-copy-status settings-message">{ownerLogMessage}</div>}
+          </div>
+        </article>
+        )}
         {ownerExternalAi && (
         <article className="settings-connection-card mcp-settings-card settings-ai-card">
           <div className="settings-card-head">

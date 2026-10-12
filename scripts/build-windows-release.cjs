@@ -92,6 +92,11 @@ async function main() {
     "never",
     `--config.directories.output=${buildRoot}`,
   ];
+  // Use the verified local Electron distribution when GitHub is unavailable.
+  const preinstalledElectronDist = path.join(projectRoot, "node_modules", "electron", "dist");
+  if (fs.existsSync(path.join(preinstalledElectronDist, "electron.exe"))) {
+    builderArgs.push(`--config.electronDist=${preinstalledElectronDist}`);
+  }
   const build = spawnSync(process.execPath, builderArgs, {
     cwd: projectRoot,
     env: process.env,

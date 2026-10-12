@@ -4,6 +4,27 @@ import { readConfig, decrypt } from "./config";
 import { SAGE_ONLINE_URL } from "./sage-online";
 import { sageMcpLaunch } from "./mcp-launch";
 import { SAGE_MCP_AI_INSTRUCTIONS } from "./mcp-ai-policy";
+import { getFittingCatalogueLocal, getFittingTypeInfoLocal } from "./fitting-dogma";
+import { mentionsName, planStrategicRequest, type StrategicPlan } from "./strategic-router";
+import { answerShipFacts } from "./strategic-facts";
+import { estimateStrategicDuration, estimateLabel, requestComplexity, type StrategicProgress, type StrategicTiming } from "./strategic-timing";
+import { USER_DATA_ROOT } from "./data-paths";
+import { promises as timingFs } from "node:fs";
+import timingPath from "node:path";
+
+const timingFile = timingPath.join(USER_DATA_ROOT, "strategic-timings.json");
+let timingWrites: Promise<unknown> = Promise.resolve();
+async function readStrategicTimings(): Promise<StrategicTiming[]> {
+  try { const rows = JSON.parse(await timingFs.readFile(timingFile, "utf8")); return Array.isArray(rows) ? rows.slice(-80) : []; }
+  catch { return []; }
+}
+function recordStrategicTiming(row: StrategicTiming) {
+  timingWrites = timingWrites.then(async () => {
+    const rows = [...await readStrategicTimings(), row].slice(-80);
+    await timingFs.mkdir(USER_DATA_ROOT, { recursive: true });
+    await timingFs.writeFile(timingFile, JSON.stringify(rows));
+  }).catch(() => undefined);
+}
 
 type StrategicMessage = { role: "user" | "assistant"; content: string };
 
@@ -34,6 +55,51 @@ type SageAiMessage = {
 
 let mcpClientPromise: Promise<Client> | null = null;
 let cachedTools: McpTool[] | null = null;
+let characterCacheSession = "";
+let characterCacheExpiresAt = 0;
+type StrategicCharacterSessionCache = {
+  characters: any[] | null;
+  sections: Map<string, unknown>;
+};
+
+const strategicCharacterSessionCache: StrategicCharacterSessionCache = {
+  characters: null,
+  sections: new Map(),
+};
+
+export function invalidateStrategicCharacterCache(characterId?: string) {
+  if (!characterId) {
+    strategicCharacterSessionCache.characters = null;
+    strategicCharacterSessionCache.sections.clear();
+    return;
+  }
+  const prefix = String(characterId) + ":";
+  for (const key of strategicCharacterSessionCache.sections.keys()) {
+    if (key.startsWith(prefix)) strategicCharacterSessionCache.sections.delete(key);
+  }
+}
+
+async function cachedCharacterRoster(client: Client, force = false) {
+  if (!force && strategicCharacterSessionCache.characters) return strategicCharacterSessionCache.characters;
+  const listed = await client.callTool({ name: "list_characters", arguments: {} }, undefined, { timeout: 10_000 });
+  if (listed.isError) throw new Error("Sage character roster could not be read.");
+  const characters = (listed as any)?.structuredContent?.data;
+  if (Array.isArray(characters)) strategicCharacterSessionCache.characters = characters;
+  return Array.isArray(characters) ? characters : [];
+}
+
+async function cachedCharacterSection(client: Client, characterId: string, section: string, force = false) {
+  const key = characterId + ":" + section;
+  if (!force && strategicCharacterSessionCache.sections.has(key)) return strategicCharacterSessionCache.sections.get(key);
+  const result = await client.callTool({ name: "get_character_data", arguments: { characterId, section } }, undefined, { timeout: 10_000 });
+  if (result.isError) throw new Error(`Sage could not read character ${section}.`);
+  const compact = compactToolResult("get_character_data", result, { characterId, section });
+  if (section === "skills" && !Array.isArray((compact as any)?.skills)) {
+    throw new Error("Character skills have not been synced in Sage.");
+  }
+  strategicCharacterSessionCache.sections.set(key, compact);
+  return compact;
+}
 
 async function getMcpClient() {
   if (!mcpClientPromise) {
@@ -47,6 +113,11 @@ async function getMcpClient() {
         stderr: "pipe",
         maxBufferSize: 32 * 1024 * 1024,
       });
+      client.onclose = () => {
+        mcpClientPromise = null;
+        cachedTools = null;
+        invalidateStrategicCharacterCache();
+      };
       await client.connect(transport);
       return client;
     })().catch((error) => {
@@ -182,6 +253,10 @@ ${SAGE_MCP_AI_INSTRUCTIONS}
 }
 
 
+function fastStrategicInstructions() {
+  return `You are Sage AI inside New Eden Sage. Answer ordinary EVE Online knowledge and conversation directly, quickly, and concisely. Do not invent live character, market, corporation, fitting, asset, route, or account facts. If the user asks for live or personal Sage data and no evidence is supplied, say what needs checking rather than guessing. Do not call tools unless tools are supplied for this request.`;
+}
+
 function fittingStrategicInstructions() {
   return `You are Sage AI operating New Eden Sage's fitting subsystem.
 
@@ -192,6 +267,7 @@ RULES
 - Sage's synced character skills are authoritative.
 - Use simulate_sage_fit as the primary computation engine.
 - For broad optimisation, build realistic candidate batches and simulate them early. Do not spend multiple rounds planning before the first simulation.
+- For thousands of iterations, use search_sage_fits: design several canonical seed fits across appropriate hulls and give module/charge/state alternatives per slot. Sage expands and tests combinations locally without thousands of model calls. Ask for up to 5000 candidates per search, inspect actual simulated/partial counts, then refine finalists with simulate_sage_fit. Never claim more candidates were tested than the tool reports.
 - Batch multiple candidates in one simulate_sage_fit call when practical. Start broad, then refine the strongest measured candidates.
 - Set includePrices:false unless the user actually asked about price.
 - Explicitly load relevant charges and module states.
@@ -243,15 +319,15 @@ const WEB_OPEN_TOOL = {
 
 function selectStrategicTools(tools: McpTool[], message: string) {
   const q = message.toLowerCase();
-  const names = new Set<string>([
-    "list_characters",
-    "get_character_data",
-    "list_character_data_points",
-  ]);
+  const names = new Set<string>();
 
   const add = (...values: string[]) => values.forEach((value) => names.add(value));
+  const personalContextRequest = /\b(my|me|character|characters|account|assets?|wallet|skills?|training|can i|do i|am i)\b/i.test(message);
+  if (personalContextRequest) {
+    add("list_characters", "get_character_data", "list_character_data_points");
+  }
 
-  if (/fit|fitting|ship|hull|dps|tank|ehp|cap|capacitor|tackle|scram|point|web|lock|range|speed|prop|mwd|afterburner|module|rig|drone|ammo|weapon/.test(q)) {
+  if (/\b(fit|fitting|dps|tank|ehp|capacitor|tackle|scram|point|web|mwd|afterburner|module|rig|drone|ammo|weapon|simulate)\b/.test(q) || (personalContextRequest && /\b(ship|hull|fly|use)\b/.test(q))) {
     add("simulate_sage_fit");
 
     if (/saved|existing|current fit|my fit|my fitting|library|already have|already saved/.test(q)) {
@@ -322,17 +398,6 @@ function selectStrategicTools(tools: McpTool[], message: string) {
         tool.name.startsWith("cloudflare_wrangler_")
       ) names.add(tool.name);
     }
-  }
-
-  // Generic discovery fallback when no specialist category matched.
-  if (names.size <= 3) {
-    add(
-      "get_all_sage_data",
-      "list_sage_data_domains",
-      "get_sage_data_domain",
-      "list_prepared_page_states",
-      "get_prepared_page_state",
-    );
   }
 
   return tools.filter((tool) => names.has(tool.name));
@@ -406,6 +471,7 @@ async function sageAiCompletion(
   sessionToken: string,
   body: Record<string, unknown>,
   requestId?: string,
+  timeoutMs = 120_000,
 ): Promise<{ requestId: string; result?: any; blocked?: boolean; message?: string; developerMode?: boolean }> {
   const response = await fetch(`${SAGE_ONLINE_URL}/v1/strategic-ai/completion`, {
     method: "POST",
@@ -413,12 +479,15 @@ async function sageAiCompletion(
       Authorization: `Bearer ${sessionToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ ...body, request_id: requestId || undefined }),
+    body: JSON.stringify({ ...body, request_id: requestId || undefined, timeout_ms: Math.max(1000, timeoutMs - 3000) }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => ({})) as any;
   if (!response.ok) {
     const message = payload?.message || "Sage AI could not complete the request.";
-    throw new Error(String(message));
+    const failure = new Error(String(message));
+    (failure as any).requestId = String(payload?.request_id || requestId || "");
+    throw failure;
   }
   return {
     requestId: String(payload.request_id || requestId || ""),
@@ -434,6 +503,7 @@ async function sageWebTool(
   name: "sage_web_search" | "sage_web_open",
   args: Record<string, unknown>,
   requestId: string,
+  timeoutMs: number,
 ) {
   const path = name === "sage_web_search" ? "search" : "open";
   const response = await fetch(`${SAGE_ONLINE_URL}/v1/strategic-ai/browser/${path}`, {
@@ -443,6 +513,7 @@ async function sageWebTool(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ ...args, request_id: requestId || undefined }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const payload = await response.json().catch(() => ({})) as any;
   if (!response.ok) throw new Error(String(payload?.message || "Sage AI web research failed."));
@@ -451,6 +522,13 @@ async function sageWebTool(
 
 function compactToolResult(name: string, value: any, args: Record<string, unknown>) {
   const structured = value?.structuredContent?.data;
+  if ((name === "search_sage_fits" || name === "optimise_sage_fit") && Array.isArray(structured?.top)) {
+    const compact = { ...structured, top: [...structured.top], rejectionSamples: structured.rejectionSamples?.slice(0, 3), omittedFinalists: 0 };
+    while (compact.top.length > 1 && JSON.stringify(compact).length > 22_000) {
+      compact.top.pop(); compact.omittedFinalists++;
+    }
+    return compact;
+  }
 
   if (name === "get_character_data" && structured && typeof structured === "object") {
     const section = String((structured as any).section || args.section || "");
@@ -464,6 +542,7 @@ function compactToolResult(name: string, value: any, args: Record<string, unknow
         total_sp: Number(inner.total_sp ?? 0),
         unallocated_sp: Number(inner.unallocated_sp ?? 0),
         skills: inner.skills.map((skill: any) => ({
+          skillId: Number(skill?.skill_id ?? 0),
           name: String(skill?.name || ""),
           level: Number(skill?.active_skill_level ?? skill?.trained_skill_level ?? 0),
           trainedLevel: Number(skill?.trained_skill_level ?? 0),
@@ -491,10 +570,10 @@ function compactPreloadedSkillEvidence(value: any, message: string) {
   if (!value || typeof value !== "object" || !Array.isArray(value.skills)) return value;
 
   const q = message.toLowerCase();
-  const fittingIntent = /\b(fit|fitting|ship|hull|skill|training|tackle|scram|point|tank|ehp|dps|capacitor|module|rig|drone|weapon|lock|speed|mwd|afterburner)\b/i.test(message);
+  const fittingIntent = /\b(fit|fitting|ship|hull|skill|training|tackle|scram|point|tank|ehp|dps|capacitor|module|rig|drone|weapon|lock|speed|mwd|afterburner|can|able|fly|use|pilot|run|handle|do)\b/i.test(message);
   if (!fittingIntent) return value;
 
-  const relevant = /(frigate|destroyer|cruiser|battlecruiser|battleship|strategic cruiser|assault frigates|heavy assault cruisers|interceptor|interdictor|heavy interdiction|recon|electronic attack|logistics|command ships|propulsion jamming|long range targeting|signature analysis|target management|navigation|acceleration control|evasive maneuvering|high speed maneuvering|afterburner|fuel conservation|warp drive operation|mechanics|hull upgrades|repair systems|armor|shield|capacitor|cpu management|power grid management|weapon upgrades|electronics upgrades|energy grid upgrades|rigging|thermodynamics|sensor compensation|electronic warfare|weapon disruption|sensor linking|cloaking)/i;
+  const relevant = /(missile|torpedo|rocket|drone|gunnery|turret|surgical strike|rapid firing|motion prediction|controlled bursts|energy emission|frigate|destroyer|cruiser|battlecruiser|battleship|strategic cruiser|assault frigates|heavy assault cruisers|interceptor|interdictor|heavy interdiction|recon|electronic attack|logistics|command ships|propulsion jamming|long range targeting|signature analysis|target management|navigation|acceleration control|evasive maneuvering|high speed maneuvering|afterburner|fuel conservation|warp drive operation|mechanics|hull upgrades|repair systems|armor|shield|capacitor|cpu management|power grid management|weapon upgrades|electronics upgrades|energy grid upgrades|rigging|thermodynamics|sensor compensation|electronic warfare|weapon disruption|sensor linking|cloaking)/i;
 
   const selected = value.skills.filter((skill: any) => {
     const name = String(skill?.name || "");
@@ -509,6 +588,7 @@ function compactPreloadedSkillEvidence(value: any, message: string) {
     relevantSkillCount: selected.length,
     omittedSkillCount: Math.max(0, value.skills.length - selected.length),
     skills: selected.map((skill: any) => ({
+      skillId: skill.skillId,
       name: String(skill?.name || ""),
       level: Number(skill?.level ?? 0),
       nextLevel: skill?.nextLevel
@@ -573,7 +653,8 @@ export async function getStrategicCommandStatus() {
 async function askStrategicCommandInternal(input: {
   message: string;
   history?: StrategicMessage[];
-}, diagnostics?: StrategicDiagnostics) {
+}, diagnostics?: StrategicDiagnostics, onProgress?: (progress: StrategicProgress) => void) {
+  const startedAt = Date.now();
   const message = String(input?.message || "").trim();
   if (!message) throw new Error("Enter a Strategic Command request.");
 
@@ -581,76 +662,128 @@ async function askStrategicCommandInternal(input: {
   const sessionToken = decrypt(config.encryptedSageSessionToken);
   if (!sessionToken) throw new Error("Sage AI is unavailable until your Sage account is connected.");
 
+  if (characterCacheSession !== sessionToken || Date.now() >= characterCacheExpiresAt) {
+    invalidateStrategicCharacterCache();
+    characterCacheSession = sessionToken;
+    characterCacheExpiresAt = Date.now() + 60_000;
+  }
   const client = await getMcpClient();
   const tools = await getTools();
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
   const q = message.toLowerCase();
+  const forceCharacterRefresh = /\b(refresh|sync|latest|current|update|recheck|re-check)\b/i.test(message);
+  let rosterError = "";
+  const sessionCharacters = await cachedCharacterRoster(client, forceCharacterRefresh).catch(() => {
+    rosterError = "Character roster is unavailable. Do not infer character ownership or capability.";
+    return [] as any[];
+  });
+  const plan: StrategicPlan = planStrategicRequest(message, {
+    history: input.history,
+    characterNames: sessionCharacters.map((row: any) => String(row?.name || "")).filter(Boolean),
+  });
+  if (diagnostics) diagnostics.plan = plan;
+  if (plan.broadRequest) {
+    const estimate = estimateStrategicDuration(plan, message, await readStrategicTimings());
+    onProgress?.({ message: "Checking the data needed for this job…", estimatedUpperMs: estimate.upperMs, estimate:
+      `This is a bigger job. Initial estimate: ${estimateLabel(estimate.lowerMs, estimate.upperMs)}${estimate.learned ? ", based on similar completed requests" : ", based on the scope of your request"}. I'll revise it as the workload becomes clearer.` });
+  } else onProgress?.({ message: "Checking Sage's data…" });
+  if ((plan.route === "fit_build" || plan.route === "fit_evaluate") && plan.characterName) {
+    const linked = sessionCharacters.find((row: any) => String(row?.name || "").toLowerCase() === plan.characterName!.toLowerCase());
+    if (!linked) {
+      const available = sessionCharacters.map((row: any) => String(row?.name || "")).filter(Boolean);
+      return {
+        answer: `I can build that fit, but **${plan.characterName}** is not linked/synced in this Sage session. Available characters: ${available.length ? available.map((name: string) => `**${name}**`).join(", ") : "none"}. Link/sync that character or tell me which available character to use.`,
+        model: "Sage router",
+        trace: [],
+        usage: null,
+      };
+    }
+  }
   const preloaded: Record<string, unknown> = {};
+  if (rosterError) preloaded.unavailable = rosterError;
+  let completeSkills: any;
   let preloadedCharacters = false;
   let preloadedSkills = false;
-
-  // Always anchor Strategic Command to the current local character roster.
-  // This prevents stale SP/ISK/location values from older conversation context winning over Sage.
-  const needsCharacterContext = true;
-
+  const needsCharacterContext = plan.requiredCharacterSections.length > 0 || plan.route === "character" || plan.route === "fit_build" || plan.route === "fit_evaluate";
   if (needsCharacterContext) {
     try {
-      const listed = await client.callTool({ name: "list_characters", arguments: {} });
-      const characters = (listed as any)?.structuredContent?.data;
+      const characters = sessionCharacters;
       if (Array.isArray(characters)) {
         preloaded.characters = characters;
         preloadedCharacters = true;
 
         const namedTarget = characters.find((row: any) => {
           const name = String(row?.name || "").toLowerCase();
-          return name && q.includes(name);
+          return name && name === plan.characterName?.toLowerCase();
         });
         const target = namedTarget ?? (characters.length === 1 ? characters[0] : undefined);
 
-        const needsSkills = /\b(skill|training|sp\b|fit|fitting|ship|hull|tackle|scram|point|tank|ehp|dps|capacitor|module|rig|drone)\b/i.test(message);
-        const needsEconomicSnapshot = /\b(money|isk|wallet|income|profit|opportunit|market|trade|industry|manufactur|mining|ore|ice|gas|planet|pi\b)\b/i.test(message);
+        const needsSkills = plan.requiredCharacterSections.includes("skills");
 
         if (target?.characterId && needsSkills) {
-          const skillResult = await client.callTool({
-            name: "get_character_data",
-            arguments: { characterId: String(target.characterId), section: "skills" },
-          });
-          const compactSkills = compactToolResult(
-            "get_character_data",
-            skillResult,
-            { characterId: String(target.characterId), section: "skills" },
+          const compactSkills = await cachedCharacterSection(
+            client,
+            String(target.characterId),
+            "skills",
+            forceCharacterRefresh,
           );
+          completeSkills = compactSkills;
           preloaded.skills = compactPreloadedSkillEvidence(compactSkills, message);
           preloadedSkills = true;
         }
 
-        if (target?.characterId && needsEconomicSnapshot) {
-          const characterId = String(target.characterId);
-          const [walletResult, locationResult, skillResult] = await Promise.all([
-            client.callTool({ name: "get_character_data", arguments: { characterId, section: "wallet" } }),
-            client.callTool({ name: "get_character_data", arguments: { characterId, section: "location" } }),
-            client.callTool({ name: "get_character_data", arguments: { characterId, section: "skills" } }),
-          ]);
-          const wallet = compactToolResult("get_character_data", walletResult, { characterId, section: "wallet" });
-          const location = compactToolResult("get_character_data", locationResult, { characterId, section: "location" });
-          const skills = compactToolResult("get_character_data", skillResult, { characterId, section: "skills" }) as any;
-          preloaded.currentCharacter = {
-            character: target,
-            wallet,
-            location,
-            total_sp: skills?.total_sp ?? null,
-            unallocated_sp: skills?.unallocated_sp ?? null,
-          };
+        if (target?.characterId) {
+          for (const section of plan.requiredCharacterSections.filter((value) => value !== "skills")) {
+            preloaded[section] = await cachedCharacterSection(client, String(target.characterId), section, forceCharacterRefresh);
+          }
         }
       }
     } catch (error) {
+      preloaded.unavailable = error instanceof Error ? error.message : String(error);
       strategicDebug("prefetch-error", { error: error instanceof Error ? error.message : String(error) });
     }
   }
+  // Resolve hull names from Sage's local CCP SDE so the model never guesses ship class or prerequisites.
+  if (plan.route !== "developer") {
+    try {
+      const catalogue = await getFittingCatalogueLocal();
+      const hullMatches = (catalogue?.items ?? []).filter((item: any) =>
+        item?.rootName === "Ships" && String(item?.name || "").length >= 3 && mentionsName(message, String(item.name)),
+      ).slice(0, 8);
+      if (hullMatches.length) {
+        const hulls = await Promise.all(hullMatches.map(async (item: any) => {
+          const info = await getFittingTypeInfoLocal(Number(item.id));
+          return {
+            typeId: info.typeId,
+            name: info.name,
+            group: info.group,
+            category: info.category,
+            marketGroup: info.marketGroup,
+            techLevel: info.techLevel,
+            requirements: info.requirements,
+            characterRequirementCheck: Array.isArray(completeSkills?.skills) ? {
+              characterId: completeSkills.characterId,
+              scope: "Direct hull prerequisites only; event entry rules and fitting requirements must be checked separately.",
+              missing: (info.requirements ?? []).filter((req: any) =>
+                Number(completeSkills.skills.find((skill: any) => skill.skillId === req.skillId)?.level ?? 0) < Number(req.level)),
+            } : null,
+          };
+        }));
+        preloaded.hulls = hulls;
+      }
+    } catch (error) {
+      strategicDebug("hull-prefetch-error", { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (plan.route === "knowledge" || plan.route === "character") {
+    const factualAnswer = answerShipFacts(message, plan.characterName, (preloaded.hulls ?? []) as any[]);
+    if (factualAnswer) return { answer: factualAnswer, model: "Sage verified data", trace: [], usage: null };
+  }
   const fullHistory = (Array.isArray(input.history) ? input.history : [])
     .filter((item): item is StrategicMessage => (item?.role === "user" || item?.role === "assistant") && typeof item?.content === "string");
-  const recentHistory = fullHistory.slice(-12);
+  const likelyFastFollowup = /\b(which|those|that|it|they|them|can|able|fly|use|do|run)\b/i.test(message);
+  const recentHistory = fullHistory.slice(likelyFastFollowup ? -4 : -12);
   const masterActivation = fullHistory.find((item) =>
     item.role === "user" &&
     /\bcommand\ override\ owner\b/i.test(item.content),
@@ -660,45 +793,52 @@ async function askStrategicCommandInternal(input: {
     ...recentHistory,
   ].map((item) => ({ role: item.role, content: item.content }));
 
-  const fittingRequest = /fit|fitting|ship|hull|dps|tank|ehp|cap|capacitor|tackle|scram|point|web|lock|range|speed|prop|mwd|afterburner|module|rig|drone|ammo|weapon/i.test(message);
-  const fittingOptimisationRequest = fittingRequest && /find|best|optim|compare|rank|simulate|test|many|broad|strongest|fastest|survive|hold|tackle/i.test(message);
+  const personalContextRequest = needsCharacterContext;
+  const fittingRequest = plan.route === "fit_build" || plan.route === "fit_evaluate";
+  const fittingOptimisationRequest = fittingRequest;
+  const explicitCurrentWebNeed = plan.allowWeb;
+  const fastKnowledgeRequest = plan.route === "knowledge" && !plan.broadRequest;
+  const fastPersonalRequest = plan.route === "character" && !plan.broadRequest;
 
   const messages: any[] = [
-    { role: "system", content: fittingRequest ? fittingStrategicInstructions() : strategicInstructions(tools) },
+    { role: "system", content: fastKnowledgeRequest ? fastStrategicInstructions() : fastPersonalRequest ? `You are Sage AI inside New Eden Sage. Answer this personal EVE capability question quickly from the PRELOADED SAGE EVIDENCE and recent conversation. Treat cached character skills and PRELOADED hull metadata as authoritative for this Sage session. Never infer a hull class or skill prerequisite from memory when hull metadata is present. Do not call tools for facts already present in the evidence. Keep the answer concise and directly answer the user's question.` : fittingRequest ? fittingStrategicInstructions() : strategicInstructions(tools) },
     ...(Object.keys(preloaded).length ? [{
       role: "system",
-      content: "PRELOADED SAGE EVIDENCE\nThis evidence was fetched locally immediately before this model call. Treat it as newer and more authoritative than any character SP, wallet, location or profile details mentioned earlier in the conversation. Never repeat conflicting older values. Re-fetch a deeper character section when the question depends on fields not present here.\n" + safeToolOutput(preloaded),
+      content: "PRELOADED SAGE EVIDENCE\nThis evidence comes from Sage local snapshots, cached for at most one minute. Snapshot freshness still depends on the last successful EVE sync. Treat it as newer and more authoritative than any character SP, wallet, location or profile details mentioned earlier in the conversation. Never repeat conflicting older values. Omitted skills are unknown, not zero. Hull prerequisites do not establish event eligibility; verify current event restrictions separately. Never infer ship class or prerequisites from older assistant answers. Re-fetch a deeper character section when the question depends on fields not present here.\n" + safeToolOutput(preloaded),
     }] : []),
     ...history,
     { role: "user", content: message },
   ];
 
-  let selectedTools = selectStrategicTools(tools, message);
+  let selectedTools = plan.route === "developer"
+    ? selectStrategicTools(tools, message)
+    : tools.filter((tool) => plan.allowedTools.includes(tool.name));
   if (preloadedCharacters) selectedTools = selectedTools.filter((tool) => tool.name !== "list_characters");
-  if (preloadedSkills) selectedTools = selectedTools.filter((tool) => tool.name !== "get_character_data");
-  if (fittingOptimisationRequest && preloadedSkills) {
-    selectedTools = selectedTools.filter((tool) => tool.name !== "list_character_data_points");
-  }
-  const explicitCurrentWebNeed = /latest|current meta|current patch|patch notes|recent|today|changed|change recently|doctrine|live web|web search|search the web/i.test(message);
-  const includeWeb = !fittingRequest || explicitCurrentWebNeed;
-  strategicDebug("tool-selection", { count: selectedTools.length, names: selectedTools.map((tool) => tool.name), preloadedCharacters, preloadedSkills, includeWeb });
+  if (preloadedSkills && !plan.broadRequest) selectedTools = selectedTools.filter((tool) => tool.name !== "get_character_data" && tool.name !== "list_character_data_points");
+  const includeWeb = plan.allowWeb;
+  const hasTools = selectedTools.length > 0 || includeWeb;
+  strategicDebug("request-plan", { plan, count: selectedTools.length, names: selectedTools.map((tool) => tool.name), preloadedCharacters, preloadedSkills, includeWeb });
   const common = {
-    tools: sageAiTools(selectedTools, includeWeb),
-    tool_choice: "auto",
+    tools: hasTools ? sageAiTools(selectedTools, includeWeb) : undefined,
+    tool_choice: hasTools ? "auto" : "none",
     temperature: 0.2,
-    max_tokens: 2048,
+    max_tokens: (fastKnowledgeRequest || fastPersonalRequest) ? 900 : plan.broadRequest ? 8192 : 4096,
+    fast_path: plan.modelTier === "fast",
   };
 
   const trace: Array<{ tool: string; status: "ok" | "blocked" | "error"; detail?: string }> = [];
   let requestId = "";
   let developerMode = false;
   if (diagnostics) diagnostics.trace = trace;
-  const startedAt = Date.now();
-  const standardDeadlineMs = 450_000;
+  const standardDeadlineMs = plan.requestBudgetMs;
   let forceSynthesis = false;
 
-  for (let round = 0; ; round += 1) {
-    const timedOut = !developerMode && Date.now() - startedAt >= standardDeadlineMs;
+  for (let round = 0; round <= plan.maxModelRounds; round += 1) {
+    if (round >= plan.maxModelRounds) forceSynthesis = true;
+    const remainingForModel = standardDeadlineMs - (Date.now() - startedAt);
+    if (remainingForModel <= 0) throw new Error("Sage reached the request's time budget. Narrow the request or continue from the results gathered.");
+    const timedOut = remainingForModel <= 30_000;
+    onProgress?.({ message: timedOut || forceSynthesis ? "Preparing the answer from the results gathered…" : round === 0 ? "Planning the work from Sage's data…" : "Comparing results and working through the next steps…" });
     let completion;
     const completionStartedAt = Date.now();
     try {
@@ -716,6 +856,7 @@ async function askStrategicCommandInternal(input: {
           tool_choice: timedOut || forceSynthesis ? "none" : common.tool_choice,
         },
         requestId || undefined,
+        Math.max(1, Math.min(180_000, remainingForModel)),
       );
     } catch (error) {
       strategicDebug("completion-error", {
@@ -726,6 +867,8 @@ async function askStrategicCommandInternal(input: {
         error: error instanceof Error ? error.message : String(error),
       });
       const enriched = error instanceof Error ? error : new Error(String(error));
+      requestId = (enriched as any).requestId || requestId;
+      if (diagnostics) diagnostics.requestId = requestId;
       (enriched as any).sageDiagnostics = {
         requestId,
         developerMode,
@@ -767,7 +910,11 @@ async function askStrategicCommandInternal(input: {
     if (!assistant) throw new Error("Sage AI returned no assistant message.");
 
     const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
-    if (!developerMode && Date.now() - startedAt >= standardDeadlineMs && toolCalls.length) {
+    if (toolCalls.length && (forceSynthesis || timedOut)) {
+      throw new Error("Sage AI did not finish within its tool limit. Please retry with a narrower request.");
+    }
+    if (toolCalls.length > 12) throw new Error("Sage AI requested too many operations in one round.");
+    if (Date.now() - startedAt >= standardDeadlineMs && toolCalls.length) {
       forceSynthesis = true;
       continue;
     }
@@ -797,8 +944,8 @@ async function askStrategicCommandInternal(input: {
       const tool = byName.get(name);
       const isWebTool = name === "sage_web_search" || name === "sage_web_open";
 
-      if (!tool && !isWebTool) {
-        trace.push({ tool: name || "unknown", status: "error", detail: "Tool is not in the live Sage catalogue." });
+      if ((!tool || !selectedTools.some((allowed) => allowed.name === name)) && !(isWebTool && includeWeb)) {
+        trace.push({ tool: name || "unknown", status: "error", detail: "Tool is not available for this request." });
         messages.push({
           role: "tool",
           tool_call_id: callId,
@@ -821,9 +968,17 @@ async function askStrategicCommandInternal(input: {
         const rawArgs = call.function?.arguments;
         const parsedArgs = typeof rawArgs === "string" ? JSON.parse(rawArgs || "{}") : (rawArgs || {});
         const args = normaliseStrategicToolArgs(name, parsedArgs as Record<string, unknown>, message);
+        if (name === "optimise_sage_fit" && plan.broadRequest && args.candidateLimit === undefined) args.candidateLimit = 5000;
+        const remainingMs = standardDeadlineMs - (Date.now() - startedAt);
+        if (name === "search_sage_fits") args.maxDurationMs = Math.max(1000, Math.min(Number(args.maxDurationMs) || 840_000, remainingMs - 30_000));
+        if (remainingMs <= 0) throw new Error("Sage request time budget expired before this operation.");
+        onProgress?.({ message: /fit/.test(name) ? "Testing fitting candidates with Sage's fitting engine…" : "Checking the next set of Sage data…" });
         const result = isWebTool
-          ? await sageWebTool(sessionToken, name as "sage_web_search" | "sage_web_open", args, requestId)
-          : await client.callTool({ name, arguments: args });
+          ? await sageWebTool(sessionToken, name as "sage_web_search" | "sage_web_open", args, requestId, remainingMs)
+          : await client.callTool({ name, arguments: args }, undefined, {
+              timeout: remainingMs,
+              onprogress: (progress) => onProgress?.({ message: progress.message || `Completed ${progress.progress}${progress.total ? ` of ${progress.total}` : ""} checks…` }),
+            });
         const compactResult = compactToolResult(name, result, args);
         strategicDebug("tool-result", {
           round,
@@ -871,10 +1026,11 @@ async function askStrategicCommandInternal(input: {
     });
   }
 
+  throw new Error("Sage AI exhausted its response limit.");
 }
 
-
 type StrategicDiagnostics = {
+  plan?: StrategicPlan;
   requestId: string;
   developerMode: boolean;
   trace: Array<{ tool: string; status: "ok" | "blocked" | "error"; detail?: string }>;
@@ -919,14 +1075,32 @@ async function reportStrategicFailure(
 export async function askStrategicCommand(input: {
   message: string;
   history?: StrategicMessage[];
-}) {
+}, onProgress?: (progress: StrategicProgress) => void) {
   const startedAt = Date.now();
   const diagnostics: StrategicDiagnostics = { requestId: "", developerMode: false, trace: [] };
   let sessionToken = "";
   try {
     const config = await readConfig();
     sessionToken = decrypt(config.encryptedSageSessionToken);
-    return await askStrategicCommandInternal(input, diagnostics);
+    let latestProgress = "Working through Sage…";
+    let estimatedUpperMs: number | undefined;
+    const pulse = setInterval(() => {
+      const elapsedMs = Date.now() - startedAt;
+      const elapsed = Math.floor(elapsedMs / 60_000);
+      const overEstimate = estimatedUpperMs && elapsedMs > estimatedUpperMs;
+      onProgress?.({ message: `${latestProgress} ${elapsed ? `${elapsed} min elapsed.` : "Still working."}${overEstimate ? " This is taking longer than the initial estimate; work is continuing." : ""}` });
+    }, 20_000);
+    try {
+      const result = await askStrategicCommandInternal(input, diagnostics, (progress) => {
+        latestProgress = progress.message;
+        if (progress.estimatedUpperMs) estimatedUpperMs = progress.estimatedUpperMs;
+        onProgress?.(progress);
+      });
+      if (diagnostics.plan && result.model !== "Sage verified data" && result.model !== "Sage router") {
+        recordStrategicTiming({ route: diagnostics.plan.route, broad: Boolean(diagnostics.plan.broadRequest), complexity: requestComplexity(input.message), elapsedMs: Date.now() - startedAt });
+      }
+      return result;
+    } finally { clearInterval(pulse); }
   } catch (error) {
     if (sessionToken) {
       await reportStrategicFailure(sessionToken, input, diagnostics, startedAt, error);

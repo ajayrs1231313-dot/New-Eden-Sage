@@ -17,6 +17,7 @@ const GENERAL_ACCESS_NAME_ALIASES = new Set([
   "thebiglebowskie",
   "thebiglebowski",
   "sithofast",
+  "sithofastjr",
 ]);
 
 const GENERAL_ACCESS_ACCOUNT_IDS = new Set<string>([

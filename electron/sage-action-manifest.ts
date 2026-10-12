@@ -2348,12 +2348,36 @@ export const SAGE_ACTION_MANIFEST: Record<string, { parameters: Array<{ name: st
     "parameters": [],
     "returns": "IPC result (not declared in renderer type interface)"
   },
+  "getOwnerLogUsers": {
+    "parameters": [],
+    "returns": "IPC result (not declared in renderer type interface)"
+  },
+  "downloadOwnerLogs": {
+    "parameters": [
+      {
+        "name": "accountId",
+        "optional": false,
+        "type": "string"
+      }
+    ],
+    "returns": "IPC result (not declared in renderer type interface)"
+  },
   "askStrategicCommand": {
     "parameters": [
       {
         "name": "input",
         "optional": false,
         "type": "unknown"
+      }
+    ],
+    "returns": "IPC result (not declared in renderer type interface)"
+  },
+  "onStrategicProgress": {
+    "parameters": [
+      {
+        "name": "callback",
+        "optional": true,
+        "type": "(progress: { message: string; estimate?: string }) => void"
       }
     ],
     "returns": "IPC result (not declared in renderer type interface)"

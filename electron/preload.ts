@@ -94,7 +94,14 @@ contextBridge.exposeInMainWorld("sage", {
   openChatGptPlugins: () => ipcRenderer.invoke("mcp:open-chatgpt"),
   openOpenAiTunnels: () => ipcRenderer.invoke("mcp:open-tunnels"),
   getStrategicCommandStatus: () => ipcRenderer.invoke("strategic:status"),
+  getOwnerLogUsers: () => ipcRenderer.invoke("owner-logs:users"),
+  downloadOwnerLogs: (accountId: string) => ipcRenderer.invoke("owner-logs:download", accountId),
   askStrategicCommand: (input: unknown) => ipcRenderer.invoke("strategic:ask", input),
+  onStrategicProgress: (callback: (progress: { message: string; estimate?: string }) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: { message: string; estimate?: string }) => callback(progress);
+    ipcRenderer.on("strategic:progress", listener);
+    return () => ipcRenderer.removeListener("strategic:progress", listener);
+  },
   loadFittingPersistence: (legacyValue: unknown) => ipcRenderer.invoke("fitting:persistence-load", legacyValue),
   saveFittingPersistence: (value: unknown) => ipcRenderer.invoke("fitting:persistence-save", value),
   syncMcpRendererData: (value: unknown) => ipcRenderer.invoke("mcp:sync-renderer-data", value),

@@ -1,5 +1,11 @@
 import { sharedMarketServerBaseUrl } from "./shared-market-data";
 
+// Cloud Run live is currently an artifact facade, not a notification API.
+// Avoid repeatedly hitting missing routes while preserving a visible error.
+const NOTIFICATION_API_RETRY_MS = 5 * 60_000;
+let notificationApiUnavailableUntil = 0;
+const NOTIFICATION_API_UNAVAILABLE = "Sage notification API is not deployed to the configured Google Cloud service. Notifications are unavailable; market data is unaffected.";
+
 export type SageNotificationRepeatMode = "edge" | "change" | "once" | "always";
 
 export interface SageNotificationRuleInput {
@@ -50,6 +56,9 @@ async function notificationRequest<T>(
   sageSessionToken: string,
   init: RequestInit = {},
 ): Promise<T> {
+  if (Date.now() < notificationApiUnavailableUntil) {
+    throw new Error(NOTIFICATION_API_UNAVAILABLE);
+  }
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${sageSessionToken}`);
   headers.set("Accept", "application/json");
@@ -65,6 +74,10 @@ async function notificationRequest<T>(
     }
   }
   if (!response.ok) {
+    if (response.status === 404 || response.status === 501) {
+      notificationApiUnavailableUntil = Date.now() + NOTIFICATION_API_RETRY_MS;
+      throw new Error(NOTIFICATION_API_UNAVAILABLE);
+    }
     const detail = payload && typeof payload === "object" && "detail" in payload
       ? String((payload as { detail?: unknown }).detail ?? "")
       : String(payload ?? "");

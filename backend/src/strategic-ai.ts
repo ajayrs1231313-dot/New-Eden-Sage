@@ -8,14 +8,16 @@ type CompletionRequest = {
   temperature?: number;
   max_tokens?: number;
   request_id?: string;
+  fast_path?: boolean;
+  timeout_ms?: number;
 };
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-function error(status: number, code: string, message: string): Response {
-  return json({ error: code, message }, status);
+function error(status: number, code: string, message: string, requestId?: string): Response {
+  return json({ error: code, message, request_id: requestId }, status);
 }
 
 export async function primaryCharacterName(env: SageEnv, accountId: string) {
@@ -66,66 +68,87 @@ For development and testing work:
 This mode is enabled automatically for the authenticated Sage owner account. No magic phrase or per-conversation activation is required.
 `.trim();
 
-async function callSageAi(env: SageEnv, body: Record<string, unknown>) {
+async function callSageFastAi(env: SageEnv, body: Record<string, unknown>, signal: AbortSignal) {
+  const result = await env.AI.run("@cf/zai-org/glm-4.7-flash" as any, {
+    ...body,
+    messages: body.messages as any,
+    max_tokens: Number.isFinite(body.max_tokens) ? Number(body.max_tokens) : 900,
+    temperature: Number.isFinite(body.temperature) ? Number(body.temperature) : 0.2,
+  } as any, { signal }) as any;
+  const choice = result?.choices?.[0];
+  if (choice?.message && (typeof choice.message.content === "string" && choice.message.content.trim() || choice.message.tool_calls?.length)) {
+    return { ...result, model: "Sage AI Backup" };
+  }
+  const content = typeof result?.response === "string" ? result.response.trim() : typeof result?.choices?.[0]?.message?.content === "string" ? result.choices[0].message.content.trim() : "";
+  if (!content) throw new Error("Sage fast AI returned no text response.");
+  return {
+    id: "sage-fast-" + crypto.randomUUID(),
+    object: "chat.completion",
+    model: "Sage AI Fast",
+    choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+    usage: result?.usage ?? null,
+  };
+}
+class SageUpstreamError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
+async function callSageReasoningAi(env: SageEnv, body: Record<string, unknown>, signal?: AbortSignal) {
+  const sharedSignal = signal ?? AbortSignal.timeout(120_000);
+  try { return await callSageAi(env, body, sharedSignal); }
+  catch (cause) {
+    const transient = cause instanceof TypeError || cause instanceof SageUpstreamError
+      && ([408, 409, 429].includes(cause.status) || cause.status >= 500);
+    if (!transient || sharedSignal.aborted || !env.AI) throw cause;
+    // Preserve messages and function schemas, and apply the same output policy below.
+    return callSageFastAi(env, body, sharedSignal);
+  }
+}
+export async function callSageAi(env: SageEnv, body: Record<string, unknown>, signal = AbortSignal.timeout(120_000)) {
   if (!env.SAGE_AI_API_KEY || !env.SAGE_AI_ENDPOINT || !env.SAGE_AI_MODEL) {
     throw new Error("Sage AI server configuration is incomplete.");
   }
-
   const payloadBody = JSON.stringify({ ...body, model: env.SAGE_AI_MODEL });
-  let lastError = "Sage AI upstream request failed.";
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let delayMs = [500, 1000, 2000, 4000][attempt] ?? 4000;
-    try {
-      const response = await fetch(env.SAGE_AI_ENDPOINT, {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + env.SAGE_AI_API_KEY,
-          "Content-Type": "application/json",
-        },
-        body: payloadBody,
-        signal: AbortSignal.timeout(90_000),
-      });
-
-      const payload = await response.json().catch(() => ({})) as any;
-      if (response.ok) return payload;
-
-      const message = payload?.error?.message || payload?.message || ("Sage AI upstream request failed (" + response.status + ").");
-      lastError = String(message);
-
-      const retryable = response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500;
-      if (!retryable || attempt === 2) throw new Error(lastError);
-
-      if (response.status === 429) {
-        const retryAfter = response.headers.get("retry-after");
-        if (retryAfter) {
-          const seconds = Number(retryAfter);
-          if (Number.isFinite(seconds) && seconds >= 0) delayMs = Math.min(60000, Math.max(delayMs, seconds * 1000));
-          else {
-            const when = Date.parse(retryAfter);
-            if (Number.isFinite(when)) delayMs = Math.min(60000, Math.max(delayMs, when - Date.now()));
-          }
-        } else {
-          delayMs = Math.max(delayMs, 5000);
-        }
-      }
-    } catch (cause) {
-      lastError = cause instanceof Error ? cause.message : String(cause);
-      if (attempt === 2) throw new Error(lastError);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    signal.throwIfAborted();
+    // A single signal bounds retries, response reading, and backoff together.
+    const response = await fetch(env.SAGE_AI_ENDPOINT, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + env.SAGE_AI_API_KEY, "Content-Type": "application/json" },
+      body: payloadBody,
+      signal,
+    });
+    const payload = await response.json().catch(() => ({})) as any;
+    signal.throwIfAborted();
+    if (response.ok) return payload;
+    const message = String(payload?.error?.message || payload?.message || ("Sage AI upstream request failed (" + response.status + ")."));
+    const retryable = [408, 409, 429, 500, 502, 503, 504].includes(response.status);
+    if (!retryable || attempt === 1) throw new SageUpstreamError(message, response.status);
+    const retryAfter = response.headers.get("retry-after");
+    let delayMs = response.status === 429 ? 1000 : 400;
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      const requested = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
+      if (Number.isFinite(requested)) delayMs = Math.max(delayMs, requested);
     }
-
-    await new Promise((resolve) => setTimeout(resolve, Math.max(0, delayMs)));
+    // Return promptly when the provider explicitly needs a long recovery period.
+    if (delayMs > 2000) throw new SageUpstreamError(message, response.status);
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, delayMs);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
   }
-
-  throw new Error(lastError);
+  throw new Error("Sage AI upstream request failed.");
 }
 
-export async function classifyRequest(env: SageEnv, text: string, eveSageOnly: boolean) {
+export async function classifyRequest(env: SageEnv, text: string, eveSageOnly: boolean, signal?: AbortSignal) {
   const domainInstruction = eveSageOnly
     ? "The request must also be substantively about EVE Online or New Eden Sage. If it is not, allowed MUST be false and category MUST be \"domain\". Ordinary greetings that clearly lead into EVE/Sage are allowed."
     : "Do not apply a topic restriction.";
 
-  const response = await callSageAi(env, {
+  const response = await callSageReasoningAi(env, {
     messages: [
       {
         role: "system",
@@ -136,7 +159,7 @@ export async function classifyRequest(env: SageEnv, text: string, eveSageOnly: b
     temperature: 0,
     max_tokens: 220,
     response_format: { type: "json_object" },
-  });
+  }, signal);
 
   const content = response?.choices?.[0]?.message?.content;
   if (typeof content !== "string") throw new Error("Sage AI safety gate returned no result.");
@@ -190,6 +213,8 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
   try { body = await request.json() as CompletionRequest; }
   catch { return error(400, "invalid_json", "Sage AI request body must be valid JSON."); }
 
+  const timeoutMs = Number.isFinite(body.timeout_ms) ? Math.max(1000, Math.min(180_000, Number(body.timeout_ms))) : 120_000;
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]);
   const messages = Array.isArray(body.messages) ? body.messages : [];
   if (!messages.length) return error(400, "messages_required", "Sage AI needs at least one message.");
 
@@ -208,11 +233,11 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
     if (!prompt) return error(400, "user_message_required", "Sage AI needs a user request.");
     requestId = await insertLog(env, principal, policy.tier, prompt);
 
-    const benignEveFastPath = policy.eveSageOnly && isClearlyBenignEveSageRequest(prompt);
+    const benignEveFastPath = isClearlyBenignEveSageRequest(prompt);
 
     if ((policy.safetyGuardrails || policy.eveSageOnly) && !benignEveFastPath) {
       try {
-        const gate = await classifyRequest(env, prompt, policy.eveSageOnly);
+        const gate = await classifyRequest(env, prompt, policy.eveSageOnly, signal);
         if (!gate.allowed) {
           await updateLog(env, requestId, { status: "blocked", policyCategory: gate.category, responseText: gate.reason });
           const domainBlocked = policy.eveSageOnly && /domain|topic|eve|sage/i.test(gate.category + " " + gate.reason);
@@ -227,7 +252,7 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         await updateLog(env, requestId, { status: "gate_error", errorText: message });
-        return error(503, "safety_gate_unavailable", "Sage AI safety checks are temporarily unavailable.");
+        return error(503, "safety_gate_unavailable", "Sage AI safety checks are temporarily unavailable.", requestId);
       }
     }
   }
@@ -247,21 +272,26 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
     : suppliedTools.filter((tool: any) => { const name = String(tool?.function?.name || ""); return !name.startsWith("dev_eve_third_party_") && !name.startsWith("dev_workspace_"); });
 
   try {
-    const upstream = await callSageAi(env, {
+    const completionBody = {
       messages: upstreamMessages,
       tools: permittedTools.length ? permittedTools : undefined,
       tool_choice: body.tool_choice ?? "auto",
       temperature: Number.isFinite(body.temperature) ? body.temperature : 0.2,
       max_tokens: Number.isFinite(body.max_tokens) ? body.max_tokens : 8192,
-    });
+    };
+    const upstream = body.fast_path === true && permittedTools.length === 0
+      ? await callSageFastAi(env, completionBody, signal).catch(() => callSageAi(env, completionBody, signal))
+      : await callSageReasoningAi(env, completionBody, signal);
 
     const assistant = upstream?.choices?.[0]?.message;
     const toolCalls = Array.isArray(assistant?.tool_calls) ? assistant.tool_calls : [];
     const responseText = typeof assistant?.content === "string" ? assistant.content.trim() : "";
+    if (!responseText && !toolCalls.length) throw new Error("Sage AI returned no usable answer.");
 
-    if (!toolCalls.length && responseText && policy.safetyGuardrails) {
+    const benignEveOutputFastPath = isClearlyBenignEveSageRequest(latestUserText(messages));
+    if (!toolCalls.length && responseText && policy.safetyGuardrails && !benignEveOutputFastPath) {
       try {
-        const outputGate = await classifyRequest(env, responseText, false);
+        const outputGate = await classifyRequest(env, responseText, false, signal);
         if (!outputGate.allowed) {
           await updateLog(env, requestId, {
             status: "output_blocked",
@@ -284,7 +314,7 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         await updateLog(env, requestId, { status: "output_gate_error", errorText: message, responseText });
-        return error(503, "safety_gate_unavailable", "Sage AI safety checks are temporarily unavailable.");
+        return error(503, "safety_gate_unavailable", "Sage AI safety checks are temporarily unavailable.", requestId);
       }
     }
 
@@ -297,14 +327,8 @@ export async function handleStrategicAi(request: Request, env: SageEnv, principa
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     await updateLog(env, requestId, { status: "error", errorText: message });
-    const cleaned = message
-      .replace(/Bearer\\s+[A-Za-z0-9._~+\\/-]+/gi, "Bearer [REDACTED]")
-      .replace(/(?:sk|nvapi|api)[-_][A-Za-z0-9_-]{12,}/gi, "[REDACTED]")
-      .replace(/((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret)\\s*[:=]\\s*)\\S+/gi, "$1[REDACTED]")
-      .replace(/\\s+/g, " ")
-      .trim()
-      .slice(0, 700);
-    return error(502, "sage_ai_failed", cleaned ? `Sage AI request failed: ${cleaned}` : "Sage AI request failed.");
+    const cleaned = sanitizeDiagnosticText(message, 700).replace(/\s+/g, " ").trim();
+    return error(502, "sage_ai_failed", cleaned ? `Sage AI request failed: ${cleaned}` : "Sage AI request failed.", requestId);
   }
 }
 
@@ -378,6 +402,3 @@ export async function cleanupStrategicAiLogs(env: SageEnv) {
     "DELETE FROM strategic_ai_failure_reports WHERE created_at < datetime('now', '-90 days')",
   ).run().catch(() => undefined);
 }
-
-
-

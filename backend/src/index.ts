@@ -1,3 +1,4 @@
+import { handleOwnerLogsApi } from "./owner-logs";
 import { handleBuybackWorkspaceApi, listBuybackNotifications, acknowledgeBuybackNotification } from "./buybacks";
 import { WorkspaceHub } from "./realtime/workspace-hub";
 import { claimPrimaryIdentity, getSageIdentity, linkCharacterIdentity, recoverLinkedIdentitySession, verifyEveAccessToken } from "./identity";
@@ -1306,6 +1307,12 @@ export default {
 
     if (url.pathname === "/v1/identity" && request.method === "GET") {
       return getSageIdentity(request, env);
+    }
+
+    if (url.pathname.startsWith("/v1/owner/logs/")) {
+      const principal = await requireSession(request, env);
+      if (principal instanceof Response) return principal;
+      return handleOwnerLogsApi(request, env, principal, url);
     }
 
     if (url.pathname === "/v1/strategic-ai/completion" && request.method === "POST") {

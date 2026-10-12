@@ -9,6 +9,7 @@ export interface EventEnvelope {
 
 export interface SageEnv {
   DB: D1Database;
+  AI: Ai;
   WORKSPACE_HUB: DurableObjectNamespace;
   EVENT_QUEUE: Queue<EventEnvelope>;
   APP_VERSION: string;

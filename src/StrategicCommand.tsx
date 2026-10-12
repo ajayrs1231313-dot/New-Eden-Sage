@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import "./strategic-command.css";
+import { isBroadStrategicRequest } from "../electron/strategic-router";
 
 type StrategicStatus = {
   configured: boolean;
@@ -11,6 +12,8 @@ type StrategicStatus = {
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
+  failed?: boolean;
+  notice?: boolean;
 };
 
 const STARTERS = [
@@ -60,6 +63,7 @@ export function StrategicCommand() {
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("Working through Sage…");
   const conversationRef = useRef<HTMLDivElement>(null);
 
   async function refreshStatus() {
@@ -77,6 +81,13 @@ export function StrategicCommand() {
   }
 
   useEffect(() => { void refreshStatus(); }, []);
+  useEffect(() => sage.onStrategicProgress?.((update: { message: string; estimate?: string }) => {
+    setProgress(update.message);
+    if (update.estimate) setMessages((current) => {
+      const index = current.map((item) => Boolean(item.notice)).lastIndexOf(true);
+      return index < 0 ? current : current.map((item, position) => position === index ? { ...item, content: update.estimate! } : item);
+    });
+  }), []);
   useEffect(() => {
     const el = conversationRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -98,8 +109,12 @@ export function StrategicCommand() {
 
     setQuestion("");
     setBusy(true);
-    const prior = messages.map(({ role, content }) => ({ role, content }));
-    setMessages((current) => [...current, { role: "user", content: text }]);
+    setProgress("Checking Sage's data…");
+    const conversation = messages.filter((item) => !item.notice);
+    const prior = conversation.filter((item, index) => !item.failed && !conversation[index + 1]?.failed).map(({ role, content }) => ({ role, content }));
+    const broad = isBroadStrategicRequest(text);
+    setMessages((current) => [...current, { role: "user", content: text }, ...(broad ? [{ role: "assistant" as const, notice: true,
+      content: "This is a bigger job. I'm checking the scope so I can give you a time estimate." }] : [])]);
 
     try {
       const result = await sage.askStrategicCommand({ message: text, history: prior }) as { answer: string };
@@ -107,6 +122,7 @@ export function StrategicCommand() {
     } catch (error) {
       setMessages((current) => [...current, {
         role: "assistant",
+        failed: true,
         content: error instanceof Error ? error.message : "Sage AI could not complete that request.",
       }]);
     } finally {
@@ -182,7 +198,7 @@ export function StrategicCommand() {
                   <div className="sc-avatar">S</div>
                   <div className="sc-message-content">
                     <div className="sc-message-label">Sage AI</div>
-                    <div className="sc-thinking"><span /><span /><span /> Working through Sage…</div>
+                    <div className="sc-thinking" role="status" aria-live="polite"><span /><span /><span /> {progress}</div>
                   </div>
                 </article>
               )}
